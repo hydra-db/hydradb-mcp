@@ -1,7 +1,7 @@
 {
-  "name": "@usecortex_ai/mcp",
-  "version": "0.1.0",
-  "description": "MCP server for Cortex AI — State-of-the-art agentic memory with recall, ingest, and knowledge graph context",
+  "name": "@hydra_db/mcp",
+  "version": "0.0.1",
+  "description": "MCP server for Hydra DB — State-of-the-art agentic memory with recall, ingest, and knowledge graph context",
   "license": "MIT",
   "type": "module",
   "main": "dist/index.js",

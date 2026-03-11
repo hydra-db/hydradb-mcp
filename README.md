@@ -1,28 +1,28 @@
-# Cortex AI — MCP Server
+# Hydra DB — MCP Server
 
-MCP (Model Context Protocol) server for [Cortex AI](https://usecortex.ai), th state-of-the-art agentic memory. Provides tools for storing, recalling, and managing memories with knowledge-graph enriched context.
+MCP (Model Context Protocol) server for [Hydra DB](https://hydradb.com), the state-of-the-art agentic memory. Provides tools for storing, recalling, and managing memories with knowledge-graph enriched context.
 
 ## Available Tools
 
 ### **cortex_search**
 
-Search through Cortex AI memories. Returns relevant chunks with graph-enriched context including entity paths and knowledge graph relations.
+Search through Hydra DB memories. Returns relevant chunks with graph-enriched context including entity paths and knowledge graph relations.
 
 ### **cortex_store**
 
-Save important information to Cortex AI memory. Cortex automatically extracts insights, preferences, and builds a knowledge graph from the stored content.
+Save important information to Hydra DB memory. Hydra DB automatically extracts insights, preferences, and builds a knowledge graph from the stored content.
 
 ### **cortex_ingest_conversation**
 
-Ingest user-assistant conversation turns into Cortex AI memory. Cortex extracts insights, preferences, and knowledge graph entities from the conversation.
+Ingest user-assistant conversation turns into Hydra DB memory. Hydra DB extracts insights, preferences, and knowledge graph entities from the conversation.
 
 ### **cortex_list_memories**
 
-List all stored user memories in Cortex AI. Returns memory IDs and their content.
+List all stored user memories in Hydra DB. Returns memory IDs and their content.
 
 ### **cortex_delete_memory**
 
-Delete a specific user memory from Cortex AI by its memory ID.
+Delete a specific user memory from Hydra DB by its memory ID.
 
 ### **cortex_fetch_content**
 
@@ -30,14 +30,14 @@ Fetch the full content of a specific source by its source ID.
 
 ### **cortex_list_sources**
 
-List all ingested sources in Cortex AI memory.
+List all ingested sources in Hydra DB memory.
 
 ## Configuration
 
 ### Get Your Credentials
 
-1. Get your Cortex API Key from [Cortex AI](https://app.usecortex.ai)
-2. Get your Tenant ID from the Cortex dashboard
+1. Get your Hydra DB API Key from [Hydra DB](https://app.hydradb.com)
+2. Get your Tenant ID from the Hydra DB dashboard
 
 ### Environment Variables
 
@@ -53,9 +53,9 @@ List all ingested sources in Cortex AI memory.
 ```json
 {
   "mcpServers": {
-    "cortex": {
+        "hydradb": {
       "command": "npx",
-      "args": ["-y", "@usecortex_ai/mcp@0.0.1"],
+      "args": ["-y", "@hydradb/mcp@0.0.1"],
       "env": {
         "CORTEX_API_KEY": "your-api-key",
         "CORTEX_TENANT_ID": "your-tenant-id"
@@ -75,9 +75,9 @@ List all ingested sources in Cortex AI memory.
 ```json
 {
   "mcpServers": {
-    "cortex": {
+      "hydradb": {
       "command": "npx",
-      "args": ["-y", "@usecortex_ai/mcp@0.0.1"],
+      "args": ["-y", "@hydradb/mcp@0.0.1"],
       "env": {
         "CORTEX_API_KEY": "your-api-key",
         "CORTEX_TENANT_ID": "your-tenant-id"
@@ -94,10 +94,10 @@ Add to `.vscode/mcp.json`:
 ```json
 {
   "servers": {
-    "cortex": {
+        "hydradb": {
       "type": "stdio",
       "command": "npx",
-      "args": ["-y", "@usecortex_ai/mcp@0.0.1"],
+      "args": ["-y", "@hydradb/mcp@0.0.1"],
       "env": {
         "CORTEX_API_KEY": "your-api-key",
         "CORTEX_TENANT_ID": "your-tenant-id"
@@ -114,9 +114,9 @@ To partition data, set the `CORTEX_SUB_TENANT_ID` environment variable:
 ```json
 {
   "mcpServers": {
-    "cortex": {
+        "hydradb": {
       "command": "npx",
-      "args": ["-y", "@usecortex_ai/mcp@0.0.1"],
+      "args": ["-y", "@hydradb/mcp@0.0.1"],
       "env": {
         "CORTEX_API_KEY": "your-api-key",
         "CORTEX_TENANT_ID": "your-tenant-id",

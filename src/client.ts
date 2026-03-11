@@ -13,7 +13,7 @@ import type {
 	RecallResponse,
 } from "./types.js";
 
-const API_BASE = "https://api.usecortex.ai";
+const API_BASE = "https://api.hydradb.com";
 
 const INGEST_INSTRUCTIONS =
 	"Focus on extracting user preferences, habits, opinions, likes, dislikes, " +
@@ -29,7 +29,7 @@ export class CortexClient {
 		this.apiKey = apiKey;
 		this.tenantId = tenantId;
 		this.subTenantId = subTenantId;
-		logger.info(`connected (tenant=${tenantId}, sub=${subTenantId})`);
+		logger.info(`Hydra DB connected (tenant=${tenantId}, sub=${subTenantId})`);
 	}
 
 	private headers(): Record<string, string> {
@@ -49,7 +49,7 @@ export class CortexClient {
 		});
 		if (!res.ok) {
 			const text = await res.text().catch(() => "");
-			throw new Error(`Cortex ${path} → ${res.status}: ${text}`);
+			throw new Error(`Hydra DB ${path} → ${res.status}: ${text}`);
 		}
 		return res.json() as Promise<T>;
 	}
@@ -67,7 +67,7 @@ export class CortexClient {
 		});
 		if (!res.ok) {
 			const text = await res.text().catch(() => "");
-			throw new Error(`Cortex ${path} → ${res.status}: ${text}`);
+			throw new Error(`Hydra DB ${path} → ${res.status}: ${text}`);
 		}
 		return res.json() as Promise<T>;
 	}
