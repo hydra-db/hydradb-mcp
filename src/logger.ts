@@ -1,5 +1,5 @@
 /**
- * Structured logger for Cortex MCP Server.
+ * Structured logger for Hydra DB MCP Server.
  * Outputs to stderr to avoid interfering with STDIO transport.
  */
 
@@ -44,12 +44,12 @@ function formatMessage(
 	const levelName = LOG_LEVEL_NAMES[level];
 	if (meta && Object.keys(meta).length > 0) {
 		try {
-			return `[${timestamp}] [cortex-mcp] ${levelName}: ${message} ${JSON.stringify(meta)}`;
+			return `[${timestamp}] [hydradb-mcp] ${levelName}: ${message} ${JSON.stringify(meta)}`;
 		} catch {
-			return `[${timestamp}] [cortex-mcp] ${levelName}: ${message} [unstringifiable]`;
+			return `[${timestamp}] [hydradb-mcp] ${levelName}: ${message} [unstringifiable]`;
 		}
 	}
-	return `[${timestamp}] [cortex-mcp] ${levelName}: ${message}`;
+	return `[${timestamp}] [hydradb-mcp] ${levelName}: ${message}`;
 }
 
 function log(

@@ -102,7 +102,7 @@ export function createCortexServer() {
 					content: [
 						{
 							type: "text" as const,
-							text: "No relevant memories found in Cortex.",
+							text: "No relevant memories found in Hydra DB.",
 						},
 					],
 				};
@@ -183,10 +183,10 @@ export function createCortexServer() {
 
 			return {
 				content: [
-					{
-						type: "text" as const,
-						text: `Saved to Cortex (${res.success_count} success, ${res.failed_count} failed): "${preview}"`,
-					},
+						{
+							type: "text" as const,
+							text: `Saved to Hydra DB (${res.success_count} success, ${res.failed_count} failed): "${preview}"`,
+						},
 				],
 			};
 		},
@@ -238,10 +238,10 @@ export function createCortexServer() {
 
 			return {
 				content: [
-					{
-						type: "text" as const,
-						text: `Ingested ${turns.length} conversation turn(s) into Cortex (source: ${source_id}, success: ${res.success_count}, failed: ${res.failed_count})`,
-					},
+						{
+							type: "text" as const,
+							text: `Ingested ${turns.length} conversation turn(s) into Hydra DB (source: ${source_id}, success: ${res.success_count}, failed: ${res.failed_count})`,
+						},
 				],
 			};
 		},
