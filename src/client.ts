@@ -20,7 +20,7 @@ const INGEST_INSTRUCTIONS =
 	"goals, and recurring themes. Capture any stated or implied personal context " +
 	"that would help personalise future interactions.";
 
-export class CortexClient {
+export class HydraDBClient {
 	private apiKey: string;
 	private tenantId: string;
 	private subTenantId: string;
@@ -170,7 +170,7 @@ export class CortexClient {
 		const payload: ListDataRequest = {
 			tenant_id: this.tenantId,
 			sub_tenant_id: this.subTenantId,
-			kind: "memories",
+			kind: "knowledge",
 			...(sourceIds && { source_ids: sourceIds }),
 		};
 		return this.post<ListSourcesResponse>("/list/data", payload);
@@ -211,3 +211,4 @@ export class CortexClient {
 		return this.subTenantId;
 	}
 }
+
