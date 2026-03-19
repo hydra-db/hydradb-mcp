@@ -55,7 +55,7 @@ List all ingested sources in Hydra DB memory.
   "mcpServers": {
         "hydradb": {
       "command": "npx",
-      "args": ["-y", "@hydradb/mcp@0.0.1"],
+      "args": ["-y", "@hydra_db/mcp@0.0.1"],
       "env": {
         "CORTEX_API_KEY": "your-api-key",
         "CORTEX_TENANT_ID": "your-tenant-id"
@@ -77,7 +77,7 @@ List all ingested sources in Hydra DB memory.
   "mcpServers": {
       "hydradb": {
       "command": "npx",
-      "args": ["-y", "@hydradb/mcp@0.0.1"],
+      "args": ["-y", "@hydra_db/mcp@0.0.1"],
       "env": {
         "CORTEX_API_KEY": "your-api-key",
         "CORTEX_TENANT_ID": "your-tenant-id"
@@ -97,7 +97,7 @@ Add to `.vscode/mcp.json`:
         "hydradb": {
       "type": "stdio",
       "command": "npx",
-      "args": ["-y", "@hydradb/mcp@0.0.1"],
+      "args": ["-y", "@hydra_db/mcp@0.0.1"],
       "env": {
         "CORTEX_API_KEY": "your-api-key",
         "CORTEX_TENANT_ID": "your-tenant-id"
@@ -116,7 +116,7 @@ To partition data, set the `CORTEX_SUB_TENANT_ID` environment variable:
   "mcpServers": {
         "hydradb": {
       "command": "npx",
-      "args": ["-y", "@hydradb/mcp@0.0.1"],
+      "args": ["-y", "@hydra_db/mcp@0.0.1"],
       "env": {
         "CORTEX_API_KEY": "your-api-key",
         "CORTEX_TENANT_ID": "your-tenant-id",
