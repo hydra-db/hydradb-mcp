@@ -3,8 +3,10 @@
  * Kept in a separate file for easy editing and localisation.
  */
 
+import { TOOL_NAMES } from "./tool-names.js";
+
 export const TOOL_DESCRIPTIONS = {
-	cortex_search: {
+	[TOOL_NAMES.SEARCH]: {
 		title: "Search Hydra DB Memory",
 		description:
 			"Search through Hydra DB State-of-the-art agentic memories. Returns relevant chunks with " +
@@ -22,7 +24,7 @@ export const TOOL_DESCRIPTIONS = {
 		},
 	},
 
-	cortex_store: {
+	[TOOL_NAMES.STORE]: {
 		title: "Store to Hydra DB Memory",
 		description:
 			"Save important information to Hydra DB State-of-the-art agentic memory. Use this to persist " +
@@ -33,15 +35,15 @@ export const TOOL_DESCRIPTIONS = {
 			text: "The information to store in memory",
 			title: "Optional title for the memory entry (default: 'MCP Memory')",
 			source_id:
-				"Optional source identifier to group related memories together. You can use this as " + 
+				"Optional source identifier to group related memories together. You can use this as " +
 				"your session ID or any other unique identifier for a conversation",
-			infer: "Whether Cortex should extract insights and build knowledge graph from this text (default: true)",
+			infer: "Whether Hydra DB should extract insights and build knowledge graph from this text (default: true)",
 			is_markdown:
 				"Whether the text is in markdown format (default: false)",
 		},
 	},
 
-	cortex_ingest_conversation: {
+	[TOOL_NAMES.INGEST_CONVERSATION]: {
 		title: "Ingest Conversation",
 		description:
 			"Ingest one or more user-assistant conversation turns into Hydra DB memory. " +
@@ -57,7 +59,7 @@ export const TOOL_DESCRIPTIONS = {
 		},
 	},
 
-	cortex_list_memories: {
+	[TOOL_NAMES.LIST_MEMORIES]: {
 		title: "List Memories",
 		description:
 			"List all stored user memories in Hydra DB. Returns memory IDs and their content. " +
@@ -65,18 +67,18 @@ export const TOOL_DESCRIPTIONS = {
 			"for deletion.",
 	},
 
-	cortex_delete_memory: {
+	[TOOL_NAMES.DELETE_MEMORY]: {
 		title: "Delete Memory",
 		description:
 			"Delete a specific user memory from Hydra DB by its memory ID. " +
-			"Use cortex_list_memories first to find the memory ID you want to delete. " +
+			`Use ${TOOL_NAMES.LIST_MEMORIES} first to find the memory ID you want to delete. ` +
 			"This action is irreversible.",
 		params: {
 			memory_id: "The ID of the memory to delete",
 		},
 	},
 
-	cortex_fetch_content: {
+	[TOOL_NAMES.FETCH_CONTENT]: {
 		title: "Fetch Source Content",
 		description:
 			"Fetch the full content of a specific source by its source ID from Hydra DB. " +
@@ -88,7 +90,7 @@ export const TOOL_DESCRIPTIONS = {
 		},
 	},
 
-	cortex_list_sources: {
+	[TOOL_NAMES.LIST_SOURCES]: {
 		title: "List Sources",
 		description:
 			"List all ingested sources in Hydra DB memory. Returns source IDs, titles, types, " +
@@ -103,11 +105,13 @@ export const TOOL_DESCRIPTIONS = {
 
 export const SERVER_INSTRUCTIONS =
 	"Hydra DB MCP server for State-of-the-art agentic memory management. " +
-	"Use cortex_search to find relevant memories and knowledge graph context. " +
-	"Use cortex_store to save important information for future recall. " +
-	"Use cortex_ingest_conversation to store conversation history. " +
-	"Use cortex_list_memories to browse stored memories. " +
-	"Use cortex_delete_memory to remove specific memories. " +
-	"Use cortex_fetch_content to retrieve full source content. " +
-	"Use cortex_list_sources to see all ingested data sources. " +
+	`Use ${TOOL_NAMES.SEARCH} to find relevant memories and knowledge graph context. ` +
+	`Use ${TOOL_NAMES.STORE} to save important information for future recall. ` +
+	`Use ${TOOL_NAMES.INGEST_CONVERSATION} to store conversation history. ` +
+	`Use ${TOOL_NAMES.LIST_MEMORIES} to browse stored memories. ` +
+	`Use ${TOOL_NAMES.DELETE_MEMORY} to remove specific memories. ` +
+	`Use ${TOOL_NAMES.FETCH_CONTENT} to retrieve full source content. ` +
+	`Use ${TOOL_NAMES.LIST_SOURCES} to see all ingested data sources. ` +
 	"All tools require a valid Hydra DB API key and tenant ID configured via environment variables.";
+
+	

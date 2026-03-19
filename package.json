@@ -1,12 +1,12 @@
 {
   "name": "@hydra_db/mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "MCP server for Hydra DB — State-of-the-art agentic memory with recall, ingest, and knowledge graph context",
   "license": "MIT",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "cortex-mcp": "dist/index.js"
+    "hydradb-mcp": "dist/index.js"
   },
   "files": [
     "dist/*.js",
@@ -16,7 +16,11 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
-    "check-types": "tsc --noEmit"
+    "check-types": "tsc --noEmit",
+    "test": "npm run test:unit",
+    "test:unit": "tsx --test tests/**/*.test.ts",
+    "test:integration": "tsx --test tests/**/*.integration.spec.ts",
+    "test:all": "npm run test:unit && npm run test:integration"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.21.1",
@@ -31,3 +35,4 @@
     "node": ">=18"
   }
 }
+

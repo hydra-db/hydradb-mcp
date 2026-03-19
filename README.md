@@ -4,31 +4,31 @@ MCP (Model Context Protocol) server for [Hydra DB](https://hydradb.com), the sta
 
 ## Available Tools
 
-### **cortex_search**
+### **hydra_db_search**
 
 Search through Hydra DB memories. Returns relevant chunks with graph-enriched context including entity paths and knowledge graph relations.
 
-### **cortex_store**
+### **hydra_db_store**
 
 Save important information to Hydra DB memory. Hydra DB automatically extracts insights, preferences, and builds a knowledge graph from the stored content.
 
-### **cortex_ingest_conversation**
+### **hydra_db_ingest_conversation**
 
 Ingest user-assistant conversation turns into Hydra DB memory. Hydra DB extracts insights, preferences, and knowledge graph entities from the conversation.
 
-### **cortex_list_memories**
+### **hydra_db_list_memories**
 
 List all stored user memories in Hydra DB. Returns memory IDs and their content.
 
-### **cortex_delete_memory**
+### **hydra_db_delete_memory**
 
 Delete a specific user memory from Hydra DB by its memory ID.
 
-### **cortex_fetch_content**
+### **hydra_db_fetch_content**
 
 Fetch the full content of a specific source by its source ID.
 
-### **cortex_list_sources**
+### **hydra_db_list_sources**
 
 List all ingested sources in Hydra DB memory.
 
@@ -43,10 +43,10 @@ List all ingested sources in Hydra DB memory.
 
 | Variable                 | Description                         | Default        |
 | ------------------------ | ----------------------------------- | -------------- |
-| `CORTEX_API_KEY`       | Your Cortex API key                 | *Required*   |
-| `CORTEX_TENANT_ID`     | Your Cortex tenant identifier       | *Required*   |
-| `CORTEX_SUB_TENANT_ID` | Sub-tenant for data partitioning    | `cortex-mcp` |
-| `CORTEX_LOG_LEVEL`     | Log level: DEBUG, INFO, WARN, ERROR | `ERROR`      |
+| `HYDRA_DB_API_KEY`       | Your Hydra-DB API key                 | *Required*   |
+| `HYDRA_DB_TENANT_ID`     | Your Hydra-DB tenant identifier       | *Required*   |
+| `HYDRA_DB_SUB_TENANT_ID` | Sub-tenant for data partitioning    | `hydra-db-mcp` |
+| `HYDRA_DB_LOG_LEVEL`     | Log level: DEBUG, INFO, WARN, ERROR | `ERROR`      |
 
 ### Claude Desktop
 
@@ -55,10 +55,10 @@ List all ingested sources in Hydra DB memory.
   "mcpServers": {
         "hydradb": {
       "command": "npx",
-      "args": ["-y", "@hydra_db/mcp@0.0.1"],
+      "args": ["-y", "@hydra_db/mcp@0.1.1"],
       "env": {
-        "CORTEX_API_KEY": "your-api-key",
-        "CORTEX_TENANT_ID": "your-tenant-id"
+        "HYDRA_DB_API_KEY": "your-api-key",
+        "HYDRA_DB_TENANT_ID": "your-tenant-id"
       }
     }
   }
@@ -77,10 +77,10 @@ List all ingested sources in Hydra DB memory.
   "mcpServers": {
       "hydradb": {
       "command": "npx",
-      "args": ["-y", "@hydra_db/mcp@0.0.1"],
+      "args": ["-y", "@hydra_db/mcp@0.1.1"],
       "env": {
-        "CORTEX_API_KEY": "your-api-key",
-        "CORTEX_TENANT_ID": "your-tenant-id"
+        "HYDRA_DB_API_KEY": "your-api-key",
+        "HYDRA_DB_TENANT_ID": "your-tenant-id"
       }
     }
   }
@@ -97,10 +97,10 @@ Add to `.vscode/mcp.json`:
         "hydradb": {
       "type": "stdio",
       "command": "npx",
-      "args": ["-y", "@hydra_db/mcp@0.0.1"],
+      "args": ["-y", "@hydra_db/mcp@0.1.1"],
       "env": {
-        "CORTEX_API_KEY": "your-api-key",
-        "CORTEX_TENANT_ID": "your-tenant-id"
+        "HYDRA_DB_API_KEY": "your-api-key",
+        "HYDRA_DB_TENANT_ID": "your-tenant-id"
       }
     }
   }
@@ -109,18 +109,18 @@ Add to `.vscode/mcp.json`:
 
 ### Custom Sub-Tenant
 
-To partition data, set the `CORTEX_SUB_TENANT_ID` environment variable:
+To partition data, set the `HYDRA_DB_SUB_TENANT_ID` environment variable:
 
 ```json
 {
   "mcpServers": {
         "hydradb": {
       "command": "npx",
-      "args": ["-y", "@hydra_db/mcp@0.0.1"],
+      "args": ["-y", "@hydra_db/mcp@0.1.1"],
       "env": {
-        "CORTEX_API_KEY": "your-api-key",
-        "CORTEX_TENANT_ID": "your-tenant-id",
-        "CORTEX_SUB_TENANT_ID": "my-project"
+        "HYDRA_DB_API_KEY": "your-api-key",
+        "HYDRA_DB_TENANT_ID": "your-tenant-id",
+        "HYDRA_DB_SUB_TENANT_ID": "my-project"
       }
     }
   }
@@ -129,30 +129,41 @@ To partition data, set the `CORTEX_SUB_TENANT_ID` environment variable:
 
 ## How It Works
 
-- **cortex_search** queries `/recall/recall_preferences` for relevant memories and returns graph-enriched context (entity paths, chunk relations, extra context).
-- **cortex_store** sends text to `/memories/add_memory` with `infer: true` and `upsert: true`. Cortex extracts insights and builds a knowledge graph automatically.
-- **cortex_ingest_conversation** sends user-assistant pairs to `/memories/add_memory` as conversation turns, grouped by `source_id`.
-- **cortex_list_memories** and **cortex_list_sources** query `/list/data` to browse stored data.
-- **cortex_delete_memory** calls `DELETE /memories/delete_memory` to remove a specific memory.
-- **cortex_fetch_content** calls `/fetch/content` to retrieve the original ingested content.
+- **hydra_db_search** queries `/recall/recall_preferences` for relevant memories and returns graph-enriched context (entity paths, chunk relations, extra context).
+- **hydra_db_store** sends text to `/memories/add_memory` with `infer: true` and `upsert: true`. Hydra-DB extracts insights and builds a knowledge graph automatically.
+- **hydra_db_ingest_conversation** sends user-assistant pairs to `/memories/add_memory` as conversation turns, grouped by `source_id`.
+- **hydra_db_list_memories** and **hydra_db_list_sources** query `/list/data` to browse stored data.
+- **hydra_db_delete_memory** calls `DELETE /memories/delete_memory` to remove a specific memory.
+- **hydra_db_fetch_content** calls `/fetch/content` to retrieve the original ingested content.
 
 ## Development
 
 ```bash
 npm install
 npm run build
-CORTEX_API_KEY=your-key CORTEX_TENANT_ID=your-tenant npm start
+HYDRA_DB_API_KEY=your-key HYDRA_DB_TENANT_ID=your-tenant npm start
 ```
 
 For development with auto-reload:
 
 ```bash
-CORTEX_API_KEY=your-key CORTEX_TENANT_ID=your-tenant npm run dev
+HYDRA_DB_API_KEY=your-key HYDRA_DB_TENANT_ID=your-tenant npm run dev
+```
+
+## Testing
+
+```bash
+# unit tests (mocked HTTP)
+npm test
+
+# live integration test against Hydra DB
+RUN_LIVE_TESTS=true HYDRA_DB_API_KEY=your-key HYDRA_DB_TENANT_ID=your-tenant npm run test:integration
 ```
 
 ## Troubleshooting
 
-- **API Key Issues**: Ensure `CORTEX_API_KEY` is set correctly
+- **API Key Issues**: Ensure `HYDRA_DB_API_KEY` is set correctly
 - **Connection Errors**: Check your internet connection and API key validity
 - **Tool Not Found**: Make sure the package is installed and the command path is correct
-- **Debug Logging**: Set `CORTEX_LOG_LEVEL=DEBUG` for verbose output
+- **Debug Logging**: Set `HYDRA_DB_LOG_LEVEL=DEBUG` for verbose output
+

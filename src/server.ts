@@ -1,36 +1,37 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { CortexClient } from "./client.js";
+import { HydraDBClient } from "./client.js";
 import { buildRecalledContext } from "./context.js";
 import { TOOL_DESCRIPTIONS, SERVER_INSTRUCTIONS } from "./descriptions.js";
 import { logger } from "./logger.js";
+import { TOOL_NAMES } from "./tool-names.js";
 
-const DEFAULT_SUB_TENANT = "cortex-mcp";
+const DEFAULT_SUB_TENANT = "hydra-db-mcp";
 
 function getConfig() {
-	const apiKey = process.env.CORTEX_API_KEY;
+	const apiKey = process.env.HYDRA_DB_API_KEY;
 	if (!apiKey) {
 		throw new Error(
-			"CORTEX_API_KEY environment variable is required",
+			"HYDRA_DB_API_KEY environment variable is required",
 		);
 	}
 
-	const tenantId = process.env.CORTEX_TENANT_ID;
+	const tenantId = process.env.HYDRA_DB_TENANT_ID;
 	if (!tenantId) {
 		throw new Error(
-			"CORTEX_TENANT_ID environment variable is required",
+			"HYDRA_DB_TENANT_ID environment variable is required",
 		);
 	}
 
-	const subTenantId = process.env.CORTEX_SUB_TENANT_ID || DEFAULT_SUB_TENANT;
+	const subTenantId = process.env.HYDRA_DB_SUB_TENANT_ID || DEFAULT_SUB_TENANT;
 
 	return { apiKey, tenantId, subTenantId };
 }
 
-export function createCortexServer() {
+export function createHydraDBServer() {
 	const server = new McpServer(
 		{
-			name: "cortex-mcp",
+			name: "hydradb-mcp",
 			version: "1.0.0",
 		},
 		{
@@ -39,17 +40,17 @@ export function createCortexServer() {
 	);
 
 	const config = getConfig();
-	const client = new CortexClient(
+	const client = new HydraDBClient(
 		config.apiKey,
 		config.tenantId,
 		config.subTenantId,
 	);
 
-	// --- cortex_search ---
+	// --- Search ---
 
-	const desc = TOOL_DESCRIPTIONS.cortex_search;
+	const desc = TOOL_DESCRIPTIONS[TOOL_NAMES.SEARCH];
 	server.registerTool(
-		"cortex_search",
+		TOOL_NAMES.SEARCH,
 		{
 			title: desc.title,
 			description: desc.description,
@@ -89,7 +90,7 @@ export function createCortexServer() {
 				graph_context?: boolean;
 			};
 
-			logger.debug(`cortex_search: "${query}"`);
+			logger.debug(`${TOOL_NAMES.SEARCH}: "${query}"`);
 
 			const res = await client.recall(query, {
 				maxResults: max_results ?? 10,
@@ -132,11 +133,11 @@ export function createCortexServer() {
 		},
 	);
 
-	// --- cortex_store ---
+	// --- Store ---
 
-	const storeDesc = TOOL_DESCRIPTIONS.cortex_store;
+	const storeDesc = TOOL_DESCRIPTIONS[TOOL_NAMES.STORE];
 	server.registerTool(
-		"cortex_store",
+		TOOL_NAMES.STORE,
 		{
 			title: storeDesc.title,
 			description: storeDesc.description,
@@ -169,7 +170,7 @@ export function createCortexServer() {
 				is_markdown?: boolean;
 			};
 
-			logger.debug(`cortex_store: "${text.slice(0, 50)}..."`);
+			logger.debug(`${TOOL_NAMES.STORE}: "${text.slice(0, 50)}..."`);
 
 			const res = await client.ingestText(text, {
 				sourceId: source_id,
@@ -192,16 +193,16 @@ export function createCortexServer() {
 		},
 	);
 
-	// --- cortex_ingest_conversation ---
+	// --- Ingest Conversation ---
 
-	const ingestDesc = TOOL_DESCRIPTIONS.cortex_ingest_conversation;
+	const ingestDesc = TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST_CONVERSATION];
 	const turnSchema = z.object({
 		user: z.string().describe("The user's message"),
 		assistant: z.string().describe("The assistant's response"),
 	});
 
 	server.registerTool(
-		"cortex_ingest_conversation",
+		TOOL_NAMES.INGEST_CONVERSATION,
 		{
 			title: ingestDesc.title,
 			description: ingestDesc.description,
@@ -227,7 +228,7 @@ export function createCortexServer() {
 			};
 
 			logger.debug(
-				`cortex_ingest_conversation: ${turns.length} turns -> ${source_id}`,
+				`${TOOL_NAMES.INGEST_CONVERSATION}: ${turns.length} turns -> ${source_id}`,
 			);
 
 			const res = await client.ingestConversation(
@@ -247,11 +248,11 @@ export function createCortexServer() {
 		},
 	);
 
-	// --- cortex_list_memories ---
+	// --- List Memories ---
 
-	const listDesc = TOOL_DESCRIPTIONS.cortex_list_memories;
+	const listDesc = TOOL_DESCRIPTIONS[TOOL_NAMES.LIST_MEMORIES];
 	server.registerTool(
-		"cortex_list_memories",
+		TOOL_NAMES.LIST_MEMORIES,
 		{
 			title: listDesc.title,
 			description: listDesc.description,
@@ -262,7 +263,7 @@ export function createCortexServer() {
 			},
 		},
 		async () => {
-			logger.debug("cortex_list_memories");
+			logger.debug(TOOL_NAMES.LIST_MEMORIES);
 
 			const res = await client.listMemories();
 			const memories = res.user_memories ?? [];
@@ -294,11 +295,11 @@ export function createCortexServer() {
 		},
 	);
 
-	// --- cortex_delete_memory ---
+	// --- Delete Memory ---
 
-	const deleteDesc = TOOL_DESCRIPTIONS.cortex_delete_memory;
+	const deleteDesc = TOOL_DESCRIPTIONS[TOOL_NAMES.DELETE_MEMORY];
 	server.registerTool(
-		"cortex_delete_memory",
+		TOOL_NAMES.DELETE_MEMORY,
 		{
 			title: deleteDesc.title,
 			description: deleteDesc.description,
@@ -309,7 +310,7 @@ export function createCortexServer() {
 		async (args: any) => {
 			const { memory_id } = args as { memory_id: string };
 
-			logger.debug(`cortex_delete_memory: ${memory_id}`);
+			logger.debug(`${TOOL_NAMES.DELETE_MEMORY}: ${memory_id}`);
 
 			const res = await client.deleteMemory(memory_id);
 
@@ -335,11 +336,11 @@ export function createCortexServer() {
 		},
 	);
 
-	// --- cortex_fetch_content ---
+	// --- Fetch Content ---
 
-	const fetchDesc = TOOL_DESCRIPTIONS.cortex_fetch_content;
+	const fetchDesc = TOOL_DESCRIPTIONS[TOOL_NAMES.FETCH_CONTENT];
 	server.registerTool(
-		"cortex_fetch_content",
+		TOOL_NAMES.FETCH_CONTENT,
 		{
 			title: fetchDesc.title,
 			description: fetchDesc.description,
@@ -361,7 +362,7 @@ export function createCortexServer() {
 				mode?: "content" | "url" | "both";
 			};
 
-			logger.debug(`cortex_fetch_content: ${source_id}`);
+			logger.debug(`${TOOL_NAMES.FETCH_CONTENT}: ${source_id}`);
 
 			const res = await client.fetchContent(source_id, mode ?? "content");
 
@@ -390,11 +391,11 @@ export function createCortexServer() {
 		},
 	);
 
-	// --- cortex_list_sources ---
+	// --- List Sources ---
 
-	const sourcesDesc = TOOL_DESCRIPTIONS.cortex_list_sources;
+	const sourcesDesc = TOOL_DESCRIPTIONS[TOOL_NAMES.LIST_SOURCES];
 	server.registerTool(
-		"cortex_list_sources",
+		TOOL_NAMES.LIST_SOURCES,
 		{
 			title: sourcesDesc.title,
 			description: sourcesDesc.description,
@@ -412,7 +413,7 @@ export function createCortexServer() {
 		async (args: any) => {
 			const { source_ids } = args as { source_ids?: string[] };
 
-			logger.debug("cortex_list_sources");
+			logger.debug(TOOL_NAMES.LIST_SOURCES);
 
 			const res = await client.listSources(source_ids);
 
@@ -446,3 +447,4 @@ export function createCortexServer() {
 
 	return server.server;
 }
+

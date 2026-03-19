@@ -18,7 +18,7 @@ const LOG_LEVEL_NAMES: Record<LogLevel, string> = {
 };
 
 function getLogLevel(): LogLevel {
-	const level = process.env.CORTEX_LOG_LEVEL?.toUpperCase();
+	const level = process.env.HYDRA_DB_LOG_LEVEL?.toUpperCase();
 	switch (level) {
 		case "DEBUG":
 			return LogLevel.DEBUG;
@@ -76,3 +76,4 @@ export const logger = {
 		log(LogLevel.ERROR, message, meta);
 	},
 };
+
