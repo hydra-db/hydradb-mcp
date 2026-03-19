@@ -1,6 +1,6 @@
 {
   "name": "@hydra_db/mcp",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "MCP server for Hydra DB — State-of-the-art agentic memory with recall, ingest, and knowledge graph context",
   "license": "MIT",
   "type": "module",
