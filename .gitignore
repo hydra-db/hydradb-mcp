@@ -3,3 +3,4 @@ dist/
 ignore/
 *.js.map
 .DS_Store
+.env
