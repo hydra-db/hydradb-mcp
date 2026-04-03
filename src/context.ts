@@ -22,6 +22,7 @@ export function buildRecalledContext(
 	},
 ): string {
 	const minScore = opts?.minEvidenceScore ?? 0.4;
+	const maxGroupOccurrences = opts?.maxGroupOccurrences;
 
 	const chunks = response.chunks ?? [];
 	const graphCtx = response.graph_context ?? {
@@ -43,6 +44,7 @@ export function buildRecalledContext(
 
 	const chunkToGroupIds = graphCtx.chunk_id_to_group_ids ?? {};
 	const consumedExtraIds = new Set<string>();
+	const groupOccurrenceCounts: Record<string, number> = {};
 	const chunkSections: string[] = [];
 
 	for (let i = 0; i < chunks.length; i++) {
@@ -65,20 +67,41 @@ export function buildRecalledContext(
 
 		const matchedRelations: ScoredPath[] = [];
 
+		// Track whether the primary lookup found any candidate groups
+		// (even if all were capped) to avoid incorrectly falling through
+		// to the fallback path
+		const hasLinkedGroups = linkedGroupIds.some(
+			(gid) => !!relationIndex[gid],
+		);
+
 		for (const gid of linkedGroupIds) {
 			if (relationIndex[gid]) {
-				matchedRelations.push(relationIndex[gid]!);
+				const occurrences = groupOccurrenceCounts[gid] ?? 0;
+				if (
+					maxGroupOccurrences == null ||
+					occurrences < maxGroupOccurrences
+				) {
+					matchedRelations.push(relationIndex[gid]!);
+					groupOccurrenceCounts[gid] = occurrences + 1;
+				}
 			}
 		}
 
-		if (matchedRelations.length === 0) {
-			for (const rel of Object.values(relationIndex)) {
+		if (matchedRelations.length === 0 && !hasLinkedGroups) {
+			for (const [gid, rel] of Object.entries(relationIndex)) {
 				const triplets = rel.triplets ?? [];
 				const hasChunk = triplets.some(
 					(t) => t.relation?.chunk_id === chunkUuid,
 				);
 				if (hasChunk) {
-					matchedRelations.push(rel);
+					const occurrences = groupOccurrenceCounts[gid] ?? 0;
+					if (
+						maxGroupOccurrences == null ||
+						occurrences < maxGroupOccurrences
+					) {
+						matchedRelations.push(rel);
+						groupOccurrenceCounts[gid] = occurrences + 1;
+					}
 				}
 			}
 		}
