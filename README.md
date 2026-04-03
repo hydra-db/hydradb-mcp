@@ -167,3 +167,24 @@ RUN_LIVE_TESTS=true HYDRA_DB_API_KEY=your-key HYDRA_DB_TENANT_ID=your-tenant npm
 - **Tool Not Found**: Make sure the package is installed and the command path is correct
 - **Debug Logging**: Set `HYDRA_DB_LOG_LEVEL=DEBUG` for verbose output
 
+## Contributing / Developer Setup
+
+Get up and running quickly with the bootstrap script:
+
+```bash
+git clone https://github.com/usecortex/hydradb-mcp.git
+cd hydradb-mcp
+make bootstrap
+```
+
+This will install dependencies, build the project, and create a `.env` file from `.env.example`. Edit `.env` with your HydraDB credentials, then:
+
+```bash
+make dev          # Start MCP server in dev mode (auto-reload)
+make test         # Run unit tests
+make test-all     # Run unit + integration tests
+make check-types  # Type-check without emitting
+```
+
+Run `make help` to see all available targets.
+
