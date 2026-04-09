@@ -1,0 +1,7 @@
+# Default code owners for all files in the repository.
+# These users/teams will be automatically requested for review on every PR.
+#
+# Update this to match your actual GitHub team or maintainer usernames.
+# See: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+* @usecortex/hydradb-maintainers
