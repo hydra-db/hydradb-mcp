@@ -8,29 +8,63 @@ MCP (Model Context Protocol) server for [Hydra DB](https://hydradb.com), the sta
 
 Search through Hydra DB memories. Returns relevant chunks with graph-enriched context including entity paths and knowledge graph relations.
 
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `query` | string | Yes | The search query to find relevant memories |
+| `max_results` | number | No | Maximum number of memory chunks to return (1-50, default: 10) |
+| `mode` | string | No | Recall mode: `fast` for quick semantic search, `thinking` for deeper personalised recall with graph traversal (default: `thinking`) |
+| `graph_context` | boolean | No | Whether to include knowledge graph relations in results (default: true) |
+
 ### **hydra_db_store**
 
-Save important information to Hydra DB memory. Hydra DB automatically extracts insights, preferences, and builds a knowledge graph from the stored content.
+Save important information to Hydra DB memory. Hydra DB automatically extracts insights, preferences, and builds a knowledge graph from the stored content. Supports plain text and markdown.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `text` | string | Yes | The information to store in memory |
+| `title` | string | No | Title for the memory entry (default: `MCP Memory`) |
+| `source_id` | string | No | Source identifier to group related memories together (e.g. session ID) |
+| `infer` | boolean | No | Whether Hydra DB should extract insights and build knowledge graph (default: true) |
+| `is_markdown` | boolean | No | Whether the text is in markdown format (default: false) |
 
 ### **hydra_db_ingest_conversation**
 
 Ingest user-assistant conversation turns into Hydra DB memory. Hydra DB extracts insights, preferences, and knowledge graph entities from the conversation.
 
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `turns` | array | Yes | Array of conversation turns, each with a `user` and `assistant` field |
+| `source_id` | string | Yes | Source identifier to group all turns from the same session together |
+| `user_name` | string | No | Name of the user for personalisation (default: `User`) |
+
 ### **hydra_db_list_memories**
 
-List all stored user memories in Hydra DB. Returns memory IDs and their content.
+List all stored user memories in Hydra DB. Returns memory IDs and their content. No parameters required.
 
 ### **hydra_db_delete_memory**
 
-Delete a specific user memory from Hydra DB by its memory ID.
+Delete a specific user memory from Hydra DB by its memory ID. This action is irreversible.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `memory_id` | string | Yes | The ID of the memory to delete |
 
 ### **hydra_db_fetch_content**
 
 Fetch the full content of a specific source by its source ID.
 
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `source_id` | string | Yes | The source ID to fetch content for |
+| `mode` | string | No | Fetch mode: `content` for text, `url` for presigned URL, `both` for both (default: `content`) |
+
 ### **hydra_db_list_sources**
 
-List all ingested sources in Hydra DB memory.
+List all ingested sources in Hydra DB memory. Returns source IDs, titles, types, and metadata.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `source_ids` | array | No | Array of specific source IDs to filter by. If omitted, lists all sources |
 
 ## Configuration
 
@@ -43,19 +77,19 @@ List all ingested sources in Hydra DB memory.
 
 | Variable                 | Description                         | Default        |
 | ------------------------ | ----------------------------------- | -------------- |
-| `HYDRA_DB_API_KEY`       | Your Hydra-DB API key                 | *Required*   |
-| `HYDRA_DB_TENANT_ID`     | Your Hydra-DB tenant identifier       | *Required*   |
+| `HYDRA_DB_API_KEY`       | Your Hydra DB API key               | *Required*     |
+| `HYDRA_DB_TENANT_ID`     | Your Hydra DB tenant identifier     | *Required*     |
 | `HYDRA_DB_SUB_TENANT_ID` | Sub-tenant for data partitioning    | `hydra-db-mcp` |
-| `HYDRA_DB_LOG_LEVEL`     | Log level: DEBUG, INFO, WARN, ERROR | `ERROR`      |
+| `HYDRA_DB_LOG_LEVEL`     | Log level: DEBUG, INFO, WARN, ERROR | `ERROR`        |
 
 ### Claude Desktop
 
 ```json
 {
   "mcpServers": {
-        "hydradb": {
+    "hydradb": {
       "command": "npx",
-      "args": ["-y", "@hydra_db/mcp@0.1.1"],
+      "args": ["-y", "@hydradb/mcp@latest"],
       "env": {
         "HYDRA_DB_API_KEY": "your-api-key",
         "HYDRA_DB_TENANT_ID": "your-tenant-id"
@@ -75,9 +109,9 @@ List all ingested sources in Hydra DB memory.
 ```json
 {
   "mcpServers": {
-      "hydradb": {
+    "hydradb": {
       "command": "npx",
-      "args": ["-y", "@hydra_db/mcp@0.1.1"],
+      "args": ["-y", "@hydradb/mcp@latest"],
       "env": {
         "HYDRA_DB_API_KEY": "your-api-key",
         "HYDRA_DB_TENANT_ID": "your-tenant-id"
@@ -94,10 +128,10 @@ Add to `.vscode/mcp.json`:
 ```json
 {
   "servers": {
-        "hydradb": {
+    "hydradb": {
       "type": "stdio",
       "command": "npx",
-      "args": ["-y", "@hydra_db/mcp@0.1.1"],
+      "args": ["-y", "@hydradb/mcp@latest"],
       "env": {
         "HYDRA_DB_API_KEY": "your-api-key",
         "HYDRA_DB_TENANT_ID": "your-tenant-id"
@@ -114,9 +148,9 @@ To partition data, set the `HYDRA_DB_SUB_TENANT_ID` environment variable:
 ```json
 {
   "mcpServers": {
-        "hydradb": {
+    "hydradb": {
       "command": "npx",
-      "args": ["-y", "@hydra_db/mcp@0.1.1"],
+      "args": ["-y", "@hydradb/mcp@latest"],
       "env": {
         "HYDRA_DB_API_KEY": "your-api-key",
         "HYDRA_DB_TENANT_ID": "your-tenant-id",
@@ -129,17 +163,18 @@ To partition data, set the `HYDRA_DB_SUB_TENANT_ID` environment variable:
 
 ## How It Works
 
-- **hydra_db_search** queries `/recall/recall_preferences` for relevant memories and returns graph-enriched context (entity paths, chunk relations, extra context).
-- **hydra_db_store** sends text to `/memories/add_memory` with `infer: true` and `upsert: true`. Hydra-DB extracts insights and builds a knowledge graph automatically.
-- **hydra_db_ingest_conversation** sends user-assistant pairs to `/memories/add_memory` as conversation turns, grouped by `source_id`.
-- **hydra_db_list_memories** and **hydra_db_list_sources** query `/list/data` to browse stored data.
+- **hydra_db_search** queries `POST /recall/recall_preferences` for relevant memories and returns graph-enriched context (entity paths, chunk relations, extra context). Supports `fast` and `thinking` recall modes.
+- **hydra_db_store** sends text to `POST /memories/add_memory` with configurable `infer`, `upsert`, `is_markdown`, `title`, and `source_id` options. Hydra DB extracts insights and builds a knowledge graph automatically.
+- **hydra_db_ingest_conversation** sends user-assistant pairs to `POST /memories/add_memory` as conversation turns, grouped by `source_id`.
+- **hydra_db_list_memories** queries `POST /list/data` (kind: `memories`) to browse stored memories.
+- **hydra_db_list_sources** queries `POST /list/data` (kind: `knowledge`) to browse ingested sources, with optional `source_ids` filter.
 - **hydra_db_delete_memory** calls `DELETE /memories/delete_memory` to remove a specific memory.
-- **hydra_db_fetch_content** calls `/fetch/content` to retrieve the original ingested content.
+- **hydra_db_fetch_content** calls `POST /fetch/content` to retrieve the original ingested content, with mode options (`content`, `url`, or `both`).
 
 ## Development
 
 ```bash
-npm install
+npm ci
 npm run build
 HYDRA_DB_API_KEY=your-key HYDRA_DB_TENANT_ID=your-tenant npm start
 ```
@@ -187,4 +222,3 @@ make check-types  # Type-check without emitting
 ```
 
 Run `make help` to see all available targets.
-
