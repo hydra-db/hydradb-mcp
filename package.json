@@ -23,7 +23,7 @@
     "test:all": "npm run test:unit && npm run test:integration"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.21.1",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "zod": "^3.25.46"
   },
   "devDependencies": {
