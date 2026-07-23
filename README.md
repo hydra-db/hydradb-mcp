@@ -4,7 +4,20 @@ MCP (Model Context Protocol) server for [Hydra DB](https://hydradb.com), the sta
 
 ## Available Tools
 
-### **hydra_db_search**
+The tool names follow the canonical HydraDB vocabulary. Every previous name still
+works as a **deprecated alias** (marked as such in its description) so existing
+`mcp.json` files keep working — but new integrations should use the canonical
+names below.
+
+| Canonical tool | Deprecated alias(es) |
+|---|---|
+| `hydradb_query` | `hydra_db_search` |
+| `hydradb_ingest` | `hydra_db_store`, `hydra_db_ingest_conversation` |
+| `hydradb_list` | `hydra_db_list_memories`, `hydra_db_list_sources` |
+| `hydradb_inspect` | `hydra_db_fetch_content` |
+| `hydradb_delete` | `hydra_db_delete_memory` |
+
+### **hydradb_query**
 
 Search through Hydra DB memories. Returns relevant chunks with graph-enriched context including entity paths and knowledge graph relations.
 
@@ -15,41 +28,32 @@ Search through Hydra DB memories. Returns relevant chunks with graph-enriched co
 | `mode` | string | No | Recall mode: `fast` for quick semantic search, `thinking` for deeper personalised recall with graph traversal (default: `thinking`) |
 | `graph_context` | boolean | No | Whether to include knowledge graph relations in results (default: true) |
 
-### **hydra_db_store**
+### **hydradb_ingest**
 
-Save important information to Hydra DB memory. Hydra DB automatically extracts insights, preferences, and builds a knowledge graph from the stored content. Supports plain text and markdown.
+Save information to Hydra DB memory. Hydra DB automatically extracts insights, preferences, and builds a knowledge graph from the stored content. Provide `text` to store a note/document, or `turns` to ingest a conversation.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `text` | string | Yes | The information to store in memory |
+| `text` | string | No\* | The information to store in memory |
 | `title` | string | No | Title for the memory entry (default: `MCP Memory`) |
 | `source_id` | string | No | Source identifier to group related memories together (e.g. session ID) |
 | `infer` | boolean | No | Whether Hydra DB should extract insights and build knowledge graph (default: true) |
 | `is_markdown` | boolean | No | Whether the text is in markdown format (default: false) |
+| `turns` | array | No\* | Conversation turns (each with a `user` and `assistant` field) to ingest instead of `text` |
+| `user_name` | string | No | Name of the user for personalisation, used with `turns` (default: `User`) |
 
-### **hydra_db_ingest_conversation**
+\* Provide exactly one of `text` or `turns`.
 
-Ingest user-assistant conversation turns into Hydra DB memory. Hydra DB extracts insights, preferences, and knowledge graph entities from the conversation.
+### **hydradb_list**
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `turns` | array | Yes | Array of conversation turns, each with a `user` and `assistant` field |
-| `source_id` | string | Yes | Source identifier to group all turns from the same session together |
-| `user_name` | string | No | Name of the user for personalisation (default: `User`) |
-
-### **hydra_db_list_memories**
-
-List all stored user memories in Hydra DB. Returns memory IDs and their content. No parameters required.
-
-### **hydra_db_delete_memory**
-
-Delete a specific user memory from Hydra DB by its memory ID. This action is irreversible.
+List stored memories or ingested knowledge sources in Hydra DB.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `memory_id` | string | Yes | The ID of the memory to delete |
+| `kind` | string | No | Which family to list: `memory` or `knowledge` (default: `memory`) |
+| `source_ids` | array | No | For `knowledge`, an array of specific source IDs to filter by. If omitted, lists all |
 
-### **hydra_db_fetch_content**
+### **hydradb_inspect**
 
 Fetch the full content of a specific source by its source ID.
 
@@ -58,13 +62,14 @@ Fetch the full content of a specific source by its source ID.
 | `source_id` | string | Yes | The source ID to fetch content for |
 | `mode` | string | No | Fetch mode: `content` for text, `url` for presigned URL, `both` for both (default: `content`) |
 
-### **hydra_db_list_sources**
+### **hydradb_delete**
 
-List all ingested sources in Hydra DB memory. Returns source IDs, titles, types, and metadata.
+Delete a memory or knowledge source from Hydra DB by its ID. This action is irreversible.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `source_ids` | array | No | Array of specific source IDs to filter by. If omitted, lists all sources |
+| `id` | string | Yes | The ID of the item to delete |
+| `kind` | string | No | Which family the ID belongs to: `memory` or `knowledge` (default: `memory`) |
 
 ## Configuration
 
@@ -163,13 +168,16 @@ To partition data, set the `HYDRA_DB_SUB_TENANT_ID` environment variable:
 
 ## How It Works
 
-- **hydra_db_search** queries `POST /recall/recall_preferences` for relevant memories and returns graph-enriched context (entity paths, chunk relations, extra context). Supports `fast` and `thinking` recall modes.
-- **hydra_db_store** sends text to `POST /memories/add_memory` with configurable `infer`, `upsert`, `is_markdown`, `title`, and `source_id` options. Hydra DB extracts insights and builds a knowledge graph automatically.
-- **hydra_db_ingest_conversation** sends user-assistant pairs to `POST /memories/add_memory` as conversation turns, grouped by `source_id`.
-- **hydra_db_list_memories** queries `POST /list/data` (kind: `memories`) to browse stored memories.
-- **hydra_db_list_sources** queries `POST /list/data` (kind: `knowledge`) to browse ingested sources, with optional `source_ids` filter.
-- **hydra_db_delete_memory** calls `DELETE /memories/delete_memory` to remove a specific memory.
-- **hydra_db_fetch_content** calls `POST /fetch/content` to retrieve the original ingested content, with mode options (`content`, `url`, or `both`).
+The server talks to Hydra DB through the generated [`@hydradb/sdk`](https://www.npmjs.com/package/@hydradb/sdk)
+(pinned exactly), behind a thin hand-owned wrapper in `src/hydra`. The wrapper
+owns scope injection, envelope unwrapping and error translation; the tools call
+it and render the results.
+
+- **hydradb_query** retrieves relevant memories and returns graph-enriched context (entity paths, chunk relations, extra context). Supports `fast` and `thinking` recall modes.
+- **hydradb_ingest** stores a note (`text`) or a conversation (`turns`) as a memory, with configurable `infer`, `is_markdown`, `title`, and `source_id`. Hydra DB extracts insights and builds a knowledge graph automatically.
+- **hydradb_list** browses stored memories (`kind: memory`) or ingested knowledge sources (`kind: knowledge`, with an optional `source_ids` filter).
+- **hydradb_inspect** retrieves the original ingested content of a source, with mode options (`content`, `url`, or `both`).
+- **hydradb_delete** removes a memory or knowledge source by ID.
 
 ## Development
 

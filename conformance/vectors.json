@@ -1,0 +1,161 @@
+{
+  "$comment": "SHARED HydraDB client conformance vectors (PRO-1298). Identical across all four client repos. Each repo's runner constructs its wrapper against a mocked SDK transport, invokes `call`, and asserts the wrapper (a) emits the canonical method named in `expect.wrapper_method`, (b) issues the SDK call in `expect.sdk`, (c) resolves any deprecated alias in `aliases` to the SAME canonical call. Do not edit one repo's copy in isolation; the master lives with CONTRACT.md.",
+  "version": 1,
+  "scope_defaults": { "database": "db_test", "collection": "col_test" },
+  "vectors": [
+    {
+      "id": "query-memory",
+      "call": { "op": "query", "args": { "query": "what does the user prefer", "kind": "memory" } },
+      "expect": {
+        "wrapper_method": "context.query",
+        "sdk": { "method": "query", "args_include": { "type": "memory", "query": "what does the user prefer" }, "args_scope": { "database": "db_test", "collection": "col_test" } }
+      },
+      "aliases": { "cli": ["recall preferences"], "mcp_tool": ["hydra_db_search"], "openclaw_tool": ["hydra_search"], "openclaw_slash": ["/hydra-recall"], "plugin_skill": ["search", "recall"] }
+    },
+    {
+      "id": "query-knowledge",
+      "call": { "op": "query", "args": { "query": "how does auth work", "kind": "knowledge" } },
+      "expect": {
+        "wrapper_method": "context.query",
+        "sdk": { "method": "query", "args_include": { "type": "knowledge", "query": "how does auth work" } }
+      },
+      "aliases": { "cli": ["recall full"] }
+    },
+    {
+      "id": "query-keyword-operator",
+      "call": { "op": "query", "args": { "query": "invoice OR receipt", "kind": "knowledge", "operator": "or" } },
+      "expect": {
+        "wrapper_method": "context.query",
+        "sdk": { "method": "query", "args_include": { "operator": "or", "query": "invoice OR receipt" } }
+      },
+      "aliases": { "cli": ["recall keyword"] }
+    },
+    {
+      "id": "ingest-memory",
+      "call": { "op": "ingest", "args": { "kind": "memory", "text": "the user prefers dark mode" } },
+      "expect": {
+        "wrapper_method": "context.ingest",
+        "sdk": { "method": "ingest", "content_type": "multipart/form-data", "args_include": { "type": "memory" }, "args_scope": { "database": "db_test" } }
+      },
+      "aliases": { "cli": ["memories add"], "mcp_tool": ["hydra_db_store", "hydra_db_ingest_conversation"], "openclaw_tool": ["hydra_store"], "openclaw_slash": ["/hydra-remember"], "plugin_skill": ["remember", "save-session"] }
+    },
+    {
+      "id": "ingest-knowledge-multipart",
+      "$comment": "Guards the DX-G-002 defect on the v2 path: knowledge ingest MUST be multipart/form-data with a top-level database, NOT application/json (v2 rejects JSON with 415). The source is carried in `app_knowledge` (structured items, which PRESERVE a client-assigned `id` verbatim as the canonical source_id — hydradb-application handler context.go:222) or `documents` (raw file). `app_sources` is a v1-`/ingestion/upload_knowledge`-only field and MUST NOT appear on the v2 path.",
+      "call": { "op": "ingest", "args": { "kind": "knowledge", "text": "quarterly report body", "title": "Q3", "id": "src_client_assigned" } },
+      "expect": {
+        "wrapper_method": "context.ingest",
+        "sdk": { "method": "ingest", "content_type": "multipart/form-data", "args_include": { "type": "knowledge" }, "args_scope": { "database": "db_test" }, "forbid_content_type": "application/json", "forbid_field": "app_sources", "source_field_in": ["app_knowledge", "documents"] }
+      },
+      "aliases": { "cli": ["knowledge upload", "knowledge upload-text"], "plugin_skill": ["sync-workspace", "reindex"] }
+    },
+    {
+      "id": "ingest-knowledge-preserves-client-id",
+      "$comment": "For clients that assign stable source ids (the plugin uses claude-file:<sha1>) so that later delete-by-id reconciliation works: an `id` provided on a structured app_knowledge item MUST be passed through to the SDK, not dropped. The server persists it verbatim (mints a uuid only when empty) and context.delete matches on it. Clients that do NOT assign ids may skip this vector.",
+      "optional_for": ["cli", "mcp", "openclaw"],
+      "call": { "op": "ingest", "args": { "kind": "knowledge", "text": "doc body", "id": "claude-file:abc123" } },
+      "expect": {
+        "wrapper_method": "context.ingest",
+        "sdk": { "method": "ingest", "source_field_in": ["app_knowledge"], "item_id_preserved": "claude-file:abc123" }
+      }
+    },
+    {
+      "id": "list-memory",
+      "call": { "op": "list", "args": { "kind": "memory" } },
+      "expect": {
+        "wrapper_method": "context.list",
+        "sdk": { "method": "list", "args_include": { "type": "memory" } }
+      },
+      "aliases": { "cli": ["memories list", "fetch sources"], "mcp_tool": ["hydra_db_list_memories", "hydra_db_list_sources"], "openclaw_tool": ["hydra_list_memories"], "openclaw_slash": ["/hydra-list"] }
+    },
+    {
+      "id": "inspect-source",
+      "call": { "op": "inspect", "args": { "id": "src_123", "mode": "content" } },
+      "expect": {
+        "wrapper_method": "context.inspect",
+        "sdk": { "method": "inspect", "args_include": { "id": "src_123" }, "args_scope": { "database": "db_test" } }
+      },
+      "aliases": { "cli": ["fetch content"], "mcp_tool": ["hydra_db_fetch_content"], "openclaw_tool": ["hydra_get_content"], "openclaw_slash": ["/hydra-get"] }
+    },
+    {
+      "id": "delete-memory",
+      "call": { "op": "delete", "args": { "ids": ["mem_1"], "kind": "memory" } },
+      "expect": {
+        "wrapper_method": "context.delete",
+        "sdk": { "method": "delete", "args_include": { "type": "memory", "ids": ["mem_1"] } }
+      },
+      "aliases": { "cli": ["memories delete"], "mcp_tool": ["hydra_db_delete_memory"], "openclaw_tool": ["hydra_delete_memory"], "openclaw_slash": ["/hydra-delete"] }
+    },
+    {
+      "id": "delete-knowledge",
+      "call": { "op": "delete", "args": { "ids": ["src_9"], "kind": "knowledge" } },
+      "expect": {
+        "wrapper_method": "context.delete",
+        "sdk": { "method": "delete", "args_include": { "type": "knowledge", "ids": ["src_9"] } }
+      },
+      "aliases": { "cli": ["knowledge delete"] }
+    },
+    {
+      "id": "relations",
+      "call": { "op": "relations", "args": { "id": "src_123", "kind": "knowledge" } },
+      "expect": {
+        "wrapper_method": "context.relations",
+        "sdk": { "method": "relations", "args_include": { "id": "src_123" }, "args_scope": { "database": "db_test" } }
+      },
+      "aliases": { "cli": ["fetch relations"] }
+    },
+    {
+      "id": "database-create",
+      "call": { "op": "database.create", "args": { "database": "new_db" } },
+      "expect": {
+        "wrapper_method": "databases.create",
+        "sdk": { "method": "create", "args_include": { "database": "new_db" } }
+      },
+      "aliases": { "cli": ["tenant create"] }
+    },
+    {
+      "id": "database-delete",
+      "call": { "op": "database.delete", "args": { "database": "old_db" } },
+      "expect": {
+        "wrapper_method": "databases.delete",
+        "sdk": { "method": "delete", "args_include": { "database": "old_db" } }
+      },
+      "aliases": { "cli": ["tenant delete"] }
+    },
+    {
+      "id": "database-collections",
+      "call": { "op": "database.collections", "args": { "database": "db_test" } },
+      "expect": {
+        "wrapper_method": "databases.collections",
+        "sdk": { "method": "collections", "args_include": { "database": "db_test" } }
+      },
+      "aliases": { "cli": ["tenant list-sub-tenants"] }
+    },
+    {
+      "id": "database-readiness",
+      "$comment": "The status disambiguation: infra readiness is `readiness`, NOT `status`. Wrapper maps to SDK databases.status.",
+      "call": { "op": "database.readiness", "args": { "database": "db_test" } },
+      "expect": {
+        "wrapper_method": "databases.readiness",
+        "sdk": { "method": "status", "args_include": { "database": "db_test" } }
+      },
+      "aliases": { "cli": ["tenant monitor"] }
+    },
+    {
+      "id": "context-ingestion-status",
+      "$comment": "The status disambiguation: per-source indexing progress is `ingestionStatus`, NOT `status`. Wrapper maps to SDK context.status.",
+      "call": { "op": "context.ingestionStatus", "args": { "ids": ["src_123"] } },
+      "expect": {
+        "wrapper_method": "context.ingestionStatus",
+        "sdk": { "method": "status", "args_scope": { "database": "db_test" } }
+      },
+      "aliases": { "cli": ["knowledge verify"] }
+    }
+  ],
+  "env_aliases": [
+    { "canonical": "HYDRADB_API_KEY", "deprecated": ["HYDRA_DB_API_KEY", "HYDRA_OPENCLAW_API_KEY"] },
+    { "canonical": "HYDRADB_DATABASE", "deprecated": ["HYDRADB_TENANT_ID", "HYDRA_DB_TENANT_ID", "HYDRA_OPENCLAW_TENANT_ID"] },
+    { "canonical": "HYDRADB_COLLECTION", "deprecated": ["HYDRADB_SUB_TENANT_ID", "HYDRA_DB_SUB_TENANT_ID"] },
+    { "canonical": "HYDRADB_BASE_URL", "deprecated": ["HYDRA_DB_BASE_URL", "HYDRADB_API_URL"] }
+  ]
+}

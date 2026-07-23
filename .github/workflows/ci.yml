@@ -62,7 +62,7 @@ jobs:
         shell: bash
         run: |
           shopt -s globstar
-          npx tsx --test tests/**/*.test.ts
+          npx tsx --test tests/**/*.test.ts conformance/**/*.test.ts
 
   dco-check:
     runs-on: ubuntu-latest
