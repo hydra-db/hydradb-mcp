@@ -154,7 +154,12 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 	async function runIngestConversation(
 		turns: ConversationTurn[],
 		sourceId: string,
-		userName?: string,
+		opts?: {
+			userName?: string;
+			infer?: boolean;
+			title?: string;
+			isMarkdown?: boolean;
+		},
 	): Promise<ToolResult> {
 		logger.debug(
 			`${TOOL_NAMES.INGEST}: ${turns.length} turns -> ${sourceId}`,
@@ -164,8 +169,10 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			kind: "memory",
 			pairs: turns,
 			sourceId,
-			userName: userName ?? "User",
-			infer: true,
+			userName: opts?.userName ?? "User",
+			infer: opts?.infer ?? true,
+			title: opts?.title,
+			isMarkdown: opts?.isMarkdown,
 			customInstructions: INGEST_INSTRUCTIONS,
 			upsert: true,
 		});
@@ -446,7 +453,14 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		}
 		if (a.turns != null && a.turns.length > 0) {
 			const sourceId = a.source_id ?? `mcp-conversation-${Date.now()}`;
-			return runIngestConversation(a.turns, sourceId, a.user_name);
+			// Forward every option the canonical schema accepts so none is
+			// silently dropped on the conversation path.
+			return runIngestConversation(a.turns, sourceId, {
+				userName: a.user_name,
+				infer: a.infer,
+				title: a.title,
+				isMarkdown: a.is_markdown,
+			});
 		}
 		if (a.text != null) {
 			return runStore({
@@ -505,7 +519,9 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			source_id: string;
 			user_name?: string;
 		};
-		return runIngestConversation(a.turns, a.source_id, a.user_name);
+		// The deprecated alias keeps its historical shape (user_name only; infer
+		// on, no title/markdown). The canonical hydradb_ingest forwards the rest.
+		return runIngestConversation(a.turns, a.source_id, { userName: a.user_name });
 	});
 
 	register(TOOL_NAMES.LIST_MEMORIES, {}, () => runListMemories(), readOnly);

@@ -71,6 +71,33 @@ test("hydradb_ingest accepts turns-only input (no text)", async () => {
 	await client.close();
 });
 
+test("hydradb_ingest turns path forwards infer/title/is_markdown (no silent drop)", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	await client.callTool({
+		name: "hydradb_ingest",
+		arguments: {
+			turns: [{ user: "hi", assistant: "hello" }],
+			source_id: "s1",
+			infer: false,
+			title: "My conversation",
+			is_markdown: true,
+		},
+	});
+
+	const ingest = calls.find((c) => c.method === "ingest");
+	assert.ok(ingest, "wrapper should have called context.ingest");
+	const item = (JSON.parse(String(ingest.args.memories)) as Record<string, unknown>[])[0]!;
+	assert.equal(item.infer, false, "infer must reach the wrapper, not be hardcoded true");
+	assert.equal(item.title, "My conversation", "title must be forwarded");
+	assert.equal(item.is_markdown, true, "is_markdown must be forwarded");
+	// custom_instructions is omitted when infer is false (preserved v1 behaviour).
+	assert.equal(item.custom_instructions, undefined);
+
+	await client.close();
+});
+
 test("hydradb_ingest rejects both text and turns rather than dropping one", async () => {
 	const { hydra, calls } = mockHydra();
 	const client = await connect(hydra);
