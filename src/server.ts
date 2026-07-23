@@ -445,7 +445,15 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			turns?: ConversationTurn[];
 			user_name?: string;
 		};
-		if (a.turns && a.turns.length > 0) {
+		const hasTurns = a.turns != null && a.turns.length > 0;
+		// `text` and `turns` are mutually exclusive — reject rather than silently
+		// dropping one (the documented "exactly one" contract).
+		if (hasTurns && a.text != null) {
+			throw new Error(
+				`${TOOL_NAMES.INGEST} accepts either \`text\` (a note) or \`turns\` (a conversation), not both.`,
+			);
+		}
+		if (a.turns != null && a.turns.length > 0) {
 			const sourceId = a.source_id ?? `mcp-conversation-${Date.now()}`;
 			return runIngestConversation(a.turns, sourceId, a.user_name);
 		}

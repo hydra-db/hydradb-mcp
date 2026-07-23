@@ -71,6 +71,30 @@ test("hydradb_ingest accepts turns-only input (no text)", async () => {
 	await client.close();
 });
 
+test("hydradb_ingest rejects both text and turns rather than dropping one", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_ingest",
+		arguments: {
+			text: "a note",
+			turns: [{ user: "hi", assistant: "hello" }],
+		},
+	});
+
+	assert.equal(result.isError, true, "providing both text and turns should error");
+	const text = (result.content as { type: string; text: string }[])[0]!.text;
+	assert.match(text, /not both/);
+	assert.equal(
+		calls.filter((c) => c.method === "ingest").length,
+		0,
+		"no ingest should be issued when the input is ambiguous",
+	);
+
+	await client.close();
+});
+
 test("invoking a deprecated alias emits exactly one warning naming the canonical tool", async () => {
 	const { hydra } = mockHydra();
 	const client = await connect(hydra);
