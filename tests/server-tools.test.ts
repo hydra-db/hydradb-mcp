@@ -6,7 +6,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { HydraDBClient } from "@hydradb/sdk";
 
 import { HydraDB } from "../src/hydra/index.js";
-import { createHydraDBServer } from "../src/server.js";
+import { __resetAliasWarnings, createHydraDBServer } from "../src/server.js";
 
 type RecordedCall = { method: string; args: Record<string, unknown> };
 
@@ -95,9 +95,8 @@ test("hydradb_ingest rejects both text and turns rather than dropping one", asyn
 	await client.close();
 });
 
-test("invoking a deprecated alias emits exactly one warning naming the canonical tool", async () => {
-	const { hydra } = mockHydra();
-	const client = await connect(hydra);
+test("deprecated alias warns exactly once per process, across two server instances", async () => {
+	__resetAliasWarnings();
 
 	const original = console.error;
 	const messages: string[] = [];
@@ -105,19 +104,27 @@ test("invoking a deprecated alias emits exactly one warning naming the canonical
 		messages.push(args.map(String).join(" "));
 	};
 
+	// Two independent server instances in the same process.
+	const clientA = await connect(mockHydra().hydra);
+	const clientB = await connect(mockHydra().hydra);
 	try {
-		await client.callTool({ name: "hydra_db_search", arguments: { query: "x" } });
-		await client.callTool({ name: "hydra_db_search", arguments: { query: "y" } });
+		await clientA.callTool({ name: "hydra_db_search", arguments: { query: "x" } });
+		await clientB.callTool({ name: "hydra_db_search", arguments: { query: "y" } });
 	} finally {
 		console.error = original;
 	}
 
 	const warnings = messages.filter((m) => m.includes('"hydra_db_search"'));
-	assert.equal(warnings.length, 1, "alias warning should fire once per process");
+	assert.equal(
+		warnings.length,
+		1,
+		"alias warning must fire once per process even across server instances",
+	);
 	assert.match(warnings[0]!, /deprecated/);
 	assert.match(warnings[0]!, /"hydradb_query"/);
 
-	await client.close();
+	await clientA.close();
+	await clientB.close();
 });
 
 test("canonical hydradb_query still renders the empty-result message", async () => {

@@ -32,6 +32,26 @@ const turnSchema = z.object({
 
 type ConversationTurn = { user: string; assistant: string };
 
+// Deprecated aliases emit exactly one stderr warning PER PROCESS naming the
+// canonical replacement (CONTRACT §3). The dedupe state is module-scoped so the
+// guarantee holds across multiple server instances in the same process, and is
+// intentionally NOT routed through `logger` — the warning must surface
+// regardless of HYDRA_DB_LOG_LEVEL.
+const warnedAliases = new Set<string>();
+function warnDeprecatedAlias(name: string) {
+	if (warnedAliases.has(name)) return;
+	warnedAliases.add(name);
+	const replacement = ALIAS_REPLACEMENTS[name] ?? "a canonical tool";
+	console.error(
+		`[hydradb-mcp] Tool "${name}" is deprecated and will be removed in a future major version; use "${replacement}" instead.`,
+	);
+}
+
+/** Test-only: reset the once-per-process alias warning dedupe. */
+export function __resetAliasWarnings() {
+	warnedAliases.clear();
+}
+
 export function createHydraDBServer(hydraOverride?: HydraDB) {
 	const server = new McpServer(
 		{
@@ -56,19 +76,6 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		});
 		logger.info(
 			`Hydra DB connected (database=${config.database}, collection=${config.collection})`,
-		);
-	}
-
-	// Deprecated aliases emit exactly one stderr warning per process naming the
-	// canonical replacement (CONTRACT §3). This is intentionally NOT routed
-	// through `logger` — the warning must surface regardless of HYDRA_DB_LOG_LEVEL.
-	const warnedAliases = new Set<string>();
-	function warnDeprecatedAlias(name: string) {
-		if (warnedAliases.has(name)) return;
-		warnedAliases.add(name);
-		const replacement = ALIAS_REPLACEMENTS[name] ?? "a canonical tool";
-		console.error(
-			`[hydradb-mcp] Tool "${name}" is deprecated and will be removed in a future major version; use "${replacement}" instead.`,
 		);
 	}
 
