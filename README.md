@@ -202,10 +202,13 @@ HYDRADB_API_KEY=your-key HYDRADB_DATABASE=your-database npm run dev
 ## Testing
 
 ```bash
-# unit tests (mocked HTTP)
+# unit + conformance tests (wrapper driven against a mocked SDK transport)
 npm test
 
-# live integration test against Hydra DB
+# just the shared conformance vectors
+npm run test:conformance
+
+# live integration test against Hydra DB (drives the wrapper end to end)
 RUN_LIVE_TESTS=true HYDRADB_API_KEY=your-key HYDRADB_DATABASE=your-database npm run test:integration
 ```
 
