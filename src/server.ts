@@ -6,7 +6,7 @@ import { buildRecalledContext } from "./context.js";
 import { SERVER_INSTRUCTIONS, TOOL_DESCRIPTIONS } from "./descriptions.js";
 import { HydraDB } from "./hydra/index.js";
 import { logger } from "./logger.js";
-import { TOOL_NAMES } from "./tool-names.js";
+import { ALIAS_REPLACEMENTS, DEPRECATED_TOOL_NAMES, TOOL_NAMES } from "./tool-names.js";
 
 const DEFAULT_SUB_TENANT = "hydra-db-mcp";
 
@@ -49,7 +49,7 @@ const turnSchema = z.object({
 
 type ConversationTurn = { user: string; assistant: string };
 
-export function createHydraDBServer() {
+export function createHydraDBServer(hydraOverride?: HydraDB) {
 	const server = new McpServer(
 		{
 			name: "hydradb-mcp",
@@ -60,15 +60,33 @@ export function createHydraDBServer() {
 		},
 	);
 
-	const config = getConfig();
-	const hydra = new HydraDB({
-		token: config.apiKey,
-		database: config.tenantId,
-		collection: config.subTenantId,
-	});
-	logger.info(
-		`Hydra DB connected (database=${config.tenantId}, collection=${config.subTenantId})`,
-	);
+	let hydra: HydraDB;
+	if (hydraOverride) {
+		hydra = hydraOverride;
+	} else {
+		const config = getConfig();
+		hydra = new HydraDB({
+			token: config.apiKey,
+			database: config.tenantId,
+			collection: config.subTenantId,
+		});
+		logger.info(
+			`Hydra DB connected (database=${config.tenantId}, collection=${config.subTenantId})`,
+		);
+	}
+
+	// Deprecated aliases emit exactly one stderr warning per process naming the
+	// canonical replacement (CONTRACT §3). This is intentionally NOT routed
+	// through `logger` — the warning must surface regardless of HYDRA_DB_LOG_LEVEL.
+	const warnedAliases = new Set<string>();
+	function warnDeprecatedAlias(name: string) {
+		if (warnedAliases.has(name)) return;
+		warnedAliases.add(name);
+		const replacement = ALIAS_REPLACEMENTS[name] ?? "a canonical tool";
+		console.error(
+			`[hydradb-mcp] Tool "${name}" is deprecated and will be removed in a future major version; use "${replacement}" instead.`,
+		);
+	}
 
 	// --- Handlers (shared by canonical tools and their deprecated aliases) ---
 
@@ -267,6 +285,13 @@ export function createHydraDBServer() {
 		},
 	) {
 		const desc = TOOL_DESCRIPTIONS[name];
+		const isDeprecated = (DEPRECATED_TOOL_NAMES as readonly string[]).includes(name);
+		const wrapped = isDeprecated
+			? (args: Record<string, unknown>) => {
+					warnDeprecatedAlias(name);
+					return handler(args);
+				}
+			: handler;
 		server.registerTool(
 			name,
 			{
@@ -275,7 +300,7 @@ export function createHydraDBServer() {
 				inputSchema: inputSchema as never,
 				...(annotations ? { annotations } : {}),
 			},
-			handler as never,
+			wrapped as never,
 		);
 	}
 
@@ -321,6 +346,12 @@ export function createHydraDBServer() {
 
 	const ingestSchema = {
 		...storeSchema,
+		// Canonical ingest accepts EITHER `text` or `turns`, so `text` is optional
+		// here (the `hydra_db_store` alias keeps it required).
+		text: z
+			.string()
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.text),
 		turns: z
 			.array(turnSchema)
 			.min(1)
