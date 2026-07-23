@@ -76,16 +76,22 @@ Delete a memory or knowledge source from Hydra DB by its ID. This action is irre
 ### Get Your Credentials
 
 1. Get your Hydra DB API Key from [Hydra DB](https://app.hydradb.com)
-2. Get your Tenant ID from the Hydra DB dashboard
+2. Get your database name from the Hydra DB dashboard
 
 ### Environment Variables
 
-| Variable                 | Description                         | Default        |
-| ------------------------ | ----------------------------------- | -------------- |
-| `HYDRA_DB_API_KEY`       | Your Hydra DB API key               | *Required*     |
-| `HYDRA_DB_TENANT_ID`     | Your Hydra DB tenant identifier     | *Required*     |
-| `HYDRA_DB_SUB_TENANT_ID` | Sub-tenant for data partitioning    | `hydra-db-mcp` |
-| `HYDRA_DB_LOG_LEVEL`     | Log level: DEBUG, INFO, WARN, ERROR | `ERROR`        |
+| Variable             | Description                          | Default                   |
+| -------------------- | ------------------------------------ | ------------------------- |
+| `HYDRADB_API_KEY`    | Your Hydra DB API key                | *Required*                |
+| `HYDRADB_DATABASE`   | Your Hydra DB database (tenant scope) | *Required*                |
+| `HYDRADB_COLLECTION` | Collection (sub-tenant) for partitioning | `hydra-db-mcp`        |
+| `HYDRADB_BASE_URL`   | Base URL override                    | `https://api.hydradb.com` |
+| `HYDRA_DB_LOG_LEVEL` | Log level: DEBUG, INFO, WARN, ERROR  | `ERROR`                   |
+
+The legacy `HYDRA_DB_*` names — `HYDRA_DB_API_KEY`, `HYDRA_DB_TENANT_ID`,
+`HYDRA_DB_SUB_TENANT_ID`, `HYDRA_DB_BASE_URL` — remain honoured as **deprecated
+aliases** (canonical wins when both are set; using an alias prints a one-time
+warning naming its replacement).
 
 ### Claude Desktop
 
@@ -96,8 +102,8 @@ Delete a memory or knowledge source from Hydra DB by its ID. This action is irre
       "command": "npx",
       "args": ["-y", "@hydradb/mcp@latest"],
       "env": {
-        "HYDRA_DB_API_KEY": "your-api-key",
-        "HYDRA_DB_TENANT_ID": "your-tenant-id"
+        "HYDRADB_API_KEY": "your-api-key",
+        "HYDRADB_DATABASE": "your-database"
       }
     }
   }
@@ -118,8 +124,8 @@ Delete a memory or knowledge source from Hydra DB by its ID. This action is irre
       "command": "npx",
       "args": ["-y", "@hydradb/mcp@latest"],
       "env": {
-        "HYDRA_DB_API_KEY": "your-api-key",
-        "HYDRA_DB_TENANT_ID": "your-tenant-id"
+        "HYDRADB_API_KEY": "your-api-key",
+        "HYDRADB_DATABASE": "your-database"
       }
     }
   }
@@ -138,8 +144,8 @@ Add to `.vscode/mcp.json`:
       "command": "npx",
       "args": ["-y", "@hydradb/mcp@latest"],
       "env": {
-        "HYDRA_DB_API_KEY": "your-api-key",
-        "HYDRA_DB_TENANT_ID": "your-tenant-id"
+        "HYDRADB_API_KEY": "your-api-key",
+        "HYDRADB_DATABASE": "your-database"
       }
     }
   }
@@ -148,7 +154,7 @@ Add to `.vscode/mcp.json`:
 
 ### Custom Sub-Tenant
 
-To partition data, set the `HYDRA_DB_SUB_TENANT_ID` environment variable:
+To partition data, set the `HYDRADB_COLLECTION` environment variable:
 
 ```json
 {
@@ -157,9 +163,9 @@ To partition data, set the `HYDRA_DB_SUB_TENANT_ID` environment variable:
       "command": "npx",
       "args": ["-y", "@hydradb/mcp@latest"],
       "env": {
-        "HYDRA_DB_API_KEY": "your-api-key",
-        "HYDRA_DB_TENANT_ID": "your-tenant-id",
-        "HYDRA_DB_SUB_TENANT_ID": "my-project"
+        "HYDRADB_API_KEY": "your-api-key",
+        "HYDRADB_DATABASE": "your-database",
+        "HYDRADB_COLLECTION": "my-project"
       }
     }
   }
@@ -184,13 +190,13 @@ it and render the results.
 ```bash
 npm ci
 npm run build
-HYDRA_DB_API_KEY=your-key HYDRA_DB_TENANT_ID=your-tenant npm start
+HYDRADB_API_KEY=your-key HYDRADB_DATABASE=your-database npm start
 ```
 
 For development with auto-reload:
 
 ```bash
-HYDRA_DB_API_KEY=your-key HYDRA_DB_TENANT_ID=your-tenant npm run dev
+HYDRADB_API_KEY=your-key HYDRADB_DATABASE=your-database npm run dev
 ```
 
 ## Testing
@@ -200,12 +206,12 @@ HYDRA_DB_API_KEY=your-key HYDRA_DB_TENANT_ID=your-tenant npm run dev
 npm test
 
 # live integration test against Hydra DB
-RUN_LIVE_TESTS=true HYDRA_DB_API_KEY=your-key HYDRA_DB_TENANT_ID=your-tenant npm run test:integration
+RUN_LIVE_TESTS=true HYDRADB_API_KEY=your-key HYDRADB_DATABASE=your-database npm run test:integration
 ```
 
 ## Troubleshooting
 
-- **API Key Issues**: Ensure `HYDRA_DB_API_KEY` is set correctly
+- **API Key Issues**: Ensure `HYDRADB_API_KEY` is set correctly
 - **Connection Errors**: Check your internet connection and API key validity
 - **Tool Not Found**: Make sure the package is installed and the command path is correct
 - **Debug Logging**: Set `HYDRA_DB_LOG_LEVEL=DEBUG` for verbose output

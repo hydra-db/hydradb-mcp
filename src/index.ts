@@ -1,21 +1,15 @@
 #!/usr/bin/env node
 
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { resolveConfig } from "./config.js";
 import { createHydraDBServer } from "./server.js";
 
-const HYDRA_DB_API_KEY = process.env.HYDRA_DB_API_KEY;
-if (!HYDRA_DB_API_KEY) {
-	console.error(
-		"Error: HYDRA_DB_API_KEY environment variable is required",
-	);
-	process.exit(1);
-}
-
-const HYDRA_DB_TENANT_ID = process.env.HYDRA_DB_TENANT_ID;
-if (!HYDRA_DB_TENANT_ID) {
-	console.error(
-		"Error: HYDRA_DB_TENANT_ID environment variable is required",
-	);
+// Fail fast with a clean message if required config is missing. Honours the
+// canonical HYDRADB_* names (and the deprecated HYDRA_DB_* aliases).
+try {
+	resolveConfig();
+} catch (error) {
+	console.error(`Error: ${error instanceof Error ? error.message : String(error)}`);
 	process.exit(1);
 }
 

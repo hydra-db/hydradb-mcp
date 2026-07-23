@@ -2,13 +2,12 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
 import { toAddMemoryResponse, toMemoryList, toRecallResponse, toSourceList } from "./adapters.js";
+import { resolveConfig } from "./config.js";
 import { buildRecalledContext } from "./context.js";
 import { SERVER_INSTRUCTIONS, TOOL_DESCRIPTIONS } from "./descriptions.js";
 import { HydraDB } from "./hydra/index.js";
 import { logger } from "./logger.js";
 import { ALIAS_REPLACEMENTS, DEPRECATED_TOOL_NAMES, TOOL_NAMES } from "./tool-names.js";
-
-const DEFAULT_SUB_TENANT = "hydra-db-mcp";
 
 // Host-owned default: silently attached to ingest so Hydra DB extracts the kind
 // of personal context this server cares about. Injected here (not in the
@@ -17,22 +16,6 @@ const INGEST_INSTRUCTIONS =
 	"Focus on extracting user preferences, habits, opinions, likes, dislikes, " +
 	"goals, and recurring themes. Capture any stated or implied personal context " +
 	"that would help personalise future interactions.";
-
-function getConfig() {
-	const apiKey = process.env.HYDRA_DB_API_KEY;
-	if (!apiKey) {
-		throw new Error("HYDRA_DB_API_KEY environment variable is required");
-	}
-
-	const tenantId = process.env.HYDRA_DB_TENANT_ID;
-	if (!tenantId) {
-		throw new Error("HYDRA_DB_TENANT_ID environment variable is required");
-	}
-
-	const subTenantId = process.env.HYDRA_DB_SUB_TENANT_ID || DEFAULT_SUB_TENANT;
-
-	return { apiKey, tenantId, subTenantId };
-}
 
 type ToolResult = {
 	content: { type: "text"; text: string }[];
@@ -64,14 +47,15 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 	if (hydraOverride) {
 		hydra = hydraOverride;
 	} else {
-		const config = getConfig();
+		const config = resolveConfig();
 		hydra = new HydraDB({
 			token: config.apiKey,
-			database: config.tenantId,
-			collection: config.subTenantId,
+			database: config.database,
+			collection: config.collection,
+			...(config.baseUrl != null ? { baseUrl: config.baseUrl } : {}),
 		});
 		logger.info(
-			`Hydra DB connected (database=${config.tenantId}, collection=${config.subTenantId})`,
+			`Hydra DB connected (database=${config.database}, collection=${config.collection})`,
 		);
 	}
 
