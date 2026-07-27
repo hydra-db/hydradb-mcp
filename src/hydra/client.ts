@@ -194,12 +194,11 @@ export class ContextResource extends Resource {
 			if (params.text != null) {
 				request.documents = {
 					data: Buffer.from(params.text, "utf-8"),
+					// The title rides on the filename; the server's
+					// document_metadata does not accept a `title` key.
 					filename: params.filename ?? `${params.title ?? "document"}.md`,
 					contentType: "text/markdown",
 				};
-			}
-			if (params.title != null) {
-				request.documentMetadata = JSON.stringify({ title: params.title });
 			}
 		}
 
