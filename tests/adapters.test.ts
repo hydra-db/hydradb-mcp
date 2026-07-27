@@ -92,13 +92,13 @@ test("toAddMemoryResponse maps ingest counts", () => {
 });
 
 test("toMemoryList reads memory rows defensively", () => {
+	// The live API returns memories at top-level `user_memories` (not under
+	// `.inner`, and not under `sources` — that is the knowledge shape).
 	const rows = toMemoryList({
-		inner: {
-			sources: [
-				{ memory_id: "m1", memory_content: "prefers dark mode" },
-				{ id: "m2", content: "likes tea" },
-			],
-		},
+		user_memories: [
+			{ memory_id: "m1", memory_content: "prefers dark mode" },
+			{ id: "m2", content: "likes tea" },
+		],
 	});
 	assert.deepEqual(rows, [
 		{ memory_id: "m1", memory_content: "prefers dark mode" },
@@ -107,14 +107,13 @@ test("toMemoryList reads memory rows defensively", () => {
 });
 
 test("toSourceList reads source rows and total", () => {
+	// The live API returns knowledge sources at top-level `sources`/`total`.
 	const { sources, total } = toSourceList({
-		inner: {
-			total: 2,
-			sources: [
-				{ id: "s1", title: "Q3 report", type: "file" },
-				{ source_id: "s2", source_type: "slack" },
-			],
-		},
+		total: 2,
+		sources: [
+			{ id: "s1", title: "Q3 report", type: "file" },
+			{ source_id: "s2", source_type: "slack" },
+		],
 	});
 	assert.equal(total, 2);
 	assert.deepEqual(sources, [
