@@ -18,11 +18,13 @@
     "dev": "tsx src/index.ts",
     "check-types": "tsc --noEmit",
     "test": "npm run test:unit",
-    "test:unit": "tsx --test tests/**/*.test.ts",
+    "test:unit": "tsx --test tests/**/*.test.ts conformance/**/*.test.ts",
+    "test:conformance": "tsx --test conformance/**/*.test.ts",
     "test:integration": "tsx --test tests/**/*.integration.spec.ts",
     "test:all": "npm run test:unit && npm run test:integration"
   },
   "dependencies": {
+    "@hydradb/sdk": "2.1.2",
     "@modelcontextprotocol/sdk": "^1.21.1",
     "zod": "^3.25.46"
   },
@@ -35,4 +37,3 @@
     "node": ">=18"
   }
 }
-

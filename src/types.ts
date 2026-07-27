@@ -1,26 +1,9 @@
-export type ConversationTurn = {
-	user: string;
-	assistant: string;
-};
-
-export type MemoryPayload = {
-	text?: string;
-	user_assistant_pairs?: ConversationTurn[];
-	is_markdown?: boolean;
-	infer?: boolean;
-	custom_instructions?: string;
-	user_name?: string;
-	source_id?: string;
-	title?: string;
-	expiry_time?: number;
-};
-
-export type AddMemoryRequest = {
-	memories: MemoryPayload[];
-	tenant_id: string;
-	sub_tenant_id?: string;
-	upsert?: boolean;
-};
+// Legacy snake_case domain shapes the MCP render layer still speaks.
+//
+// The v2 SDK returns camelCase payloads; `src/adapters.ts` maps those back into
+// these shapes so `src/context.ts` (the byte-identical recall renderer) and the
+// tool output strings stay unchanged. These are NOT wire request types — the
+// wrapper owns the SDK request surface.
 
 export type MemoryResultItem = {
 	source_id: string;
@@ -36,18 +19,6 @@ export type AddMemoryResponse = {
 	results: MemoryResultItem[];
 	success_count: number;
 	failed_count: number;
-};
-
-export type RecallRequest = {
-	tenant_id: string;
-	sub_tenant_id?: string;
-	query: string;
-	max_results?: number;
-	mode?: "fast" | "thinking";
-	alpha?: number | string;
-	recency_bias?: number;
-	graph_context?: boolean;
-	additional_context?: string;
 };
 
 export type VectorChunk = {
@@ -96,70 +67,3 @@ export type RecallResponse = {
 	graph_context?: GraphContext;
 	additional_context?: Record<string, VectorChunk>;
 };
-
-// --- List API ---
-
-export type ListDataRequest = {
-	tenant_id: string;
-	sub_tenant_id?: string;
-	kind?: "knowledge" | "memories";
-	source_ids?: string[];
-};
-
-export type UserMemory = {
-	memory_id: string;
-	memory_content: string;
-};
-
-export type ListMemoriesResponse = {
-	success: boolean;
-	user_memories: UserMemory[];
-};
-
-export type SourceItem = {
-	id: string;
-	tenant_id: string;
-	sub_tenant_id: string;
-	title?: string;
-	type?: string;
-	description?: string;
-	timestamp?: string;
-	url?: string;
-};
-
-export type ListSourcesResponse = {
-	success: boolean;
-	message?: string;
-	sources: SourceItem[];
-	total: number;
-};
-
-// --- Delete API ---
-
-export type DeleteMemoryResponse = {
-	success: boolean;
-	user_memory_deleted: boolean;
-};
-
-// --- Fetch Content API ---
-
-export type FetchContentRequest = {
-	tenant_id: string;
-	sub_tenant_id?: string;
-	source_id: string;
-	mode?: "content" | "url" | "both";
-	expiry_seconds?: number;
-};
-
-export type FetchContentResponse = {
-	success: boolean;
-	source_id: string;
-	content?: string | null;
-	content_base64?: string | null;
-	presigned_url?: string | null;
-	content_type?: string | null;
-	size_bytes?: number | null;
-	message?: string;
-	error?: string | null;
-};
-

@@ -1,0 +1,169 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import type { HydraDBClient } from "@hydradb/sdk";
+
+import { HydraDB } from "../src/hydra/index.js";
+import { __resetAliasWarnings, createHydraDBServer } from "../src/server.js";
+
+type RecordedCall = { method: string; args: Record<string, unknown> };
+
+function mockHydra(): { hydra: HydraDB; calls: RecordedCall[] } {
+	const calls: RecordedCall[] = [];
+	const record =
+		(method: string, data: unknown) => (args?: Record<string, unknown>) => {
+			calls.push({ method, args: args ?? {} });
+			return Promise.resolve({ data, success: true });
+		};
+
+	const sdk = {
+		query: record("query", { chunks: [] }),
+		context: {
+			ingest: record("ingest", { success: true, successCount: 1, failedCount: 0 }),
+			list: record("list", { inner: { sources: [], total: 0 } }),
+			inspect: record("inspect", { success: true, content: "hi" }),
+			delete: record("delete", { success: true, userMemoryDeleted: 1 }),
+			relations: record("relations", {}),
+			status: record("status", {}),
+		},
+	} as unknown as HydraDBClient;
+
+	const hydra = new HydraDB(
+		{ token: "t", database: "db_test", collection: "col_test" },
+		sdk,
+	);
+	return { hydra, calls };
+}
+
+async function connect(hydra: HydraDB) {
+	const server = createHydraDBServer(hydra);
+	const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+	const client = new Client({ name: "test", version: "0.0.0" });
+	await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+	return client;
+}
+
+test("hydradb_ingest accepts turns-only input (no text)", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_ingest",
+		arguments: {
+			turns: [{ user: "hi", assistant: "hello" }],
+			source_id: "s1",
+		},
+	});
+
+	assert.notEqual(result.isError, true, "turns-only ingest should not be rejected");
+	const text = (result.content as { type: string; text: string }[])[0]!.text;
+	assert.match(text, /Ingested 1 conversation turn/);
+
+	const ingest = calls.find((c) => c.method === "ingest");
+	assert.ok(ingest, "wrapper should have called context.ingest");
+	const memories = JSON.parse(String(ingest.args.memories)) as Record<string, unknown>[];
+	assert.deepEqual(memories[0]!.user_assistant_pairs, [
+		{ user: "hi", assistant: "hello" },
+	]);
+
+	await client.close();
+});
+
+test("hydradb_ingest turns path forwards infer/title/is_markdown (no silent drop)", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	await client.callTool({
+		name: "hydradb_ingest",
+		arguments: {
+			turns: [{ user: "hi", assistant: "hello" }],
+			source_id: "s1",
+			infer: false,
+			title: "My conversation",
+			is_markdown: true,
+		},
+	});
+
+	const ingest = calls.find((c) => c.method === "ingest");
+	assert.ok(ingest, "wrapper should have called context.ingest");
+	const item = (JSON.parse(String(ingest.args.memories)) as Record<string, unknown>[])[0]!;
+	assert.equal(item.infer, false, "infer must reach the wrapper, not be hardcoded true");
+	assert.equal(item.title, "My conversation", "title must be forwarded");
+	assert.equal(item.is_markdown, true, "is_markdown must be forwarded");
+	// custom_instructions is omitted when infer is false (preserved v1 behaviour).
+	assert.equal(item.custom_instructions, undefined);
+
+	await client.close();
+});
+
+test("hydradb_ingest rejects both text and turns rather than dropping one", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_ingest",
+		arguments: {
+			text: "a note",
+			turns: [{ user: "hi", assistant: "hello" }],
+		},
+	});
+
+	assert.equal(result.isError, true, "providing both text and turns should error");
+	const text = (result.content as { type: string; text: string }[])[0]!.text;
+	assert.match(text, /not both/);
+	assert.equal(
+		calls.filter((c) => c.method === "ingest").length,
+		0,
+		"no ingest should be issued when the input is ambiguous",
+	);
+
+	await client.close();
+});
+
+test("deprecated alias warns exactly once per process, across two server instances", async () => {
+	__resetAliasWarnings();
+
+	const original = console.error;
+	const messages: string[] = [];
+	console.error = (...args: unknown[]) => {
+		messages.push(args.map(String).join(" "));
+	};
+
+	// Two independent server instances in the same process.
+	const clientA = await connect(mockHydra().hydra);
+	const clientB = await connect(mockHydra().hydra);
+	try {
+		await clientA.callTool({ name: "hydra_db_search", arguments: { query: "x" } });
+		await clientB.callTool({ name: "hydra_db_search", arguments: { query: "y" } });
+	} finally {
+		console.error = original;
+	}
+
+	const warnings = messages.filter((m) => m.includes('"hydra_db_search"'));
+	assert.equal(
+		warnings.length,
+		1,
+		"alias warning must fire once per process even across server instances",
+	);
+	assert.match(warnings[0]!, /deprecated/);
+	assert.match(warnings[0]!, /"hydradb_query"/);
+
+	await clientA.close();
+	await clientB.close();
+});
+
+test("canonical hydradb_query still renders the empty-result message", async () => {
+	const { hydra } = mockHydra();
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_query",
+		arguments: { query: "anything" },
+	});
+	const text = (result.content as { type: string; text: string }[])[0]!.text;
+	assert.equal(text, "No relevant memories found in Hydra DB.");
+
+	await client.close();
+});
