@@ -33,23 +33,54 @@ jobs:
       # write it. So a stale NPM_TOKEN surfaces as "404 Not Found - PUT
       # https://registry.npmjs.org/@hydradb%2fmcp", which reads like the package
       # is missing. Fail earlier, and say what it actually is.
+      #
+      # Identity and authorisation are separate questions: `npm whoami` proves
+      # the token is valid for SOME account, not that the account may write this
+      # package. A token belonging to the wrong user, or scoped read-only, passes
+      # whoami and then 404s exactly as before. So identity is a hard gate, and
+      # write access is probed separately.
       - name: Verify npm authentication
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
+          set -uo pipefail
+          name=$(node -p "require('./package.json').name")
+
           if [ -z "${NODE_AUTH_TOKEN}" ]; then
             echo "::error::The NPM_TOKEN secret is unset or empty."
             exit 1
           fi
+
           if ! who=$(npm whoami 2>&1); then
             echo "::error::npm rejected NPM_TOKEN: ${who}"
             echo "Mint a fresh automation token for the publishing account and update"
-            echo "the NPM_TOKEN repository secret. A publish attempt with a token that"
-            echo "is expired, revoked, or lacking write access to the @hydradb scope"
-            echo "fails as a 404 on PUT, not as an auth error."
+            echo "the NPM_TOKEN repository secret."
             exit 1
           fi
           echo "Authenticated to npm as ${who}"
+
+          # Advisory, not a gate. `npm access` is not available to every token
+          # type, so an error here means "could not determine", which must not
+          # block a release that would otherwise succeed. Only an explicit
+          # read-only answer is treated as fatal, because that one is certain.
+          if perms=$(npm access list packages --json 2>/dev/null); then
+            level=$(printf '%s' "$perms" | jq -r --arg n "$name" '.[$n] // empty' 2>/dev/null)
+            case "$level" in
+              read-write)
+                echo "${who} has read-write on ${name}"
+                ;;
+              read-only)
+                echo "::error::${who} has read-only access to ${name}; publishing will fail."
+                exit 1
+                ;;
+              *)
+                echo "::warning::Could not confirm ${who} has write access to ${name}." \
+                     "Proceeding — this probe is not supported for every token type."
+                ;;
+            esac
+          else
+            echo "::warning::npm access list is unavailable to this token; skipping the write-access probe."
+          fi
 
       - name: Publish to npm
         env:
@@ -68,4 +99,19 @@ jobs:
           fi
 
           echo "Publishing ${name}@${version}"
-          npm publish --access public
+          if npm publish --access public; then
+            echo "Published ${name}@${version}"
+            exit 0
+          fi
+
+          # The preflight can be indeterminate; this cannot. If the publish
+          # failed and the package is readable from this very job, then the
+          # registry knows it exists and refused our write anyway — which is
+          # authorisation, whatever the status code claims.
+          if npm view "${name}" version >/dev/null 2>&1; then
+            echo "::error::Publish failed, but ${name} is readable from this job," \
+                 "so the registry does know it exists. A 404 on PUT here is npm" \
+                 "refusing an unauthorised write, not a missing package. Check that" \
+                 "NPM_TOKEN's account has read-write on ${name}."
+          fi
+          exit 1
