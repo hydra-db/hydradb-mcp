@@ -167,3 +167,80 @@ test("canonical hydradb_query still renders the empty-result message", async () 
 
 	await client.close();
 });
+
+// Regression: a live knowledge delete came back success:false, and the tool
+// answered "Source <id> was not found or already deleted." The caller is told
+// the data is gone when the server has in fact declined to remove it.
+function mockHydraWithDelete(deleteResponse: Record<string, unknown>): HydraDB {
+	const sdk = {
+		query: () => Promise.resolve({ data: { chunks: [] }, success: true }),
+		context: {
+			delete: () => Promise.resolve({ data: deleteResponse, success: true }),
+		},
+	} as unknown as HydraDBClient;
+	return new HydraDB({ token: "t", database: "db_test" }, sdk);
+}
+
+async function deleteText(
+	deleteResponse: Record<string, unknown>,
+	args: Record<string, unknown>,
+): Promise<string> {
+	const client = await connect(mockHydraWithDelete(deleteResponse));
+	const result = await client.callTool({ name: "hydradb_delete", arguments: args });
+	const text = (result.content as { type: string; text: string }[])[0]!.text;
+	await client.close();
+	return text;
+}
+
+test("hydradb_delete does not claim 'not found' when the server refused", async () => {
+	const text = await deleteText(
+		{
+			success: false,
+			message: "source is still processing",
+			deletedCount: 0,
+		},
+		{ id: "src-1", kind: "knowledge" },
+	);
+
+	assert.match(text, /could NOT delete/i);
+	assert.match(text, /source is still processing/);
+	assert.match(text, /has not been removed/i);
+	assert.doesNotMatch(
+		text,
+		/not found or already deleted/i,
+		"a refusal must not be reported as a missing source",
+	);
+});
+
+test("hydradb_delete surfaces the per-item error ahead of the summary message", async () => {
+	const text = await deleteText(
+		{
+			success: false,
+			message: "delete failed",
+			deletedCount: 0,
+			results: [{ id: "src-1", error: "source locked by an active ingestion" }],
+		},
+		{ id: "src-1", kind: "knowledge" },
+	);
+
+	assert.match(text, /source locked by an active ingestion/);
+});
+
+test("hydradb_delete still reports the benign idempotent case as not found", async () => {
+	const text = await deleteText(
+		{ success: true, deletedCount: 0 },
+		{ id: "mem-1" },
+	);
+
+	assert.match(text, /not found or already deleted/i);
+	assert.doesNotMatch(text, /refused/i);
+});
+
+test("hydradb_delete reports a successful removal unchanged", async () => {
+	const text = await deleteText(
+		{ success: true, userMemoryDeleted: 1 },
+		{ id: "mem-1" },
+	);
+
+	assert.equal(text, "Deleted memory: mem-1");
+});

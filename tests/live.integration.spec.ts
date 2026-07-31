@@ -120,7 +120,15 @@ test(
 			ids: [found.value.memory_id],
 			kind: "memory",
 		});
-		assert.equal(deleted.success, true, "delete(memory) did not report success");
+		assert.equal(
+			deleted.success,
+			true,
+			`delete(memory) did not report success: ${JSON.stringify(deleted)}`,
+		);
+		assert.ok(
+			(deleted.userMemoryDeleted ?? 0) > 0 || (deleted.deletedCount ?? 0) > 0,
+			`delete(memory) reported success but removed nothing: ${JSON.stringify(deleted)}`,
+		);
 	},
 );
 
@@ -182,10 +190,16 @@ test(
 			ids: [sourceId],
 			kind: "knowledge",
 		});
+		// Print the whole response: "success !== true" on its own does not say
+		// whether the server refused, why, or whether it removed anything.
 		assert.equal(
 			deleted.success,
 			true,
-			"delete(knowledge) did not report success",
+			`delete(knowledge) did not report success for ${sourceId}: ${JSON.stringify(deleted)}`,
+		);
+		assert.ok(
+			(deleted.deletedCount ?? 0) > 0,
+			`delete(knowledge) reported success but removed nothing: ${JSON.stringify(deleted)}`,
 		);
 	},
 );
