@@ -23,18 +23,49 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # No continue-on-error: a failed build used to fall through to publish,
+      # which would ship whatever dist/ happened to contain.
       - name: Build package
-        # If you have a build step, otherwise remove this
         run: npm run build
-        continue-on-error: true
+
+      # The registry answers an unauthorised write to a scoped package with 404,
+      # not 401 — it will not confirm the package exists to someone who cannot
+      # write it. So a stale NPM_TOKEN surfaces as "404 Not Found - PUT
+      # https://registry.npmjs.org/@hydradb%2fmcp", which reads like the package
+      # is missing. Fail earlier, and say what it actually is.
+      - name: Verify npm authentication
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "${NODE_AUTH_TOKEN}" ]; then
+            echo "::error::The NPM_TOKEN secret is unset or empty."
+            exit 1
+          fi
+          if ! who=$(npm whoami 2>&1); then
+            echo "::error::npm rejected NPM_TOKEN: ${who}"
+            echo "Mint a fresh automation token for the publishing account and update"
+            echo "the NPM_TOKEN repository secret. A publish attempt with a token that"
+            echo "is expired, revoked, or lacking write access to the @hydradb scope"
+            echo "fails as a 404 on PUT, not as an auth error."
+            exit 1
+          fi
+          echo "Authenticated to npm as ${who}"
 
       - name: Publish to npm
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          # Only publish if this is not a pre-release and version has changed
-          if [ "$(npm view . version)" != "$(node -p "require('./package.json').version")" ]; then
-            npm publish --access public
-          else
-            echo "Version already published, skipping."
+          set -euo pipefail
+          name=$(node -p "require('./package.json').name")
+          version=$(node -p "require('./package.json').version")
+
+          # Ask whether THIS version exists, rather than comparing against the
+          # latest tag. Comparing to latest treats a hotfix on an older line as
+          # "already published" and silently skips it.
+          if npm view "${name}@${version}" version >/dev/null 2>&1; then
+            echo "${name}@${version} is already on the registry; nothing to publish."
+            exit 0
           fi
+
+          echo "Publishing ${name}@${version}"
+          npm publish --access public
