@@ -31,11 +31,18 @@ function warnOnce(message: string, warn: WarnFn): void {
 	warn(message);
 }
 
-function readEnv(
+/**
+ * Read a canonical `HYDRADB_*` variable, falling back to the legacy `HYDRA_DB_*`
+ * spelling with a once-per-process warning. Exported so every variable this
+ * server reads goes through the same rule - `HYDRADB_LOG_LEVEL` is resolved by
+ * the logger, which owns its own module state but must not invent a second
+ * deprecation policy.
+ */
+export function readEnv(
 	env: EnvSource,
 	canonical: string,
 	deprecated: string,
-	warn: WarnFn,
+	warn: WarnFn = defaultWarn,
 ): string | undefined {
 	const canonicalValue = env[canonical];
 	if (canonicalValue != null && canonicalValue !== "") {

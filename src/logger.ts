@@ -3,6 +3,8 @@
  * Outputs to stderr to avoid interfering with STDIO transport.
  */
 
+import { type EnvSource, readEnv, type WarnFn } from "./config.js";
+
 export enum LogLevel {
 	DEBUG = 0,
 	INFO = 1,
@@ -17,8 +19,23 @@ const LOG_LEVEL_NAMES: Record<LogLevel, string> = {
 	[LogLevel.ERROR]: "ERROR",
 };
 
-function getLogLevel(): LogLevel {
-	const level = process.env.HYDRA_DB_LOG_LEVEL?.toUpperCase();
+/**
+ * `HYDRADB_LOG_LEVEL` is the canonical name (CONTRACT §1). `HYDRA_DB_LOG_LEVEL`
+ * was the only variable the canonical-prefix migration missed; it is honoured as
+ * a deprecated alias on the same terms as every other legacy spelling.
+ */
+export function resolveLogLevel(
+	env: EnvSource = process.env,
+	warn?: WarnFn,
+): LogLevel {
+	// `warn` is optional here; passing it through undefined falls back to
+	// readEnv's own stderr default.
+	const level = readEnv(
+		env,
+		"HYDRADB_LOG_LEVEL",
+		"HYDRA_DB_LOG_LEVEL",
+		warn,
+	)?.toUpperCase();
 	switch (level) {
 		case "DEBUG":
 			return LogLevel.DEBUG;
@@ -33,7 +50,7 @@ function getLogLevel(): LogLevel {
 	}
 }
 
-const currentLogLevel = getLogLevel();
+const currentLogLevel = resolveLogLevel();
 
 function formatMessage(
 	level: LogLevel,

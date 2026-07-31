@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { resolveConfig } from "../src/config.js";
+import { LogLevel, resolveLogLevel } from "../src/logger.js";
 
 // A fresh warning sink per call keeps assertions isolated from the module-level
 // once-per-process dedupe used in production.
@@ -74,6 +75,43 @@ test("collection defaults when unset; baseUrl is optional", () => {
 	);
 	assert.equal(config.collection, "hydra-db-mcp");
 	assert.equal(config.baseUrl, undefined);
+});
+
+test("HYDRADB_LOG_LEVEL is canonical; the HYDRA_DB_ spelling warns but still works", () => {
+	const canonical = collect();
+	assert.equal(
+		resolveLogLevel({ HYDRADB_LOG_LEVEL: "debug" }, canonical.warn),
+		LogLevel.DEBUG,
+	);
+	assert.deepEqual(canonical.messages, []);
+
+	const legacy = collect();
+	assert.equal(
+		resolveLogLevel({ HYDRA_DB_LOG_LEVEL: "warn" }, legacy.warn),
+		LogLevel.WARN,
+	);
+	assert.ok(
+		legacy.messages.some(
+			(m) => m.includes("HYDRA_DB_LOG_LEVEL") && m.includes("HYDRADB_LOG_LEVEL"),
+		),
+	);
+
+	const both = collect();
+	assert.equal(
+		resolveLogLevel(
+			{ HYDRADB_LOG_LEVEL: "info", HYDRA_DB_LOG_LEVEL: "debug" },
+			both.warn,
+		),
+		LogLevel.INFO,
+	);
+	assert.deepEqual(both.messages, []);
+
+	// Unset and unrecognised both fall back to ERROR.
+	assert.equal(resolveLogLevel({}, collect().warn), LogLevel.ERROR);
+	assert.equal(
+		resolveLogLevel({ HYDRADB_LOG_LEVEL: "chatty" }, collect().warn),
+		LogLevel.ERROR,
+	);
 });
 
 test("missing required config throws naming the canonical variable", () => {
