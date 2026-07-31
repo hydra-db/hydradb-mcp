@@ -1,3 +1,5 @@
+import { createRequire } from "node:module";
+
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
@@ -16,6 +18,15 @@ const INGEST_INSTRUCTIONS =
 	"Focus on extracting user preferences, habits, opinions, likes, dislikes, " +
 	"goals, and recurring themes. Capture any stated or implied personal context " +
 	"that would help personalise future interactions.";
+
+// Read the version from package.json rather than repeating it here: the literal
+// this replaces sat at 1.0.0 through the whole 1.x line, so every client saw
+// stale version metadata. `../package.json` resolves to the package root from
+// both `src/` (tsx) and `dist/` (published build).
+const require = createRequire(import.meta.url);
+const { version: SERVER_VERSION } = require("../package.json") as {
+	version: string;
+};
 
 type ToolResult = {
 	content: { type: "text"; text: string }[];
@@ -56,7 +67,7 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 	const server = new McpServer(
 		{
 			name: "hydradb-mcp",
-			version: "1.0.0",
+			version: SERVER_VERSION,
 		},
 		{
 			instructions: SERVER_INSTRUCTIONS,
