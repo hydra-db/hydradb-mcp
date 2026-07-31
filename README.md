@@ -86,12 +86,12 @@ Delete a memory or knowledge source from Hydra DB by its ID. This action is irre
 | `HYDRADB_DATABASE`   | Your Hydra DB database (tenant scope) | *Required*                |
 | `HYDRADB_COLLECTION` | Collection (sub-tenant) for partitioning | `hydra-db-mcp`        |
 | `HYDRADB_BASE_URL`   | Base URL override                    | `https://api.hydradb.com` |
-| `HYDRA_DB_LOG_LEVEL` | Log level: DEBUG, INFO, WARN, ERROR  | `ERROR`                   |
+| `HYDRADB_LOG_LEVEL`  | Log level: DEBUG, INFO, WARN, ERROR  | `ERROR`                   |
 
 The legacy `HYDRA_DB_*` names — `HYDRA_DB_API_KEY`, `HYDRA_DB_TENANT_ID`,
-`HYDRA_DB_SUB_TENANT_ID`, `HYDRA_DB_BASE_URL` — remain honoured as **deprecated
-aliases** (canonical wins when both are set; using an alias prints a one-time
-warning naming its replacement).
+`HYDRA_DB_SUB_TENANT_ID`, `HYDRA_DB_BASE_URL`, `HYDRA_DB_LOG_LEVEL` — remain
+honoured as **deprecated aliases** (canonical wins when both are set; using an
+alias prints a one-time warning naming its replacement).
 
 ### Claude Desktop
 
@@ -217,7 +217,7 @@ RUN_LIVE_TESTS=true HYDRADB_API_KEY=your-key HYDRADB_DATABASE=your-database npm 
 - **API Key Issues**: Ensure `HYDRADB_API_KEY` is set correctly
 - **Connection Errors**: Check your internet connection and API key validity
 - **Tool Not Found**: Make sure the package is installed and the command path is correct
-- **Debug Logging**: Set `HYDRA_DB_LOG_LEVEL=DEBUG` for verbose output
+- **Debug Logging**: Set `HYDRADB_LOG_LEVEL=DEBUG` for verbose output
 
 ## Contributing / Developer Setup
 

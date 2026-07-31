@@ -1,3 +1,5 @@
+import { createRequire } from "node:module";
+
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
@@ -16,6 +18,15 @@ const INGEST_INSTRUCTIONS =
 	"Focus on extracting user preferences, habits, opinions, likes, dislikes, " +
 	"goals, and recurring themes. Capture any stated or implied personal context " +
 	"that would help personalise future interactions.";
+
+// Read the version from package.json rather than repeating it here: the literal
+// this replaces sat at 1.0.0 through the whole 1.x line, so every client saw
+// stale version metadata. `../package.json` resolves to the package root from
+// both `src/` (tsx) and `dist/` (published build).
+const require = createRequire(import.meta.url);
+const { version: SERVER_VERSION } = require("../package.json") as {
+	version: string;
+};
 
 type ToolResult = {
 	content: { type: "text"; text: string }[];
@@ -56,7 +67,7 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 	const server = new McpServer(
 		{
 			name: "hydradb-mcp",
-			version: "1.0.0",
+			version: SERVER_VERSION,
 		},
 		{
 			instructions: SERVER_INSTRUCTIONS,
@@ -247,13 +258,51 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		return textResult(`Source: ${args.source_id}\n\n${content}`);
 	}
 
-	function deleteReport(kind: "memory" | "knowledge", id: string, deleted: boolean): ToolResult {
+	/**
+	 * Three outcomes, not two. A delete that removed nothing is either the
+	 * benign idempotent case (the server succeeded, there was nothing there) or
+	 * a refusal (the server returned success:false and told us why). Collapsing
+	 * both into "not found or already deleted" states a cause we did not
+	 * observe, and it is the reassuring one: the caller is told their data is
+	 * gone when the server just declined to remove it.
+	 */
+	function deleteReport(
+		kind: "memory" | "knowledge",
+		id: string,
+		res: { success?: boolean; message?: string; results?: unknown },
+		removed: boolean,
+	): ToolResult {
 		const noun = kind === "knowledge" ? "source" : "memory";
-		if (deleted) {
+		if (removed) {
 			return textResult(`Deleted ${noun}: ${id}`);
 		}
+
+		if (res.success === false) {
+			const reason = deleteFailureReason(res);
+			return textResult(
+				`Could NOT delete ${noun} ${id} — the server refused the request` +
+					`${reason ? `: ${reason}` : " and gave no reason"}. ` +
+					`The ${noun} has not been removed.`,
+			);
+		}
+
 		const Noun = noun.charAt(0).toUpperCase() + noun.slice(1);
 		return textResult(`${Noun} ${id} was not found or already deleted.`);
+	}
+
+	/** The server's own explanation, preferring the per-item error over the summary. */
+	function deleteFailureReason(res: {
+		message?: string;
+		results?: unknown;
+	}): string | undefined {
+		const items = Array.isArray(res.results) ? res.results : [];
+		for (const item of items) {
+			if (item != null && typeof item === "object") {
+				const error = (item as { error?: unknown }).error;
+				if (typeof error === "string" && error !== "") return error;
+			}
+		}
+		return res.message !== "" ? res.message : undefined;
 	}
 
 	async function runDelete(args: {
@@ -264,10 +313,16 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		logger.debug(`${TOOL_NAMES.DELETE}: ${kind} ${args.id}`);
 
 		const res = await hydra.context.delete({ ids: [args.id], kind });
-		const deleted =
+		const removed =
 			(res.userMemoryDeleted ?? 0) > 0 || (res.deletedCount ?? 0) > 0;
+		if (!removed) {
+			logger.warn(
+				`${TOOL_NAMES.DELETE}: removed nothing for ${kind} ${args.id}`,
+				{ success: res.success, message: res.message, results: res.results },
+			);
+		}
 
-		return deleteReport(kind, args.id, deleted);
+		return deleteReport(kind, args.id, res, removed);
 	}
 
 	// --- Registration helper ---
