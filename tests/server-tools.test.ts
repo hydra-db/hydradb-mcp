@@ -193,17 +193,26 @@ async function deleteText(
 }
 
 test("hydradb_delete does not claim 'not found' when the server refused", async () => {
+	// Verbatim from a live run against api.hydradb.com.
 	const text = await deleteText(
 		{
 			success: false,
-			message: "source is still processing",
+			message: "Source is still processing; retry deletion after ingestion completes",
+			results: [
+				{
+					id: "src-1",
+					deleted: false,
+					error:
+						"Source is still processing; retry deletion after ingestion completes",
+				},
+			],
 			deletedCount: 0,
 		},
 		{ id: "src-1", kind: "knowledge" },
 	);
 
 	assert.match(text, /could NOT delete/i);
-	assert.match(text, /source is still processing/);
+	assert.match(text, /retry deletion after ingestion completes/);
 	assert.match(text, /has not been removed/i);
 	assert.doesNotMatch(
 		text,

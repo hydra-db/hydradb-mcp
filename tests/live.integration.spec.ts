@@ -158,6 +158,29 @@ test(
 		);
 		const sourceId = created.id;
 
+		// A source is listable and inspectable while it is still indexing, but the
+		// server refuses to delete one mid-ingestion: "Source is still processing;
+		// retry deletion after ingestion completes". ingestionStatus is the
+		// canonical gate for that, and skipping it is what made this test fail on
+		// its last step while every step before it passed.
+		const indexed = await pollUntil("ingestion completes", async () => {
+			const batch = await hydra.context.ingestionStatus({ ids: [sourceId] });
+			const status = batch.statuses?.find((s) => s.id === sourceId);
+			assert.notEqual(
+				status?.indexingStatus,
+				"failed",
+				`ingestion failed for ${sourceId}: ${status?.errorMessage ?? status?.errorCode}`,
+			);
+			return {
+				value: status?.indexingStatus === "completed" ? status : null,
+				observed: batch,
+			};
+		});
+		assert.ok(
+			indexed.value,
+			`${sourceId} never reached indexingStatus=completed within ${INDEX_TIMEOUT_MS}ms`,
+		);
+
 		const listed = await pollUntil(
 			"knowledge source appears in list(knowledge)",
 			async () => {
