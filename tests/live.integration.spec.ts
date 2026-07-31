@@ -20,11 +20,12 @@ const skipReason = !RUN_LIVE_TESTS
 		: false;
 
 // Ingestion is asynchronous: a queued source is not listable the moment the
-// upload returns. The old 7.5s budget was shorter than observed indexing time,
-// which made a slow index and a broken read path produce the same failure.
-// Override with HYDRADB_INDEX_TIMEOUT_MS when testing against a slower stack.
-const INDEX_TIMEOUT_MS = Number(process.env.HYDRADB_INDEX_TIMEOUT_MS ?? 90_000);
-const POLL_INTERVAL_MS = 3_000;
+// upload returns, and it is not deletable until indexing finishes. Knowledge
+// ingestion runs through graph extraction and was still going at 90s, so the
+// budget is 5 minutes. Override with HYDRADB_INDEX_TIMEOUT_MS for a slower or
+// faster stack.
+const INDEX_TIMEOUT_MS = Number(process.env.HYDRADB_INDEX_TIMEOUT_MS ?? 300_000);
+const POLL_INTERVAL_MS = 5_000;
 
 /**
  * Poll until `fn` returns non-null or the budget runs out. Returns the last
@@ -163,6 +164,13 @@ test(
 		// retry deletion after ingestion completes". ingestionStatus is the
 		// canonical gate for that, and skipping it is what made this test fail on
 		// its last step while every step before it passed.
+		//
+		// Only `completed` is treated as done and only `failed` as fatal;
+		// everything else counts as in-progress. Deliberately a string compare
+		// against no fixed set: a live run returned `graph_creation`, which the
+		// SDK's IngestionSourceStatus enum (queued/processing/completed/failed)
+		// does not declare, so switching on that enum would misread reality.
+		let lastStatus: string | undefined;
 		const indexed = await pollUntil("ingestion completes", async () => {
 			const batch = await hydra.context.ingestionStatus({ ids: [sourceId] });
 			const status = batch.statuses?.find((s) => s.id === sourceId);
@@ -171,6 +179,12 @@ test(
 				"failed",
 				`ingestion failed for ${sourceId}: ${status?.errorMessage ?? status?.errorCode}`,
 			);
+			// A five-minute silent wait is indistinguishable from a hang; narrate
+			// each transition so a slow stage is visible while it is happening.
+			if (status?.indexingStatus !== lastStatus) {
+				lastStatus = status?.indexingStatus;
+				console.error(`[live] ${sourceId} indexingStatus=${lastStatus}`);
+			}
 			return {
 				value: status?.indexingStatus === "completed" ? status : null,
 				observed: batch,
