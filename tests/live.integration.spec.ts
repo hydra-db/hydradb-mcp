@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { toMemoryList, toSourceList } from "../src/adapters.js";
 import { resolveConfig } from "../src/config.js";
 import { HydraDB } from "../src/hydra/index.js";
+import { HydraWrapperError } from "../src/hydra/errors.js";
 
 const RUN_LIVE_TESTS = process.env.RUN_LIVE_TESTS === "true";
 
@@ -28,6 +29,25 @@ const INDEX_TIMEOUT_MS = Number(process.env.HYDRADB_INDEX_TIMEOUT_MS ?? 300_000)
 const POLL_INTERVAL_MS = 5_000;
 
 /**
+ * Is this failure worth another attempt inside the polling window?
+ *
+ * A minutes-long poll against a remote API will meet the occasional dropped
+ * connection - one such blip (`fetch failed`, no status, no response) ended a
+ * run 34s into a 300s budget. Those retry. Anything the server answered with a
+ * 4xx is a real answer and fails immediately; 429 and 5xx are the server asking
+ * us to come back.
+ *
+ * Assertion failures raised inside the polled function are not
+ * HydraWrapperErrors, so they propagate untouched - a spurious retry there would
+ * hide the very thing the test is checking.
+ */
+function isRetriable(err: unknown): boolean {
+	if (!(err instanceof HydraWrapperError)) return false;
+	if (err.status == null) return true; // transport-level: no HTTP reply at all
+	return err.status === 429 || err.status >= 500;
+}
+
+/**
  * Poll until `fn` returns non-null or the budget runs out. Returns the last
  * observed value on failure as well, so an assertion can report what the API
  * actually said rather than just "expected true".
@@ -40,12 +60,27 @@ async function pollUntil<T>(
 	const startedAt = Date.now();
 	let observed: unknown;
 
+	let transientFailures = 0;
+
 	for (;;) {
-		const attempt = await fn();
-		observed = attempt.observed;
-		if (attempt.value != null) {
-			return { value: attempt.value, observed, waitedMs: Date.now() - startedAt };
+		try {
+			const attempt = await fn();
+			observed = attempt.observed;
+			if (attempt.value != null) {
+				if (transientFailures > 0) {
+					console.error(
+						`[live] ${label} satisfied after ${transientFailures} transient failure(s)`,
+					);
+				}
+				return { value: attempt.value, observed, waitedMs: Date.now() - startedAt };
+			}
+		} catch (err) {
+			if (!isRetriable(err) || Date.now() >= deadline) throw err;
+			transientFailures++;
+			observed = { transientError: String(err) };
+			console.error(`[live] ${label}: transient failure, retrying — ${err}`);
 		}
+
 		if (Date.now() >= deadline) {
 			console.error(
 				`[live] ${label} never satisfied within ${INDEX_TIMEOUT_MS}ms; last response: ${JSON.stringify(observed)?.slice(0, 400)}`,
