@@ -32,18 +32,31 @@ export function buildRecalledContext(
 	};
 	const extraContextMap = response.additional_context ?? {};
 
-	const rawRelations: ScoredPath[] = graphCtx.chunk_relations ?? [];
-	const relationIndex: Record<string, ScoredPath> = {};
+const rawRelations: ScoredPath[] = graphCtx.chunk_relations ?? [];
+const relationIndex: Record<string, ScoredPath> = {};
 
-	for (let idx = 0; idx < rawRelations.length; idx++) {
-		const relation = rawRelations[idx]!;
-		if ((relation.relevancy_score ?? 0) < minScore) continue;
-		const groupId = relation.group_id ?? `p_${idx}`;
-		relationIndex[groupId] = relation;
+for (let idx = 0; idx < rawRelations.length; idx++) {
+	const relation = rawRelations[idx]!;
+	if ((relation.relevancy_score ?? 0) < minScore) continue;
+	const groupId = relation.group_id ?? `p_${idx}`;
+	relationIndex[groupId] = relation;
+}
+
+const primaryChunkToGroupIds = graphCtx.chunk_id_to_group_ids ?? {};
+const chunkToGroupIds: Record<string, string[]> = {};
+for (const [cid, gids] of Object.entries(primaryChunkToGroupIds)) {
+	chunkToGroupIds[cid] = [...gids];
+}
+for (const [gid, rel] of Object.entries(relationIndex)) {
+	for (const triplet of rel.triplets ?? []) {
+		const cid = triplet.relation?.chunk_id;
+		if (cid && !chunkToGroupIds[cid]?.includes(gid)) {
+			(chunkToGroupIds[cid] ??= []).push(gid);
+		}
 	}
+}
 
-	const chunkToGroupIds = graphCtx.chunk_id_to_group_ids ?? {};
-	const consumedExtraIds = new Set<string>();
+const consumedExtraIds = new Set<string>();
 	const groupOccurrenceCounts: Record<string, number> = {};
 	const chunkSections: string[] = [];
 
@@ -62,19 +75,17 @@ export function buildRecalledContext(
 
 		lines.push(chunk.chunk_content ?? "");
 
-		const chunkUuid = chunk.chunk_uuid;
-		const linkedGroupIds = chunkToGroupIds[chunkUuid] ?? [];
+const chunkUuid = chunk.chunk_uuid;
+		const primaryGroupIds = primaryChunkToGroupIds[chunkUuid] ?? [];
+		const fallbackGroupIds = chunkToGroupIds[chunkUuid] ?? [];
+		const hasLinkedGroups = primaryGroupIds.some((gid) => !!relationIndex[gid]);
 
 		const matchedRelations: ScoredPath[] = [];
 
-		// Track whether the primary lookup found any candidate groups
-		// (even if all were capped) to avoid incorrectly falling through
-		// to the fallback path
-		const hasLinkedGroups = linkedGroupIds.some(
-			(gid) => !!relationIndex[gid],
-		);
+		// Only iterate primary groups fallback groups only used if NO primary groups existed
+		const groupsToCheck = hasLinkedGroups ? primaryGroupIds : fallbackGroupIds;
 
-		for (const gid of linkedGroupIds) {
+		for (const gid of groupsToCheck) {
 			if (relationIndex[gid]) {
 				const occurrences = groupOccurrenceCounts[gid] ?? 0;
 				if (
@@ -83,25 +94,6 @@ export function buildRecalledContext(
 				) {
 					matchedRelations.push(relationIndex[gid]!);
 					groupOccurrenceCounts[gid] = occurrences + 1;
-				}
-			}
-		}
-
-		if (matchedRelations.length === 0 && !hasLinkedGroups) {
-			for (const [gid, rel] of Object.entries(relationIndex)) {
-				const triplets = rel.triplets ?? [];
-				const hasChunk = triplets.some(
-					(t) => t.relation?.chunk_id === chunkUuid,
-				);
-				if (hasChunk) {
-					const occurrences = groupOccurrenceCounts[gid] ?? 0;
-					if (
-						maxGroupOccurrences == null ||
-						occurrences < maxGroupOccurrences
-					) {
-						matchedRelations.push(rel);
-						groupOccurrenceCounts[gid] = occurrences + 1;
-					}
 				}
 			}
 		}
