@@ -43,17 +43,22 @@ for (let idx = 0; idx < rawRelations.length; idx++) {
 }
 
 const primaryChunkToGroupIds = graphCtx.chunk_id_to_group_ids ?? {};
-const chunkToGroupIds: Record<string, string[]> = {};
+const chunkToGroupIds: Record<string, Set<string>> = {};
 for (const [cid, gids] of Object.entries(primaryChunkToGroupIds)) {
-	chunkToGroupIds[cid] = [...gids];
+	chunkToGroupIds[cid] = new Set(gids);
 }
 for (const [gid, rel] of Object.entries(relationIndex)) {
 	for (const triplet of rel.triplets ?? []) {
 		const cid = triplet.relation?.chunk_id;
-		if (cid && !chunkToGroupIds[cid]?.includes(gid)) {
-			(chunkToGroupIds[cid] ??= []).push(gid);
+		if (cid) {
+			(chunkToGroupIds[cid] ??= new Set()).add(gid);
 		}
 	}
+}
+// Convert Sets to arrays for downstream compatibility
+const chunkToGroupIdsArray: Record<string, string[]> = {};
+for (const [cid, set] of Object.entries(chunkToGroupIds)) {
+	chunkToGroupIdsArray[cid] = Array.from(set);
 }
 
 const consumedExtraIds = new Set<string>();
@@ -77,7 +82,7 @@ const consumedExtraIds = new Set<string>();
 
 const chunkUuid = chunk.chunk_uuid;
 		const primaryGroupIds = primaryChunkToGroupIds[chunkUuid] ?? [];
-		const fallbackGroupIds = chunkToGroupIds[chunkUuid] ?? [];
+		const fallbackGroupIds = chunkToGroupIdsArray[chunkUuid] ?? [];
 		const hasLinkedGroups = primaryGroupIds.some((gid) => !!relationIndex[gid]);
 
 		const matchedRelations: ScoredPath[] = [];
