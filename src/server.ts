@@ -115,7 +115,10 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			return textResult("No relevant memories found in Hydra DB.");
 		}
 
+		const buildStart = Date.now();
 		const contextStr = buildRecalledContext(res);
+		const buildMs = Date.now() - buildStart;
+		logger.info(`buildRecalledContext took ${buildMs}ms (chunks=${res.chunks.length}, relations=${res.graph_context?.chunk_relations?.length ?? 0})`);
 		const summary = res.chunks.slice(0, 10).map((c, i) => {
 			const score =
 				c.relevancy_score != null
