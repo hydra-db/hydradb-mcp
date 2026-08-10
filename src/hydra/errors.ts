@@ -61,8 +61,17 @@ export function translateError(path: string, err: unknown): HydraWrapperError {
 	if (err instanceof HydraDBError) {
 		const status = err.statusCode;
 		const statusText = status != null ? String(status) : "ERR";
+		// An SDK error carrying neither a status nor a body renders as an empty
+		// tail — `Hydra DB /query → ERR: ` — which tells the model nothing at all.
+		// A timed-out request arrives in exactly that shape, so fall back to the
+		// SDK's own message. With no status and no body to append, the SDK builds
+		// that message from the bare reason alone, so nothing multi-line or
+		// redundant can leak into the template. Every error that has a status or a
+		// body is untouched.
+		const detail =
+			status == null && err.body == null ? err.message : bodyToString(err.body);
 		return new HydraWrapperError(
-			`Hydra DB ${path} → ${statusText}: ${bodyToString(err.body)}`,
+			`Hydra DB ${path} → ${statusText}: ${detail}`,
 			path,
 			{ status, body: err.body, cause: err },
 		);

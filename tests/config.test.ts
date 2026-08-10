@@ -27,6 +27,8 @@ test("canonical HYDRADB_* names are read as primary with no warning", () => {
 		database: "db",
 		collection: "col",
 		baseUrl: "https://custom.example.com",
+		timeoutSeconds: 30,
+		maxRetries: 2,
 	});
 	assert.deepEqual(messages, []);
 });
@@ -111,6 +113,47 @@ test("HYDRADB_LOG_LEVEL is canonical; the HYDRA_DB_ spelling warns but still wor
 	assert.equal(
 		resolveLogLevel({ HYDRADB_LOG_LEVEL: "chatty" }, collect().warn),
 		LogLevel.ERROR,
+	);
+});
+
+test("the latency budget defaults, and both knobs are overridable", () => {
+	const { warn } = collect();
+	const base = { HYDRADB_API_KEY: "key", HYDRADB_DATABASE: "db" };
+
+	const defaults = resolveConfig(base, warn);
+	assert.equal(defaults.timeoutSeconds, 30);
+	assert.equal(defaults.maxRetries, 2);
+
+	const overridden = resolveConfig(
+		{ ...base, HYDRADB_TIMEOUT_SECONDS: "5", HYDRADB_MAX_RETRIES: "0" },
+		warn,
+	);
+	assert.equal(overridden.timeoutSeconds, 5);
+	// 0 is a legitimate choice (retries off), not an unset value.
+	assert.equal(overridden.maxRetries, 0);
+});
+
+test("a malformed latency budget throws instead of reverting to the default", () => {
+	const { warn } = collect();
+	const base = { HYDRADB_API_KEY: "key", HYDRADB_DATABASE: "db" };
+
+	for (const bad of ["30s", "abc", "1.5", "0", "-1"]) {
+		assert.throws(
+			() => resolveConfig({ ...base, HYDRADB_TIMEOUT_SECONDS: bad }, warn),
+			/HYDRADB_TIMEOUT_SECONDS must be an integer >= 1/,
+			`expected "${bad}" to be rejected`,
+		);
+	}
+
+	assert.throws(
+		() => resolveConfig({ ...base, HYDRADB_MAX_RETRIES: "-1" }, warn),
+		/HYDRADB_MAX_RETRIES must be an integer >= 0/,
+	);
+
+	// Empty is "unset", not malformed — it falls back to the default.
+	assert.equal(
+		resolveConfig({ ...base, HYDRADB_TIMEOUT_SECONDS: "" }, warn).timeoutSeconds,
+		30,
 	);
 });
 
