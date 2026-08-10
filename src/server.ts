@@ -83,6 +83,8 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			token: config.apiKey,
 			database: config.database,
 			collection: config.collection,
+			timeoutSeconds: config.timeoutSeconds,
+			maxRetries: config.maxRetries,
 			...(config.baseUrl != null ? { baseUrl: config.baseUrl } : {}),
 		});
 		logger.info(

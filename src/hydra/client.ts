@@ -36,6 +36,18 @@ export interface HydraConfig {
 	collection?: string;
 	/** Optional base URL override; defaults to the SDK's environment. */
 	baseUrl?: string;
+	/**
+	 * Per-attempt request deadline in seconds. Omitted leaves the SDK's own
+	 * default (60s) in force; the MCP host supplies a tighter one from config.
+	 */
+	timeoutSeconds?: number;
+	/**
+	 * Retries per call. The SDK owns the policy — 408/429/5xx only, exponential
+	 * backoff with jitter, honouring `Retry-After` — and defaults to 2. Only the
+	 * budget is ours to set; do not re-implement the loop around `call()`, or the
+	 * two multiply.
+	 */
+	maxRetries?: number;
 }
 
 export interface QueryParams {
@@ -329,6 +341,10 @@ export class HydraDB {
 			new HydraDBClient({
 				token: config.token,
 				...(config.baseUrl != null ? { baseUrl: config.baseUrl } : {}),
+				...(config.timeoutSeconds != null
+					? { timeoutInSeconds: config.timeoutSeconds }
+					: {}),
+				...(config.maxRetries != null ? { maxRetries: config.maxRetries } : {}),
 			});
 		this.context = new ContextResource(client, config.database, config.collection);
 		this.databases = new DatabasesResource(

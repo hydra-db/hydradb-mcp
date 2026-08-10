@@ -29,6 +29,35 @@ test("translateError handles non-SDK failures without a status", () => {
 	assert.equal(translated.message, "Hydra DB /context/ingest → ERR: socket hang up");
 });
 
+test("an SDK error with neither status nor body still says something", () => {
+	// The shape a timed-out request arrives in: the SDK classifies the abort as
+	// an unknown failure, so the reason survives only on `message`. Rendering the
+	// body alone would emit `Hydra DB /query → ERR: ` and strand the model.
+	const translated = translateError(
+		"/query",
+		new HydraDBError({ message: "invalid_argument" }),
+	);
+	assert.equal(translated.message, "Hydra DB /query → ERR: invalid_argument");
+	assert.equal(translated.status, undefined);
+});
+
+test("the fallback does not disturb errors that carry a status", () => {
+	// A status with no body keeps the v1 template exactly — the SDK's own message
+	// would read "Status code: 500", which the template already conveys.
+	assert.equal(
+		translateError("/query", new HydraDBError({ statusCode: 500 })).message,
+		"Hydra DB /query → 500: ",
+	);
+	// And a status with a body is unchanged.
+	assert.equal(
+		translateError(
+			"/query",
+			new HydraDBError({ statusCode: 400, body: { code: "BAD" } }),
+		).message,
+		`Hydra DB /query → 400: ${JSON.stringify({ code: "BAD" })}`,
+	);
+});
+
 test("wrapper catches SDK errors and rethrows the byte-identical message", async () => {
 	const failingSdk = {
 		query() {
