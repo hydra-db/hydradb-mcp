@@ -30,10 +30,25 @@ const { version: SERVER_VERSION } = require("../package.json") as {
 
 type ToolResult = {
 	content: { type: "text"; text: string }[];
+	structuredContent?: Record<string, unknown>;
 };
 
-function textResult(text: string): ToolResult {
-	return { content: [{ type: "text" as const, text }] };
+/**
+ * A tool result carrying the same facts twice: prose for a human reading the
+ * transcript, and `structuredContent` for the model, which would otherwise have
+ * to parse IDs back out of English. Tools that declare an `outputSchema` must
+ * supply the structured half on EVERY non-error path — the MCP SDK rejects a
+ * result that has a schema and no structured content — so the empty and
+ * soft-failure branches carry it too.
+ */
+function textResult(
+	text: string,
+	structured?: Record<string, unknown>,
+): ToolResult {
+	return {
+		content: [{ type: "text" as const, text }],
+		...(structured != null ? { structuredContent: structured } : {}),
+	};
 }
 
 const turnSchema = z.object({
@@ -112,7 +127,11 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		const res = toRecallResponse(raw);
 
 		if (!res.chunks || res.chunks.length === 0) {
-			return textResult("No relevant memories found in Hydra DB.");
+			return textResult("No relevant memories found in Hydra DB.", {
+				count: 0,
+				memories: [],
+				context: "",
+			});
 		}
 
 		const contextStr = buildRecalledContext(res);
@@ -130,6 +149,17 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 
 		return textResult(
 			`Found ${res.chunks.length} memories:\n\n${summary.join("\n")}\n\n---\nFull context:\n${contextStr}`,
+			{
+				count: res.chunks.length,
+				// Untruncated and unrounded on purpose: the prose caps the summary at
+				// ten entries and clips each to 150 chars for readability, which is
+				// exactly the lossiness the structured half exists to avoid.
+				memories: res.chunks.map((c) => ({
+					content: c.chunk_content,
+					...(c.relevancy_score != null ? { score: c.relevancy_score } : {}),
+				})),
+				context: contextStr,
+			},
 		);
 	}
 
@@ -159,6 +189,11 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 
 		return textResult(
 			`Saved to Hydra DB (${res.success_count} success, ${res.failed_count} failed): "${preview}"`,
+			{
+				success_count: res.success_count,
+				failed_count: res.failed_count,
+				...(args.source_id != null ? { source_id: args.source_id } : {}),
+			},
 		);
 	}
 
@@ -191,6 +226,11 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 
 		return textResult(
 			`Ingested ${turns.length} conversation turn(s) into Hydra DB (source: ${sourceId}, success: ${res.success_count}, failed: ${res.failed_count})`,
+			{
+				success_count: res.success_count,
+				failed_count: res.failed_count,
+				source_id: sourceId,
+			},
 		);
 	}
 
@@ -201,14 +241,25 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		const memories = toMemoryList(raw);
 
 		if (memories.length === 0) {
-			return textResult("No memories stored yet.");
+			return textResult("No memories stored yet.", {
+				kind: "memory",
+				total: 0,
+				items: [],
+			});
 		}
 
 		const lines = memories.map(
 			(m, i) => `${i + 1}. [${m.memory_id}] ${m.memory_content.slice(0, 150)}`,
 		);
 
-		return textResult(`${memories.length} memories:\n\n${lines.join("\n")}`);
+		return textResult(`${memories.length} memories:\n\n${lines.join("\n")}`, {
+			kind: "memory",
+			total: memories.length,
+			items: memories.map((m) => ({
+				id: m.memory_id,
+				content: m.memory_content,
+			})),
+		});
 	}
 
 	async function runListSources(args: {
@@ -223,7 +274,11 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		const { sources, total } = toSourceList(raw);
 
 		if (sources.length === 0) {
-			return textResult("No sources found.");
+			return textResult("No sources found.", {
+				kind: "knowledge",
+				total: 0,
+				items: [],
+			});
 		}
 
 		const lines = sources.map((s, i) => {
@@ -232,7 +287,15 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			return `${i + 1}. [${s.id}]${title}${type}`;
 		});
 
-		return textResult(`${total} sources:\n\n${lines.join("\n")}`);
+		return textResult(`${total} sources:\n\n${lines.join("\n")}`, {
+			kind: "knowledge",
+			total,
+			items: sources.map((s) => ({
+				id: s.id,
+				...(s.title != null ? { title: s.title } : {}),
+				...(s.type != null ? { type: s.type } : {}),
+			})),
+		});
 	}
 
 	async function runInspect(args: {
@@ -246,16 +309,27 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			mode: args.mode ?? "content",
 		});
 
-		// Soft failure: return a normal (non-error) text result, matching v1.
+		// Soft failure: return a normal (non-error) text result, matching v1. The
+		// `success` flag carries that distinction as data, so a caller no longer
+		// has to notice the difference in wording.
 		if (!res.success || res.error) {
 			return textResult(
 				`Could not fetch source ${args.source_id}: ${res.error ?? "unknown error"}`,
+				{
+					source_id: args.source_id,
+					success: false,
+					...(res.error != null ? { error: res.error } : {}),
+				},
 			);
 		}
 
 		const content = res.content ?? res.contentBase64 ?? "(no text content)";
 
-		return textResult(`Source: ${args.source_id}\n\n${content}`);
+		return textResult(`Source: ${args.source_id}\n\n${content}`, {
+			source_id: args.source_id,
+			success: true,
+			content,
+		});
 	}
 
 	/**
@@ -274,7 +348,11 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 	): ToolResult {
 		const noun = kind === "knowledge" ? "source" : "memory";
 		if (removed) {
-			return textResult(`Deleted ${noun}: ${id}`);
+			return textResult(`Deleted ${noun}: ${id}`, {
+				outcome: "removed",
+				id,
+				kind,
+			});
 		}
 
 		if (res.success === false) {
@@ -283,11 +361,21 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 				`Could NOT delete ${noun} ${id} — the server refused the request` +
 					`${reason ? `: ${reason}` : " and gave no reason"}. ` +
 					`The ${noun} has not been removed.`,
+				{
+					outcome: "refused",
+					id,
+					kind,
+					...(reason != null ? { reason } : {}),
+				},
 			);
 		}
 
 		const Noun = noun.charAt(0).toUpperCase() + noun.slice(1);
-		return textResult(`${Noun} ${id} was not found or already deleted.`);
+		return textResult(`${Noun} ${id} was not found or already deleted.`, {
+			outcome: "absent",
+			id,
+			kind,
+		});
 	}
 
 	/** The server's own explanation, preferring the per-item error over the summary. */
@@ -331,10 +419,13 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		name: keyof typeof TOOL_DESCRIPTIONS,
 		inputSchema: Record<string, unknown>,
 		handler: (args: Record<string, unknown>) => Promise<ToolResult>,
-		annotations?: {
-			readOnlyHint?: boolean;
-			openWorldHint?: boolean;
-			idempotentHint?: boolean;
+		opts?: {
+			outputSchema?: Record<string, unknown>;
+			annotations?: {
+				readOnlyHint?: boolean;
+				openWorldHint?: boolean;
+				idempotentHint?: boolean;
+			};
 		},
 	) {
 		const desc = TOOL_DESCRIPTIONS[name];
@@ -351,7 +442,8 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 				title: desc.title,
 				description: desc.description,
 				inputSchema: inputSchema as never,
-				...(annotations ? { annotations } : {}),
+				...(opts?.outputSchema ? { outputSchema: opts.outputSchema as never } : {}),
+				...(opts?.annotations ? { annotations: opts.annotations } : {}),
 			},
 			wrapped as never,
 		);
@@ -472,6 +564,69 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.DELETE_MEMORY].params.memory_id),
 	};
 
+	// --- Output schemas ---
+	//
+	// One per handler, shared by a canonical tool and its deprecated aliases:
+	// the alias deprecates the NAME, not the payload, so both describe the same
+	// result. Field names mirror the snake_case the tool inputs already use.
+
+	const queryOutputSchema = {
+		count: z.number().describe("How many memories matched"),
+		memories: z.array(
+			z.object({
+				content: z.string(),
+				score: z.number().optional().describe("Relevance, 0 to 1"),
+			}),
+		),
+		context: z
+			.string()
+			.describe("Graph-enriched recall context; empty when nothing matched"),
+	};
+
+	const ingestOutputSchema = {
+		success_count: z.number(),
+		failed_count: z.number(),
+		source_id: z
+			.string()
+			.optional()
+			.describe("Identifier the content was stored under, when known"),
+	};
+
+	const listOutputSchema = {
+		kind: z.enum(["memory", "knowledge"]),
+		total: z.number(),
+		items: z.array(
+			z.object({
+				id: z.string().describe("Pass to hydradb_inspect or hydradb_delete"),
+				content: z.string().optional().describe("Memory text (memories only)"),
+				title: z.string().optional(),
+				type: z.string().optional(),
+			}),
+		),
+	};
+
+	const inspectOutputSchema = {
+		source_id: z.string(),
+		success: z.boolean().describe("False when the source could not be fetched"),
+		content: z.string().optional(),
+		error: z.string().optional(),
+	};
+
+	const deleteOutputSchema = {
+		outcome: z
+			.enum(["removed", "refused", "absent"])
+			.describe(
+				"`removed`: deleted. `refused`: the server declined and it is STILL THERE. " +
+					"`absent`: there was nothing to delete.",
+			),
+		id: z.string(),
+		kind: z.enum(["memory", "knowledge"]),
+		reason: z
+			.string()
+			.optional()
+			.describe("The server's explanation, when it refused"),
+	};
+
 	const readOnly = { readOnlyHint: true, idempotentHint: true };
 	const searchAnnotations = {
 		readOnlyHint: true,
@@ -485,7 +640,7 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		TOOL_NAMES.QUERY,
 		querySchema,
 		(args) => runQuery(args as Parameters<typeof runQuery>[0]),
-		searchAnnotations,
+		{ outputSchema: queryOutputSchema, annotations: searchAnnotations },
 	);
 
 	register(TOOL_NAMES.INGEST, ingestSchema, async (args) => {
@@ -529,7 +684,7 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		throw new Error(
 			`${TOOL_NAMES.INGEST} requires either \`text\` (a note) or \`turns\` (a conversation).`,
 		);
-	});
+	}, { outputSchema: ingestOutputSchema });
 
 	register(
 		TOOL_NAMES.LIST,
@@ -541,18 +696,21 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			}
 			return runListMemories();
 		},
-		readOnly,
+		{ outputSchema: listOutputSchema, annotations: readOnly },
 	);
 
 	register(
 		TOOL_NAMES.INSPECT,
 		inspectSchema,
 		(args) => runInspect(args as Parameters<typeof runInspect>[0]),
-		readOnly,
+		{ outputSchema: inspectOutputSchema, annotations: readOnly },
 	);
 
-	register(TOOL_NAMES.DELETE, deleteSchema, (args) =>
-		runDelete(args as Parameters<typeof runDelete>[0]),
+	register(
+		TOOL_NAMES.DELETE,
+		deleteSchema,
+		(args) => runDelete(args as Parameters<typeof runDelete>[0]),
+		{ outputSchema: deleteOutputSchema },
 	);
 
 	// --- Deprecated aliases ---
@@ -561,44 +719,62 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		TOOL_NAMES.SEARCH,
 		querySchema,
 		(args) => runQuery(args as Parameters<typeof runQuery>[0]),
-		searchAnnotations,
+		{ outputSchema: queryOutputSchema, annotations: searchAnnotations },
 	);
 
-	register(TOOL_NAMES.STORE, storeSchema, (args) =>
-		runStore(args as Parameters<typeof runStore>[0]),
+	register(
+		TOOL_NAMES.STORE,
+		storeSchema,
+		(args) => runStore(args as Parameters<typeof runStore>[0]),
+		{ outputSchema: ingestOutputSchema },
 	);
 
-	register(TOOL_NAMES.INGEST_CONVERSATION, conversationSchema, (args) => {
-		const a = args as {
-			turns: ConversationTurn[];
-			source_id: string;
-			user_name?: string;
-		};
-		// The deprecated alias keeps its historical shape (user_name only; infer
-		// on, no title/markdown). The canonical hydradb_ingest forwards the rest.
-		return runIngestConversation(a.turns, a.source_id, { userName: a.user_name });
+	register(
+		TOOL_NAMES.INGEST_CONVERSATION,
+		conversationSchema,
+		(args) => {
+			const a = args as {
+				turns: ConversationTurn[];
+				source_id: string;
+				user_name?: string;
+			};
+			// The deprecated alias keeps its historical shape (user_name only; infer
+			// on, no title/markdown). The canonical hydradb_ingest forwards the rest.
+			return runIngestConversation(a.turns, a.source_id, {
+				userName: a.user_name,
+			});
+		},
+		{ outputSchema: ingestOutputSchema },
+	);
+
+	register(TOOL_NAMES.LIST_MEMORIES, {}, () => runListMemories(), {
+		outputSchema: listOutputSchema,
+		annotations: readOnly,
 	});
-
-	register(TOOL_NAMES.LIST_MEMORIES, {}, () => runListMemories(), readOnly);
 
 	register(
 		TOOL_NAMES.LIST_SOURCES,
 		listSourcesSchema,
 		(args) => runListSources(args as { source_ids?: string[] }),
-		readOnly,
+		{ outputSchema: listOutputSchema, annotations: readOnly },
 	);
 
 	register(
 		TOOL_NAMES.FETCH_CONTENT,
 		inspectSchema,
 		(args) => runInspect(args as Parameters<typeof runInspect>[0]),
-		readOnly,
+		{ outputSchema: inspectOutputSchema, annotations: readOnly },
 	);
 
-	register(TOOL_NAMES.DELETE_MEMORY, deleteMemorySchema, (args) => {
-		const { memory_id } = args as { memory_id: string };
-		return runDelete({ id: memory_id, kind: "memory" });
-	});
+	register(
+		TOOL_NAMES.DELETE_MEMORY,
+		deleteMemorySchema,
+		(args) => {
+			const { memory_id } = args as { memory_id: string };
+			return runDelete({ id: memory_id, kind: "memory" });
+		},
+		{ outputSchema: deleteOutputSchema },
+	);
 
 	return server.server;
 }
