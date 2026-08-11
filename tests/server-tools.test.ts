@@ -192,6 +192,109 @@ async function deleteText(
 	return text;
 }
 
+async function deleteStructured(
+	deleteResponse: Record<string, unknown>,
+	args: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+	const client = await connect(mockHydraWithDelete(deleteResponse));
+	const result = await client.callTool({ name: "hydradb_delete", arguments: args });
+	await client.close();
+	return result.structuredContent as Record<string, unknown>;
+}
+
+test("every tool advertises an output schema", async () => {
+	const { hydra } = mockHydra();
+	const client = await connect(hydra);
+
+	const { tools } = await client.listTools();
+	const missing = tools.filter((t) => !t.outputSchema).map((t) => t.name);
+	assert.deepEqual(missing, [], "every tool should declare an outputSchema");
+
+	await client.close();
+});
+
+test("hydradb_list returns ids as data, untruncated, alongside the prose", async () => {
+	// The prose clips each row to 150 chars, so a caller that scraped it got a
+	// mangled id/content pair. The structured half is the whole value.
+	const long = "x".repeat(300);
+	const sdk = {
+		context: {
+			list: () =>
+				Promise.resolve({
+					data: { user_memories: [{ memory_id: "m1", memory_content: long }] },
+					success: true,
+				}),
+		},
+	} as unknown as HydraDBClient;
+	const client = await connect(new HydraDB({ token: "t", database: "db" }, sdk));
+
+	const result = await client.callTool({ name: "hydradb_list", arguments: {} });
+
+	const text = (result.content as { type: string; text: string }[])[0]!.text;
+	assert.match(text, /1 memories:/, "prose output is unchanged");
+
+	assert.deepEqual(result.structuredContent, {
+		kind: "memory",
+		total: 1,
+		items: [{ id: "m1", content: long }],
+	});
+
+	await client.close();
+});
+
+test("hydradb_delete reports its three outcomes as data, not just wording", async () => {
+	assert.deepEqual(
+		await deleteStructured({ success: true, userMemoryDeleted: 1 }, { id: "m1" }),
+		{ outcome: "removed", id: "m1", kind: "memory" },
+	);
+
+	// The distinction the prose makes in words is now machine-readable: a caller
+	// can branch on `refused` instead of pattern-matching an English sentence.
+	assert.deepEqual(
+		await deleteStructured(
+			{ success: false, message: "still processing", deletedCount: 0 },
+			{ id: "s1", kind: "knowledge" },
+		),
+		{
+			outcome: "refused",
+			id: "s1",
+			kind: "knowledge",
+			reason: "still processing",
+		},
+	);
+
+	assert.deepEqual(
+		await deleteStructured({ success: true, deletedCount: 0 }, { id: "m1" }),
+		{ outcome: "absent", id: "m1", kind: "memory" },
+	);
+});
+
+test("a soft inspect failure is reported as data, not only as prose", async () => {
+	const sdk = {
+		context: {
+			inspect: () =>
+				Promise.resolve({ data: { success: false, error: "gone" }, success: true }),
+		},
+	} as unknown as HydraDBClient;
+	const client = await connect(new HydraDB({ token: "t", database: "db" }, sdk));
+
+	const result = await client.callTool({
+		name: "hydradb_inspect",
+		arguments: { source_id: "s1" },
+	});
+
+	// Still a non-error result, matching v1 — but no longer indistinguishable
+	// from success without reading the sentence.
+	assert.notEqual(result.isError, true);
+	assert.deepEqual(result.structuredContent, {
+		source_id: "s1",
+		success: false,
+		error: "gone",
+	});
+
+	await client.close();
+});
+
 test("hydradb_delete does not claim 'not found' when the server refused", async () => {
 	// Verbatim from a live run against api.hydradb.com.
 	const text = await deleteText(
