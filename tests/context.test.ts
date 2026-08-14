@@ -639,13 +639,14 @@ test("buildRecalledContext suppresses chunks contained in another chunk", () => 
 
 	const out = buildRecalledContext(response);
 
-	assert.match(out, /every language they write/, "the longer chunk must survive");
-	assert.equal(
-		out.match(/Chunk \d/g)?.length,
-		1,
-		"the contained chunk should not be rendered at all",
-	);
-	assert.equal(renderedChunkCount(response), 1);
+	assert.match(out, /every language they write/, "the longer body must survive");
+	// Both chunks are still rendered — only the duplicated BODY collapses, since
+	// each chunk's id, score and relations exist nowhere else.
+	assert.equal(out.match(/^Chunk \d+/gm)?.length, 2);
+	assert.match(out, /same text as Chunk 1/);
+	// The duplicated text appears once.
+	assert.equal(out.match(/prefers tabs over spaces/g)?.length, 1);
+	assert.equal(renderedChunkCount(response), 2);
 });
 
 test("buildRecalledContext keeps genuinely different chunks", () => {
@@ -669,7 +670,7 @@ test("containment ignores whitespace and case", () => {
 		],
 	} as never;
 
-	assert.equal(renderedChunkCount(response), 1);
+	assert.match(buildRecalledContext(response), /same text as Chunk 1/);
 });
 
 // Identical bodies collapse to one, keeping the higher-ranked chunk.
@@ -683,7 +684,9 @@ test("identical chunks collapse to a single rendering", () => {
 	} as never;
 
 	const out = buildRecalledContext(response);
-	assert.equal(out.match(/Chunk \d/g)?.length, 1);
+	assert.equal(out.match(/^Chunk \d+/gm)?.length, 2);
+	assert.equal(out.match(/the user deploys on Tuesday/g)?.length, 1);
+	assert.match(out, /same text as Chunk 1/);
 });
 
 // Chunk numbering must follow what is rendered, or it points at nothing.
@@ -697,9 +700,12 @@ test("chunk numbering is contiguous after suppression", () => {
 	} as never;
 
 	const out = buildRecalledContext(response);
+	// All three render; chunk 2's body points at chunk 1.
 	assert.match(out, /Chunk 1/);
 	assert.match(out, /Chunk 2/);
-	assert.doesNotMatch(out, /Chunk 3/, "numbering must not skip the suppressed chunk");
+	assert.match(out, /Chunk 3/);
+	assert.match(out, /same text as Chunk 1/);
+	assert.match(out, /beta body entirely different/);
 });
 
 // The id-keyed dedupe never noticed the same passage arriving under two ids.
@@ -821,4 +827,85 @@ test("a repeated extra-context passage cites where it was shown", () => {
 	assert.match(out, /same as Chunk 1/);
 	const secondChunk = out.slice(out.indexOf("Chunk 2"));
 	assert.match(secondChunk, /Extra Context:/, "chunk 2 must not look context-free");
+});
+
+// Greptile, PR #49: dropping a contained chunk removed more than duplicated
+// text. Its id, score, graph relations and extra-context references belong to
+// that chunk and exist nowhere else, so the caller lost a discoverable source.
+test("a contained chunk keeps its id, score and relations", () => {
+	const long = "The user prefers tabs over spaces in every language they write.";
+	const out = buildRecalledContext({
+		chunks: [
+			{
+				chunk_uuid: "c1",
+				source_id: "doc",
+				chunk_content: long,
+				relevancy_score: 0.9,
+			},
+			{
+				chunk_uuid: "c2",
+				source_id: "doc",
+				chunk_content: "prefers tabs over spaces",
+				relevancy_score: 0.7,
+				extra_context_ids: ["e1"],
+			},
+		],
+		additional_context: {
+			e1: { chunk_uuid: "e1", source_id: "x", chunk_content: "a related passage" },
+		},
+		graph_context: {
+			query_paths: [],
+			chunk_relations: [
+				{
+					relevancy_score: 0.9,
+					group_id: "g1",
+					source_chunk_ids: ["c2"],
+					triplets: [
+						{
+							source: { name: "Alice" },
+							relation: { raw_predicate: "likes", context: "" },
+							target: { name: "Tabs" },
+						},
+					],
+				},
+			],
+			chunk_id_to_group_ids: {},
+		},
+	} as never);
+
+	// The body is sent once...
+	assert.equal(out.match(/prefers tabs over spaces/g)?.length, 1);
+	// ...but everything that is NOT the body survives on the second chunk.
+	assert.match(out, /\(70%\)/, "its score must survive");
+	assert.match(out, /Alice.*likes.*Tabs/, "its graph relation must survive");
+	assert.match(out, /a related passage/, "its extra context must survive");
+});
+
+// The whole rendering must fit the ceiling, including the entity-path prefix.
+test("entity paths count against the output budget", () => {
+	const out = buildRecalledContext(
+		{
+			chunks: Array.from({ length: 20 }, (_, i) => ({
+				chunk_uuid: `c${i}`,
+				source_id: `s${i}`,
+				chunk_content: `body-${i} ` + "x".repeat(3000),
+			})),
+			graph_context: {
+				query_paths: Array.from({ length: 200 }, (_, i) => ({
+					relevancy_score: 0.9,
+					combined_context: `entity path ${i} ` + "p".repeat(200),
+					triplets: [],
+				})),
+				chunk_relations: [],
+				chunk_id_to_group_ids: {},
+			},
+		} as never,
+		{ maxTotalChars: 20_000 },
+	);
+
+	assert.ok(
+		out.length <= 20_000,
+		`the whole rendering must fit the ceiling, got ${out.length}`,
+	);
+	assert.match(out, /ENTITY PATHS/, "the prefix is still included, just budgeted");
 });

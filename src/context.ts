@@ -133,9 +133,10 @@ function normalise(text: string): string {
 function containedChunkIndices(
 	bodies: string[],
 	sourceIds: (string | undefined)[],
-): Set<number> {
+): Map<number, number> {
 	const normalised = bodies.map(normalise);
-	const dropped = new Set<number>();
+	/** duplicate chunk index -> the 1-based chunk number holding the same text. */
+	const dropped = new Map<number, number>();
 
 	for (let i = 0; i < normalised.length; i++) {
 		if (dropped.has(i)) continue;
@@ -159,7 +160,7 @@ function containedChunkIndices(
 
 			// Keep the longer body; on an exact tie keep whichever ranked first.
 			const keepsI = a.length > b.length || (a.length === b.length && i < j);
-			if (keepsI && a.includes(b)) dropped.add(j);
+			if (keepsI && a.includes(b)) dropped.set(j, i + 1);
 		}
 	}
 	return dropped;
@@ -178,7 +179,8 @@ export function renderedChunkCount(response: RecallResponse): number {
 		chunks.map((c) => extractChunkText(c.chunk_content)),
 		chunks.map((c) => c.source_id),
 	);
-	return chunks.length - contained.size;
+	// Every chunk is still rendered; only duplicated BODIES are collapsed.
+	return chunks.length;
 }
 
 /**
@@ -189,6 +191,9 @@ export function renderedChunkCount(response: RecallResponse): number {
  * budget applies overstates what survived it. The header and the body must
  * describe the same thing.
  */
+/** Room reserved for the truncation notice itself, so it also fits. */
+const TRUNCATION_NOTE_ALLOWANCE = 240;
+
 export function renderRecalledContext(
 	response: RecallResponse,
 	opts?: Parameters<typeof buildRecalledContext>[1],
@@ -271,9 +276,14 @@ export function buildRecalledContext(
 
 	let rendered = 0;
 	for (let i = 0; i < chunks.length; i++) {
-		if (contained.has(i)) continue;
 		const chunk = chunks[i]!;
 		rendered++;
+		// A contained chunk is rendered, but its BODY is replaced with a pointer.
+		// Only the text is duplicated: the id, score, graph relations and
+		// extra-context references belong to THIS chunk and exist nowhere else,
+		// so dropping the whole section would remove associations rather than
+		// repetition — and take a discoverable source id with them.
+		const bodyDuplicateOf = contained.get(i);
 		const lines: string[] = [];
 
 		// The id rides in the chunk header because this block is what a caller
@@ -300,6 +310,9 @@ export function buildRecalledContext(
 		}
 
 		const bodyText = extractChunkText(chunk.chunk_content);
+		if (bodyDuplicateOf != null) {
+			lines.push(`(same text as Chunk ${bodyDuplicateOf})`);
+		} else
 		lines.push(
 			maxChunkChars != null && bodyText.length > maxChunkChars
 				? `${bodyText.slice(0, maxChunkChars)}… [chunk truncated: ${bodyText.length} chars; ` +
@@ -475,8 +488,32 @@ export function buildRecalledContext(
 		// to use, and it silently removes whole sections the "Found N" header is
 		// still counting. Dropping whole chunks and saying how many were dropped
 		// keeps the header and the body describing the same thing.
+		// The prefix needs its own ceiling, not just a place in the accounting: a
+		// graph-heavy result can produce entity paths that exceed the whole budget
+		// on their own, and then no amount of dropping chunks brings the total
+		// under it. Half the budget leaves room for the chunks the caller asked
+		// for.
+		const headBudget = Math.floor(budget / 2);
+		let head = "";
+		if (entityPathLines.length > 0) {
+			const keptPaths: string[] = [];
+			let headUsed = "=== ENTITY PATHS ===\n\n".length;
+			for (const line of entityPathLines) {
+				if (headUsed + line.length + 1 > headBudget) break;
+				keptPaths.push(line);
+				headUsed += line.length + 1;
+			}
+			const droppedPaths = entityPathLines.length - keptPaths.length;
+			head =
+				`=== ENTITY PATHS ===\n${keptPaths.join("\n")}` +
+				(droppedPaths > 0 ? `\n[${droppedPaths} more entity path(s) omitted]` : "") +
+				"\n\n";
+		}
 		const kept: string[] = [];
-		let used = 0;
+		// The prefix and the framing count against the ceiling too. Budgeting only
+		// the chunk sections let a graph-heavy result exceed the documented limit
+		// by however large its entity paths happened to be.
+		let used = head.length + "=== CONTEXT ===\n".length + TRUNCATION_NOTE_ALLOWANCE;
 		const separator = "\n\n---\n\n";
 		for (const section of chunkSections) {
 			const cost = section.length + (kept.length > 0 ? separator.length : 0);
@@ -485,9 +522,6 @@ export function buildRecalledContext(
 			used += cost;
 		}
 		const dropped = chunkSections.length - kept.length;
-		const head = entityPathLines.length > 0
-			? `=== ENTITY PATHS ===\n${entityPathLines.join("\n")}\n\n`
-			: "";
 		return (
 			`${head}=== CONTEXT ===\n${kept.join(separator)}\n\n` +
 			`[response truncated: showing ${kept.length} of ${chunkSections.length} chunks. ` +
