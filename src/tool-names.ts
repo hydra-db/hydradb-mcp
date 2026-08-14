@@ -12,6 +12,7 @@ export const TOOL_NAMES = {
 	LIST: "hydradb_list",
 	INSPECT: "hydradb_inspect",
 	DELETE: "hydradb_delete",
+	STATUS: "hydradb_status",
 
 	// Deprecated aliases — kept working for backward compatibility.
 	SEARCH: "hydra_db_search",
@@ -31,6 +32,7 @@ export const CANONICAL_TOOL_NAMES = [
 	TOOL_NAMES.LIST,
 	TOOL_NAMES.INSPECT,
 	TOOL_NAMES.DELETE,
+	TOOL_NAMES.STATUS,
 ] as const;
 
 export const DEPRECATED_TOOL_NAMES = [

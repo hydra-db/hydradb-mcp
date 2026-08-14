@@ -870,3 +870,89 @@ test("hydradb_ingest refuses to file a conversation as knowledge", async () => {
 
 	await client.close();
 });
+
+// Ingestion is asynchronous — the upload returns when the source is queued, and
+// indexing runs through graph extraction for seconds afterwards. A caller that
+// saves then immediately queries to confirm gets "No relevant context items
+// found" and concludes the save failed, then re-saves — which under upsert
+// replaces what it just wrote. The tool result never said any of this.
+test("hydradb_ingest warns that indexing is asynchronous", async () => {
+	const text = await ingestText(
+		{ success: true, successCount: 1, failedCount: 0, message: "", results: [] },
+		{ text: "a note" },
+	);
+
+	assert.match(text, /asynchronous/i);
+	assert.match(text, /hydradb_status/);
+});
+
+test("hydradb_status reports per-source indexing state", async () => {
+	const { hydra } = mockHydra();
+	const client = await connect(hydra);
+	// context.status is not part of the Responses override map, so drive it
+	// through a purpose-built stub.
+	await client.close();
+
+	const sdk = {
+		context: {
+			status: () =>
+				Promise.resolve({
+					data: {
+						statuses: [
+							{ id: "s1", indexingStatus: "completed" },
+							{ id: "s2", indexingStatus: "graph_creation" },
+							{
+								id: "s3",
+								indexingStatus: "failed",
+								errorMessage: "extraction timed out",
+								errorCode: "TIMEOUT",
+							},
+						],
+					},
+					success: true,
+				}),
+		},
+	} as unknown as HydraDBClient;
+	const client2 = await connect(
+		new HydraDB({ token: "t", database: "db_test" }, sdk),
+	);
+
+	const result = await client2.callTool({
+		name: "hydradb_status",
+		arguments: { ids: ["s1", "s2", "s3"] },
+	});
+	const out = (result.content as { text: string }[])[0]!.text;
+
+	assert.match(out, /s1: completed/);
+	assert.match(out, /s2: graph_creation/);
+	assert.match(out, /s3: failed .* extraction timed out \[TIMEOUT\]/);
+	// graph_creation is not in the SDK's status enum but is a real live value,
+	// so it must count as still-in-progress rather than be treated as terminal.
+	assert.match(out, /1 still indexing/);
+
+	await client2.close();
+});
+
+test("hydradb_status says when everything is settled", async () => {
+	const sdk = {
+		context: {
+			status: () =>
+				Promise.resolve({
+					data: { statuses: [{ id: "s1", indexingStatus: "completed" }] },
+					success: true,
+				}),
+		},
+	} as unknown as HydraDBClient;
+	const client = await connect(new HydraDB({ token: "t", database: "db_test" }, sdk));
+
+	const result = await client.callTool({
+		name: "hydradb_status",
+		arguments: { ids: ["s1"] },
+	});
+
+	assert.match(
+		(result.content as { text: string }[])[0]!.text,
+		/All sources have reached a terminal state/,
+	);
+	await client.close();
+});

@@ -196,6 +196,28 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		return undefined;
 	}
 
+	/**
+	 * Ingestion is asynchronous, and the caller has no way to know that.
+	 *
+	 * The upload returns as soon as the source is queued; indexing then runs
+	 * through graph extraction and takes seconds. A caller that saves and
+	 * immediately queries to confirm gets "No relevant context items found" and
+	 * reasonably concludes the save failed — then re-saves, which under upsert
+	 * replaces what it just wrote.
+	 *
+	 * The server already says this in its 202 body; the adapter kept the message
+	 * so we can pass the server's own words through rather than invent our own.
+	 */
+	function indexingNote(res: { message: string }): string {
+		const said = res.message.trim();
+		const mentionsAsync = /asynchron|queued|still processing|not.*indexed/i.test(said);
+		return (
+			`\n\nIndexing is asynchronous — the content is not searchable until it ` +
+			`completes. Use ${TOOL_NAMES.STATUS} to check.` +
+			(mentionsAsync ? "" : said ? `\nServer: ${briefly(said)}` : "")
+		);
+	}
+
 	/** Keep one server-supplied message from crowding out the rest of the result. */
 	function briefly(message: string): string {
 		return message.length > 200 ? `${message.slice(0, 200)}…` : message;
@@ -283,6 +305,7 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		return textResult(
 			`Saved to Hydra DB${id ? ` (id: ${id})` : ""} ` +
 			`(${res.success_count} success, ${res.failed_count} failed).` +
+			indexingNote(res) +
 			ingestIssues(res),
 		);
 	}
@@ -318,6 +341,7 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		return textResult(
 			`Ingested ${turns.length} conversation turn(s) into Hydra DB ` +
 			`(id: ${createdId(res) ?? sourceId}, success: ${res.success_count}, failed: ${res.failed_count})` +
+			indexingNote(res) +
 			ingestIssues(res),
 		);
 	}
@@ -448,6 +472,42 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		}
 
 		return textResult(parts.join("\n\n"));
+	}
+
+	async function runStatus(args: { ids: string[] }): Promise<ToolResult> {
+		logger.debug(`${TOOL_NAMES.STATUS}: ${args.ids.join(", ")}`);
+
+		const res = await hydra.context.ingestionStatus({ ids: args.ids });
+		const statuses = res.statuses ?? [];
+
+		if (statuses.length === 0) {
+			return textResult(
+				`No indexing status found for: ${args.ids.join(", ")}. ` +
+				`Either the ids are wrong or the sources were never queued.`,
+			);
+		}
+
+		const lines = statuses.map((s) => {
+			const state = s.indexingStatus ?? "unknown";
+			const reason = s.errorMessage
+				? ` — ${briefly(s.errorMessage)}${s.errorCode ? ` [${s.errorCode}]` : ""}`
+				: "";
+			return `  - ${s.id ?? "(unknown id)"}: ${state}${reason}`;
+		});
+
+		// `completed` and `failed` are terminal; everything else means keep
+		// waiting. Deliberately not switched over the SDK's status enum
+		// (queued/processing/completed/failed) — a live run returned
+		// `graph_creation`, which that enum does not declare.
+		const pending = statuses.filter(
+			(s) => !["completed", "failed"].includes(String(s.indexingStatus).toLowerCase()),
+		);
+		const note =
+			pending.length > 0
+				? `\n\n${pending.length} still indexing — not yet searchable. Check again in a few seconds.`
+				: `\n\nAll sources have reached a terminal state.`;
+
+		return textResult(`Indexing status:\n${lines.join("\n")}${note}`);
 	}
 
 	/**
@@ -691,6 +751,13 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.DELETE].params.kind),
 	};
 
+	const statusSchema = {
+		ids: z
+			.array(z.string())
+			.min(1)
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.STATUS].params.ids),
+	};
+
 	const deleteMemorySchema = {
 		memory_id: z
 			.string()
@@ -806,6 +873,13 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 
 	register(TOOL_NAMES.DELETE, deleteSchema, (args) =>
 		runDelete(args as Parameters<typeof runDelete>[0]),
+	);
+
+	register(
+		TOOL_NAMES.STATUS,
+		statusSchema,
+		(args) => runStatus(args as Parameters<typeof runStatus>[0]),
+		readOnly,
 	);
 
 	// --- Deprecated aliases ---

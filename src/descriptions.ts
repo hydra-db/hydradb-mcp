@@ -166,6 +166,20 @@ export const TOOL_DESCRIPTIONS = {
 		},
 	},
 
+	[TOOL_NAMES.STATUS]: {
+		title: "Check Hydra DB Indexing Status",
+		description:
+			"Check whether ingested sources have finished indexing. Ingestion is " +
+			"asynchronous: hydradb_ingest returns as soon as the source is queued, and " +
+			"the content is not searchable until indexing reaches a terminal state. " +
+			"Use this after ingesting when you need to confirm the write landed — " +
+			"an empty hydradb_query result shortly after an ingest usually means " +
+			"'still indexing', not 'the save failed'.",
+		params: {
+			ids: "The source IDs to check, as returned by hydradb_ingest.",
+		},
+	},
+
 	// --- Deprecated aliases ---
 
 	[TOOL_NAMES.SEARCH]: {
@@ -246,6 +260,8 @@ export const SERVER_INSTRUCTIONS =
 	`Use ${TOOL_NAMES.LIST} to browse stored memories or knowledge sources. ` +
 	`Use ${TOOL_NAMES.INSPECT} to retrieve the full content of a source. ` +
 	`Use ${TOOL_NAMES.DELETE} to remove a memory or knowledge source. ` +
+	`Use ${TOOL_NAMES.STATUS} to check whether an ingested source has finished indexing — ` +
+	"ingestion is asynchronous, so content is not searchable the instant it is saved. " +
 	"Deprecated aliases remain available for backward compatibility but should not be used in new integrations: " +
 	`${TOOL_NAMES.SEARCH} → ${TOOL_NAMES.QUERY}, ` +
 	`${TOOL_NAMES.STORE} → ${TOOL_NAMES.INGEST}, ` +
