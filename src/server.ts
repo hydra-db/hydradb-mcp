@@ -297,9 +297,10 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		query: string;
 		kind?: QueryKind;
 		max_results?: number;
-		mode?: "fast" | "thinking";
+		mode?: "fast" | "thinking" | "auto";
 		graph_context?: boolean;
 		detail?: "compact" | "full";
+		operator?: "or" | "and" | "phrase";
 	}, signal?: AbortSignal): Promise<ToolResult> {
 		// Host-owned default (CONTRACT §2 rule 5): search BOTH families. This tool
 		// used to pin `kind: "memory"`, which made every ingested knowledge source
@@ -314,6 +315,7 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			kind,
 			maxResults,
 			mode: args.mode ?? "thinking",
+			operator: args.operator,
 			graphContext: args.graph_context ?? true,
 			alpha: 0.8,
 			recencyBias: 0,
@@ -812,6 +814,7 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			mode?: "content" | "url" | "both";
 			offset?: number;
 			limit?: number;
+			expiry_seconds?: number;
 		};
 		// Reject a conflict rather than picking one. This server rejects `text`
 		// AND `turns` on ingest for the same reason: silently choosing between two
@@ -830,7 +833,13 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 				`${TOOL_NAMES.QUERY} results or in [brackets] in ${TOOL_NAMES.LIST} output.`,
 			);
 		}
-		return { source_id: id, mode: a.mode, offset: a.offset, limit: a.limit };
+		return {
+			source_id: id,
+			mode: a.mode,
+			offset: a.offset,
+			limit: a.limit,
+			expiry_seconds: a.expiry_seconds,
+		};
 	}
 
 	async function runInspect(args: {
@@ -838,12 +847,14 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		mode?: "content" | "url" | "both";
 		offset?: number;
 		limit?: number;
+		expiry_seconds?: number;
 	}, signal?: AbortSignal): Promise<ToolResult> {
 		logger.debug(`${TOOL_NAMES.INSPECT}: ${args.source_id}`);
 
 		const res = await hydra.context.inspect({
 			id: args.source_id,
 			mode: args.mode ?? "content",
+			expirySeconds: args.expiry_seconds,
 		}, { signal });
 
 		// Soft failure: return a normal (non-error) text result, matching v1.
@@ -1059,7 +1070,7 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.max_results),
 		mode: z
-			.enum(["fast", "thinking"])
+			.enum(["fast", "thinking", "auto"])
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.mode),
 		graph_context: z
@@ -1070,6 +1081,10 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			.enum(["compact", "full"])
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.detail),
+		operator: z
+			.enum(["or", "and", "phrase"])
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.operator),
 	};
 
 	const storeSchema = {
@@ -1216,6 +1231,12 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			.max(INSPECT_CHAR_BUDGET)
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INSPECT].params.limit),
+		expiry_seconds: z
+			.number()
+			.int()
+			.min(1)
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INSPECT].params.expiry_seconds),
 	};
 
 	const deleteSchema = {

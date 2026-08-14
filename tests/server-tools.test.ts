@@ -1969,3 +1969,44 @@ test("the whole query response stays within the documented ceiling", async () =>
 	assert.match(text, /^Found \d+ /);
 	assert.match(text, /hydradb_inspect/);
 });
+
+// Three params the wrapper already forwarded and the tool layer never offered.
+test("hydradb_query forwards operator to the wire", async () => {
+	for (const operator of ["or", "and", "phrase"] as const) {
+		const { hydra, calls } = mockHydra();
+		const client = await connect(hydra);
+		await client.callTool({
+			name: "hydradb_query",
+			arguments: { query: "invoice OR receipt", operator },
+		});
+		assert.equal(calls.find((c) => c.method === "query")?.args.operator, operator);
+		await client.close();
+	}
+});
+
+test("hydradb_query accepts mode auto", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+	const result = await client.callTool({
+		name: "hydradb_query",
+		arguments: { query: "q", mode: "auto" },
+	});
+
+	assert.notEqual(result.isError, true, "auto is a real SDK mode and must be accepted");
+	assert.equal(calls.find((c) => c.method === "query")?.args.mode, "auto");
+	await client.close();
+});
+
+test("hydradb_inspect forwards expiry_seconds", async () => {
+	const { hydra, calls } = mockHydra({
+		inspect: { success: true, presignedUrl: "https://example.invalid/x" },
+	});
+	const client = await connect(hydra);
+	await client.callTool({
+		name: "hydradb_inspect",
+		arguments: { id: "s1", mode: "url", expiry_seconds: 300 },
+	});
+
+	assert.equal(calls.find((c) => c.method === "inspect")?.args.expirySeconds, 300);
+	await client.close();
+});

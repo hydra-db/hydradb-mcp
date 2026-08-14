@@ -29,7 +29,15 @@ const PARAM = {
 		"'thinking' (default) runs graph traversal and personalised reranking: a few " +
 		"seconds, best recall — use it when the answer matters or the question is about " +
 		"the user. 'fast' is plain semantic search and is markedly quicker — use it for a " +
-		"lookup you expect to hit, or when issuing several queries in a row.",
+		"lookup you expect to hit, or when issuing several queries in a row. 'auto' lets " +
+		"Hydra DB pick based on the query.",
+	operator:
+		"How to combine the terms in your query: 'or' (default) matches any, 'and' " +
+		"requires all, 'phrase' matches the words together in order. Reach for 'phrase' " +
+		"when looking up an exact string such as an error message or a config key.",
+	expiry_seconds:
+		"How long the download link stays valid, in seconds. Only meaningful with " +
+		"mode 'url' or 'both'; ignored otherwise.",
 	graph_context:
 		"Include knowledge-graph relations (default: true). These are the entity paths — " +
 		"(Alice)-[prefers]->(Tea) — that connect facts across separate memories, and they " +
@@ -175,6 +183,7 @@ export const TOOL_DESCRIPTIONS = {
 			mode: PARAM.mode,
 			graph_context: PARAM.graph_context,
 			detail: PARAM.detail,
+			operator: PARAM.operator,
 		},
 	},
 
@@ -227,6 +236,7 @@ Memory rows come back as [id] content. Knowledge rows as [id] — title (type), 
 			mode: PARAM.fetch_mode,
 			offset: PARAM.fetch_offset,
 			limit: PARAM.fetch_limit,
+			expiry_seconds: PARAM.expiry_seconds,
 		},
 	},
 
