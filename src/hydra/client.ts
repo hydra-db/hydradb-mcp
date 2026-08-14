@@ -139,6 +139,19 @@ export interface IngestParams {
 	/** Passed through only when `infer` is truthy (host-owned default text). */
 	customInstructions?: string;
 	upsert?: boolean;
+	/**
+	 * Tenant metadata stored alongside the memory, and matchable later via
+	 * `metadataFilters` on query.
+	 *
+	 * Accepted by the backend (`domain/memories/models.go`) but absent from the
+	 * generated SDK request type, which is why the wrapper carries it explicitly
+	 * inside the memory item rather than as a typed field.
+	 */
+	metadata?: Record<string, unknown>;
+	/** Document-level metadata, matchable via `additional_metadata`. */
+	additionalMetadata?: Record<string, unknown>;
+	/** When the fact was true, as opposed to when it was stored (RFC3339 date). */
+	observationDate?: string;
 	/** Filename to attach when ingesting knowledge text as a document. */
 	filename?: string;
 	collection?: string;
@@ -271,6 +284,13 @@ export class ContextResource extends Resource {
 			if (params.sourceId != null) item.source_id = params.sourceId;
 			if (params.title != null) item.title = params.title;
 			if (params.userName != null) item.user_name = params.userName;
+			if (params.metadata != null) item.metadata = params.metadata;
+			if (params.additionalMetadata != null) {
+				item.additional_metadata = params.additionalMetadata;
+			}
+			if (params.observationDate != null) {
+				item.observation_date = params.observationDate;
+			}
 			request.memories = JSON.stringify([item]);
 		} else {
 			// The knowledge path can only carry the document itself and its
@@ -287,6 +307,9 @@ export class ContextResource extends Resource {
 					["isMarkdown", params.isMarkdown],
 					["customInstructions", params.customInstructions],
 					["userName", params.userName],
+					["metadata", params.metadata],
+					["additionalMetadata", params.additionalMetadata],
+					["observationDate", params.observationDate],
 				] as const
 			)
 				.filter(([, value]) => value != null)

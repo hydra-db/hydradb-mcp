@@ -457,6 +457,8 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		infer?: boolean;
 		is_markdown?: boolean;
 		overwrite?: boolean;
+		metadata?: Record<string, unknown>;
+		observation_date?: string;
 	}, signal?: AbortSignal): Promise<ToolResult> {
 		const kind = args.kind ?? "memory";
 		logger.debug(`${TOOL_NAMES.INGEST}: "${args.text.slice(0, 50)}..." (kind=${kind})`);
@@ -473,6 +475,8 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 						infer: args.infer ?? true,
 						isMarkdown: args.is_markdown ?? false,
 						customInstructions: INGEST_INSTRUCTIONS,
+						metadata: args.metadata,
+						observationDate: args.observation_date,
 					}
 				: {};
 
@@ -1170,8 +1174,20 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.STORE].params.overwrite),
 	};
 
+	const ingestMetadataSchema = {
+		metadata: z
+			.record(z.unknown())
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.metadata),
+		observation_date: z
+			.string()
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.observation_date),
+	};
+
 	const ingestSchema = {
 		...storeSchema,
+		...ingestMetadataSchema,
 		// Canonical ingest accepts EITHER `text` or `turns`, so `text` is optional
 		// here (the `hydra_db_store` alias keeps it required).
 		text: z
@@ -1409,6 +1425,8 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			infer?: boolean;
 			is_markdown?: boolean;
 			overwrite?: boolean;
+			metadata?: Record<string, unknown>;
+			observation_date?: string;
 			turns?: ConversationTurn[];
 			user_name?: string;
 		};
@@ -1422,6 +1440,33 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 				`${TOOL_NAMES.INGEST} cannot ingest \`turns\` as knowledge — conversations are memories. ` +
 				`Use \`text\` for a knowledge document, or drop \`kind\`.`,
 			);
+		}
+
+		// The handler strips memory-only fields before calling the wrapper on the
+		// knowledge path, which means the wrapper's own guard never sees them —
+		// so without this they would be dropped in silence, which is the exact
+		// behaviour that guard exists to prevent.
+		if (a.kind === "knowledge") {
+			const memoryOnlyGiven = (
+				[
+					["source_id", a.source_id],
+					["infer", a.infer],
+					["is_markdown", a.is_markdown],
+					["user_name", a.user_name],
+					["metadata", a.metadata],
+					["observation_date", a.observation_date],
+				] as const
+			)
+				.filter(([, value]) => value != null)
+				.map(([name]) => name);
+
+			if (memoryOnlyGiven.length > 0) {
+				throw new Error(
+					`${TOOL_NAMES.INGEST} does not support ${memoryOnlyGiven.join(", ")} for ` +
+					`kind "knowledge" — those apply to memory ingestion only. Drop them, or ` +
+					`ingest this as a memory.`,
+				);
+			}
 		}
 		// `text` and `turns` are mutually exclusive — reject rather than silently
 		// dropping one (the documented "exactly one" contract).
@@ -1457,6 +1502,8 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 					infer: a.infer,
 					is_markdown: a.is_markdown,
 					overwrite: a.overwrite,
+					metadata: a.metadata,
+					observation_date: a.observation_date,
 				},
 				extra?.signal,
 			);

@@ -2128,3 +2128,55 @@ test("none of the new query filters are sent when unset", async () => {
 	assert.equal(call?.args.numRelatedChunks, undefined);
 	await client.close();
 });
+
+// The backend accepts these on the memory item, and the generated SDK request
+// type does not declare them — so they were invisible from the wrapper up.
+// A metadata FILTER over keys the caller cannot create is close to useless, so
+// this and query's metadata_filters only pay off together.
+test("hydradb_ingest sends metadata and observation_date", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+	await client.callTool({
+		name: "hydradb_ingest",
+		arguments: {
+			text: "Chose Atlas for schema migrations.",
+			metadata: { project: "hydradb", kind: "decision" },
+			observation_date: "2026-03-14",
+		},
+	});
+
+	const item = (
+		JSON.parse(String(calls.find((c) => c.method === "ingest")!.args.memories)) as Record<string, unknown>[]
+	)[0]!;
+	assert.deepEqual(item.metadata, { project: "hydradb", kind: "decision" });
+	assert.equal(item.observation_date, "2026-03-14");
+	await client.close();
+});
+
+test("metadata keys are omitted entirely when not provided", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+	await client.callTool({ name: "hydradb_ingest", arguments: { text: "a note" } });
+
+	const item = (
+		JSON.parse(String(calls.find((c) => c.method === "ingest")!.args.memories)) as Record<string, unknown>[]
+	)[0]!;
+	assert.ok(!("metadata" in item), "an absent field must not be sent as null");
+	assert.ok(!("observation_date" in item));
+	await client.close();
+});
+
+// They belong to the memory item shape, so the knowledge branch must reject
+// them rather than drop them — same rule as every other memory-only field.
+test("knowledge ingest rejects metadata rather than dropping it", async () => {
+	const { hydra } = mockHydra();
+	const client = await connect(hydra);
+	const result = await client.callTool({
+		name: "hydradb_ingest",
+		arguments: { text: "doc body", kind: "knowledge", metadata: { a: 1 } },
+	});
+
+	assert.equal(result.isError, true);
+	assert.match((result.content as { text: string }[])[0]!.text, /metadata/);
+	await client.close();
+});

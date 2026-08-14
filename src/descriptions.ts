@@ -79,6 +79,14 @@ const PARAM = {
 		"Whether ingesting with an existing source_id may replace what is stored there " +
 		"(default: true). Set false to have the server reject the write instead of " +
 		"overwriting, when you expect to be creating something new.",
+	metadata:
+		"Key/value metadata to store with this entry, as {key: value}. These are the " +
+		"keys hydradb_query's metadata_filters can match on later, so set them when you " +
+		"expect to narrow by them — e.g. {\"project\": \"hydradb\", \"kind\": \"decision\"}.",
+	observation_date:
+		"When the fact was true, as an RFC3339 date — distinct from when you stored it. " +
+		"Use it when saving something historical, so recency reflects the fact rather " +
+		"than the write.",
 	infer:
 		"Let Hydra DB extract insights and knowledge-graph entities from this text " +
 		"(default: true). Keep it true for anything about the user or their work — that " +
@@ -221,6 +229,8 @@ export const TOOL_DESCRIPTIONS = {
 			infer: PARAM.infer,
 			is_markdown: PARAM.is_markdown,
 			overwrite: PARAM.overwrite,
+			metadata: PARAM.metadata,
+			observation_date: PARAM.observation_date,
 			turns:
 				"The conversation to ingest, oldest first, as [{user, assistant}, ...]. Provide " +
 				"EXACTLY ONE of `text` or `turns` — passing both is an error, and so is passing " +
@@ -308,7 +318,15 @@ Take the id from hydradb_query or hydradb_list — never guess one. Confirm with
 			text: PARAM.text,
 			title: PARAM.title,
 			source_id: PARAM.source_id,
-			infer: PARAM.infer,
+			metadata:
+		"Key/value metadata to store with this entry, as {key: value}. These are the " +
+		"keys hydradb_query's metadata_filters can match on later, so set them when you " +
+		"expect to narrow by them — e.g. {\"project\": \"hydradb\", \"kind\": \"decision\"}.",
+	observation_date:
+		"When the fact was true, as an RFC3339 date — distinct from when you stored it. " +
+		"Use it when saving something historical, so recency reflects the fact rather " +
+		"than the write.",
+	infer: PARAM.infer,
 			is_markdown: PARAM.is_markdown,
 			overwrite: PARAM.overwrite,
 		},
