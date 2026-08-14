@@ -1728,3 +1728,77 @@ test("an empty listing still carries structured content", async () => {
 	assert.deepEqual(structured.items, []);
 	assert.equal(structured.has_more, false);
 });
+
+// Greptile, PR #48: the structured payload carried every memory_content in
+// full while the prose beside it showed 150 characters per row — so a host
+// consuming structured output got megabytes from a routine inventory call.
+// Structured output is a different encoding of the same answer, not a bypass
+// of its limits.
+test("structured list items are bounded like the text preview", async () => {
+	const { hydra } = mockHydra({
+		list: {
+			user_memories: Array.from({ length: 20 }, (_, i) => ({
+				memory_id: `m${i}`,
+				memory_content: "x".repeat(5000),
+			})),
+			total: 20,
+		},
+	});
+	const client = await connect(hydra);
+	const result = await client.callTool({
+		name: "hydradb_list",
+		arguments: { kind: "memory" },
+	});
+	await client.close();
+
+	const items = (result.structuredContent as { items: { content: string }[] }).items;
+	for (const item of items) {
+		assert.ok(
+			item.content.length <= 153,
+			`structured content must be previewed, got ${item.content.length} chars`,
+		);
+	}
+	assert.ok(JSON.stringify(items).length < 5000, "the whole payload must stay small");
+});
+
+// Silently picking one of two conflicting values means acting on a target the
+// caller did not ask for — and for delete, that target gets destroyed.
+test("hydradb_inspect rejects conflicting id and source_id", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+	const result = await client.callTool({
+		name: "hydradb_inspect",
+		arguments: { id: "wanted", source_id: "different" },
+	});
+	await client.close();
+
+	assert.equal(result.isError, true);
+	assert.match((result.content as { text: string }[])[0]!.text, /different values/);
+	assert.equal(calls.filter((c) => c.method === "inspect").length, 0);
+});
+
+test("matching id and source_id are accepted", async () => {
+	const { hydra, calls } = mockHydra({ inspect: { success: true, content: "body" } });
+	const client = await connect(hydra);
+	const result = await client.callTool({
+		name: "hydradb_inspect",
+		arguments: { id: "same", source_id: "same" },
+	});
+	await client.close();
+
+	assert.notEqual(result.isError, true);
+	assert.equal(calls.find((c) => c.method === "inspect")?.args.id, "same");
+});
+
+test("hydradb_list rejects conflicting ids and source_ids", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+	const result = await client.callTool({
+		name: "hydradb_list",
+		arguments: { kind: "memory", ids: ["a"], source_ids: ["b"] },
+	});
+	await client.close();
+
+	assert.equal(result.isError, true);
+	assert.equal(calls.filter((c) => c.method === "list").length, 0);
+});

@@ -607,7 +607,15 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			`${coverage(memories.length, page, args.page)} memories:\n\n${lines.join("\n")}`,
 			{
 				kind: "memory",
-				items: memories.map((m) => ({ id: m.memory_id, content: m.memory_content })),
+				// Bounded like the text preview. The structured payload previously
+				// carried every memory_content in full, so a host consuming it got
+				// megabytes from a routine inventory call while the prose beside it
+				// showed 150 characters per row. Structured output is a different
+				// encoding of the same answer, not a bypass of its limits.
+				items: memories.map((m) => ({
+					id: m.memory_id,
+					content: clampPreview(m.memory_content),
+				})),
 				shown: memories.length,
 				total: page.total ?? memories.length,
 				page: page.page ?? args.page ?? 1,
@@ -680,6 +688,20 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 	 * small enough that no single call can dominate a conversation.
 	 */
 	const INSPECT_CHAR_BUDGET = 20_000;
+
+	/**
+	 * The per-row preview length shared by the text and structured listings.
+	 *
+	 * They must agree: a caller reading `structuredContent` and a caller reading
+	 * the prose should get the same answer, not two different ones.
+	 */
+	const LIST_PREVIEW_CHARS = 150;
+
+	function clampPreview(text: string): string {
+		return text.length > LIST_PREVIEW_CHARS
+			? `${text.slice(0, LIST_PREVIEW_CHARS)}...`
+			: text;
+	}
 
 	/** Bound any one server-supplied string, marking it when it is shortened. */
 	function clamp(text: string, budget: number): string {
@@ -760,6 +782,16 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			offset?: number;
 			limit?: number;
 		};
+		// Reject a conflict rather than picking one. This server rejects `text`
+		// AND `turns` on ingest for the same reason: silently choosing between two
+		// values the caller deliberately supplied means acting on a target they
+		// did not ask for, and here that target can be a DELETE.
+		if (a.id != null && a.source_id != null && a.id !== a.source_id) {
+			throw new Error(
+				`${TOOL_NAMES.INSPECT} received different values for \`id\` (${a.id}) and its ` +
+				`deprecated alias \`source_id\` (${a.source_id}). Pass only \`id\`.`,
+			);
+		}
 		const id = a.id ?? a.source_id;
 		if (!id) {
 			throw new Error(
@@ -1328,6 +1360,16 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 				page?: number;
 				page_size?: number;
 			};
+			if (
+				a.ids != null &&
+				a.source_ids != null &&
+				JSON.stringify(a.ids) !== JSON.stringify(a.source_ids)
+			) {
+				throw new Error(
+					`${TOOL_NAMES.LIST} received different values for \`ids\` and its deprecated ` +
+					`alias \`source_ids\`. Pass only \`ids\`.`,
+				);
+			}
 			const ids = a.ids ?? a.source_ids;
 			if (a.kind === "knowledge") {
 				return runListSources(
