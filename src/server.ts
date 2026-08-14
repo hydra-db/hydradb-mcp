@@ -72,9 +72,34 @@ function resultNoun(kind: QueryKind, count?: number): string {
 	return one ? "context item" : "context items";
 }
 
+/**
+ * Input ceilings.
+ *
+ * `text` and `turns` were unbounded. The whole payload is materialised —
+ * `JSON.stringify` on the memory path, a Buffer on the knowledge path — so an
+ * oversized body is best case a 413 after uploading all of it, worst case an
+ * out-of-memory in this process. Rejecting locally is instant, costs no
+ * bandwidth, and names the limit.
+ *
+ * Sized well above any realistic memory or document this tool is asked to store.
+ */
+const MAX_TEXT_CHARS = 1_000_000;
+const MAX_TURNS = 500;
+const MAX_TURN_CHARS = 100_000;
+
 const turnSchema = z.object({
-	user: z.string().describe("The user's message"),
-	assistant: z.string().describe("The assistant's response"),
+	user: z
+		.string()
+		.max(MAX_TURN_CHARS, {
+			message: `each turn's user message must be at most ${MAX_TURN_CHARS} characters`,
+		})
+		.describe("The user's message"),
+	assistant: z
+		.string()
+		.max(MAX_TURN_CHARS, {
+			message: `each turn's assistant message must be at most ${MAX_TURN_CHARS} characters`,
+		})
+		.describe("The assistant's response"),
 });
 
 type ConversationTurn = { user: string; assistant: string };
@@ -730,7 +755,12 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 	};
 
 	const storeSchema = {
-		text: z.string().describe(TOOL_DESCRIPTIONS[TOOL_NAMES.STORE].params.text),
+		text: z
+			.string()
+			.max(MAX_TEXT_CHARS, {
+				message: `text must be at most ${MAX_TEXT_CHARS} characters`,
+			})
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.STORE].params.text),
 		title: z
 			.string()
 			.optional()
@@ -759,6 +789,9 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		// here (the `hydra_db_store` alias keeps it required).
 		text: z
 			.string()
+			.max(MAX_TEXT_CHARS, {
+				message: `text must be at most ${MAX_TEXT_CHARS} characters`,
+			})
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.text),
 		kind: z
@@ -768,6 +801,7 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		turns: z
 			.array(turnSchema)
 			.min(1)
+			.max(MAX_TURNS, { message: `at most ${MAX_TURNS} turns per ingest` })
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.turns),
 		user_name: z
@@ -780,6 +814,7 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		turns: z
 			.array(turnSchema)
 			.min(1)
+			.max(MAX_TURNS, { message: `at most ${MAX_TURNS} turns per ingest` })
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST_CONVERSATION].params.turns),
 		source_id: z
 			.string()

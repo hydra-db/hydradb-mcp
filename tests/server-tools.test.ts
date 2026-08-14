@@ -1055,3 +1055,59 @@ test("hydradb_inspect returns short content whole, with no truncation noise", as
 	assert.match(text, /a short document/);
 	assert.doesNotMatch(text, /truncated/);
 });
+
+// text and turns were unbounded. The whole payload is materialised before it is
+// sent, so an oversized body is best case a 413 after uploading all of it,
+// worst case an OOM in this process.
+test("hydradb_ingest rejects oversized text locally", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_ingest",
+		arguments: { text: "x".repeat(1_000_001) },
+	});
+
+	assert.equal(result.isError, true);
+	assert.match((result.content as { text: string }[])[0]!.text, /at most 1000000 characters/);
+	assert.equal(
+		calls.filter((c) => c.method === "ingest").length,
+		0,
+		"an oversized body must not be uploaded before being rejected",
+	);
+
+	await client.close();
+});
+
+test("hydradb_ingest rejects too many turns locally", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_ingest",
+		arguments: {
+			turns: Array.from({ length: 501 }, () => ({ user: "hi", assistant: "hello" })),
+		},
+	});
+
+	assert.equal(result.isError, true);
+	assert.match((result.content as { text: string }[])[0]!.text, /at most 500 turns/);
+	assert.equal(calls.filter((c) => c.method === "ingest").length, 0);
+
+	await client.close();
+});
+
+test("hydradb_ingest accepts a realistically large document", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_ingest",
+		arguments: { text: "x".repeat(500_000) },
+	});
+
+	assert.notEqual(result.isError, true, "the ceiling must not reject ordinary documents");
+	assert.equal(calls.filter((c) => c.method === "ingest").length, 1);
+
+	await client.close();
+});
