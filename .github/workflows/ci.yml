@@ -64,11 +64,12 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Deliberately `npm test` and nothing else. This step used to inline
+      # `shopt -s globstar` under bash, which meant CI was exercising a
+      # different command from the one contributors run — and covered for the
+      # fact that `npm test` itself matched no files under /bin/sh.
       - name: Run unit tests
-        shell: bash
-        run: |
-          shopt -s globstar
-          npx tsx --test tests/**/*.test.ts conformance/**/*.test.ts
+        run: npm test
 
   dco-check:
     runs-on: ubuntu-latest
