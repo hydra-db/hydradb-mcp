@@ -933,3 +933,40 @@ test("content that looks like a chunk header does not inflate the count", () => 
 	// The body itself is untouched — it is the caller's content.
 	assert.match(text, /Chunk 5 of the manual/);
 });
+
+// Greptile, PR #49: a `(same text as Chunk N)` pointer must always resolve.
+// Two ways it could dangle, both now impossible.
+test("a body pointer never aims forward, where truncation could remove it", () => {
+	// The LONGER body is second, so the naive rule would point chunk 1 forward
+	// at chunk 2 — and truncation drops from the end.
+	const long = "The user prefers tabs over spaces in every language they write.";
+	const out = buildRecalledContext({
+		chunks: [
+			{ chunk_uuid: "c1", source_id: "doc", chunk_content: "prefers tabs over spaces" },
+			{ chunk_uuid: "c2", source_id: "doc", chunk_content: long },
+		],
+	} as never);
+
+	assert.doesNotMatch(out, /same text as Chunk 2/, "a pointer must not aim forward");
+	// Both bodies are present rather than one pointing at something that may go.
+	assert.match(out, /prefers tabs over spaces/);
+	assert.match(out, /every language they write/);
+});
+
+test("compact rendering never collapses bodies into a pointer", () => {
+	const shared = "y".repeat(400);
+	const out = buildRecalledContext(
+		{
+			chunks: [
+				{ chunk_uuid: "c1", source_id: "doc", chunk_content: `${"x".repeat(2000)}${shared}` },
+				{ chunk_uuid: "c2", source_id: "doc", chunk_content: shared },
+			],
+		} as never,
+		{ maxChunkChars: 600 },
+	);
+
+	// The shared text sits past chunk 1's 600-character cut, so a pointer would
+	// promise content the rendered response does not contain.
+	assert.doesNotMatch(out, /same text as Chunk/);
+	assert.match(out, new RegExp(shared.slice(0, 50)), "the second body is rendered");
+});

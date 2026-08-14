@@ -158,6 +158,11 @@ function containedChunkIndices(
 				sourceIds[i] != null && sourceIds[i] === sourceIds[j];
 			if (!sameSource) continue;
 
+			// Point BACKWARDS only. Truncation drops sections from the end, so a
+			// pointer to an earlier chunk always resolves; one aimed forward can
+			// name a chunk the budget removed, leaving the caller told the text is
+			// in "Chunk 12" when there is no Chunk 12.
+			if (i >= j) continue;
 			// Keep the longer body; on an exact tie keep whichever ranked first.
 			const keepsI = a.length > b.length || (a.length === b.length && i < j);
 			if (keepsI && a.includes(b)) dropped.set(j, i + 1);
@@ -274,10 +279,17 @@ function render(
 
 	// Suppress chunks wholly contained in another chunk before rendering any of
 	// them, so the numbering reflects what the caller actually receives.
-	const contained = containedChunkIndices(
-		chunks.map((c) => extractChunkText(c.chunk_content)),
-		chunks.map((c) => c.source_id),
-	);
+	// Body collapsing is disabled when per-chunk trimming is on. Compact mode
+	// already caps each body, so the duplication it would remove is small — and
+	// the pointer could name a chunk whose RENDERED body was cut before the
+	// shared text, promising content no rendered chunk actually contains.
+	const contained =
+		maxChunkChars == null
+			? containedChunkIndices(
+					chunks.map((c) => extractChunkText(c.chunk_content)),
+					chunks.map((c) => c.source_id),
+				)
+			: new Map<number, number>();
 	// Extra context is deduped by CONTENT as well as by id: the same passage
 	// arrives under different ids, and an id-keyed check never notices.
 	// Maps a passage to the chunk number that already rendered it, so a later
