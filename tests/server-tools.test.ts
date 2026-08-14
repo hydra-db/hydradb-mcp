@@ -1569,3 +1569,64 @@ test("reads are read-only, writes are not, and only deletes are destructive", as
 
 	await client.close();
 });
+
+// CONTRACT §1 says a source's identifier field is `id`, but one concept was
+// spelled three ways across tools designed to chain: inspect took `source_id`,
+// list took `source_ids`, delete took `id`.
+test("hydradb_inspect accepts the canonical id and the old spelling", async () => {
+	for (const args of [{ id: "s1" }, { source_id: "s1" }]) {
+		const { hydra, calls } = mockHydra({ inspect: { success: true, content: "body" } });
+		const client = await connect(hydra);
+		const result = await client.callTool({ name: "hydradb_inspect", arguments: args });
+
+		assert.notEqual(result.isError, true, `should accept ${JSON.stringify(args)}`);
+		assert.equal(calls.find((c) => c.method === "inspect")?.args.id, "s1");
+		await client.close();
+	}
+});
+
+test("hydradb_inspect says where an id comes from when none is given", async () => {
+	const { hydra } = mockHydra();
+	const client = await connect(hydra);
+	const result = await client.callTool({ name: "hydradb_inspect", arguments: {} });
+
+	assert.equal(result.isError, true);
+	const text = (result.content as { text: string }[])[0]!.text;
+	assert.match(text, /requires `id`/);
+	assert.match(text, /hydradb_query|hydradb_list/);
+	await client.close();
+});
+
+test("hydradb_list accepts ids and the old source_ids spelling", async () => {
+	for (const key of ["ids", "source_ids"] as const) {
+		const { calls } = await listText(
+			{ user_memories: [], total: 0 },
+			{ kind: "memory", [key]: ["s1", "s2"] },
+		);
+		assert.deepEqual(calls.find((c) => c.method === "list")?.args.ids, ["s1", "s2"]);
+	}
+});
+
+// The query path marks truncation with "..."; the listing did not, so a caller
+// read a half sentence as a whole fact.
+test("hydradb_list marks a truncated memory row", async () => {
+	const { text } = await listText(
+		{
+			user_memories: [{ memory_id: "m1", memory_content: "x".repeat(300) }],
+			total: 1,
+		},
+		{ kind: "memory" },
+	);
+
+	assert.match(text, /x{150}\.\.\./, "a truncated row must say it was truncated");
+});
+
+test("hydradb_list does not add an ellipsis to a short row", async () => {
+	const { text } = await listText(
+		{ user_memories: [{ memory_id: "m1", memory_content: "short fact" }], total: 1 },
+		{ kind: "memory" },
+	);
+
+	assert.match(text, /\[m1\] short fact/);
+	assert.doesNotMatch(text, /short fact\.\.\./);
+});

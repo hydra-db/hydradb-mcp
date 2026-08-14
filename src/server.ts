@@ -543,9 +543,14 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			);
 		}
 
-		const lines = memories.map(
-			(m, i) => `${i + 1}. [${m.memory_id}] ${m.memory_content.slice(0, 150)}`,
-		);
+		const lines = memories.map((m, i) => {
+			// The query path appends "..." when it truncates; this one did not, so a
+			// half sentence read as a complete fact.
+			const content = m.memory_content;
+			const snippet =
+				content.length > 150 ? `${content.slice(0, 150)}...` : content;
+			return `${i + 1}. [${m.memory_id}] ${snippet}`;
+		});
 
 		return textResult(
 			`${coverage(memories.length, page, args.page)} memories:\n\n${lines.join("\n")}`,
@@ -665,6 +670,25 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		return (
 			`${slice}\n\n[truncated: showing characters ${start}-${end} of ${total}.${more}]`
 		);
+	}
+
+	/** Accept either spelling, and say so when neither is present. */
+	function toInspectArgs(args: Record<string, unknown>) {
+		const a = args as {
+			id?: string;
+			source_id?: string;
+			mode?: "content" | "url" | "both";
+			offset?: number;
+			limit?: number;
+		};
+		const id = a.id ?? a.source_id;
+		if (!id) {
+			throw new Error(
+				`${TOOL_NAMES.INSPECT} requires \`id\` — the value shown as [id: …] in ` +
+				`${TOOL_NAMES.QUERY} results or in [brackets] in ${TOOL_NAMES.LIST} output.`,
+			);
+		}
+		return { source_id: id, mode: a.mode, offset: a.offset, limit: a.limit };
 	}
 
 	async function runInspect(args: {
@@ -970,10 +994,14 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		kind: z
 			.enum(["memory", "knowledge"])
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.LIST].params.kind),
-		source_ids: z
+		ids: z
 			.array(z.string())
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.LIST].params.source_ids),
+		source_ids: z
+			.array(z.string())
+			.optional()
+			.describe("Deprecated alias for `ids`."),
 		page: z
 			.number()
 			.int()
@@ -997,9 +1025,18 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 	};
 
 	const inspectSchema = {
+		// CONTRACT §1 says a source's identifier field is `id`, but this surface
+		// spelled one concept three ways across tools meant to chain: inspect took
+		// `source_id`, list took `source_ids`, delete took `id`. `id` is canonical
+		// here; the old spelling stays accepted so nothing breaks.
+		id: z
+			.string()
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INSPECT].params.source_id),
 		source_id: z
 			.string()
-			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INSPECT].params.source_id),
+			.optional()
+			.describe("Deprecated alias for `id`."),
 		mode: z
 			.enum(["content", "url", "both"])
 			.optional()
@@ -1157,18 +1194,20 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		(args, extra) => {
 			const a = args as {
 				kind?: "memory" | "knowledge";
+				ids?: string[];
 				source_ids?: string[];
 				page?: number;
 				page_size?: number;
 			};
+			const ids = a.ids ?? a.source_ids;
 			if (a.kind === "knowledge") {
 				return runListSources(
-					{ source_ids: a.source_ids, page: a.page, page_size: a.page_size },
+					{ source_ids: ids, page: a.page, page_size: a.page_size },
 					extra?.signal,
 				);
 			}
 			return runListMemories(
-				{ source_ids: a.source_ids, page: a.page, page_size: a.page_size },
+				{ source_ids: ids, page: a.page, page_size: a.page_size },
 				extra?.signal,
 			);
 		},
@@ -1178,8 +1217,7 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 	register(
 		TOOL_NAMES.INSPECT,
 		inspectSchema,
-		(args, extra) =>
-			runInspect(args as Parameters<typeof runInspect>[0], extra?.signal),
+		(args, extra) => runInspect(toInspectArgs(args), extra?.signal),
 		readOnly,
 	);
 
@@ -1273,8 +1311,7 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 	register(
 		TOOL_NAMES.FETCH_CONTENT,
 		inspectSchema,
-		(args, extra) =>
-			runInspect(args as Parameters<typeof runInspect>[0], extra?.signal),
+		(args, extra) => runInspect(toInspectArgs(args), extra?.signal),
 		readOnly,
 	);
 
