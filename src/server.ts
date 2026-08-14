@@ -341,19 +341,24 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		// chunk while the list stopped at 10, so a 15-chunk result announced 15 and
 		// showed 10.
 		const compact = (args.detail ?? "compact") === "compact";
+		// The header and the legend are part of the response the caller pays for,
+		// so the renderer gets a budget with room already reserved for them.
+		// Adding framing after the ceiling had been applied put the finished
+		// response over the documented limit — the same mistake as leaving the
+		// entity-path prefix out of the accounting, one layer up.
+		const legend =
+			`\n\n---\nEach [id: …] is a source id: pass one to ${TOOL_NAMES.INSPECT} for that ` +
+			`source's full content, or to ${TOOL_NAMES.DELETE} to remove it.`;
+		const headerAllowance = 120;
+
 		const { text: contextStr, shown } = renderRecalledContext(res, {
 			// Compact keeps every chunk but trims each body and drops the
 			// extra-context blocks; `full` is the unchanged rendering.
 			...(compact
 				? { maxChunkChars: COMPACT_CHUNK_CHARS, includeExtraContext: false }
 				: {}),
-			maxTotalChars: QUERY_CHAR_BUDGET,
+			maxTotalChars: QUERY_CHAR_BUDGET - legend.length - headerAllowance,
 		});
-		// An id the caller cannot connect to anything is just noise, so name what
-		// accepts it. Without this the ids read as internal bookkeeping.
-		const legend =
-			`\n\n---\nEach [id: …] is a source id: pass one to ${TOOL_NAMES.INSPECT} for that ` +
-			`source's full content, or to ${TOOL_NAMES.DELETE} to remove it.`;
 
 		return textResult(
 			`Found ${shown} ${resultNoun(kind, shown)}:\n\n${contextStr}${legend}`,

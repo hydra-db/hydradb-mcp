@@ -1950,3 +1950,22 @@ test("max_results actually bounds what is rendered", async () => {
 	);
 	assert.match(text, /Found 3 /);
 });
+
+// Greptile, PR #49: the header and legend were appended after the renderer had
+// applied its ceiling, so the finished response exceeded the documented limit.
+test("the whole query response stays within the documented ceiling", async () => {
+	const text = await queryText(
+		{ query: "q", detail: "full", max_results: 50 },
+		longChunks(50, 5000),
+	);
+
+	// 40k is the documented ceiling for the response the caller receives, not
+	// for one component of it.
+	assert.ok(
+		text.length <= 40_000,
+		`the finished response must fit the ceiling, got ${text.length}`,
+	);
+	// The framing that has to fit is still present.
+	assert.match(text, /^Found \d+ /);
+	assert.match(text, /hydradb_inspect/);
+});

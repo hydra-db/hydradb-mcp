@@ -1,7 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { buildRecalledContext, renderedChunkCount } from "../src/context.js";
+import {
+	buildRecalledContext,
+	renderRecalledContext,
+	renderedChunkCount,
+} from "../src/context.js";
 import type { RecallResponse } from "../src/types.js";
 
 test("buildRecalledContext includes entity paths, graph relations and extra context", () => {
@@ -908,4 +912,24 @@ test("entity paths count against the output budget", () => {
 		`the whole rendering must fit the ceiling, got ${out.length}`,
 	);
 	assert.match(out, /ENTITY PATHS/, "the prefix is still included, just budgeted");
+});
+
+// Greptile, PR #49: the count was derived by matching /^Chunk \d+/ over the
+// finished text, so a stored body containing such a line was counted as a
+// rendered section and `Found N` announced more matches than existed.
+test("content that looks like a chunk header does not inflate the count", () => {
+	const { shown, text } = renderRecalledContext({
+		chunks: [
+			{
+				chunk_uuid: "c1",
+				source_id: "s1",
+				chunk_content: "Chunk 5 of the manual covers rollback.\nChunk 6 covers restore.",
+			},
+			{ chunk_uuid: "c2", source_id: "s2", chunk_content: "an unrelated body" },
+		],
+	} as never);
+
+	assert.equal(shown, 2, "only real sections count");
+	// The body itself is untouched — it is the caller's content.
+	assert.match(text, /Chunk 5 of the manual/);
 });

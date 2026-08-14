@@ -198,12 +198,23 @@ export function renderRecalledContext(
 	response: RecallResponse,
 	opts?: Parameters<typeof buildRecalledContext>[1],
 ): { text: string; shown: number } {
-	const text = buildRecalledContext(response, opts);
-	const shown = (text.match(/^Chunk \d+/gm) ?? []).length;
-	return { text, shown };
+	// The count comes from the renderer, which knows exactly how many sections it
+	// emitted. Deriving it by matching /^Chunk \d+/ over the finished text meant a
+	// stored body containing a line like "Chunk 5 of the manual" was counted as a
+	// rendered section, so `Found N` announced more matches than existed — the
+	// same header/body disagreement this PR removed, reintroduced by the fix for
+	// it.
+	return render(response, opts);
 }
 
 export function buildRecalledContext(
+	response: RecallResponse,
+	opts?: Parameters<typeof render>[1],
+): string {
+	return render(response, opts).text;
+}
+
+function render(
 	response: RecallResponse,
 	opts?: {
 		maxGroupOccurrences?: number;
@@ -218,7 +229,7 @@ export function buildRecalledContext(
 		/** Total character ceiling for the whole rendering. */
 		maxTotalChars?: number;
 	},
-): string {
+): { text: string; shown: number } {
 	const minScore = opts?.minEvidenceScore ?? 0.4;
 	const maxGroupOccurrences = opts?.maxGroupOccurrences;
 	const maxChunkChars = opts?.maxChunkChars;
@@ -522,13 +533,15 @@ export function buildRecalledContext(
 			used += cost;
 		}
 		const dropped = chunkSections.length - kept.length;
-		return (
-			`${head}=== CONTEXT ===\n${kept.join(separator)}\n\n` +
-			`[response truncated: showing ${kept.length} of ${chunkSections.length} chunks. ` +
-			`${dropped} omitted to stay within ${budget} characters. Narrow the query, lower ` +
-			`max_results, or fetch a specific source with hydradb_inspect.]`
-		);
+		return {
+			text:
+				`${head}=== CONTEXT ===\n${kept.join(separator)}\n\n` +
+				`[response truncated: showing ${kept.length} of ${chunkSections.length} chunks. ` +
+				`${dropped} omitted to stay within ${budget} characters. Narrow the query, lower ` +
+				`max_results, or fetch a specific source with hydradb_inspect.]`,
+			shown: kept.length,
+		};
 	}
-	return text;
+	return { text, shown: chunkSections.length };
 }
 
