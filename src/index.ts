@@ -4,7 +4,7 @@ import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { resolveConfig } from "./config.js";
 import { logger } from "./logger.js";
-import { createHydraDBServer } from "./server.js";
+import { awaitInFlight, createHydraDBServer, inFlightCount } from "./server.js";
 
 // Fail fast with a clean message if required config is missing. Honours the
 // canonical HYDRADB_* names (and the deprecated HYDRA_DB_* aliases).
@@ -67,6 +67,15 @@ function installLifecycle(server: Server) {
 		timer.unref();
 
 		try {
+			// Drain BEFORE closing. `server.close()` tears down the transport; it
+			// does not wait for handlers already running, so closing first would
+			// cut an accepted ingest off mid-write and leave the caller unable to
+			// tell whether it committed.
+			const pending = inFlightCount();
+			if (pending > 0) {
+				logger.info(`waiting for ${pending} in-flight tool call(s)`);
+				await awaitInFlight();
+			}
 			await server.close();
 		} catch (error) {
 			logger.error("error while closing the server", { error: describe(error) });

@@ -6,7 +6,12 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { HydraDBClient } from "@hydradb/sdk";
 
 import { HydraDB } from "../src/hydra/index.js";
-import { __resetAliasWarnings, createHydraDBServer } from "../src/server.js";
+import {
+	__resetAliasWarnings,
+	awaitInFlight,
+	createHydraDBServer,
+	inFlightCount,
+} from "../src/server.js";
 
 type RecordedCall = { method: string; args: Record<string, unknown> };
 
@@ -1185,4 +1190,83 @@ test("a successful delete is not flagged as an error", async () => {
 	);
 
 	assert.notEqual(isError, true);
+});
+
+// Greptile, PR #47: server.close() tears down the transport but does not wait
+// for handlers already running, so SIGTERM during an ingest killed the process
+// mid-write — and since a reused source_id replaces, "did it commit?" is not a
+// question the caller can settle by retrying.
+test("in-flight tool calls are tracked so shutdown can wait for them", async () => {
+	let release!: () => void;
+	const blocked = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+
+	const sdk = {
+		query: async () => {
+			await blocked;
+			return { data: { chunks: [] }, success: true };
+		},
+	} as unknown as HydraDBClient;
+
+	const client = await connect(new HydraDB({ token: "t", database: "db" }, sdk));
+
+	assert.equal(inFlightCount(), 0, "nothing should be in flight before the call");
+
+	const call = client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
+	// Let the handler start.
+	await new Promise((r) => setTimeout(r, 10));
+	assert.equal(inFlightCount(), 1, "the running call must be visible to shutdown");
+
+	// awaitInFlight must not resolve while the handler is still running.
+	let drained = false;
+	void awaitInFlight().then(() => {
+		drained = true;
+	});
+	await new Promise((r) => setTimeout(r, 10));
+	assert.equal(drained, false, "drain resolved while a call was still running");
+
+	release();
+	await call;
+	await new Promise((r) => setTimeout(r, 10));
+
+	assert.equal(inFlightCount(), 0);
+	assert.equal(drained, true, "drain must resolve once the last call finishes");
+
+	await client.close();
+});
+
+test("a failing tool call still decrements the in-flight count", async () => {
+	const sdk = {
+		query: () => Promise.reject(new Error("boom")),
+	} as unknown as HydraDBClient;
+	const client = await connect(new HydraDB({ token: "t", database: "db" }, sdk));
+
+	await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
+
+	assert.equal(
+		inFlightCount(),
+		0,
+		"a thrown handler must not leave the process permanently undrainable",
+	);
+	await client.close();
+});
+
+// Greptile, PR #47: the binary branch appended the server's summary without
+// applying the budget, so the path that exists to keep this response small
+// became its own way of blowing past it.
+test("hydradb_inspect bounds the binary summary too", async () => {
+	const text = await inspectText(
+		{
+			success: true,
+			contentBase64: "AAAA",
+			contentType: "application/pdf",
+			sizeBytes: 1024,
+			inferredContent: "y".repeat(60_000),
+		},
+		{ source_id: "s1" },
+	);
+
+	assert.ok(text.length < 25_000, `summary must obey the budget, got ${text.length} chars`);
+	assert.match(text, /truncated: 60000 chars total/);
 });

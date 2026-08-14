@@ -137,6 +137,41 @@ function warnDeprecatedAlias(name: string) {
 	);
 }
 
+/**
+ * In-flight tool calls, so shutdown can wait for them.
+ *
+ * `server.close()` tears down the transport; it does not wait for handlers that
+ * are already running. Without this, SIGTERM during an ingest kills the process
+ * mid-write and the caller never learns whether it committed — which, since a
+ * reused source_id replaces, is not a question they can answer by retrying.
+ *
+ * Module-scoped so it spans every server instance in the process, matching how
+ * the alias-warning dedupe is scoped.
+ */
+let inFlight = 0;
+const idleWaiters: (() => void)[] = [];
+
+function trackInFlight<T>(work: () => Promise<T>): Promise<T> {
+	inFlight++;
+	return work().finally(() => {
+		inFlight--;
+		if (inFlight === 0) {
+			while (idleWaiters.length > 0) idleWaiters.pop()?.();
+		}
+	});
+}
+
+/** Resolves once no tool call is running, or immediately if none is. */
+export function awaitInFlight(): Promise<void> {
+	if (inFlight === 0) return Promise.resolve();
+	return new Promise((resolve) => idleWaiters.push(resolve));
+}
+
+/** How many tool calls are currently running. Exported for tests and logging. */
+export function inFlightCount(): number {
+	return inFlight;
+}
+
 /** Test-only: reset the once-per-process alias warning dedupe. */
 export function __resetAliasWarnings() {
 	warnedAliases.clear();
@@ -498,6 +533,12 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 	 */
 	const INSPECT_CHAR_BUDGET = 20_000;
 
+	/** Bound any one server-supplied string, marking it when it is shortened. */
+	function clamp(text: string, budget: number): string {
+		if (text.length <= budget) return text;
+		return `${text.slice(0, budget)}\n\n[truncated: ${text.length} chars total]`;
+	}
+
 	/**
 	 * The readable part of an inspect response, bounded.
 	 *
@@ -530,8 +571,12 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		if (res.content == null || res.content === "") {
 			if (res.contentBase64) {
 				const size = res.sizeBytes != null ? `${res.sizeBytes} bytes` : "unknown size";
+				// The summary is server-generated and unbounded, so it has to obey
+				// the same budget as the content it stands in for — otherwise the
+				// binary branch, which exists to keep this response small, becomes
+				// its own way of blowing past it.
 				const summary = res.inferredContent
-					? `\n\nSummary of the content:\n${res.inferredContent}`
+					? `\n\nSummary of the content:\n${clamp(res.inferredContent, INSPECT_CHAR_BUDGET)}`
 					: "";
 				return (
 					`(binary ${res.contentType ?? "content"}, ${size} — not shown. ` +
@@ -730,12 +775,16 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 	) {
 		const desc = TOOL_DESCRIPTIONS[name];
 		const isDeprecated = (DEPRECATED_TOOL_NAMES as readonly string[]).includes(name);
+		const counted = (
+			args: Record<string, unknown>,
+			extra?: { signal?: AbortSignal },
+		) => trackInFlight(() => handler(args, extra));
 		const wrapped = isDeprecated
 			? (args: Record<string, unknown>, extra?: { signal?: AbortSignal }) => {
 					warnDeprecatedAlias(name);
-					return handler(args, extra);
+					return counted(args, extra);
 				}
-			: handler;
+			: counted;
 		server.registerTool(
 			name,
 			{
