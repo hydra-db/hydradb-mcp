@@ -364,7 +364,7 @@ test("buildRecalledContext prefers text over markdown in an envelope", () => {
 			{
 				chunk_uuid: "c1",
 				source_id: "s9",
-				chunk_content: '{"content":{"text":"plain body","markdown":"# md body"}}',
+				chunk_content: '{"id":"s9","content":{"text":"plain body","markdown":"# md body"}}',
 			},
 		],
 	} as never);
@@ -379,7 +379,7 @@ test("buildRecalledContext falls back to markdown when text is absent", () => {
 			{
 				chunk_uuid: "c1",
 				source_id: "s9",
-				chunk_content: '{"content":{"markdown":"# md body"}}',
+				chunk_content: '{"id":"s9","content":{"markdown":"# md body"}}',
 			},
 		],
 	} as never);
@@ -393,7 +393,7 @@ test("buildRecalledContext falls back to markdown when text is absent", () => {
 test("buildRecalledContext leaves non-envelope content untouched", () => {
 	for (const body of [
 		'{"not":"an envelope"}',
-		'{"content":"a string, not an object"}',
+		'{"id":"s9","content":"a string, not an object"}',
 		"{ this is not valid json }",
 		"a plain sentence about {braces}",
 	]) {
@@ -497,4 +497,38 @@ test("buildRecalledContext still drops low-scoring relations linked directly", (
 	} as never);
 
 	assert.doesNotMatch(out, /Bob/);
+});
+
+// Greptile, PR #46: a nested content.text was enough to trigger unwrapping, so a
+// legitimate JSON document with that shape lost every sibling and outer field.
+test("buildRecalledContext does not unwrap JSON that merely looks like an envelope", () => {
+	const stored = '{"content":{"text":"a fragment"},"author":"ada","tags":["x"]}';
+	const out = buildRecalledContext({
+		chunks: [{ chunk_uuid: "c1", source_id: "s9", chunk_content: stored }],
+	} as never);
+
+	// Without an identifying source field this is just a document the user
+	// stored, and it must survive intact.
+	assert.match(out, /author/);
+	assert.match(out, /tags/);
+	assert.ok(
+		out.includes(stored),
+		"a non-envelope document must be preserved verbatim, not reduced to content.text",
+	);
+});
+
+test("buildRecalledContext still unwraps a real envelope carrying an id", () => {
+	const out = buildRecalledContext({
+		chunks: [
+			{
+				chunk_uuid: "c1",
+				source_id: "s9",
+				chunk_content:
+					'{"id":"s9","tenant_id":"t","content":{"text":"the actual body"}}',
+			},
+		],
+	} as never);
+
+	assert.match(out, /the actual body/);
+	assert.doesNotMatch(out, /tenant_id/);
 });

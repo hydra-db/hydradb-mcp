@@ -37,7 +37,19 @@ function extractChunkText(chunkContent: string | undefined): string {
 	}
 	if (typeof parsed !== "object" || parsed === null) return trimmed;
 
-	const content = (parsed as { content?: unknown }).content;
+	// A nested `content.text` is not enough to call something an envelope. A
+	// user can legitimately store a JSON document that happens to have that
+	// shape, and unwrapping it would silently discard every sibling and outer
+	// field — turning a stored document into one of its fragments. Require an
+	// identifying field from the source record as well, so this only fires on
+	// what it was written for.
+	const record = parsed as Record<string, unknown>;
+	const looksLikeSource = ["id", "tenant_id", "source_id", "chunk_id"].some(
+		(key) => typeof record[key] === "string",
+	);
+	if (!looksLikeSource) return trimmed;
+
+	const content = record.content;
 	if (typeof content === "object" && content !== null) {
 		for (const key of ["text", "markdown"] as const) {
 			const value = (content as Record<string, unknown>)[key];
