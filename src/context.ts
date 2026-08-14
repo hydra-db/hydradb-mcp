@@ -51,39 +51,42 @@ function extractChunkText(chunkContent: string | undefined): string {
 	// The asymmetry is deliberate. Leaving a real envelope wrapped is ugly;
 	// unwrapping a real document destroys data.
 	const record = parsed as Record<string, unknown>;
-	const ENVELOPE_KEYS = new Set([
+	// Only SCOPING keys. These are identifiers the server stamps on a record;
+	// they carry nothing the user wrote, so discarding them loses nothing.
+	//
+	// The previous allowlist also contained `title`, `metadata`, `timestamp` and
+	// friends. Those ARE envelope fields, but they also carry user data — so a
+	// document with any of them populated was being reduced to its content.text
+	// and the rest silently dropped. Three rounds of narrowing the guess did not
+	// fix that, because the premise was wrong: the test cannot be "does this look
+	// like an envelope", it has to be "is there anything here to lose".
+	const SCOPING_KEYS = new Set([
 		"content",
 		"id",
 		"tenant_id",
 		"sub_tenant_id",
 		"source_id",
 		"chunk_id",
-		"source_type",
-		"source_title",
-		"title",
-		"metadata",
-		"additional_metadata",
-		"document_metadata",
-		"tenant_metadata",
-		"created_at",
-		"updated_at",
-		"timestamp",
 	]);
-	const hasUnknownSibling = Object.keys(record).some(
-		(key) => !ENVELOPE_KEYS.has(key),
-	);
-	if (hasUnknownSibling) return trimmed;
 
-	// And require a field that is unambiguously OURS. `id` is not — a user's own
-	// document can easily carry one, and so can `title` or `timestamp`, all of
-	// which are in the allowlist above. `tenant_id`/`sub_tenant_id` are internal
-	// scoping fields the server stamps on; a document someone wrote by hand does
-	// not have them.
-	//
-	// If a future envelope arrives without them we simply stop unwrapping it, and
-	// the content is rendered as JSON — visible, ugly, and recoverable. That is
-	// the direction to fail in: the opposite mistake deletes someone's data with
-	// no trace.
+	// Any other key holding an actual value means this is someone's document.
+	// Empty strings, nulls and empty objects are not data, so a bare envelope
+	// carrying `"title": ""` still unwraps.
+	const hasData = (value: unknown): boolean => {
+		if (value == null) return false;
+		if (typeof value === "string") return value.trim() !== "";
+		if (Array.isArray(value)) return value.length > 0;
+		if (typeof value === "object") return Object.keys(value).length > 0;
+		return true;
+	};
+	const wouldLoseSomething = Object.entries(record).some(
+		([key, value]) => !SCOPING_KEYS.has(key) && hasData(value),
+	);
+	if (wouldLoseSomething) return trimmed;
+
+	// And require a field that is unambiguously OURS. `id` alone is not — a
+	// user's own document can carry one. `tenant_id`/`sub_tenant_id` are internal
+	// scoping fields the server stamps on; a hand-written document has neither.
 	const looksLikeSource = ["tenant_id", "sub_tenant_id"].some(
 		(key) => typeof record[key] === "string",
 	);

@@ -552,16 +552,51 @@ test("buildRecalledContext keeps a document that has an id but also unknown fiel
 	assert.match(out, /owner/);
 });
 
-// The inverse must still work: a real envelope carries only known fields, so
-// unwrapping it loses nothing.
-test("buildRecalledContext unwraps an envelope whose every sibling is known", () => {
+// The inverse must still work. This is the envelope shape observed from the live
+// API: scoping identifiers and the content, nothing else — so unwrapping it
+// provably loses nothing.
+test("buildRecalledContext unwraps an envelope of pure scoping fields", () => {
 	const out = buildRecalledContext({
 		chunks: [
 			{
 				chunk_uuid: "c1",
 				source_id: "s9",
 				chunk_content:
-					'{"id":"s9","tenant_id":"t","sub_tenant_id":"c","source_type":"file","created_at":"2026-01-01","content":{"text":"the actual body"}}',
+					'{"id":"s9","tenant_id":"t","sub_tenant_id":"c","content":{"text":"the actual body"}}',
+			},
+		],
+	} as never);
+
+	assert.match(out, /the actual body/);
+	assert.doesNotMatch(out, /tenant_id/);
+});
+
+// Greptile, PR #46 (fourth pass): `title`, `metadata` and `timestamp` are
+// envelope field names AND places user data lives. A record carrying any of
+// them populated must be left alone, because unwrapping would discard exactly
+// that data.
+test("a record with populated non-scoping fields is never unwrapped", () => {
+	for (const doc of [
+		'{"id":"s9","tenant_id":"t","title":"Q3 report","content":{"text":"body"}}',
+		'{"tenant_id":"t","timestamp":"2026-01-01","content":{"text":"body"}}',
+		'{"tenant_id":"t","metadata":{"team":"platform"},"content":{"text":"body"}}',
+	]) {
+		const out = buildRecalledContext({
+			chunks: [{ chunk_uuid: "c1", source_id: "s9", chunk_content: doc }],
+		} as never);
+		assert.ok(out.includes(doc), `must survive verbatim: ${doc}`);
+	}
+});
+
+// Empty values are not data, so they do not block unwrapping.
+test("an envelope with empty non-scoping fields still unwraps", () => {
+	const out = buildRecalledContext({
+		chunks: [
+			{
+				chunk_uuid: "c1",
+				source_id: "s9",
+				chunk_content:
+					'{"id":"s9","tenant_id":"t","title":"","metadata":{},"content":{"text":"the actual body"}}',
 			},
 		],
 	} as never);
