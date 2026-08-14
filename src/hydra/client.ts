@@ -223,6 +223,9 @@ abstract class Resource {
 }
 
 export class ContextResource extends Resource {
+	// The base constructor is `protected`, so this one is what makes the class
+	// instantiable from outside the file. Removing it fails with TS2674.
+	// biome-ignore lint/complexity/noUselessConstructor: widens visibility
 	constructor(sdk: HydraDBClient, database: string, collection?: string) {
 		super(sdk, database, collection);
 	}
@@ -416,6 +419,9 @@ export class ContextResource extends Resource {
 }
 
 export class DatabasesResource extends Resource {
+	// The base constructor is `protected`, so this one is what makes the class
+	// instantiable from outside the file. Removing it fails with TS2674.
+	// biome-ignore lint/complexity/noUselessConstructor: widens visibility
 	constructor(sdk: HydraDBClient, database: string, collection?: string) {
 		super(sdk, database, collection);
 	}

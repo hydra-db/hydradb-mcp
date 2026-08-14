@@ -29,6 +29,12 @@ jobs:
       - name: Run type check
         run: npm run check-types
 
+      # This job was named `lint` and ran no linter — for a public repo taking
+      # contributions, that meant style and correctness rules were unenforced
+      # while the job name implied otherwise.
+      - name: Run linter
+        run: npm run lint
+
   build:
     runs-on: ubuntu-latest
     strategy:
