@@ -275,3 +275,115 @@ test(
 		);
 	},
 );
+
+// `upsert` is hardcoded true on both ingest paths, and PARAM.source_id tells the
+// model to "use this as your session ID or any other unique identifier for a
+// conversation". Whether following that instruction is safe depends entirely on
+// what upsert does to a reused source_id — and nothing pinned it: not
+// CONTRACT.md, not conformance/vectors.json, not this file.
+//
+// It REPLACES. A second ingest under the same source_id destroys the first, and
+// the tool still answers "1 success, 0 failed". That is a data-loss path reached
+// by following our own documentation, so it gets a regression test rather than a
+// comment.
+//
+// Two things this test has to get right, both of which a naive version gets
+// wrong:
+//   - Row count cannot answer the question. The listing is per SOURCE, so it
+//     returns exactly one row whether the second ingest replaced or appended.
+//     Only the source's CONTENT distinguishes them.
+//   - The read must happen after a terminal indexingStatus. Reading straight
+//     after ingest returns the previous generation's content and "proves"
+//     whichever answer the race happens to produce.
+//
+// `infer: false` keeps the text verbatim so the markers survive into storage;
+// with inference on, the server stores extracted insights and neither marker is
+// guaranteed to appear literally.
+test(
+	"live: reusing a source_id REPLACES the previous memory, it does not append",
+	{ skip: skipReason },
+	async () => {
+		const hydra = client();
+		const id = marker();
+		const sourceId = `mcp-e2e-upsert-${id}`;
+		const ALPHA = `UPSERT-ALPHA-${id}`;
+		const BRAVO = `UPSERT-BRAVO-${id}`;
+
+		async function ingestVerbatim(text: string) {
+			const res = await hydra.context.ingest({
+				kind: "memory",
+				text,
+				sourceId,
+				title: `Upsert probe ${id}`,
+				infer: false,
+				upsert: true,
+			});
+			assert.equal(res.success, true, `ingest failed: ${res.message}`);
+			return res;
+		}
+
+		async function awaitIndexed(label: string) {
+			let lastStatus: string | undefined;
+			const indexed = await pollUntil(`${label} reaches a terminal status`, async () => {
+				const batch = await hydra.context.ingestionStatus({ ids: [sourceId] });
+				const status = batch.statuses?.find((s) => s.id === sourceId);
+				assert.notEqual(
+					status?.indexingStatus,
+					"failed",
+					`ingestion failed for ${sourceId}: ${status?.errorMessage ?? status?.errorCode}`,
+				);
+				if (status?.indexingStatus !== lastStatus) {
+					lastStatus = status?.indexingStatus;
+					console.error(`[live] ${label} indexingStatus=${lastStatus}`);
+				}
+				return {
+					value: status?.indexingStatus === "completed" ? status : null,
+					observed: batch,
+				};
+			});
+			assert.ok(
+				indexed.value,
+				`${label}: ${sourceId} never reached indexingStatus=completed within ${INDEX_TIMEOUT_MS}ms`,
+			);
+		}
+
+		async function readBack(label: string): Promise<string> {
+			const fetched = await pollUntil(`${label} inspect returns content`, async () => {
+				const res = await hydra.context.inspect({ id: sourceId, mode: "content" });
+				return { value: res.success ? res : null, observed: res };
+			});
+			assert.ok(fetched.value, `${label}: inspect(${sourceId}) never succeeded`);
+			return String(fetched.value.content ?? fetched.value.contentBase64 ?? "");
+		}
+
+		await ingestVerbatim(`${ALPHA} the user prefers tabs over spaces.`);
+		await awaitIndexed("first ingest");
+		const afterAlpha = await readBack("first ingest");
+		assert.ok(
+			afterAlpha.includes(ALPHA),
+			`first ingest never became readable — the test cannot judge upsert without it. Got: ${afterAlpha.slice(0, 200)}`,
+		);
+
+		await ingestVerbatim(`${BRAVO} the user deploys only on Tuesday and Thursday.`);
+		await awaitIndexed("second ingest");
+		const afterBravo = await readBack("second ingest");
+
+		assert.ok(
+			afterBravo.includes(BRAVO),
+			`second ingest under the same source_id never landed. Got: ${afterBravo.slice(0, 200)}`,
+		);
+		assert.ok(
+			!afterBravo.includes(ALPHA),
+			"reusing a source_id APPENDED rather than replaced — upsert semantics have changed. " +
+				"This inverts the guidance in PARAM.source_id and the correction path built on it; " +
+				`re-read both before changing this assertion. Got: ${afterBravo.slice(0, 300)}`,
+		);
+
+		const deleted = await hydra.context.delete({ ids: [sourceId], kind: "memory" });
+		assert.equal(
+			deleted.success,
+			true,
+			`cleanup delete failed for ${sourceId}: ${JSON.stringify(deleted)}`,
+		);
+	},
+);
