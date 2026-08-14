@@ -956,3 +956,45 @@ test("hydradb_status says when everything is settled", async () => {
 	);
 	await client.close();
 });
+
+// Greptile, PR #46: on a non-first FINAL page, `total > shown` is still true
+// (12 shown of 412) and was advertising a page that does not exist.
+test("hydradb_list does not advertise a next page on the last page", async () => {
+	const { text } = await listText({
+		user_memories: Array.from({ length: 12 }, (_, i) => ({
+			memory_id: `m${i}`,
+			memory_content: "x",
+		})),
+		total: 412,
+		pagination: { page: 9, page_size: 50, total_pages: 9, has_next: false },
+	}, { page: 9 });
+
+	assert.match(text, /12 of 412 \(page 9\)/);
+	assert.doesNotMatch(text, /page=10/, "there is no page 10");
+	assert.doesNotMatch(text, /for more/);
+});
+
+// Same shape, but the server sent no has_next — the page arithmetic has to
+// reach the same conclusion.
+test("hydradb_list infers the last page from total_pages when has_next is absent", async () => {
+	const { text } = await listText({
+		user_memories: [{ memory_id: "m1", memory_content: "x" }],
+		total: 412,
+		pagination: { page: 9, page_size: 50, total_pages: 9 },
+	}, { page: 9 });
+
+	assert.doesNotMatch(text, /for more/);
+});
+
+test("hydradb_list still advertises a next page in the middle of a corpus", async () => {
+	const { text } = await listText({
+		user_memories: Array.from({ length: 50 }, (_, i) => ({
+			memory_id: `m${i}`,
+			memory_content: "x",
+		})),
+		total: 412,
+		pagination: { page: 2, page_size: 50, total_pages: 9, has_next: true },
+	}, { page: 2 });
+
+	assert.match(text, /page=3 for more/);
+});

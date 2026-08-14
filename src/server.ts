@@ -356,13 +356,20 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 	function coverage(shown: number, page: PageInfo, requestedPage?: number): string {
 		const total = page.total ?? shown;
 		const current = page.page ?? requestedPage ?? 1;
-		if (total <= shown && page.has_next !== true && current === 1) {
-			return `${shown}`;
-		}
-		const more =
-			page.has_next === true || total > shown
-				? ` — pass page=${current + 1} for more`
-				: "";
+
+		// `total > shown` is NOT a usable "more exists" test on its own: on the
+		// last page of a large corpus it is still true (12 shown of 412) and would
+		// point the caller at a page that does not exist. Prefer what the server
+		// stated, then the page arithmetic, and only then the row comparison —
+		// which is correct on page 1, the only place it is reached.
+		const seen = (current - 1) * (page.page_size ?? shown) + shown;
+		const hasMore =
+			page.has_next ??
+			(page.total_pages != null ? current < page.total_pages : seen < total);
+
+		if (!hasMore && current === 1) return `${shown}`;
+
+		const more = hasMore ? ` — pass page=${current + 1} for more` : "";
 		return `${shown} of ${total} (page ${current})${more}`;
 	}
 
