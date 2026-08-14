@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -34,6 +35,26 @@ const { version: SERVER_VERSION } = require("../package.json") as {
 type ToolResult = {
 	content: { type: "text"; text: string }[];
 };
+
+/**
+ * A source id for a conversation the caller did not name.
+ *
+ * This was `mcp-conversation-${Date.now()}` — millisecond resolution, no
+ * randomness, no process or session identity. Two ingests landing in the same
+ * millisecond produced the same id, and because `upsert` is true the second
+ * silently REPLACED the first (see the upsert regression test) while reporting
+ * "success: 1, failed: 0". Nothing surfaced the loss.
+ *
+ * The collision window is wider than one agent racing itself: HYDRADB_COLLECTION
+ * defaults to the shared literal `hydra-db-mcp`, so every user who does not set
+ * it shares one namespace with a low-entropy id.
+ *
+ * The timestamp prefix is kept because it sorts and reads well; the suffix is
+ * what makes it unique.
+ */
+function generatedSourceId(): string {
+	return `mcp-conversation-${Date.now()}-${randomUUID().slice(0, 8)}`;
+}
 
 function textResult(text: string): ToolResult {
 	return { content: [{ type: "text" as const, text }] };
@@ -668,7 +689,7 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			);
 		}
 		if (a.turns != null && a.turns.length > 0) {
-			const sourceId = a.source_id ?? `mcp-conversation-${Date.now()}`;
+			const sourceId = a.source_id ?? generatedSourceId();
 			// Forward every option the canonical schema accepts so none is
 			// silently dropped on the conversation path.
 			return runIngestConversation(a.turns, sourceId, {

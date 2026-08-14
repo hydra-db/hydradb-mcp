@@ -613,3 +613,57 @@ test("hydradb_list omits ids entirely when source_ids is not given", async () =>
 
 	assert.equal(calls.find((c) => c.method === "list")?.args.ids, undefined);
 });
+
+// `mcp-conversation-${Date.now()}` collides for two ingests in the same
+// millisecond, and because upsert is true the second REPLACES the first while
+// reporting success. Nothing surfaces the loss.
+test("generated conversation source ids do not collide within a millisecond", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	// Issued concurrently so they land in the same millisecond on any machine
+	// fast enough to matter — which is the case the old id could not survive.
+	await Promise.all(
+		Array.from({ length: 20 }, () =>
+			client.callTool({
+				name: "hydradb_ingest",
+				arguments: { turns: [{ user: "hi", assistant: "hello" }] },
+			}),
+		),
+	);
+
+	const ids = calls
+		.filter((c) => c.method === "ingest")
+		.map((c) => {
+			const item = (JSON.parse(String(c.args.memories)) as Record<string, unknown>[])[0]!;
+			return String(item.source_id);
+		});
+
+	assert.equal(ids.length, 20);
+	assert.equal(new Set(ids).size, 20, "every generated source id must be distinct");
+	for (const id of ids) {
+		assert.match(id, /^mcp-conversation-\d+-[0-9a-f]{8}$/);
+	}
+
+	await client.close();
+});
+
+test("an explicit source_id is still used verbatim", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	await client.callTool({
+		name: "hydradb_ingest",
+		arguments: {
+			turns: [{ user: "hi", assistant: "hello" }],
+			source_id: "session-42",
+		},
+	});
+
+	const item = (
+		JSON.parse(String(calls.find((c) => c.method === "ingest")!.args.memories)) as Record<string, unknown>[]
+	)[0]!;
+	assert.equal(item.source_id, "session-42");
+
+	await client.close();
+});
