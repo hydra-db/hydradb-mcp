@@ -1111,3 +1111,78 @@ test("hydradb_ingest accepts a realistically large document", async () => {
 
 	await client.close();
 });
+
+
+/** Call a tool and return both the rendered text and the isError flag. */
+async function callRaw(
+	responses: Responses,
+	name: string,
+	args: Record<string, unknown>,
+): Promise<{ text: string; isError: unknown }> {
+	const { hydra } = mockHydra(responses);
+	const client = await connect(hydra);
+	const result = await client.callTool({ name, arguments: args });
+	await client.close();
+	return {
+		text: (result.content as { text: string }[])[0]?.text ?? "",
+		isError: result.isError,
+	};
+}
+
+// Three contracts for "it didn't work" used to coexist: thrown errors became
+// isError:true, while a failed inspect and a server-REFUSED delete returned
+// plain text with isError absent. A client branching on isError read
+// "Could NOT delete X - the server refused" as a success.
+test("a failed inspect is flagged as an error", async () => {
+	const { text, isError } = await callRaw(
+		{ inspect: { success: false, error: "source not found" } },
+		"hydradb_inspect",
+		{ source_id: "missing" },
+	);
+
+	assert.equal(isError, true);
+	// The wording is deliberate and survives the flag — a thrown error would
+	// replace it with something generic.
+	assert.match(text, /Could not fetch source missing: source not found/);
+});
+
+test("a server-refused delete is flagged as an error", async () => {
+	const { text, isError } = await callRaw(
+		{
+			delete: {
+				success: false,
+				message: "Source is still processing; retry deletion after ingestion completes",
+				deletedCount: 0,
+				results: [{ id: "s1", error: "Source is still processing" }],
+			},
+		},
+		"hydradb_delete",
+		{ id: "s1", kind: "knowledge" },
+	);
+
+	assert.equal(isError, true);
+	assert.match(text, /Could NOT delete/);
+});
+
+// The benign case is NOT an error: the server succeeded, the id simply is not
+// there. Flagging it would push callers to retry something that cannot succeed.
+test("a delete that found nothing is not flagged as an error", async () => {
+	const { text, isError } = await callRaw(
+		{ delete: { success: true, deletedCount: 0 } },
+		"hydradb_delete",
+		{ id: "mem-1" },
+	);
+
+	assert.notEqual(isError, true);
+	assert.match(text, /nothing was deleted/i);
+});
+
+test("a successful delete is not flagged as an error", async () => {
+	const { isError } = await callRaw(
+		{ delete: { success: true, userMemoryDeleted: 1 } },
+		"hydradb_delete",
+		{ id: "mem-1" },
+	);
+
+	assert.notEqual(isError, true);
+});

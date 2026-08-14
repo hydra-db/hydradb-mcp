@@ -34,6 +34,7 @@ const { version: SERVER_VERSION } = require("../package.json") as {
 
 type ToolResult = {
 	content: { type: "text"; text: string }[];
+	isError?: boolean;
 };
 
 /**
@@ -58,6 +59,23 @@ function generatedSourceId(): string {
 
 function textResult(text: string): ToolResult {
 	return { content: [{ type: "text" as const, text }] };
+}
+
+/**
+ * A failure the caller should treat as a failure, not a result.
+ *
+ * Three different contracts for "it didn\'t work" used to coexist here: thrown
+ * errors became `isError: true`, while a failed inspect and a server-REFUSED
+ * delete returned plain text with `isError` absent. A client branching on
+ * `isError` therefore read "Could NOT delete X — the server refused" as a
+ * success.
+ *
+ * These stay soft text rather than throws, deliberately — the message is
+ * carefully worded and a thrown error would replace it with a generic one — but
+ * they are now flagged.
+ */
+function errorResult(text: string): ToolResult {
+	return { content: [{ type: "text" as const, text }], isError: true };
 }
 
 /**
@@ -555,7 +573,7 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 
 		// Soft failure: return a normal (non-error) text result, matching v1.
 		if (!res.success || res.error) {
-			return textResult(
+			return errorResult(
 				`Could not fetch source ${args.source_id}: ${res.error ?? "unknown error"}`,
 			);
 		}
@@ -641,7 +659,7 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 
 		if (res.success === false) {
 			const reason = deleteFailureReason(res);
-			return textResult(
+			return errorResult(
 				`Could NOT delete ${noun} ${id} — the server refused the request` +
 					`${reason ? `: ${reason}` : " and gave no reason"}. ` +
 					`The ${noun} has not been removed.`,
