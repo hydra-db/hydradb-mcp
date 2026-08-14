@@ -4,72 +4,127 @@ MCP (Model Context Protocol) server for [Hydra DB](https://hydradb.com), the sta
 
 ## Available Tools
 
-The tool names follow the canonical HydraDB vocabulary. Every previous name still
-works as a **deprecated alias** (marked as such in its description) so existing
-`mcp.json` files keep working — but new integrations should use the canonical
-names below.
-
-| Canonical tool | Deprecated alias(es) |
+| Tool | What it does |
 |---|---|
-| `hydradb_query` | `hydra_db_search` |
-| `hydradb_ingest` | `hydra_db_store`, `hydra_db_ingest_conversation` |
-| `hydradb_list` | `hydra_db_list_memories`, `hydra_db_list_sources` |
-| `hydradb_inspect` | `hydra_db_fetch_content` |
-| `hydradb_delete` | `hydra_db_delete_memory` |
+| `hydradb_query` | Search memories and knowledge together, with knowledge-graph context |
+| `hydradb_ingest` | Save a note, a document, or a conversation |
+| `hydradb_list` | Enumerate one family — every memory, or every knowledge source |
+| `hydradb_inspect` | Fetch one source's full content by id |
+| `hydradb_delete` | Remove one or more items by id, irreversibly |
+| `hydradb_status` | Check whether an ingested source has finished indexing |
+
+Ids flow between these: `hydradb_query` and `hydradb_list` emit them;
+`hydradb_inspect`, `hydradb_delete` and `hydradb_status` accept them.
+
+### Deprecated aliases
+
+The previous `hydra_db_*` tool names are **no longer registered by default** as
+of 1.2.0. If your `mcp.json` still calls them, set:
+
+```
+HYDRADB_MCP_LEGACY_TOOLS=1
+```
+
+| Deprecated alias | Use instead |
+|---|---|
+| `hydra_db_search` | `hydradb_query` |
+| `hydra_db_store`, `hydra_db_ingest_conversation` | `hydradb_ingest` |
+| `hydra_db_list_memories`, `hydra_db_list_sources` | `hydradb_list` |
+| `hydra_db_fetch_content` | `hydradb_inspect` |
+| `hydra_db_delete_memory` | `hydradb_delete` |
 
 ### **hydradb_query**
 
-Search through Hydra DB memories. Returns relevant chunks with graph-enriched context including entity paths and knowledge graph relations.
+Searches **both** memories and ingested knowledge sources. Returns matching
+chunks with their source id, a relevance score, and knowledge-graph context.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `query` | string | Yes | The search query to find relevant memories |
-| `max_results` | number | No | Maximum number of memory chunks to return (1-50, default: 10) |
-| `mode` | string | No | Recall mode: `fast` for quick semantic search, `thinking` for deeper personalised recall with graph traversal (default: `thinking`) |
-| `graph_context` | boolean | No | Whether to include knowledge graph relations in results (default: true) |
+| `query` | string | Yes | What you want to know, as a question or topic |
+| `kind` | string | No | `memory`, `knowledge`, or `all` (default: `all`) |
+| `max_results` | number | No | Maximum chunks to return (1-50, default: 10) |
+| `mode` | string | No | `fast`, `thinking` (default), or `auto` |
+| `detail` | string | No | `compact` (default) trims each chunk; `full` returns them whole |
+| `graph_context` | boolean | No | Include knowledge-graph relations (default: true) |
+| `operator` | string | No | `or` (default), `and`, or `phrase` for exact strings |
+| `source_ids` | array | No | Restrict the search to these sources |
+| `metadata_filters` | object | No | Exact-match filters over stored metadata |
+| `num_related_chunks` | number | No | Adjacent chunks to attach per match (0-5, default: 0) |
 
 ### **hydradb_ingest**
 
-Save information to Hydra DB memory. Hydra DB automatically extracts insights, preferences, and builds a knowledge graph from the stored content. Provide `text` to store a note/document, or `turns` to ingest a conversation.
+Saves information so it outlives the session. Provide **exactly one** of `text`
+or `turns`.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `text` | string | No\* | The information to store in memory |
-| `title` | string | No | Title for the memory entry (default: `MCP Memory`) |
-| `source_id` | string | No | Source identifier to group related memories together (e.g. session ID) |
-| `infer` | boolean | No | Whether Hydra DB should extract insights and build knowledge graph (default: true) |
-| `is_markdown` | boolean | No | Whether the text is in markdown format (default: false) |
-| `turns` | array | No\* | Conversation turns (each with a `user` and `assistant` field) to ingest instead of `text` |
-| `user_name` | string | No | Name of the user for personalisation, used with `turns` (default: `User`) |
+| `text` | string | No\* | A note, fact, decision, or document body |
+| `turns` | array | No\* | Conversation turns, each with `user` and `assistant` |
+| `kind` | string | No | `memory` (default) or `knowledge` for a document |
+| `title` | string | No | Label shown in later search results — always set it |
+| `source_id` | string | No | Identifier for this entry. **Reusing one REPLACES what is stored under it** |
+| `overwrite` | boolean | No | Allow that replacement (default: true) |
+| `infer` | boolean | No | Extract insights and graph entities (default: true) |
+| `is_markdown` | boolean | No | Chunk on markdown structure (default: false) |
+| `metadata` | object | No | Key/value metadata, matchable later via `metadata_filters` |
+| `observation_date` | string | No | When the fact was true (RFC3339), vs when it was stored |
+| `user_name` | string | No | What to call the user, used with `turns` (default: `User`) |
 
-\* Provide exactly one of `text` or `turns`.
+\* Passing both is an error; passing neither is an error.
+
+Ingestion is **asynchronous** — content is not searchable the instant it is
+saved. Use `hydradb_status` to confirm.
 
 ### **hydradb_list**
 
-List stored memories or ingested knowledge sources in Hydra DB.
+Enumerates one family at a time. These are separate corpora: listing memories
+tells you nothing about which knowledge sources exist.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `kind` | string | No | Which family to list: `memory` or `knowledge` (default: `memory`) |
-| `source_ids` | array | No | For `knowledge`, an array of specific source IDs to filter by. If omitted, lists all |
+| `kind` | string | **Yes** | `memory` or `knowledge` |
+| `ids` | array | No | Restrict to these ids |
+| `source_ids` | array | No | Deprecated alias for `ids` |
+| `page` | number | No | Page to return, 1-indexed (default: 1) |
+| `page_size` | number | No | Items per page (1-100) |
+
+The response reports how many of the total it showed and how to reach the rest.
 
 ### **hydradb_inspect**
 
-Fetch the full content of a specific source by its source ID.
+Fetches one source's full content by id.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `source_id` | string | Yes | The source ID to fetch content for |
-| `mode` | string | No | Fetch mode: `content` for text, `url` for presigned URL, `both` for both (default: `content`) |
+| `id` | string | Yes | The source id, from `hydradb_query` or `hydradb_list` |
+| `source_id` | string | No | Deprecated alias for `id` |
+| `mode` | string | No | `content` (default), `url` for a download link, or `both` |
+| `offset` | number | No | Character offset to read from (default: 0) |
+| `limit` | number | No | Maximum characters to return (max 20000) |
+| `expiry_seconds` | number | No | How long a `url` link stays valid |
+
+Long sources come back in slices, and binary sources are never inlined — you get
+their type and size, and `mode: "url"` returns a download link.
 
 ### **hydradb_delete**
 
-Delete a memory or knowledge source from Hydra DB by its ID. This action is irreversible.
+Removes items by id. Irreversible.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `id` | string | Yes | The ID of the item to delete |
-| `kind` | string | No | Which family the ID belongs to: `memory` or `knowledge` (default: `memory`) |
+| `ids` | array | No\* | The ids to delete — accepts several at once |
+| `id` | string | No\* | A single id |
+| `kind` | string | No | `memory` (default) or `knowledge` |
+
+\* Provide one of them.
+
+### **hydradb_status**
+
+Checks whether ingested sources have finished indexing.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `ids` | array | Yes | The source ids to check |
 
 ## Configuration
 
@@ -87,6 +142,9 @@ Delete a memory or knowledge source from Hydra DB by its ID. This action is irre
 | `HYDRADB_COLLECTION` | Collection (sub-tenant) for partitioning | `hydra-db-mcp`        |
 | `HYDRADB_BASE_URL`   | Base URL override                    | `https://api.hydradb.com` |
 | `HYDRADB_LOG_LEVEL`  | Log level: DEBUG, INFO, WARN, ERROR  | `ERROR`                   |
+| `HYDRADB_TIMEOUT_SECONDS` | Per-attempt request timeout     | `30`                      |
+| `HYDRADB_MAX_RETRIES` | Retries per request (0 disables)    | `2`                       |
+| `HYDRADB_MCP_LEGACY_TOOLS` | Register the deprecated `hydra_db_*` tools | *off* |
 
 The legacy `HYDRA_DB_*` names — `HYDRA_DB_API_KEY`, `HYDRA_DB_TENANT_ID`,
 `HYDRA_DB_SUB_TENANT_ID`, `HYDRA_DB_BASE_URL`, `HYDRA_DB_LOG_LEVEL` — remain
