@@ -209,12 +209,15 @@ export interface SourceListItem {
 export interface SourceList {
 	sources: SourceListItem[];
 	total: number;
+	page: PageInfo;
 }
 
 /** SDK list result → knowledge source rows + total. */
 export function toSourceList(data: SDK.ListV2SourceListResponse): SourceList {
 	// Knowledge listings surface at top-level `sources`, not under `.inner`.
 	const d = data as unknown as Record<string, unknown>;
+	const container =
+		(asRecords(d.sources) ? d : (d.inner as Record<string, unknown>)) ?? d;
 	const records =
 		asRecords(d.sources) ??
 		asRecords((d.inner as Record<string, unknown> | undefined)?.sources) ??
@@ -229,5 +232,6 @@ export function toSourceList(data: SDK.ListV2SourceListResponse): SourceList {
 	return {
 		sources,
 		total: typeof total === "number" ? total : sources.length,
+		page: toPageInfo(container, sources.length),
 	};
 }

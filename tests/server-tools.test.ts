@@ -534,3 +534,51 @@ test("hydradb_list distinguishes an empty page from an empty store", async () =>
 	assert.match(text, /No memories on page 99/);
 	assert.doesNotMatch(text, /No memories stored yet/);
 });
+
+// The header printed the corpus-wide `total` above a single page of rows:
+// "412 sources:" over 50 lines, no truncation marker, no way to reach the rest.
+// The count was right about the corpus and wrong about what the caller saw.
+test("hydradb_list does not print a corpus total above one page of sources", async () => {
+	const { text } = await listText(
+		{
+			sources: [
+				{ id: "s1", title: "Q3 report", type: "file" },
+				{ id: "s2", title: "Runbook", type: "file" },
+			],
+			total: 412,
+			pagination: { page: 1, page_size: 2, total_pages: 206, has_next: true },
+		},
+		{ kind: "knowledge" },
+	);
+
+	assert.match(text, /2 of 412/);
+	assert.doesNotMatch(
+		text,
+		/^412 sources:/,
+		"the corpus total must not be presented as the number shown",
+	);
+	assert.match(text, /page=2/);
+});
+
+test("hydradb_list forwards page and page_size for knowledge", async () => {
+	const { calls } = await listText(
+		{ sources: [{ id: "s1" }], total: 1 },
+		{ kind: "knowledge", page: 2, page_size: 10 },
+	);
+
+	const call = calls.find((c) => c.method === "list");
+	assert.ok(call);
+	assert.equal(call.args.type, "knowledge");
+	assert.equal(call.args.page, 2);
+	assert.equal(call.args.pageSize, 10);
+});
+
+test("hydradb_list distinguishes an empty source page from an empty corpus", async () => {
+	const { text } = await listText(
+		{ sources: [], total: 400 },
+		{ kind: "knowledge", page: 99 },
+	);
+
+	assert.match(text, /No sources on page 99/);
+	assert.doesNotMatch(text, /No sources found/);
+});

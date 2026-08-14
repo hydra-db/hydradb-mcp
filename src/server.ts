@@ -334,17 +334,25 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 
 	async function runListSources(args: {
 		source_ids?: string[];
+		page?: number;
+		page_size?: number;
 	}): Promise<ToolResult> {
 		logger.debug(TOOL_NAMES.LIST);
 
 		const raw = await hydra.context.list({
 			kind: "knowledge",
 			ids: args.source_ids,
+			page: args.page,
+			pageSize: args.page_size,
 		});
-		const { sources, total } = toSourceList(raw);
+		const { sources, page } = toSourceList(raw);
 
 		if (sources.length === 0) {
-			return textResult("No sources found.");
+			return textResult(
+				args.page != null && args.page > 1
+					? `No sources on page ${args.page}.`
+					: "No sources found.",
+			);
 		}
 
 		const lines = sources.map((s, i) => {
@@ -353,7 +361,12 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			return `${i + 1}. [${s.id}]${title}${type}`;
 		});
 
-		return textResult(`${total} sources:\n\n${lines.join("\n")}`);
+		// Was `${total} sources:` — the corpus-wide total printed above a single
+		// page of rows, so "412 sources:" sat over 50 lines with no marker and no
+		// way to reach the other 362.
+		return textResult(
+			`${coverage(sources.length, page, args.page)} sources:\n\n${lines.join("\n")}`,
+		);
 	}
 
 	async function runInspect(args: {
@@ -688,7 +701,11 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 				page_size?: number;
 			};
 			if ((a.kind ?? "memory") === "knowledge") {
-				return runListSources({ source_ids: a.source_ids });
+				return runListSources({
+					source_ids: a.source_ids,
+					page: a.page,
+					page_size: a.page_size,
+				});
 			}
 			return runListMemories({ page: a.page, page_size: a.page_size });
 		},
