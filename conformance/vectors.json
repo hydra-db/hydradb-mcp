@@ -13,6 +13,16 @@
       "aliases": { "cli": ["recall preferences"], "mcp_tool": ["hydra_db_search"], "openclaw_tool": ["hydra_search"], "openclaw_slash": ["/hydra-recall"], "plugin_skill": ["search", "recall"] }
     },
     {
+      "id": "query-all",
+      "$comment": "Retrieval takes THREE corpora, not two: `all` searches memories and knowledge together. The MCP shipped 1.1.0 pinning type=memory in its query handler with no way for a caller to widen it, so every ingested knowledge source was unsearchable there while list/inspect could still see it. A client that cannot emit type=all fails this vector.",
+      "call": { "op": "query", "args": { "query": "how do I renew the lease", "kind": "all" } },
+      "expect": {
+        "wrapper_method": "context.query",
+        "sdk": { "method": "query", "args_include": { "type": "all", "query": "how do I renew the lease" }, "args_scope": { "database": "db_test", "collection": "col_test" } }
+      },
+      "aliases": { "mcp_tool": ["hydra_db_search"] }
+    },
+    {
       "id": "query-knowledge",
       "call": { "op": "query", "args": { "query": "how does auth work", "kind": "knowledge" } },
       "expect": {

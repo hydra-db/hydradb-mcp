@@ -8,6 +8,7 @@ import { resolveConfig } from "./config.js";
 import { buildRecalledContext } from "./context.js";
 import { SERVER_INSTRUCTIONS, TOOL_DESCRIPTIONS } from "./descriptions.js";
 import { HydraDB } from "./hydra/index.js";
+import type { QueryKind } from "./hydra/index.js";
 import { logger } from "./logger.js";
 import { ALIAS_REPLACEMENTS, DEPRECATED_TOOL_NAMES, TOOL_NAMES } from "./tool-names.js";
 
@@ -34,6 +35,18 @@ type ToolResult = {
 
 function textResult(text: string): ToolResult {
 	return { content: [{ type: "text" as const, text }] };
+}
+
+/**
+ * What a query actually searched, for the result strings. A query over `all`
+ * must not report "memories" — that phrasing is what taught callers the MCP
+ * was memory-only in the first place.
+ */
+function resultNoun(kind: QueryKind, count?: number): string {
+	const one = count === 1;
+	if (kind === "memory") return one ? "memory" : "memories";
+	if (kind === "knowledge") return one ? "knowledge source" : "knowledge sources";
+	return one ? "context item" : "context items";
 }
 
 const turnSchema = z.object({
@@ -94,15 +107,21 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 
 	async function runQuery(args: {
 		query: string;
+		kind?: QueryKind;
 		max_results?: number;
 		mode?: "fast" | "thinking";
 		graph_context?: boolean;
 	}): Promise<ToolResult> {
-		logger.debug(`${TOOL_NAMES.QUERY}: "${args.query}"`);
+		// Host-owned default (CONTRACT §2 rule 5): search BOTH families. This tool
+		// used to pin `kind: "memory"`, which made every ingested knowledge source
+		// unreachable from the MCP — `hydradb_list`/`hydradb_inspect` could browse
+		// knowledge but nothing could search it.
+		const kind = args.kind ?? "all";
+		logger.debug(`${TOOL_NAMES.QUERY}: "${args.query}" (kind=${kind})`);
 
 		const raw = await hydra.context.query({
 			query: args.query,
-			kind: "memory",
+			kind,
 			maxResults: args.max_results ?? 10,
 			mode: args.mode ?? "thinking",
 			graphContext: args.graph_context ?? true,
@@ -112,7 +131,7 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		const res = toRecallResponse(raw);
 
 		if (!res.chunks || res.chunks.length === 0) {
-			return textResult("No relevant memories found in Hydra DB.");
+			return textResult(`No relevant ${resultNoun(kind)} found in Hydra DB.`);
 		}
 
 		const contextStr = buildRecalledContext(res);
@@ -129,7 +148,7 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		});
 
 		return textResult(
-			`Found ${res.chunks.length} memories:\n\n${summary.join("\n")}\n\n---\nFull context:\n${contextStr}`,
+			`Found ${res.chunks.length} ${resultNoun(kind, res.chunks.length)}:\n\n${summary.join("\n")}\n\n---\nFull context:\n${contextStr}`,
 		);
 	}
 
@@ -361,6 +380,10 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 
 	const querySchema = {
 		query: z.string().describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.query),
+		kind: z
+			.enum(["memory", "knowledge", "all"])
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.kind),
 		max_results: z
 			.number()
 			.min(1)

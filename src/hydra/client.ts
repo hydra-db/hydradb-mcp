@@ -23,7 +23,14 @@ import { translateError } from "./errors.js";
 
 export type ContextKind = "memory" | "knowledge";
 
-function kindToType(kind: ContextKind | undefined): "memory" | "knowledge" | undefined {
+/**
+ * Retrieval accepts a third corpus selector the write/list paths do not: `all`,
+ * which searches memories and knowledge together. Only `context.query` takes it
+ * — ingesting or deleting "all" is meaningless, so those stay `ContextKind`.
+ */
+export type QueryKind = ContextKind | "all";
+
+function kindToType<K extends QueryKind>(kind: K | undefined): K | undefined {
 	return kind;
 }
 
@@ -40,7 +47,7 @@ export interface HydraConfig {
 
 export interface QueryParams {
 	query: string;
-	kind?: ContextKind;
+	kind?: QueryKind;
 	operator?: "or" | "and" | "phrase";
 	maxResults?: number;
 	mode?: "fast" | "thinking" | "auto";

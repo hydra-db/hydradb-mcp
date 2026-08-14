@@ -163,7 +163,64 @@ test("canonical hydradb_query still renders the empty-result message", async () 
 		arguments: { query: "anything" },
 	});
 	const text = (result.content as { type: string; text: string }[])[0]!.text;
-	assert.equal(text, "No relevant memories found in Hydra DB.");
+	assert.equal(text, "No relevant context items found in Hydra DB.");
+
+	await client.close();
+});
+
+// Regression (reported by a user): the MCP could ingest and list knowledge but
+// never *search* it. runQuery pinned `kind: "memory"` and querySchema exposed no
+// selector, so with additionalProperties:false a caller could not widen the
+// corpus even by asking. Verified against the live API: for a query matching an
+// indexed knowledge doc, type=memory returns 0 chunks and type=all returns it.
+test("hydradb_query searches both families by default", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	await client.callTool({
+		name: "hydradb_query",
+		arguments: { query: "the zarnovix lease window" },
+	});
+
+	const call = calls.find((c) => c.method === "query");
+	assert.ok(call, "query should reach the SDK");
+	assert.equal(
+		call.args.type,
+		"all",
+		"an unqualified query must not be pinned to memory",
+	);
+
+	await client.close();
+});
+
+test("hydradb_query forwards an explicit kind to the wire `type`", async () => {
+	for (const kind of ["memory", "knowledge", "all"] as const) {
+		const { hydra, calls } = mockHydra();
+		const client = await connect(hydra);
+
+		await client.callTool({
+			name: "hydradb_query",
+			arguments: { query: "q", kind },
+		});
+
+		assert.equal(calls.find((c) => c.method === "query")?.args.type, kind);
+		await client.close();
+	}
+});
+
+// The deprecated alias shares runQuery, so it must gain the same reach — a user
+// who has not migrated off `hydra_db_search` is exactly who hit this bug.
+test("the deprecated hydra_db_search alias also searches knowledge", async () => {
+	__resetAliasWarnings();
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	await client.callTool({
+		name: "hydra_db_search",
+		arguments: { query: "q", kind: "knowledge" },
+	});
+
+	assert.equal(calls.find((c) => c.method === "query")?.args.type, "knowledge");
 
 	await client.close();
 });

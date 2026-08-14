@@ -10,6 +10,7 @@ export { HydraDB, ContextResource, DatabasesResource } from "./client.js";
 export type {
 	HydraConfig,
 	ContextKind,
+	QueryKind,
 	ConversationTurn,
 	QueryParams,
 	IngestParams,
