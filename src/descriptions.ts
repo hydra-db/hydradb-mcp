@@ -11,8 +11,12 @@ import { ALIAS_REPLACEMENTS, TOOL_NAMES } from "./tool-names.js";
 
 // Shared parameter blurbs, reused across canonical tools and their aliases.
 const PARAM = {
-	query: "The search query to find relevant memories",
-	max_results: "Maximum number of memory chunks to return (1-50, default: 10)",
+	query: "The search query to find relevant memories and knowledge",
+	query_kind:
+		"Which context family to search: 'memory' for stored user memories, " +
+		"'knowledge' for ingested documents and sources, or 'all' for both " +
+		"(default: 'all'). Leave unset unless you specifically want to exclude one family.",
+	max_results: "Maximum number of chunks to return (1-50, default: 10)",
 	mode: "Recall mode: 'fast' for quick semantic search, 'thinking' for deeper personalised recall with graph traversal (default: 'thinking')",
 	graph_context:
 		"Whether to include knowledge graph relations in results (default: true)",
@@ -42,10 +46,12 @@ function deprecated(alias: string, body: string): string {
 }
 
 const SEARCH_BODY =
-	"Search through Hydra DB State-of-the-art agentic memories. Returns relevant chunks with " +
+	"Search through Hydra DB State-of-the-art agentic context — both stored memories AND " +
+	"ingested knowledge sources (documents, files, playbooks). Returns relevant chunks with " +
 	"graph-enriched context including entity paths and knowledge graph relations. " +
 	"Use this to find previously stored information, past conversations, user preferences, " +
-	"or any knowledge that has been ingested into Hydra DB memory. " +
+	"or any document that has been ingested into Hydra DB. Searches both families by default; " +
+	"pass `kind` to narrow to one. " +
 	"Supports both fast semantic search and deeper thinking mode with graph traversal.";
 
 const STORE_BODY =
@@ -83,6 +89,7 @@ export const TOOL_DESCRIPTIONS = {
 		description: SEARCH_BODY,
 		params: {
 			query: PARAM.query,
+			kind: PARAM.query_kind,
 			max_results: PARAM.max_results,
 			mode: PARAM.mode,
 			graph_context: PARAM.graph_context,
@@ -144,6 +151,7 @@ export const TOOL_DESCRIPTIONS = {
 		description: deprecated(TOOL_NAMES.SEARCH, SEARCH_BODY),
 		params: {
 			query: PARAM.query,
+			kind: PARAM.query_kind,
 			max_results: PARAM.max_results,
 			mode: PARAM.mode,
 			graph_context: PARAM.graph_context,
@@ -209,7 +217,8 @@ export const TOOL_DESCRIPTIONS = {
 
 export const SERVER_INSTRUCTIONS =
 	"Hydra DB MCP server for State-of-the-art agentic memory management. " +
-	`Use ${TOOL_NAMES.QUERY} to find relevant memories and knowledge graph context. ` +
+	`Use ${TOOL_NAMES.QUERY} to search stored memories and ingested knowledge sources together, ` +
+	"with knowledge-graph context; pass `kind` to restrict it to one family. " +
 	`Use ${TOOL_NAMES.INGEST} to save information (a note via 'text', or a conversation via 'turns'). ` +
 	`Use ${TOOL_NAMES.LIST} to browse stored memories or knowledge sources. ` +
 	`Use ${TOOL_NAMES.INSPECT} to retrieve the full content of a source. ` +
