@@ -9,8 +9,15 @@ export type MemoryResultItem = {
 	source_id: string;
 	title?: string | null;
 	status: string;
-	infer: boolean;
 	error?: string | null;
+	/** Machine-readable classification for `error`, when the server sent one. */
+	error_code?: string | null;
+	/**
+	 * Graph extraction can fail on an item the server otherwise accepted. That
+	 * item is stored and findable by text, but unreachable by graph traversal —
+	 * a partial success that looks identical to a full one unless reported.
+	 */
+	relations_error?: string | null;
 };
 
 export type AddMemoryResponse = {
@@ -54,6 +61,12 @@ export type ScoredPath = {
 	relevancy_score: number;
 	combined_context?: string | null;
 	group_id?: string | null;
+	/**
+	 * Chunks this relation path was drawn from. The direct chunk→relation link,
+	 * and the mapping the SDK's own renderer prefers; `group_id` plus
+	 * `chunk_id_to_group_ids` is the indirect fallback for when this is absent.
+	 */
+	source_chunk_ids?: string[] | null;
 };
 
 export type GraphContext = {

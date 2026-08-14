@@ -10,11 +10,22 @@ import { __resetAliasWarnings, createHydraDBServer } from "../src/server.js";
 
 type RecordedCall = { method: string; args: Record<string, unknown> };
 
-function mockHydra(): { hydra: HydraDB; calls: RecordedCall[] } {
+/** Per-method response overrides, for tests that care what the API returned. */
+type Responses = Partial<
+	Record<"query" | "ingest" | "list" | "inspect" | "delete", unknown>
+>;
+
+function mockHydra(responses: Responses = {}): {
+	hydra: HydraDB;
+	calls: RecordedCall[];
+} {
 	const calls: RecordedCall[] = [];
 	const record =
-		(method: string, data: unknown) => (args?: Record<string, unknown>) => {
+		(method: string, fallback: unknown) => (args?: Record<string, unknown>) => {
 			calls.push({ method, args: args ?? {} });
+			const data = method in responses
+				? responses[method as keyof Responses]
+				: fallback;
 			return Promise.resolve({ data, success: true });
 		};
 
@@ -273,7 +284,7 @@ test("hydradb_delete does not claim 'not found' when the server refused", async 
 	assert.match(text, /has not been removed/i);
 	assert.doesNotMatch(
 		text,
-		/not found or already deleted/i,
+		/nothing was deleted/i,
 		"a refusal must not be reported as a missing source",
 	);
 });
@@ -292,14 +303,27 @@ test("hydradb_delete surfaces the per-item error ahead of the summary message", 
 	assert.match(text, /source locked by an active ingestion/);
 });
 
-test("hydradb_delete still reports the benign idempotent case as not found", async () => {
+// The server succeeded and removed nothing: no such id exists. The old wording
+// ("not found OR ALREADY DELETED") offered a cause never observed, and the
+// reassuring one — a caller that guessed an id read it as confirmation and told
+// the user their data was gone.
+test("hydradb_delete states only what it observed when nothing was removed", async () => {
 	const text = await deleteText(
 		{ success: true, deletedCount: 0 },
 		{ id: "mem-1" },
 	);
 
-	assert.match(text, /not found or already deleted/i);
-	assert.doesNotMatch(text, /refused/i);
+	assert.match(text, /no memory with id mem-1 exists/i);
+	assert.match(text, /nothing was deleted/i);
+	assert.doesNotMatch(text, /refused/i, "the server did not refuse; it succeeded");
+	assert.doesNotMatch(
+		text,
+		/already deleted/i,
+		"never claim a prior deletion that was not observed",
+	);
+	// Point at where a real id comes from, so the caller corrects course instead
+	// of retrying the same guess.
+	assert.match(text, /hydradb_query|hydradb_list/);
 });
 
 test("hydradb_delete reports a successful removal unchanged", async () => {
@@ -309,4 +333,668 @@ test("hydradb_delete reports a successful removal unchanged", async () => {
 	);
 
 	assert.equal(text, "Deleted memory: mem-1");
+});
+
+/** Call hydradb_ingest against a given API response and return the rendered text. */
+async function ingestText(
+	ingest: unknown,
+	args: Record<string, unknown>,
+): Promise<string> {
+	const { hydra } = mockHydra({ ingest });
+	const client = await connect(hydra);
+	const result = await client.callTool({ name: "hydradb_ingest", arguments: args });
+	return ((result.content as { text: string }[])[0]?.text ?? "");
+}
+
+test("hydradb_ingest names which item failed and why", async () => {
+	const text = await ingestText(
+		{
+			success: false,
+			successCount: 1,
+			failedCount: 1,
+			results: [
+				{ id: "s-ok", status: "completed", error: "" },
+				{
+					id: "s-bad",
+					status: "failed",
+					error: "content exceeds maximum size",
+					errorCode: "TOO_LARGE",
+				},
+			],
+		},
+		{ text: "some note" },
+	);
+
+	// Without the id and the reason the caller can only re-ingest everything —
+	// which, since a reused source_id replaces, can destroy what did succeed.
+	assert.match(text, /s-bad/, "the failed item's id must be reported");
+	assert.match(text, /content exceeds maximum size/);
+	assert.match(text, /TOO_LARGE/);
+
+	// Scoped to the Issues block: the header legitimately names the created id
+	// of the item that succeeded, so a whole-text check would forbid that too.
+	const issues = text.slice(text.indexOf("Issues:"));
+	assert.doesNotMatch(issues, /s-ok/, "successful items should not be listed as issues");
+});
+
+test("hydradb_ingest reports graph extraction failure on a stored item", async () => {
+	const text = await ingestText(
+		{
+			success: true,
+			successCount: 1,
+			failedCount: 0,
+			results: [
+				{
+					id: "s1",
+					status: "completed",
+					error: "",
+					relationsError: "entity extraction timed out",
+				},
+			],
+		},
+		{ text: "some note" },
+	);
+
+	// failed_count is 0 here: the item is stored and text-searchable but will
+	// never be reached by graph traversal. Silent before this.
+	assert.match(text, /0 failed/);
+	assert.match(text, /graph extraction failed/i);
+	assert.match(text, /entity extraction timed out/);
+});
+
+test("hydradb_ingest stays quiet when everything succeeded", async () => {
+	const text = await ingestText(
+		{
+			success: true,
+			successCount: 1,
+			failedCount: 0,
+			results: [{ id: "s1", status: "completed", error: "", errorCode: "" }],
+		},
+		{ text: "some note" },
+	);
+
+	assert.doesNotMatch(text, /Issues:/);
+});
+
+// Every audit of this server reached the same finding independently: a recall
+// result carried no value that hydradb_inspect or hydradb_delete would accept,
+// so a follow-up meant guessing an id or listing everything and matching prose.
+// A hallucinated id then hit "not found or already deleted", which reads as
+// success. The composition chain has to be closed at the source.
+test("hydradb_query emits source ids the other tools accept", async () => {
+	const { hydra } = mockHydra({
+		query: {
+			chunks: [
+				{
+					chunkUuid: "c1",
+					id: "src-alpha",
+					chunkContent: "the user prefers tabs",
+					sourceTitle: "Prefs",
+					relevancyScore: 0.91,
+				},
+			],
+		},
+	});
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_query",
+		arguments: { query: "indentation" },
+	});
+	const text = (result.content as { text: string }[])[0]!.text;
+
+	// Both halves of the result: the skimmable summary and the block a caller
+	// actually reads. An id in only one of them is an id the caller may miss.
+	const summary = text.slice(0, text.indexOf("Full context:"));
+	const context = text.slice(text.indexOf("Full context:"));
+	assert.match(summary, /\[id: src-alpha\]/, "summary line must carry the id");
+	assert.match(context, /\[id: src-alpha\]/, "chunk header must carry the id");
+
+	// An id with no stated purpose is noise; name what consumes it.
+	assert.match(text, /hydradb_inspect/);
+	assert.match(text, /hydradb_delete/);
+
+	await client.close();
+});
+
+test("hydradb_ingest returns the id the server assigned", async () => {
+	// The caller supplied no source_id, so this value exists nowhere else and
+	// cannot be derived — without it the memory can never be corrected.
+	const text = await ingestText(
+		{
+			success: true,
+			successCount: 1,
+			failedCount: 0,
+			results: [{ id: "srv-assigned-9", status: "completed", error: "" }],
+		},
+		{ text: "a note" },
+	);
+
+	assert.match(text, /id: srv-assigned-9/);
+	assert.doesNotMatch(text, /"a note"/, "should not echo back the caller's own text");
+});
+
+/** Call hydradb_list against a given API response and return the rendered text. */
+async function listText(
+	list: unknown,
+	args: Record<string, unknown> = {},
+): Promise<{ text: string; calls: RecordedCall[] }> {
+	const { hydra, calls } = mockHydra({ list });
+	const client = await connect(hydra);
+	const result = await client.callTool({ name: "hydradb_list", arguments: args });
+	await client.close();
+	return { text: (result.content as { text: string }[])[0]?.text ?? "", calls };
+}
+
+// The listing took no paging arguments and rendered its own row count as the
+// header, so a user with 4,000 memories asking "what do you know about me?" got
+// "50 memories:" and an agent that answered as if that were everything. Page 2
+// was unreachable through the MCP at all.
+test("hydradb_list says how much of the corpus a memory page covered", async () => {
+	const { text } = await listText({
+		user_memories: [
+			{ memory_id: "m1", memory_content: "prefers tabs" },
+			{ memory_id: "m2", memory_content: "deploys Tuesdays" },
+		],
+		total: 412,
+		pagination: { page: 1, page_size: 2, total_pages: 206, has_next: true },
+	});
+
+	assert.match(text, /2 of 412/, "must not present one page as the whole store");
+	assert.match(text, /page 1/);
+	assert.match(text, /page=2/, "must say how to reach the rest");
+});
+
+test("hydradb_list forwards page and page_size for memories", async () => {
+	const { calls } = await listText(
+		{ user_memories: [{ memory_id: "m1", memory_content: "x" }], total: 1 },
+		{ kind: "memory", page: 3, page_size: 25 },
+	);
+
+	const call = calls.find((c) => c.method === "list");
+	assert.ok(call, "list should reach the SDK");
+	assert.equal(call.args.page, 3);
+	assert.equal(call.args.pageSize, 25);
+});
+
+test("hydradb_list stays terse when one page is the whole corpus", async () => {
+	const { text } = await listText({
+		user_memories: [{ memory_id: "m1", memory_content: "prefers tabs" }],
+		total: 1,
+		pagination: { page: 1, page_size: 50, total_pages: 1, has_next: false },
+	});
+
+	assert.match(text, /^1 memories:/);
+	assert.doesNotMatch(text, /page=/, "no next-page hint when there is no next page");
+});
+
+test("hydradb_list distinguishes an empty page from an empty store", async () => {
+	const { text } = await listText({ user_memories: [], total: 400 }, { page: 99 });
+
+	assert.match(text, /No memories on page 99/);
+	assert.doesNotMatch(text, /No memories stored yet/);
+});
+
+// The header printed the corpus-wide `total` above a single page of rows:
+// "412 sources:" over 50 lines, no truncation marker, no way to reach the rest.
+// The count was right about the corpus and wrong about what the caller saw.
+test("hydradb_list does not print a corpus total above one page of sources", async () => {
+	const { text } = await listText(
+		{
+			sources: [
+				{ id: "s1", title: "Q3 report", type: "file" },
+				{ id: "s2", title: "Runbook", type: "file" },
+			],
+			total: 412,
+			pagination: { page: 1, page_size: 2, total_pages: 206, has_next: true },
+		},
+		{ kind: "knowledge" },
+	);
+
+	assert.match(text, /2 of 412/);
+	assert.doesNotMatch(
+		text,
+		/^412 sources:/,
+		"the corpus total must not be presented as the number shown",
+	);
+	assert.match(text, /page=2/);
+});
+
+test("hydradb_list forwards page and page_size for knowledge", async () => {
+	const { calls } = await listText(
+		{ sources: [{ id: "s1" }], total: 1 },
+		{ kind: "knowledge", page: 2, page_size: 10 },
+	);
+
+	const call = calls.find((c) => c.method === "list");
+	assert.ok(call);
+	assert.equal(call.args.type, "knowledge");
+	assert.equal(call.args.page, 2);
+	assert.equal(call.args.pageSize, 10);
+});
+
+test("hydradb_list distinguishes an empty source page from an empty corpus", async () => {
+	const { text } = await listText(
+		{ sources: [], total: 400 },
+		{ kind: "knowledge", page: 99 },
+	);
+
+	assert.match(text, /No sources on page 99/);
+	assert.doesNotMatch(text, /No sources found/);
+});
+
+// hydradb_list declared `source_ids` for both families but the memory branch
+// called runListMemories() with no arguments, so the filter was dropped in
+// silence. Worse than an ordinary no-op: source-to-many-memories fan-out is real
+// (that is what source_id does on ingest), so a caller handed 40 unfiltered rows
+// has a coherent explanation ready — "those two sources expanded into 40" — and
+// reports them as filtered. Nothing in the response contradicts it.
+test("hydradb_list honours source_ids when listing memories", async () => {
+	const { calls } = await listText(
+		{ user_memories: [{ memory_id: "m1", memory_content: "x" }], total: 1 },
+		{ kind: "memory", source_ids: ["s1", "s2"] },
+	);
+
+	const call = calls.find((c) => c.method === "list");
+	assert.ok(call, "list should reach the SDK");
+	assert.equal(call.args.type, "memory");
+	assert.deepEqual(
+		call.args.ids,
+		["s1", "s2"],
+		"source_ids must reach the wire, not be silently dropped",
+	);
+});
+
+test("hydradb_list omits ids entirely when source_ids is not given", async () => {
+	const { calls } = await listText(
+		{ user_memories: [], total: 0 },
+		{ kind: "memory" },
+	);
+
+	assert.equal(calls.find((c) => c.method === "list")?.args.ids, undefined);
+});
+
+// `mcp-conversation-${Date.now()}` collides for two ingests in the same
+// millisecond, and because upsert is true the second REPLACES the first while
+// reporting success. Nothing surfaces the loss.
+test("generated conversation source ids do not collide within a millisecond", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	// Issued concurrently so they land in the same millisecond on any machine
+	// fast enough to matter — which is the case the old id could not survive.
+	await Promise.all(
+		Array.from({ length: 20 }, () =>
+			client.callTool({
+				name: "hydradb_ingest",
+				arguments: { turns: [{ user: "hi", assistant: "hello" }] },
+			}),
+		),
+	);
+
+	const ids = calls
+		.filter((c) => c.method === "ingest")
+		.map((c) => {
+			const item = (JSON.parse(String(c.args.memories)) as Record<string, unknown>[])[0]!;
+			return String(item.source_id);
+		});
+
+	assert.equal(ids.length, 20);
+	assert.equal(new Set(ids).size, 20, "every generated source id must be distinct");
+	for (const id of ids) {
+		assert.match(id, /^mcp-conversation-\d+-[0-9a-f]{8}$/);
+	}
+
+	await client.close();
+});
+
+test("an explicit source_id is still used verbatim", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	await client.callTool({
+		name: "hydradb_ingest",
+		arguments: {
+			turns: [{ user: "hi", assistant: "hello" }],
+			source_id: "session-42",
+		},
+	});
+
+	const item = (
+		JSON.parse(String(calls.find((c) => c.method === "ingest")!.args.memories)) as Record<string, unknown>[]
+	)[0]!;
+	assert.equal(item.source_id, "session-42");
+
+	await client.close();
+});
+
+// upsert was hardcoded true with no way to opt out, while PARAM.source_id told
+// the caller to reuse a session id — a combination that silently destroys the
+// earlier memory. The default stays true (the SDK retries POSTs, and upsert is
+// what stops a retry duplicating), but it is now the caller's choice.
+test("hydradb_ingest defaults to overwriting, preserving retry safety", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	await client.callTool({
+		name: "hydradb_ingest",
+		arguments: { text: "a note", source_id: "s1" },
+	});
+
+	assert.equal(calls.find((c) => c.method === "ingest")?.args.upsert, "true");
+	await client.close();
+});
+
+test("hydradb_ingest forwards overwrite:false as an opt-out", async () => {
+	for (const path of [
+		{ text: "a note", source_id: "s1", overwrite: false },
+		{
+			turns: [{ user: "hi", assistant: "hello" }],
+			source_id: "s1",
+			overwrite: false,
+		},
+	]) {
+		const { hydra, calls } = mockHydra();
+		const client = await connect(hydra);
+
+		await client.callTool({ name: "hydradb_ingest", arguments: path });
+
+		assert.equal(
+			calls.find((c) => c.method === "ingest")?.args.upsert,
+			"false",
+			`overwrite must reach the wire on both ingest paths (${Object.keys(path).join(",")})`,
+		);
+		await client.close();
+	}
+});
+
+/** Call hydradb_inspect against a given API response and return the rendered text. */
+async function inspectText(
+	inspect: unknown,
+	args: Record<string, unknown>,
+): Promise<string> {
+	const { hydra } = mockHydra({ inspect });
+	const client = await connect(hydra);
+	const result = await client.callTool({ name: "hydradb_inspect", arguments: args });
+	await client.close();
+	return (result.content as { text: string }[])[0]?.text ?? "";
+}
+
+// presignedUrl was never read, so the one mode whose entire purpose is the link
+// returned "(no text content)". Documented in the schema and the README, and it
+// could not work. There was also no test of runInspect at all.
+test("hydradb_inspect returns the download link for mode url", async () => {
+	const text = await inspectText(
+		{
+			success: true,
+			presignedUrl: "https://example.invalid/signed",
+			content: "the extracted text",
+		},
+		{ source_id: "s1", mode: "url" },
+	);
+
+	assert.match(text, /https:\/\/example\.invalid\/signed/);
+	assert.doesNotMatch(
+		text,
+		/the extracted text/,
+		"url mode asks for the link instead of the content",
+	);
+	assert.doesNotMatch(text, /no text content/);
+});
+
+test("hydradb_inspect returns both link and content for mode both", async () => {
+	const text = await inspectText(
+		{
+			success: true,
+			presignedUrl: "https://example.invalid/signed",
+			content: "the extracted text",
+		},
+		{ source_id: "s1", mode: "both" },
+	);
+
+	assert.match(text, /https:\/\/example\.invalid\/signed/);
+	assert.match(text, /the extracted text/);
+});
+
+test("hydradb_inspect defaults to content and does not mention a link", async () => {
+	const text = await inspectText(
+		{
+			success: true,
+			presignedUrl: "https://example.invalid/signed",
+			content: "the extracted text",
+		},
+		{ source_id: "s1" },
+	);
+
+	assert.match(text, /the extracted text/);
+	assert.doesNotMatch(text, /example\.invalid/);
+});
+
+test("hydradb_inspect says so when a link was asked for and none exists", async () => {
+	const text = await inspectText(
+		{ success: true, content: "the extracted text" },
+		{ source_id: "s1", mode: "url" },
+	);
+
+	assert.match(text, /No download URL available/);
+});
+
+test("hydradb_inspect reports a soft failure without erroring", async () => {
+	const text = await inspectText(
+		{ success: false, error: "source not found" },
+		{ source_id: "missing" },
+	);
+
+	assert.match(text, /Could not fetch source missing/);
+	assert.match(text, /source not found/);
+});
+
+// hydradb_query searches knowledge, hydradb_list browses it, hydradb_inspect
+// reads it and hydradb_delete removes it — and nothing could create it. `kind`
+// was pinned to "memory" at both ingest call sites, so the wrapper's entire
+// knowledge branch was unreachable. A caller told "index this design doc as
+// knowledge" silently produced a memory instead.
+test("hydradb_ingest can write knowledge", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_ingest",
+		arguments: { text: "# Design doc\n\nbody", kind: "knowledge", title: "Design" },
+	});
+
+	assert.notEqual(result.isError, true);
+	const call = calls.find((c) => c.method === "ingest");
+	assert.ok(call, "ingest should reach the SDK");
+	assert.equal(call.args.type, "knowledge");
+	// Knowledge travels as a multipart document, never as a memory item.
+	assert.equal(call.args.memories, undefined);
+	assert.ok(call.args.documents, "knowledge must be sent as a document part");
+
+	await client.close();
+});
+
+test("hydradb_ingest still defaults to memory", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	await client.callTool({
+		name: "hydradb_ingest",
+		arguments: { text: "a note" },
+	});
+
+	const call = calls.find((c) => c.method === "ingest");
+	assert.equal(call?.args.type, "memory");
+	assert.ok(call?.args.memories, "memory must still travel as a memory item");
+
+	await client.close();
+});
+
+// The wrapper rejects memory-only params on the knowledge branch; the server
+// must not send them itself, or every knowledge write would fail.
+test("hydradb_ingest omits memory-only fields when writing knowledge", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_ingest",
+		arguments: { text: "body", kind: "knowledge" },
+	});
+
+	assert.notEqual(
+		result.isError,
+		true,
+		"knowledge ingest must not trip the wrapper's memory-only guard",
+	);
+	await client.close();
+});
+
+test("hydradb_ingest refuses to file a conversation as knowledge", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_ingest",
+		arguments: {
+			turns: [{ user: "hi", assistant: "hello" }],
+			kind: "knowledge",
+		},
+	});
+
+	assert.equal(result.isError, true);
+	assert.match(
+		(result.content as { text: string }[])[0]!.text,
+		/conversations are memories/,
+	);
+	assert.equal(calls.filter((c) => c.method === "ingest").length, 0);
+
+	await client.close();
+});
+
+// Ingestion is asynchronous — the upload returns when the source is queued, and
+// indexing runs through graph extraction for seconds afterwards. A caller that
+// saves then immediately queries to confirm gets "No relevant context items
+// found" and concludes the save failed, then re-saves — which under upsert
+// replaces what it just wrote. The tool result never said any of this.
+test("hydradb_ingest warns that indexing is asynchronous", async () => {
+	const text = await ingestText(
+		{ success: true, successCount: 1, failedCount: 0, message: "", results: [] },
+		{ text: "a note" },
+	);
+
+	assert.match(text, /asynchronous/i);
+	assert.match(text, /hydradb_status/);
+});
+
+test("hydradb_status reports per-source indexing state", async () => {
+	const { hydra } = mockHydra();
+	const client = await connect(hydra);
+	// context.status is not part of the Responses override map, so drive it
+	// through a purpose-built stub.
+	await client.close();
+
+	const sdk = {
+		context: {
+			status: () =>
+				Promise.resolve({
+					data: {
+						statuses: [
+							{ id: "s1", indexingStatus: "completed" },
+							{ id: "s2", indexingStatus: "graph_creation" },
+							{
+								id: "s3",
+								indexingStatus: "failed",
+								errorMessage: "extraction timed out",
+								errorCode: "TIMEOUT",
+							},
+						],
+					},
+					success: true,
+				}),
+		},
+	} as unknown as HydraDBClient;
+	const client2 = await connect(
+		new HydraDB({ token: "t", database: "db_test" }, sdk),
+	);
+
+	const result = await client2.callTool({
+		name: "hydradb_status",
+		arguments: { ids: ["s1", "s2", "s3"] },
+	});
+	const out = (result.content as { text: string }[])[0]!.text;
+
+	assert.match(out, /s1: completed/);
+	assert.match(out, /s2: graph_creation/);
+	assert.match(out, /s3: failed .* extraction timed out \[TIMEOUT\]/);
+	// graph_creation is not in the SDK's status enum but is a real live value,
+	// so it must count as still-in-progress rather than be treated as terminal.
+	assert.match(out, /1 still indexing/);
+
+	await client2.close();
+});
+
+test("hydradb_status says when everything is settled", async () => {
+	const sdk = {
+		context: {
+			status: () =>
+				Promise.resolve({
+					data: { statuses: [{ id: "s1", indexingStatus: "completed" }] },
+					success: true,
+				}),
+		},
+	} as unknown as HydraDBClient;
+	const client = await connect(new HydraDB({ token: "t", database: "db_test" }, sdk));
+
+	const result = await client.callTool({
+		name: "hydradb_status",
+		arguments: { ids: ["s1"] },
+	});
+
+	assert.match(
+		(result.content as { text: string }[])[0]!.text,
+		/All sources have reached a terminal state/,
+	);
+	await client.close();
+});
+
+// Greptile, PR #46: on a non-first FINAL page, `total > shown` is still true
+// (12 shown of 412) and was advertising a page that does not exist.
+test("hydradb_list does not advertise a next page on the last page", async () => {
+	const { text } = await listText({
+		user_memories: Array.from({ length: 12 }, (_, i) => ({
+			memory_id: `m${i}`,
+			memory_content: "x",
+		})),
+		total: 412,
+		pagination: { page: 9, page_size: 50, total_pages: 9, has_next: false },
+	}, { page: 9 });
+
+	assert.match(text, /12 of 412 \(page 9\)/);
+	assert.doesNotMatch(text, /page=10/, "there is no page 10");
+	assert.doesNotMatch(text, /for more/);
+});
+
+// Same shape, but the server sent no has_next — the page arithmetic has to
+// reach the same conclusion.
+test("hydradb_list infers the last page from total_pages when has_next is absent", async () => {
+	const { text } = await listText({
+		user_memories: [{ memory_id: "m1", memory_content: "x" }],
+		total: 412,
+		pagination: { page: 9, page_size: 50, total_pages: 9 },
+	}, { page: 9 });
+
+	assert.doesNotMatch(text, /for more/);
+});
+
+test("hydradb_list still advertises a next page in the middle of a corpus", async () => {
+	const { text } = await listText({
+		user_memories: Array.from({ length: 50 }, (_, i) => ({
+			memory_id: `m${i}`,
+			memory_content: "x",
+		})),
+		total: 412,
+		pagination: { page: 2, page_size: 50, total_pages: 9, has_next: true },
+	}, { page: 2 });
+
+	assert.match(text, /page=3 for more/);
 });

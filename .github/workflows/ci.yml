@@ -1,8 +1,14 @@
 name: CI
 
 on:
+  # Every pull request, not only those targeting main.
+  #
+  # This was `pull_request: branches: [main]`, which means a PR opened against
+  # any other branch got NO checks at all — and an empty check list looks a lot
+  # like a passing one. Stacked pull requests target the layer below them rather
+  # than main, so an entire stack could sit "green" without a single test having
+  # run on it.
   pull_request:
-    branches: [main]
   push:
     branches: [main]
 

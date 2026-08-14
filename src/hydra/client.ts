@@ -169,8 +169,14 @@ export class ContextResource extends Resource {
 		);
 	}
 
-	/** Ingest a memory or knowledge item (SDK `context.ingest`, multipart). */
-	ingest(params: IngestParams): Promise<SDK.IngestionV2SourceUploadResponse> {
+	/**
+	 * Ingest a memory or knowledge item (SDK `context.ingest`, multipart).
+	 *
+	 * `async` so the knowledge-path validation below surfaces as a rejection.
+	 * Every other failure in this wrapper rejects, and a caller that only handles
+	 * `.catch()` would otherwise see this one escape as a synchronous throw.
+	 */
+	async ingest(params: IngestParams): Promise<SDK.IngestionV2SourceUploadResponse> {
 		const request: SDK.IngestContextRequest = {
 			...this.scope(params.collection),
 			type: kindToType(params.kind),
@@ -196,6 +202,33 @@ export class ContextResource extends Resource {
 			if (params.userName != null) item.user_name = params.userName;
 			request.memories = JSON.stringify([item]);
 		} else {
+			// The knowledge path can only carry the document itself and its
+			// filename. Everything below belongs to the memory item shape and has
+			// nowhere to go here — so reject rather than accept and discard. A
+			// caller that sets `infer: true` on a knowledge write and is answered
+			// "success: 1, failed: 0" has been told its instruction was honoured
+			// when it was dropped on the floor.
+			const unsupported = (
+				[
+					["pairs", params.pairs],
+					["sourceId", params.sourceId],
+					["infer", params.infer],
+					["isMarkdown", params.isMarkdown],
+					["customInstructions", params.customInstructions],
+					["userName", params.userName],
+				] as const
+			)
+				.filter(([, value]) => value != null)
+				.map(([name]) => name);
+
+			if (unsupported.length > 0) {
+				throw new Error(
+					`Knowledge ingestion does not support ${unsupported.join(", ")} — ` +
+					`those apply to memory ingestion only. Pass kind "memory" instead, ` +
+					`or drop them.`,
+				);
+			}
+
 			// Knowledge is multipart with the document as a file part — never the
 			// `app_knowledge` JSON field (guards the DX-G-002 class of bug).
 			if (params.text != null) {

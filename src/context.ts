@@ -4,6 +4,104 @@ import type {
 	ScoredPath,
 } from "./types.js";
 
+/**
+ * A chunk's readable text, unwrapping the v2 source envelope when present.
+ *
+ * Ingest can store a chunk whose body is the serialised source record rather
+ * than the text itself:
+ *
+ *     {"id":"s9","tenant_id":"t","content":{"text":"the actual body"}}
+ *
+ * Rendered verbatim, that ships ids, tenant identifiers and JSON punctuation
+ * into the prompt in place of the content, and the reader has to parse it back
+ * out. The SDK's own renderer unwraps this (`dist/helpers/buildString.js`);
+ * this port keeps the behaviour without taking the rest of that helper, which
+ * drops the evidence-score filter, extra context and `raw_predicate` handling
+ * below.
+ *
+ * The wire format is snake_case regardless of SDK casing, so the keys checked
+ * here are the wire ones. Anything that does not match the envelope shape is
+ * returned untouched — a chunk that legitimately begins and ends with braces is
+ * left alone.
+ */
+function extractChunkText(chunkContent: string | undefined): string {
+	if (!chunkContent) return "";
+	const trimmed = chunkContent.trim();
+	if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) return trimmed;
+
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(trimmed);
+	} catch {
+		return trimmed;
+	}
+	if (typeof parsed !== "object" || parsed === null) return trimmed;
+
+	// Unwrap ONLY when nothing would be lost by doing so.
+	//
+	// A nested `content.text` is not evidence of an envelope, and neither is an
+	// `id` alongside it — a user can legitimately store
+	// `{"id":"cfg","content":{"text":"..."},"version":2}`, and unwrapping that
+	// discards `version` silently, turning a stored document into one of its
+	// fragments. So instead of guessing what an envelope looks like, check the
+	// inverse: every key we are about to drop must be one the envelope is known
+	// to carry. An unrecognised sibling means this is someone's document, and it
+	// is returned untouched.
+	//
+	// The asymmetry is deliberate. Leaving a real envelope wrapped is ugly;
+	// unwrapping a real document destroys data.
+	const record = parsed as Record<string, unknown>;
+	// Only SCOPING keys. These are identifiers the server stamps on a record;
+	// they carry nothing the user wrote, so discarding them loses nothing.
+	//
+	// The previous allowlist also contained `title`, `metadata`, `timestamp` and
+	// friends. Those ARE envelope fields, but they also carry user data — so a
+	// document with any of them populated was being reduced to its content.text
+	// and the rest silently dropped. Three rounds of narrowing the guess did not
+	// fix that, because the premise was wrong: the test cannot be "does this look
+	// like an envelope", it has to be "is there anything here to lose".
+	const SCOPING_KEYS = new Set([
+		"content",
+		"id",
+		"tenant_id",
+		"sub_tenant_id",
+		"source_id",
+		"chunk_id",
+	]);
+
+	// Any other key holding an actual value means this is someone's document.
+	// Empty strings, nulls and empty objects are not data, so a bare envelope
+	// carrying `"title": ""` still unwraps.
+	const hasData = (value: unknown): boolean => {
+		if (value == null) return false;
+		if (typeof value === "string") return value.trim() !== "";
+		if (Array.isArray(value)) return value.length > 0;
+		if (typeof value === "object") return Object.keys(value).length > 0;
+		return true;
+	};
+	const wouldLoseSomething = Object.entries(record).some(
+		([key, value]) => !SCOPING_KEYS.has(key) && hasData(value),
+	);
+	if (wouldLoseSomething) return trimmed;
+
+	// And require a field that is unambiguously OURS. `id` alone is not — a
+	// user's own document can carry one. `tenant_id`/`sub_tenant_id` are internal
+	// scoping fields the server stamps on; a hand-written document has neither.
+	const looksLikeSource = ["tenant_id", "sub_tenant_id"].some(
+		(key) => typeof record[key] === "string",
+	);
+	if (!looksLikeSource) return trimmed;
+
+	const content = record.content;
+	if (typeof content === "object" && content !== null) {
+		for (const key of ["text", "markdown"] as const) {
+			const value = (content as Record<string, unknown>)[key];
+			if (typeof value === "string" && value.trim()) return value.trim();
+		}
+	}
+	return trimmed;
+}
+
 function formatTriplet(triplet: PathTriplet): string {
 	const src = triplet.source?.name ?? "?";
 	const rel = triplet.relation;
@@ -42,6 +140,20 @@ export function buildRecalledContext(
 		relationIndex[groupId] = relation;
 	}
 
+	// Direct chunk → relation links, the mapping the server states explicitly and
+	// the one the SDK's own renderer reaches for first. Without it this renderer
+	// had only the indirect route (group_id + chunk_id_to_group_ids) and the
+	// triplet.chunk_id scan, so any relation the server linked ONLY via
+	// source_chunk_ids was silently dropped from the output.
+	const directRelations: Record<string, [string, ScoredPath][]> = {};
+	for (const [groupId, relation] of Object.entries(relationIndex)) {
+		for (const chunkId of relation.source_chunk_ids ?? []) {
+			const bucket = directRelations[chunkId];
+			if (bucket) bucket.push([groupId, relation]);
+			else directRelations[chunkId] = [[groupId, relation]];
+		}
+	}
+
 	const chunkToGroupIds = graphCtx.chunk_id_to_group_ids ?? {};
 	const consumedExtraIds = new Set<string>();
 	const groupOccurrenceCounts: Record<string, number> = {};
@@ -51,7 +163,13 @@ export function buildRecalledContext(
 		const chunk = chunks[i]!;
 		const lines: string[] = [];
 
-		lines.push(`Chunk ${i + 1}`);
+		// The id rides in the chunk header because this block is what a caller
+		// actually reads. Without it a recall result is unactionable: there is no
+		// value anywhere in the output that `hydradb_inspect` or `hydradb_delete`
+		// will accept, so a follow-up means guessing an id or listing everything
+		// and matching on prose.
+		const chunkId = chunk.source_id;
+		lines.push(`Chunk ${i + 1}${chunkId ? `  [id: ${chunkId}]` : ""}`);
 
 		const meta = chunk.document_metadata ?? {};
 		const title =
@@ -60,34 +178,49 @@ export function buildRecalledContext(
 			lines.push(`Source: ${title}`);
 		}
 
-		lines.push(chunk.chunk_content ?? "");
+		lines.push(extractChunkText(chunk.chunk_content));
 
 		const chunkUuid = chunk.chunk_uuid;
 		const linkedGroupIds = chunkToGroupIds[chunkUuid] ?? [];
 
 		const matchedRelations: ScoredPath[] = [];
 
-		// Track whether the primary lookup found any candidate groups
-		// (even if all were capped) to avoid incorrectly falling through
-		// to the fallback path
+		/** Take a relation for this chunk unless its group is already capped. */
+		const take = (gid: string, relation: ScoredPath) => {
+			const occurrences = groupOccurrenceCounts[gid] ?? 0;
+			if (maxGroupOccurrences == null || occurrences < maxGroupOccurrences) {
+				matchedRelations.push(relation);
+				groupOccurrenceCounts[gid] = occurrences + 1;
+			}
+		};
+
+		// Preferred route: the server said which chunks this relation came from.
+		const direct = directRelations[chunkUuid] ?? [];
+		for (const [gid, relation] of direct) {
+			take(gid, relation);
+		}
+
+		// Track whether a lookup found any candidate groups (even if all were
+		// capped) to avoid incorrectly falling through to the fallback path
 		const hasLinkedGroups = linkedGroupIds.some(
 			(gid) => !!relationIndex[gid],
 		);
 
-		for (const gid of linkedGroupIds) {
-			if (relationIndex[gid]) {
-				const occurrences = groupOccurrenceCounts[gid] ?? 0;
-				if (
-					maxGroupOccurrences == null ||
-					occurrences < maxGroupOccurrences
-				) {
-					matchedRelations.push(relationIndex[gid]!);
-					groupOccurrenceCounts[gid] = occurrences + 1;
+		// Indirect route, used only when the direct one produced no candidates —
+		// running both would attach the same relation twice.
+		if (direct.length === 0) {
+			for (const gid of linkedGroupIds) {
+				if (relationIndex[gid]) {
+					take(gid, relationIndex[gid]!);
 				}
 			}
 		}
 
-		if (matchedRelations.length === 0 && !hasLinkedGroups) {
+		if (
+			matchedRelations.length === 0 &&
+			!hasLinkedGroups &&
+			direct.length === 0
+		) {
 			for (const [gid, rel] of Object.entries(relationIndex)) {
 				const triplets = rel.triplets ?? [];
 				const hasChunk = triplets.some(
@@ -131,7 +264,7 @@ export function buildRecalledContext(
 				const extraChunk = extraContextMap[ctxId];
 				if (extraChunk) {
 					consumedExtraIds.add(ctxId);
-					const extraContent = extraChunk.chunk_content ?? "";
+					const extraContent = extractChunkText(extraChunk.chunk_content);
 					const extraTitle = extraChunk.source_title ?? "";
 					if (extraTitle) {
 						extraLines.push(

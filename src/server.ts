@@ -1,16 +1,19 @@
+import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
 import { toAddMemoryResponse, toMemoryList, toRecallResponse, toSourceList } from "./adapters.js";
+import type { PageInfo } from "./adapters.js";
 import { resolveConfig } from "./config.js";
 import { buildRecalledContext } from "./context.js";
 import { SERVER_INSTRUCTIONS, TOOL_DESCRIPTIONS } from "./descriptions.js";
 import { HydraDB } from "./hydra/index.js";
-import type { QueryKind } from "./hydra/index.js";
+import type { ContextKind, QueryKind } from "./hydra/index.js";
 import { logger } from "./logger.js";
 import { ALIAS_REPLACEMENTS, DEPRECATED_TOOL_NAMES, TOOL_NAMES } from "./tool-names.js";
+import type { MemoryResultItem } from "./types.js";
 
 // Host-owned default: silently attached to ingest so Hydra DB extracts the kind
 // of personal context this server cares about. Injected here (not in the
@@ -32,6 +35,26 @@ const { version: SERVER_VERSION } = require("../package.json") as {
 type ToolResult = {
 	content: { type: "text"; text: string }[];
 };
+
+/**
+ * A source id for a conversation the caller did not name.
+ *
+ * This was `mcp-conversation-${Date.now()}` — millisecond resolution, no
+ * randomness, no process or session identity. Two ingests landing in the same
+ * millisecond produced the same id, and because `upsert` is true the second
+ * silently REPLACED the first (see the upsert regression test) while reporting
+ * "success: 1, failed: 0". Nothing surfaced the loss.
+ *
+ * The collision window is wider than one agent racing itself: HYDRADB_COLLECTION
+ * defaults to the shared literal `hydra-db-mcp`, so every user who does not set
+ * it shares one namespace with a low-entropy id.
+ *
+ * The timestamp prefix is kept because it sorts and reads well; the suffix is
+ * what makes it unique.
+ */
+function generatedSourceId(): string {
+	return `mcp-conversation-${Date.now()}-${randomUUID().slice(0, 8)}`;
+}
 
 function textResult(text: string): ToolResult {
 	return { content: [{ type: "text" as const, text }] };
@@ -144,40 +167,146 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 				c.chunk_content.length > 150
 					? `${c.chunk_content.slice(0, 150)}...`
 					: c.chunk_content;
-			return `${i + 1}. ${snippet}${score}`;
+			return `${i + 1}. [id: ${c.source_id || "unknown"}]${score} ${snippet}`;
 		});
 
+		// An id the caller cannot connect to anything is just noise, so name what
+		// accepts it. Without this the ids read as internal bookkeeping.
+		const legend =
+			`\n\n---\nEach [id: …] is a source id: pass one to ${TOOL_NAMES.INSPECT} for that ` +
+			`source's full content, or to ${TOOL_NAMES.DELETE} to remove it.`;
+
 		return textResult(
-			`Found ${res.chunks.length} ${resultNoun(kind, res.chunks.length)}:\n\n${summary.join("\n")}\n\n---\nFull context:\n${contextStr}`,
+			`Found ${res.chunks.length} ${resultNoun(kind, res.chunks.length)}:\n\n${summary.join("\n")}\n\n---\nFull context:\n${contextStr}${legend}`,
 		);
+	}
+
+	/**
+	 * The id the server assigned to the item it just stored.
+	 *
+	 * On the memory path the caller may supply `source_id`, but when it does not
+	 * the server assigns one — and that value appeared nowhere in the tool result,
+	 * so the caller could not later inspect, correct or delete what it had
+	 * written. Reads the first successful item; ingest here is always one item.
+	 */
+	function createdId(res: { results: MemoryResultItem[] }): string | undefined {
+		for (const item of res.results) {
+			if (item.source_id && !item.error) return item.source_id;
+		}
+		return undefined;
+	}
+
+	/**
+	 * Ingestion is asynchronous, and the caller has no way to know that.
+	 *
+	 * The upload returns as soon as the source is queued; indexing then runs
+	 * through graph extraction and takes seconds. A caller that saves and
+	 * immediately queries to confirm gets "No relevant context items found" and
+	 * reasonably concludes the save failed — then re-saves, which under upsert
+	 * replaces what it just wrote.
+	 *
+	 * The server already says this in its 202 body; the adapter kept the message
+	 * so we can pass the server's own words through rather than invent our own.
+	 */
+	function indexingNote(res: { message: string }): string {
+		const said = res.message.trim();
+		const mentionsAsync = /asynchron|queued|still processing|not.*indexed/i.test(said);
+		return (
+			`\n\nIndexing is asynchronous — the content is not searchable until it ` +
+			`completes. Use ${TOOL_NAMES.STATUS} to check.` +
+			(mentionsAsync ? "" : said ? `\nServer: ${briefly(said)}` : "")
+		);
+	}
+
+	/** Keep one server-supplied message from crowding out the rest of the result. */
+	function briefly(message: string): string {
+		return message.length > 200 ? `${message.slice(0, 200)}…` : message;
+	}
+
+	/**
+	 * Per-item detail for an ingest that did not fully succeed.
+	 *
+	 * Two distinct outcomes are worth reporting and neither is visible in the
+	 * counts alone:
+	 *
+	 *   - a failed item, where the caller needs the id and the reason to retry
+	 *     just that one rather than re-ingesting everything;
+	 *   - an item the server stored but could not extract relations from, which
+	 *     is a partial success. It is findable by text and unreachable by graph
+	 *     traversal, and `failed_count` stays 0 — so without this line it looks
+	 *     identical to a clean ingest.
+	 *
+	 * Returns "" when there is nothing to say, so the success path stays quiet.
+	 */
+	function ingestIssues(res: { results: MemoryResultItem[] }): string {
+		const lines: string[] = [];
+		for (const item of res.results) {
+			const label = item.source_id || item.title || "(unnamed item)";
+			const failure =
+				item.error ?? (item.status === "failed" ? "ingestion failed" : null);
+			if (failure) {
+				const code = item.error_code ? ` [${item.error_code}]` : "";
+				lines.push(`  - ${label}: ${briefly(failure)}${code}`);
+			} else if (item.relations_error) {
+				lines.push(
+					`  - ${label}: stored, but graph extraction failed — ${briefly(item.relations_error)}. ` +
+					`It is searchable by text but will not be reached by graph traversal.`,
+				);
+			}
+		}
+		return lines.length > 0 ? `\n\nIssues:\n${lines.join("\n")}` : "";
 	}
 
 	async function runStore(args: {
 		text: string;
+		kind?: ContextKind;
 		title?: string;
 		source_id?: string;
 		infer?: boolean;
 		is_markdown?: boolean;
+		overwrite?: boolean;
 	}): Promise<ToolResult> {
-		logger.debug(`${TOOL_NAMES.INGEST}: "${args.text.slice(0, 50)}..."`);
+		const kind = args.kind ?? "memory";
+		logger.debug(`${TOOL_NAMES.INGEST}: "${args.text.slice(0, 50)}..." (kind=${kind})`);
+
+		// The memory item shape has no counterpart on the knowledge path, which
+		// carries only a document and its filename — so those fields are sent only
+		// where they mean something. The wrapper rejects them on the knowledge
+		// branch rather than dropping them, and passing them here unconditionally
+		// would make every knowledge write fail.
+		const memoryOnly =
+			kind === "memory"
+				? {
+						sourceId: args.source_id,
+						infer: args.infer ?? true,
+						isMarkdown: args.is_markdown ?? false,
+						customInstructions: INGEST_INSTRUCTIONS,
+					}
+				: {};
 
 		const raw = await hydra.context.ingest({
-			kind: "memory",
+			kind,
 			text: args.text,
-			title: args.title ?? "MCP Memory",
-			sourceId: args.source_id,
-			infer: args.infer ?? true,
-			isMarkdown: args.is_markdown ?? false,
-			customInstructions: INGEST_INSTRUCTIONS,
-			upsert: true,
+			title: args.title ?? (kind === "memory" ? "MCP Memory" : undefined),
+			...memoryOnly,
+			// Default stays true. The SDK retries POSTs, so upsert is what keeps a
+			// retried ingest from duplicating — flipping this default would trade a
+			// silent overwrite for a silent duplicate.
+			upsert: args.overwrite ?? true,
 		});
 		const res = toAddMemoryResponse(raw);
 
-		const preview =
-			args.text.length > 80 ? `${args.text.slice(0, 80)}...` : args.text;
+		// Was an 80-char echo of the text the caller had just sent — zero
+		// information back to them. The id is the thing they do not have and
+		// cannot derive, and it is what makes correcting this memory later
+		// possible at all.
+		const id = createdId(res) ?? args.source_id;
 
 		return textResult(
-			`Saved to Hydra DB (${res.success_count} success, ${res.failed_count} failed): "${preview}"`,
+			`Saved to Hydra DB${id ? ` (id: ${id})` : ""} ` +
+			`(${res.success_count} success, ${res.failed_count} failed).` +
+			indexingNote(res) +
+			ingestIssues(res),
 		);
 	}
 
@@ -189,6 +318,7 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			infer?: boolean;
 			title?: string;
 			isMarkdown?: boolean;
+			overwrite?: boolean;
 		},
 	): Promise<ToolResult> {
 		logger.debug(
@@ -204,45 +334,98 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			title: opts?.title,
 			isMarkdown: opts?.isMarkdown,
 			customInstructions: INGEST_INSTRUCTIONS,
-			upsert: true,
+			upsert: opts?.overwrite ?? true,
 		});
 		const res = toAddMemoryResponse(raw);
 
 		return textResult(
-			`Ingested ${turns.length} conversation turn(s) into Hydra DB (source: ${sourceId}, success: ${res.success_count}, failed: ${res.failed_count})`,
+			`Ingested ${turns.length} conversation turn(s) into Hydra DB ` +
+			`(id: ${createdId(res) ?? sourceId}, success: ${res.success_count}, failed: ${res.failed_count})` +
+			indexingNote(res) +
+			ingestIssues(res),
 		);
 	}
 
-	async function runListMemories(): Promise<ToolResult> {
+	/**
+	 * How much of the corpus this page covered, stated plainly.
+	 *
+	 * A listing that shows 50 of 4,000 rows and says "50 memories:" is not a
+	 * truncated answer, it is a wrong one — the caller reports it as the complete
+	 * inventory. Say what was shown, out of what, and how to reach the rest.
+	 */
+	function coverage(shown: number, page: PageInfo, requestedPage?: number): string {
+		const total = page.total ?? shown;
+		const current = page.page ?? requestedPage ?? 1;
+
+		// `total > shown` is NOT a usable "more exists" test on its own: on the
+		// last page of a large corpus it is still true (12 shown of 412) and would
+		// point the caller at a page that does not exist. Prefer what the server
+		// stated, then the page arithmetic, and only then the row comparison —
+		// which is correct on page 1, the only place it is reached.
+		const seen = (current - 1) * (page.page_size ?? shown) + shown;
+		const hasMore =
+			page.has_next ??
+			(page.total_pages != null ? current < page.total_pages : seen < total);
+
+		if (!hasMore && current === 1) return `${shown}`;
+
+		const more = hasMore ? ` — pass page=${current + 1} for more` : "";
+		return `${shown} of ${total} (page ${current})${more}`;
+	}
+
+	async function runListMemories(args: {
+		source_ids?: string[];
+		page?: number;
+		page_size?: number;
+	} = {}): Promise<ToolResult> {
 		logger.debug(TOOL_NAMES.LIST);
 
-		const raw = await hydra.context.list({ kind: "memory" });
-		const memories = toMemoryList(raw);
+		const raw = await hydra.context.list({
+			kind: "memory",
+			ids: args.source_ids,
+			page: args.page,
+			pageSize: args.page_size,
+		});
+		const { memories, page } = toMemoryList(raw);
 
 		if (memories.length === 0) {
-			return textResult("No memories stored yet.");
+			return textResult(
+				args.page != null && args.page > 1
+					? `No memories on page ${args.page}.`
+					: "No memories stored yet.",
+			);
 		}
 
 		const lines = memories.map(
 			(m, i) => `${i + 1}. [${m.memory_id}] ${m.memory_content.slice(0, 150)}`,
 		);
 
-		return textResult(`${memories.length} memories:\n\n${lines.join("\n")}`);
+		return textResult(
+			`${coverage(memories.length, page, args.page)} memories:\n\n${lines.join("\n")}`,
+		);
 	}
 
 	async function runListSources(args: {
 		source_ids?: string[];
+		page?: number;
+		page_size?: number;
 	}): Promise<ToolResult> {
 		logger.debug(TOOL_NAMES.LIST);
 
 		const raw = await hydra.context.list({
 			kind: "knowledge",
 			ids: args.source_ids,
+			page: args.page,
+			pageSize: args.page_size,
 		});
-		const { sources, total } = toSourceList(raw);
+		const { sources, page } = toSourceList(raw);
 
 		if (sources.length === 0) {
-			return textResult("No sources found.");
+			return textResult(
+				args.page != null && args.page > 1
+					? `No sources on page ${args.page}.`
+					: "No sources found.",
+			);
 		}
 
 		const lines = sources.map((s, i) => {
@@ -251,7 +434,12 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			return `${i + 1}. [${s.id}]${title}${type}`;
 		});
 
-		return textResult(`${total} sources:\n\n${lines.join("\n")}`);
+		// Was `${total} sources:` — the corpus-wide total printed above a single
+		// page of rows, so "412 sources:" sat over 50 lines with no marker and no
+		// way to reach the other 362.
+		return textResult(
+			`${coverage(sources.length, page, args.page)} sources:\n\n${lines.join("\n")}`,
+		);
 	}
 
 	async function runInspect(args: {
@@ -272,9 +460,61 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			);
 		}
 
-		const content = res.content ?? res.contentBase64 ?? "(no text content)";
+		const mode = args.mode ?? "content";
+		const parts: string[] = [`Source: ${args.source_id}`];
 
-		return textResult(`Source: ${args.source_id}\n\n${content}`);
+		// `presignedUrl` was never read, so `mode: "url"` — documented in the
+		// schema and the README — returned "(no text content)" and nothing else.
+		// The one mode whose entire purpose is the link never emitted the link.
+		if (mode === "url" || mode === "both") {
+			parts.push(
+				res.presignedUrl
+					? `Download URL (time-limited): ${res.presignedUrl}`
+					: "No download URL available for this source.",
+			);
+		}
+
+		if (mode === "content" || mode === "both") {
+			parts.push(res.content ?? res.contentBase64 ?? "(no text content)");
+		}
+
+		return textResult(parts.join("\n\n"));
+	}
+
+	async function runStatus(args: { ids: string[] }): Promise<ToolResult> {
+		logger.debug(`${TOOL_NAMES.STATUS}: ${args.ids.join(", ")}`);
+
+		const res = await hydra.context.ingestionStatus({ ids: args.ids });
+		const statuses = res.statuses ?? [];
+
+		if (statuses.length === 0) {
+			return textResult(
+				`No indexing status found for: ${args.ids.join(", ")}. ` +
+				`Either the ids are wrong or the sources were never queued.`,
+			);
+		}
+
+		const lines = statuses.map((s) => {
+			const state = s.indexingStatus ?? "unknown";
+			const reason = s.errorMessage
+				? ` — ${briefly(s.errorMessage)}${s.errorCode ? ` [${s.errorCode}]` : ""}`
+				: "";
+			return `  - ${s.id ?? "(unknown id)"}: ${state}${reason}`;
+		});
+
+		// `completed` and `failed` are terminal; everything else means keep
+		// waiting. Deliberately not switched over the SDK's status enum
+		// (queued/processing/completed/failed) — a live run returned
+		// `graph_creation`, which that enum does not declare.
+		const pending = statuses.filter(
+			(s) => !["completed", "failed"].includes(String(s.indexingStatus).toLowerCase()),
+		);
+		const note =
+			pending.length > 0
+				? `\n\n${pending.length} still indexing — not yet searchable. Check again in a few seconds.`
+				: `\n\nAll sources have reached a terminal state.`;
+
+		return textResult(`Indexing status:\n${lines.join("\n")}${note}`);
 	}
 
 	/**
@@ -305,8 +545,16 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			);
 		}
 
-		const Noun = noun.charAt(0).toUpperCase() + noun.slice(1);
-		return textResult(`${Noun} ${id} was not found or already deleted.`);
+		// The server succeeded and removed nothing, so no such id exists in this
+		// database. "or already deleted" was the same mistake the refusal branch
+		// above was written to fix: it offers a cause we did not observe, and the
+		// reassuring one. A caller that invented an id — the likely case, since
+		// until recently nothing emitted one — reads it as confirmation and tells
+		// the user their data is gone.
+		return textResult(
+			`No ${noun} with id ${id} exists in this database — nothing was deleted. ` +
+			`Ids come from ${TOOL_NAMES.QUERY} or ${TOOL_NAMES.LIST}; check the id rather than retrying.`,
+		);
 	}
 
 	/** The server's own explanation, preferring the per-item error over the summary. */
@@ -418,6 +666,10 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			.boolean()
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.STORE].params.is_markdown),
+		overwrite: z
+			.boolean()
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.STORE].params.overwrite),
 	};
 
 	const ingestSchema = {
@@ -428,6 +680,10 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			.string()
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.text),
+		kind: z
+			.enum(["memory", "knowledge"])
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.kind),
 		turns: z
 			.array(turnSchema)
 			.min(1)
@@ -462,6 +718,19 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			.array(z.string())
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.LIST].params.source_ids),
+		page: z
+			.number()
+			.int()
+			.min(1)
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.LIST].params.page),
+		page_size: z
+			.number()
+			.int()
+			.min(1)
+			.max(100)
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.LIST].params.page_size),
 	};
 
 	const listSourcesSchema = {
@@ -489,6 +758,13 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.DELETE].params.kind),
 	};
 
+	const statusSchema = {
+		ids: z
+			.array(z.string())
+			.min(1)
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.STATUS].params.ids),
+	};
+
 	const deleteMemorySchema = {
 		memory_id: z
 			.string()
@@ -514,14 +790,26 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 	register(TOOL_NAMES.INGEST, ingestSchema, async (args) => {
 		const a = args as {
 			text?: string;
+			kind?: ContextKind;
 			title?: string;
 			source_id?: string;
 			infer?: boolean;
 			is_markdown?: boolean;
+			overwrite?: boolean;
 			turns?: ConversationTurn[];
 			user_name?: string;
 		};
 		const hasTurns = a.turns != null && a.turns.length > 0;
+
+		// A conversation is a memory by definition; there is no knowledge document
+		// made of user/assistant pairs. Reject rather than quietly ingesting it as
+		// the wrong family.
+		if (hasTurns && a.kind === "knowledge") {
+			throw new Error(
+				`${TOOL_NAMES.INGEST} cannot ingest \`turns\` as knowledge — conversations are memories. ` +
+				`Use \`text\` for a knowledge document, or drop \`kind\`.`,
+			);
+		}
 		// `text` and `turns` are mutually exclusive — reject rather than silently
 		// dropping one (the documented "exactly one" contract).
 		if (hasTurns && a.text != null) {
@@ -530,7 +818,7 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			);
 		}
 		if (a.turns != null && a.turns.length > 0) {
-			const sourceId = a.source_id ?? `mcp-conversation-${Date.now()}`;
+			const sourceId = a.source_id ?? generatedSourceId();
 			// Forward every option the canonical schema accepts so none is
 			// silently dropped on the conversation path.
 			return runIngestConversation(a.turns, sourceId, {
@@ -538,15 +826,18 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 				infer: a.infer,
 				title: a.title,
 				isMarkdown: a.is_markdown,
+				overwrite: a.overwrite,
 			});
 		}
 		if (a.text != null) {
 			return runStore({
 				text: a.text,
+				kind: a.kind,
 				title: a.title,
 				source_id: a.source_id,
 				infer: a.infer,
 				is_markdown: a.is_markdown,
+				overwrite: a.overwrite,
 			});
 		}
 		throw new Error(
@@ -558,11 +849,24 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		TOOL_NAMES.LIST,
 		listSchema,
 		(args) => {
-			const a = args as { kind?: "memory" | "knowledge"; source_ids?: string[] };
+			const a = args as {
+				kind?: "memory" | "knowledge";
+				source_ids?: string[];
+				page?: number;
+				page_size?: number;
+			};
 			if ((a.kind ?? "memory") === "knowledge") {
-				return runListSources({ source_ids: a.source_ids });
+				return runListSources({
+					source_ids: a.source_ids,
+					page: a.page,
+					page_size: a.page_size,
+				});
 			}
-			return runListMemories();
+			return runListMemories({
+				source_ids: a.source_ids,
+				page: a.page,
+				page_size: a.page_size,
+			});
 		},
 		readOnly,
 	);
@@ -576,6 +880,13 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 
 	register(TOOL_NAMES.DELETE, deleteSchema, (args) =>
 		runDelete(args as Parameters<typeof runDelete>[0]),
+	);
+
+	register(
+		TOOL_NAMES.STATUS,
+		statusSchema,
+		(args) => runStatus(args as Parameters<typeof runStatus>[0]),
+		readOnly,
 	);
 
 	// --- Deprecated aliases ---

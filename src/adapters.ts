@@ -17,6 +17,7 @@ import type { HydraDB as SDK } from "@hydradb/sdk";
 
 import type {
 	AddMemoryResponse,
+	MemoryResultItem,
 	RecallResponse,
 	ScoredPath,
 	VectorChunk,
@@ -29,6 +30,7 @@ function toScoredPath(path: SDK.SearchScoredPathResponse): ScoredPath {
 		relevancy_score: path.relevancyScore ?? 0,
 		combined_context: path.combinedContext ?? null,
 		group_id: path.groupId ?? null,
+		source_chunk_ids: path.sourceChunkIds ?? null,
 	};
 }
 
@@ -70,14 +72,38 @@ export function toRecallResponse(data: SDK.SearchV2RetrievalResult): RecallRespo
 	};
 }
 
-/** SDK ingest result → the legacy `AddMemoryResponse` (success/failed counts). */
+/**
+ * SDK ingest result → `AddMemoryResponse`.
+ *
+ * `results` used to be hardcoded empty here, which discarded every per-item
+ * `status`/`error`/`errorCode`/`relationsError` the server sent. The caller was
+ * left with bare counts — "1 success, 2 failed" with no reason, no code and no
+ * way to tell WHICH item failed — so its only rational recovery was to re-ingest
+ * everything, which (a reused `source_id` replaces, see the upsert regression
+ * test) can destroy the item that succeeded.
+ */
+function toMemoryResultItem(
+	item: SDK.IngestionV2SourceUploadResultItem,
+): MemoryResultItem {
+	return {
+		source_id: item.id ?? "",
+		title: item.filename ?? null,
+		status: item.status ?? "unknown",
+		// The server sends "" rather than omitting these on success; normalise to
+		// null so callers can test presence instead of emptiness.
+		error: item.error || null,
+		error_code: item.errorCode || null,
+		relations_error: item.relationsError || null,
+	};
+}
+
 export function toAddMemoryResponse(
 	data: SDK.IngestionV2SourceUploadResponse,
 ): AddMemoryResponse {
 	return {
 		success: data.success ?? false,
 		message: data.message ?? "",
-		results: [],
+		results: (data.results ?? []).map(toMemoryResultItem),
 		success_count: data.successCount ?? 0,
 		failed_count: data.failedCount ?? 0,
 	};
@@ -102,20 +128,77 @@ export interface MemoryListItem {
 	memory_content: string;
 }
 
+/**
+ * How much of the corpus a listing actually covered.
+ *
+ * The server returns this alongside every listing and both adapters used to
+ * discard it, which is what let one page be presented as the whole store.
+ */
+export interface PageInfo {
+	/** Total rows across all pages, when the server reported one. */
+	total?: number;
+	page?: number;
+	page_size?: number;
+	total_pages?: number;
+	has_next?: boolean;
+}
+
+export interface MemoryList {
+	memories: MemoryListItem[];
+	page: PageInfo;
+}
+
+function num(record: Record<string, unknown>, ...keys: string[]): number | undefined {
+	for (const key of keys) {
+		const value = record[key];
+		if (typeof value === "number") return value;
+	}
+	return undefined;
+}
+
+/**
+ * Pagination metadata, read defensively for the same reason the rows are: the
+ * SDK types this response as `{ inner?: … }` while the live API returns at top
+ * level, and neither shape is guaranteed to carry every field.
+ */
+function toPageInfo(
+	container: Record<string, unknown>,
+	rowCount: number,
+): PageInfo {
+	const meta =
+		(container.pagination as Record<string, unknown> | undefined) ?? {};
+	const total = num(container, "total") ?? num(meta, "total");
+	return {
+		total: total ?? rowCount,
+		page: num(meta, "page"),
+		page_size: num(meta, "page_size", "pageSize"),
+		total_pages: num(meta, "total_pages", "totalPages"),
+		has_next:
+			typeof meta.has_next === "boolean"
+				? meta.has_next
+				: typeof meta.hasNext === "boolean"
+					? meta.hasNext
+					: undefined,
+	};
+}
+
 /** SDK list result → memory rows. Field names vary across v2 records, so read defensively. */
-export function toMemoryList(data: SDK.ListV2SourceListResponse): MemoryListItem[] {
+export function toMemoryList(data: SDK.ListV2SourceListResponse): MemoryList {
 	// Memory listings surface at top-level `user_memories` — not under an
 	// `.inner` wrapper, and not under `sources` (that is the knowledge shape).
 	const d = data as unknown as Record<string, unknown>;
+	const container =
+		(asRecords(d.user_memories) ? d : (d.inner as Record<string, unknown>)) ?? d;
 	const records =
 		asRecords(d.user_memories) ??
 		asRecords((d.inner as Record<string, unknown> | undefined)?.user_memories) ??
 		[];
-	return records.map((record) => ({
+	const memories = records.map((record) => ({
 		memory_id: str(record, "memory_id", "id", "source_id") ?? "",
 		memory_content:
 			str(record, "memory_content", "content", "text", "memory", "title") ?? "",
 	}));
+	return { memories, page: toPageInfo(container, memories.length) };
 }
 
 export interface SourceListItem {
@@ -127,12 +210,15 @@ export interface SourceListItem {
 export interface SourceList {
 	sources: SourceListItem[];
 	total: number;
+	page: PageInfo;
 }
 
 /** SDK list result → knowledge source rows + total. */
 export function toSourceList(data: SDK.ListV2SourceListResponse): SourceList {
 	// Knowledge listings surface at top-level `sources`, not under `.inner`.
 	const d = data as unknown as Record<string, unknown>;
+	const container =
+		(asRecords(d.sources) ? d : (d.inner as Record<string, unknown>)) ?? d;
 	const records =
 		asRecords(d.sources) ??
 		asRecords((d.inner as Record<string, unknown> | undefined)?.sources) ??
@@ -147,5 +233,6 @@ export function toSourceList(data: SDK.ListV2SourceListResponse): SourceList {
 	return {
 		sources,
 		total: typeof total === "number" ? total : sources.length,
+		page: toPageInfo(container, sources.length),
 	};
 }

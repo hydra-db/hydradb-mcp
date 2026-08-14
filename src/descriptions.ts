@@ -21,10 +21,21 @@ const PARAM = {
 	graph_context:
 		"Whether to include knowledge graph relations in results (default: true)",
 	text: "The information to store in memory",
+	ingest_kind:
+		"What to write: 'memory' for a personal fact, preference or conversation " +
+		"(default), or 'knowledge' to store a document as a searchable source. " +
+		"Memory-only options (turns, source_id, infer, is_markdown, user_name) do not " +
+		"apply to knowledge and are rejected rather than ignored.",
 	title: "Optional title for the memory entry (default: 'MCP Memory')",
 	source_id:
-		"Optional source identifier to group related memories together. You can use this as " +
-		"your session ID or any other unique identifier for a conversation",
+		"Optional identifier for this entry. Ingesting again with an existing source_id " +
+		"REPLACES everything previously stored under it — it does not add to it. Use a fresh " +
+		"id (or leave it unset) for each new fact, and reuse an id only when you deliberately " +
+		"mean to overwrite, such as correcting a memory you saved earlier. Leave unset if unsure.",
+	overwrite:
+		"Whether ingesting with an existing source_id may replace what is stored there " +
+		"(default: true). Set false to have the server reject the write instead of " +
+		"overwriting, when you expect to be creating something new.",
 	infer: "Whether Hydra DB should extract insights and build knowledge graph from this text (default: true)",
 	is_markdown: "Whether the text is in markdown format (default: false)",
 	turns: "Array of conversation turns, each with a 'user' and 'assistant' field",
@@ -32,6 +43,13 @@ const PARAM = {
 	kind: "Which context family to list: 'memory' or 'knowledge' (default: 'memory')",
 	source_ids:
 		"Optional array of specific source IDs to filter by. If omitted, lists all sources.",
+	page:
+		"Which page of results to return, 1-indexed (default: 1). The response reports how " +
+		"many of the total it showed; pass the next page to continue rather than assuming " +
+		"the first page is everything.",
+	page_size:
+		"How many items to return per page (1-100). Defaults to the server's page size. " +
+		"Raise it to see more at once; lower it to keep the response small.",
 	fetch_source_id: "The source ID to fetch content for",
 	fetch_mode:
 		"Fetch mode: 'content' for text, 'url' for presigned URL, 'both' for both (default: 'content')",
@@ -104,10 +122,12 @@ export const TOOL_DESCRIPTIONS = {
 			"(user/assistant pairs) rather than `text`.",
 		params: {
 			text: PARAM.text,
+			kind: PARAM.ingest_kind,
 			title: PARAM.title,
 			source_id: PARAM.source_id,
 			infer: PARAM.infer,
 			is_markdown: PARAM.is_markdown,
+			overwrite: PARAM.overwrite,
 			turns: "Optional conversation turns to ingest instead of `text`; each has a 'user' and 'assistant' field",
 			user_name: PARAM.user_name,
 		},
@@ -121,6 +141,8 @@ export const TOOL_DESCRIPTIONS = {
 		params: {
 			kind: PARAM.kind,
 			source_ids: PARAM.source_ids,
+			page: PARAM.page,
+			page_size: PARAM.page_size,
 		},
 	},
 
@@ -141,6 +163,20 @@ export const TOOL_DESCRIPTIONS = {
 		params: {
 			id: PARAM.delete_id,
 			kind: PARAM.delete_kind,
+		},
+	},
+
+	[TOOL_NAMES.STATUS]: {
+		title: "Check Hydra DB Indexing Status",
+		description:
+			"Check whether ingested sources have finished indexing. Ingestion is " +
+			"asynchronous: hydradb_ingest returns as soon as the source is queued, and " +
+			"the content is not searchable until indexing reaches a terminal state. " +
+			"Use this after ingesting when you need to confirm the write landed — " +
+			"an empty hydradb_query result shortly after an ingest usually means " +
+			"'still indexing', not 'the save failed'.",
+		params: {
+			ids: "The source IDs to check, as returned by hydradb_ingest.",
 		},
 	},
 
@@ -167,6 +203,7 @@ export const TOOL_DESCRIPTIONS = {
 			source_id: PARAM.source_id,
 			infer: PARAM.infer,
 			is_markdown: PARAM.is_markdown,
+			overwrite: PARAM.overwrite,
 		},
 	},
 
@@ -223,6 +260,8 @@ export const SERVER_INSTRUCTIONS =
 	`Use ${TOOL_NAMES.LIST} to browse stored memories or knowledge sources. ` +
 	`Use ${TOOL_NAMES.INSPECT} to retrieve the full content of a source. ` +
 	`Use ${TOOL_NAMES.DELETE} to remove a memory or knowledge source. ` +
+	`Use ${TOOL_NAMES.STATUS} to check whether an ingested source has finished indexing — ` +
+	"ingestion is asynchronous, so content is not searchable the instant it is saved. " +
 	"Deprecated aliases remain available for backward compatibility but should not be used in new integrations: " +
 	`${TOOL_NAMES.SEARCH} → ${TOOL_NAMES.QUERY}, ` +
 	`${TOOL_NAMES.STORE} → ${TOOL_NAMES.INGEST}, ` +
