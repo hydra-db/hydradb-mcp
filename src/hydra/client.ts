@@ -49,10 +49,6 @@ export interface RequestOptions {
  */
 export type QueryKind = ContextKind | "all";
 
-function kindToType<K extends QueryKind>(kind: K | undefined): K | undefined {
-	return kind;
-}
-
 /**
  * An SDK logger that cannot corrupt the stdio transport.
  *
@@ -218,7 +214,7 @@ export class ContextResource extends Resource {
 			this.sdk.query({
 				...this.scope(params.collection),
 				query: params.query,
-				type: kindToType(params.kind),
+				type: params.kind,
 				operator: params.operator,
 				maxResults: params.maxResults,
 				mode: params.mode,
@@ -242,7 +238,7 @@ export class ContextResource extends Resource {
 	): Promise<SDK.IngestionV2SourceUploadResponse> {
 		const request: SDK.IngestContextRequest = {
 			...this.scope(params.collection),
-			type: kindToType(params.kind),
+			type: params.kind,
 		};
 		if (params.upsert != null) {
 			request.upsert = String(params.upsert);
@@ -318,7 +314,7 @@ export class ContextResource extends Resource {
 		return this.call("/context/list", () =>
 			this.sdk.context.list({
 				...this.scope(params.collection),
-				type: kindToType(params.kind),
+				type: params.kind,
 				ids: params.ids,
 				page: params.page,
 				pageSize: params.pageSize,
@@ -362,7 +358,7 @@ export class ContextResource extends Resource {
 			this.sdk.context.relations({
 				...this.scope(params.collection),
 				id: params.id,
-				type: kindToType(params.kind),
+				type: params.kind,
 				limit: params.limit,
 				cursor: params.cursor,
 			}),
@@ -378,7 +374,7 @@ export class ContextResource extends Resource {
 			this.sdk.context.delete({
 				...this.scope(params.collection),
 				ids: params.ids,
-				type: kindToType(params.kind),
+				type: params.kind,
 			}, req(opts)),
 		);
 	}
