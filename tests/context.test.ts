@@ -407,3 +407,94 @@ test("buildRecalledContext leaves non-envelope content untouched", () => {
 		);
 	}
 });
+
+// `source_chunk_ids` is the server's explicit statement of which chunks a
+// relation came from, and the mapping the SDK's own renderer prefers. It was
+// dropped by the adapter, so a relation linked ONLY that way — with no entry in
+// chunk_id_to_group_ids and no matching triplet.chunk_id — vanished from the
+// output. The graph traversal was paid for and the result discarded.
+test("buildRecalledContext attaches relations linked only by source_chunk_ids", () => {
+	const out = buildRecalledContext({
+		chunks: [{ chunk_uuid: "c1", source_id: "s1", chunk_content: "body" }],
+		graph_context: {
+			query_paths: [],
+			chunk_relations: [
+				{
+					relevancy_score: 0.9,
+					group_id: "g1",
+					source_chunk_ids: ["c1"],
+					triplets: [
+						{
+							source: { name: "Alice" },
+							relation: { raw_predicate: "likes", context: "" },
+							target: { name: "Tea" },
+						},
+					],
+				},
+			],
+			// Deliberately empty: the indirect route cannot find this relation.
+			chunk_id_to_group_ids: {},
+		},
+	} as never);
+
+	assert.match(out, /Graph Relations:/);
+	assert.match(out, /Alice.*likes.*Tea/);
+});
+
+// When the server links both ways, the relation must appear once, not twice.
+test("buildRecalledContext does not double-attach a relation linked both ways", () => {
+	const out = buildRecalledContext({
+		chunks: [{ chunk_uuid: "c1", source_id: "s1", chunk_content: "body" }],
+		graph_context: {
+			query_paths: [],
+			chunk_relations: [
+				{
+					relevancy_score: 0.9,
+					group_id: "g1",
+					source_chunk_ids: ["c1"],
+					triplets: [
+						{
+							source: { name: "Alice" },
+							relation: { raw_predicate: "likes", context: "" },
+							target: { name: "Tea" },
+						},
+					],
+				},
+			],
+			chunk_id_to_group_ids: { c1: ["g1"] },
+		},
+	} as never);
+
+	assert.equal(
+		out.match(/Alice/g)?.length,
+		1,
+		"a relation reachable by both routes must be attached exactly once",
+	);
+});
+
+// The direct route must not suppress the score filter.
+test("buildRecalledContext still drops low-scoring relations linked directly", () => {
+	const out = buildRecalledContext({
+		chunks: [{ chunk_uuid: "c1", source_id: "s1", chunk_content: "body" }],
+		graph_context: {
+			query_paths: [],
+			chunk_relations: [
+				{
+					relevancy_score: 0.15,
+					group_id: "g1",
+					source_chunk_ids: ["c1"],
+					triplets: [
+						{
+							source: { name: "Bob" },
+							relation: { raw_predicate: "dislikes", context: "" },
+							target: { name: "Coffee" },
+						},
+					],
+				},
+			],
+			chunk_id_to_group_ids: {},
+		},
+	} as never);
+
+	assert.doesNotMatch(out, /Bob/);
+});

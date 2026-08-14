@@ -61,6 +61,12 @@ export type ScoredPath = {
 	relevancy_score: number;
 	combined_context?: string | null;
 	group_id?: string | null;
+	/**
+	 * Chunks this relation path was drawn from. The direct chunk→relation link,
+	 * and the mapping the SDK's own renderer prefers; `group_id` plus
+	 * `chunk_id_to_group_ids` is the indirect fallback for when this is absent.
+	 */
+	source_chunk_ids?: string[] | null;
 };
 
 export type GraphContext = {

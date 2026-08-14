@@ -30,6 +30,7 @@ function toScoredPath(path: SDK.SearchScoredPathResponse): ScoredPath {
 		relevancy_score: path.relevancyScore ?? 0,
 		combined_context: path.combinedContext ?? null,
 		group_id: path.groupId ?? null,
+		source_chunk_ids: path.sourceChunkIds ?? null,
 	};
 }
 

@@ -85,6 +85,20 @@ export function buildRecalledContext(
 		relationIndex[groupId] = relation;
 	}
 
+	// Direct chunk → relation links, the mapping the server states explicitly and
+	// the one the SDK's own renderer reaches for first. Without it this renderer
+	// had only the indirect route (group_id + chunk_id_to_group_ids) and the
+	// triplet.chunk_id scan, so any relation the server linked ONLY via
+	// source_chunk_ids was silently dropped from the output.
+	const directRelations: Record<string, [string, ScoredPath][]> = {};
+	for (const [groupId, relation] of Object.entries(relationIndex)) {
+		for (const chunkId of relation.source_chunk_ids ?? []) {
+			const bucket = directRelations[chunkId];
+			if (bucket) bucket.push([groupId, relation]);
+			else directRelations[chunkId] = [[groupId, relation]];
+		}
+	}
+
 	const chunkToGroupIds = graphCtx.chunk_id_to_group_ids ?? {};
 	const consumedExtraIds = new Set<string>();
 	const groupOccurrenceCounts: Record<string, number> = {};
@@ -116,27 +130,42 @@ export function buildRecalledContext(
 
 		const matchedRelations: ScoredPath[] = [];
 
-		// Track whether the primary lookup found any candidate groups
-		// (even if all were capped) to avoid incorrectly falling through
-		// to the fallback path
+		/** Take a relation for this chunk unless its group is already capped. */
+		const take = (gid: string, relation: ScoredPath) => {
+			const occurrences = groupOccurrenceCounts[gid] ?? 0;
+			if (maxGroupOccurrences == null || occurrences < maxGroupOccurrences) {
+				matchedRelations.push(relation);
+				groupOccurrenceCounts[gid] = occurrences + 1;
+			}
+		};
+
+		// Preferred route: the server said which chunks this relation came from.
+		const direct = directRelations[chunkUuid] ?? [];
+		for (const [gid, relation] of direct) {
+			take(gid, relation);
+		}
+
+		// Track whether a lookup found any candidate groups (even if all were
+		// capped) to avoid incorrectly falling through to the fallback path
 		const hasLinkedGroups = linkedGroupIds.some(
 			(gid) => !!relationIndex[gid],
 		);
 
-		for (const gid of linkedGroupIds) {
-			if (relationIndex[gid]) {
-				const occurrences = groupOccurrenceCounts[gid] ?? 0;
-				if (
-					maxGroupOccurrences == null ||
-					occurrences < maxGroupOccurrences
-				) {
-					matchedRelations.push(relationIndex[gid]!);
-					groupOccurrenceCounts[gid] = occurrences + 1;
+		// Indirect route, used only when the direct one produced no candidates —
+		// running both would attach the same relation twice.
+		if (direct.length === 0) {
+			for (const gid of linkedGroupIds) {
+				if (relationIndex[gid]) {
+					take(gid, relationIndex[gid]!);
 				}
 			}
 		}
 
-		if (matchedRelations.length === 0 && !hasLinkedGroups) {
+		if (
+			matchedRelations.length === 0 &&
+			!hasLinkedGroups &&
+			direct.length === 0
+		) {
 			for (const [gid, rel] of Object.entries(relationIndex)) {
 				const triplets = rel.triplets ?? [];
 				const hasChunk = triplets.some(
