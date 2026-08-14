@@ -74,7 +74,17 @@ function extractChunkText(chunkContent: string | undefined): string {
 	);
 	if (hasUnknownSibling) return trimmed;
 
-	const looksLikeSource = ["id", "tenant_id", "source_id", "chunk_id"].some(
+	// And require a field that is unambiguously OURS. `id` is not — a user's own
+	// document can easily carry one, and so can `title` or `timestamp`, all of
+	// which are in the allowlist above. `tenant_id`/`sub_tenant_id` are internal
+	// scoping fields the server stamps on; a document someone wrote by hand does
+	// not have them.
+	//
+	// If a future envelope arrives without them we simply stop unwrapping it, and
+	// the content is rendered as JSON — visible, ugly, and recoverable. That is
+	// the direction to fail in: the opposite mistake deletes someone's data with
+	// no trace.
+	const looksLikeSource = ["tenant_id", "sub_tenant_id"].some(
 		(key) => typeof record[key] === "string",
 	);
 	if (!looksLikeSource) return trimmed;

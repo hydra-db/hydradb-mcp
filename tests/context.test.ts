@@ -364,7 +364,8 @@ test("buildRecalledContext prefers text over markdown in an envelope", () => {
 			{
 				chunk_uuid: "c1",
 				source_id: "s9",
-				chunk_content: '{"id":"s9","content":{"text":"plain body","markdown":"# md body"}}',
+				chunk_content:
+					'{"id":"s9","tenant_id":"t","content":{"text":"plain body","markdown":"# md body"}}',
 			},
 		],
 	} as never);
@@ -379,7 +380,7 @@ test("buildRecalledContext falls back to markdown when text is absent", () => {
 			{
 				chunk_uuid: "c1",
 				source_id: "s9",
-				chunk_content: '{"id":"s9","content":{"markdown":"# md body"}}',
+				chunk_content: '{"id":"s9","tenant_id":"t","content":{"markdown":"# md body"}}',
 			},
 		],
 	} as never);
@@ -393,7 +394,7 @@ test("buildRecalledContext falls back to markdown when text is absent", () => {
 test("buildRecalledContext leaves non-envelope content untouched", () => {
 	for (const body of [
 		'{"not":"an envelope"}',
-		'{"id":"s9","content":"a string, not an object"}',
+		'{"id":"s9","tenant_id":"t","content":"a string, not an object"}',
 		"{ this is not valid json }",
 		"a plain sentence about {braces}",
 	]) {
@@ -567,4 +568,22 @@ test("buildRecalledContext unwraps an envelope whose every sibling is known", ()
 
 	assert.match(out, /the actual body/);
 	assert.doesNotMatch(out, /tenant_id/);
+});
+
+// Greptile, PR #46 (third pass): an `id` is not evidence of an envelope, and
+// neither are `title`/`metadata`/`timestamp` — all names a user's own document
+// plausibly uses. Only the internal scoping fields are ours alone.
+test("buildRecalledContext keeps a document whose fields merely look internal", () => {
+	const stored =
+		'{"id":"doc-1","title":"Notes","timestamp":"2026-01-01","content":{"text":"the body"}}';
+	const out = buildRecalledContext({
+		chunks: [{ chunk_uuid: "c1", source_id: "s9", chunk_content: stored }],
+	} as never);
+
+	assert.ok(
+		out.includes(stored),
+		"without tenant_id this is a user document and must survive verbatim",
+	);
+	assert.match(out, /Notes/);
+	assert.match(out, /2026-01-01/);
 });
