@@ -38,22 +38,6 @@ type ToolResult = {
 };
 
 /**
- * A source id for a conversation the caller did not name.
- *
- * This was `mcp-conversation-${Date.now()}` — millisecond resolution, no
- * randomness, no process or session identity. Two ingests landing in the same
- * millisecond produced the same id, and because `upsert` is true the second
- * silently REPLACED the first (see the upsert regression test) while reporting
- * "success: 1, failed: 0". Nothing surfaced the loss.
- *
- * The collision window is wider than one agent racing itself: HYDRADB_COLLECTION
- * defaults to the shared literal `hydra-db-mcp`, so every user who does not set
- * it shares one namespace with a low-entropy id.
- *
- * The timestamp prefix is kept because it sorts and reads well; the suffix is
- * what makes it unique.
- */
-/**
  * A usable title for an entry the caller did not name.
  *
  * The default was the constant "MCP Memory". Since `title` is the ONLY per-chunk
@@ -75,6 +59,22 @@ function defaultTitle(text: string): string {
 	return cleaned.length <= 60 ? cleaned : `${cleaned.slice(0, 57).trimEnd()}…`;
 }
 
+/**
+ * A source id for a conversation the caller did not name.
+ *
+ * This was `mcp-conversation-${Date.now()}` — millisecond resolution, no
+ * randomness, no process or session identity. Two ingests landing in the same
+ * millisecond produced the same id, and because `upsert` is true the second
+ * silently REPLACED the first (see the upsert regression test) while reporting
+ * "success: 1, failed: 0". Nothing surfaced the loss.
+ *
+ * The collision window is wider than one agent racing itself: HYDRADB_COLLECTION
+ * defaults to the shared literal `hydra-db-mcp`, so every user who does not set
+ * it shares one namespace with a low-entropy id.
+ *
+ * The timestamp prefix is kept because it sorts and reads well; the suffix is
+ * what makes it unique.
+ */
 function generatedSourceId(): string {
 	return `mcp-conversation-${Date.now()}-${randomUUID().slice(0, 8)}`;
 }
@@ -833,6 +833,7 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		) => Promise<ToolResult>,
 		annotations?: {
 			readOnlyHint?: boolean;
+			destructiveHint?: boolean;
 			openWorldHint?: boolean;
 			idempotentHint?: boolean;
 		},
@@ -1039,11 +1040,35 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.DELETE_MEMORY].params.memory_id),
 	};
 
-	const readOnly = { readOnlyHint: true, idempotentHint: true };
-	const searchAnnotations = {
+	// `destructiveHint` was missing from the annotations type, so no tool could
+	// declare it — and the MCP spec defaults it to TRUE for any non-readonly
+	// tool. A spec-following host therefore read hydradb_ingest as destructive
+	// and could prompt the user before every proactive save, which is exactly the
+	// behaviour the instructions now ask for. Meanwhile hydradb_delete, which IS
+	// destructive, was landing there only by absence — one refactor adding an
+	// explicit `readOnlyHint: false` would have flipped it.
+	//
+	// All four are stated on every tool so none of them depends on a default.
+	const readOnly = {
 		readOnlyHint: true,
-		openWorldHint: true,
+		destructiveHint: false,
 		idempotentHint: true,
+		openWorldHint: true,
+	};
+	const searchAnnotations = readOnly;
+	/** Adds context; never removes any. Repeating it is not a no-op. */
+	const additiveWrite = {
+		readOnlyHint: false,
+		destructiveHint: false,
+		idempotentHint: false,
+		openWorldHint: true,
+	};
+	/** Removes context irreversibly. Repeating it is harmless once it is gone. */
+	const destructive = {
+		readOnlyHint: false,
+		destructiveHint: true,
+		idempotentHint: true,
+		openWorldHint: true,
 	};
 
 	// --- Canonical tools ---
@@ -1055,7 +1080,10 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		searchAnnotations,
 	);
 
-	register(TOOL_NAMES.INGEST, ingestSchema, async (args, extra) => {
+	register(
+		TOOL_NAMES.INGEST,
+		ingestSchema,
+		async (args, extra) => {
 		const a = args as {
 			text?: string;
 			kind?: ContextKind;
@@ -1116,10 +1144,12 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 				extra?.signal,
 			);
 		}
-		throw new Error(
-			`${TOOL_NAMES.INGEST} requires either \`text\` (a note) or \`turns\` (a conversation).`,
-		);
-	});
+			throw new Error(
+				`${TOOL_NAMES.INGEST} requires either \`text\` (a note) or \`turns\` (a conversation).`,
+			);
+		},
+		additiveWrite,
+	);
 
 	register(
 		TOOL_NAMES.LIST,
@@ -1153,8 +1183,11 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		readOnly,
 	);
 
-	register(TOOL_NAMES.DELETE, deleteSchema, (args, extra) =>
-		runDelete(args as Parameters<typeof runDelete>[0], extra?.signal),
+	register(
+		TOOL_NAMES.DELETE,
+		deleteSchema,
+		(args, extra) => runDelete(args as Parameters<typeof runDelete>[0], extra?.signal),
+		destructive,
 	);
 
 	register(
@@ -1194,11 +1227,17 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		searchAnnotations,
 	);
 
-	register(TOOL_NAMES.STORE, storeSchema, (args, extra) =>
-		runStore(args as Parameters<typeof runStore>[0], extra?.signal),
+	register(
+		TOOL_NAMES.STORE,
+		storeSchema,
+		(args, extra) => runStore(args as Parameters<typeof runStore>[0], extra?.signal),
+		additiveWrite,
 	);
 
-	register(TOOL_NAMES.INGEST_CONVERSATION, conversationSchema, (args, extra) => {
+	register(
+		TOOL_NAMES.INGEST_CONVERSATION,
+		conversationSchema,
+		(args, extra) => {
 		const a = args as {
 			turns: ConversationTurn[];
 			source_id: string;
@@ -1206,13 +1245,15 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		};
 		// The deprecated alias keeps its historical shape (user_name only; infer
 		// on, no title/markdown). The canonical hydradb_ingest forwards the rest.
-		return runIngestConversation(
-			a.turns,
-			a.source_id,
-			{ userName: a.user_name },
-			extra?.signal,
-		);
-	});
+			return runIngestConversation(
+				a.turns,
+				a.source_id,
+				{ userName: a.user_name },
+				extra?.signal,
+			);
+		},
+		additiveWrite,
+	);
 
 	register(
 		TOOL_NAMES.LIST_MEMORIES,
@@ -1237,10 +1278,15 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		readOnly,
 	);
 
-	register(TOOL_NAMES.DELETE_MEMORY, deleteMemorySchema, (args, extra) => {
-		const { memory_id } = args as { memory_id: string };
-		return runDelete({ id: memory_id, kind: "memory" }, extra?.signal);
-	});
+	register(
+		TOOL_NAMES.DELETE_MEMORY,
+		deleteMemorySchema,
+		(args, extra) => {
+			const { memory_id } = args as { memory_id: string };
+			return runDelete({ id: memory_id, kind: "memory" }, extra?.signal);
+		},
+		destructive,
+	);
 	}
 
 	return server.server;

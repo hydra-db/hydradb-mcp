@@ -1502,3 +1502,70 @@ test("an explicit title always wins", async () => {
 	assert.equal(item.title, "Deployment rollback policy");
 	await client.close();
 });
+
+// `destructiveHint` was absent from the register() annotations type, so no tool
+// could declare it — and the MCP spec defaults it to TRUE for any non-readonly
+// tool. A spec-following host therefore read hydradb_ingest as destructive and
+// could prompt before every proactive save, killing the behaviour the
+// instructions ask for. hydradb_delete meanwhile was destructive only by
+// absence, one refactor away from flipping.
+test("every tool declares all four behaviour hints explicitly", async () => {
+	process.env.HYDRADB_MCP_LEGACY_TOOLS = "1";
+	const client = await connect(mockHydra().hydra);
+	const { tools } = await client.listTools();
+	delete process.env.HYDRADB_MCP_LEGACY_TOOLS;
+
+	for (const tool of tools) {
+		const a = tool.annotations ?? {};
+		for (const hint of [
+			"readOnlyHint",
+			"destructiveHint",
+			"idempotentHint",
+			"openWorldHint",
+		] as const) {
+			assert.equal(
+				typeof a[hint],
+				"boolean",
+				`${tool.name} must state ${hint} rather than inherit a default`,
+			);
+		}
+	}
+	await client.close();
+});
+
+test("reads are read-only, writes are not, and only deletes are destructive", async () => {
+	process.env.HYDRADB_MCP_LEGACY_TOOLS = "1";
+	const client = await connect(mockHydra().hydra);
+	const { tools } = await client.listTools();
+	delete process.env.HYDRADB_MCP_LEGACY_TOOLS;
+
+	const hint = (name: string) =>
+		tools.find((t) => t.name === name)!.annotations as Record<string, boolean>;
+
+	for (const name of [
+		"hydradb_query",
+		"hydradb_list",
+		"hydradb_inspect",
+		"hydradb_status",
+	]) {
+		assert.equal(hint(name).readOnlyHint, true, `${name} should be read-only`);
+		assert.equal(hint(name).destructiveHint, false);
+	}
+
+	// Ingest writes but never removes; a host must not gate it behind a
+	// destructive-action prompt.
+	for (const name of ["hydradb_ingest", "hydra_db_store", "hydra_db_ingest_conversation"]) {
+		assert.equal(hint(name).readOnlyHint, false, `${name} writes`);
+		assert.equal(
+			hint(name).destructiveHint,
+			false,
+			`${name} adds context and must not read as destructive`,
+		);
+	}
+
+	for (const name of ["hydradb_delete", "hydra_db_delete_memory"]) {
+		assert.equal(hint(name).destructiveHint, true, `${name} removes data irreversibly`);
+	}
+
+	await client.close();
+});
