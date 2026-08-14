@@ -2200,6 +2200,15 @@ test("a boolean-only delete response is not reported as partial", async () => {
 	assert.doesNotMatch(text, /1 of 3/, "a flag is not a count of one");
 	assert.notEqual(structured.partial, true);
 	assert.equal(structured.deleted, true);
+
+	// Greptile, PR #50 (second pass): nor is it a count of three. Substituting
+	// ids.length overstates a partial removal as complete success, which is the
+	// same fabrication in the other direction. An unknown count is reported as
+	// unknown.
+	assert.equal(structured.deleted_count, undefined, "must not invent a count");
+	assert.equal(structured.deleted_count_known, false);
+	assert.match(text, /did not say how many/);
+	assert.match(text, /hydradb_list/, "must say how to find out");
 });
 
 // A real count still drives the partial report.

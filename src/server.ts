@@ -949,30 +949,42 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		ids: string[],
 		res: { success?: boolean; message?: string; results?: unknown },
 		removed: boolean,
-		removedCount = 0,
+		/** How many were removed, when the server said. `undefined` means unknown. */
+		removedCount?: number,
 	): ToolResult {
 		const noun = kind === "knowledge" ? "source" : "memory";
 		const id = ids.join(", ");
 		if (removed) {
-			// With several ids the server may remove only some of them, and saying
-			// "Deleted" over a partial result is the kind of overstatement this
-			// whole branch of work exists to remove. Only claim partial when the
-			// server actually gave us a count — inferring one from a boolean would
-			// invent a failure that may not have happened.
-			const partial = ids.length > 1 && removedCount < ids.length;
-			return structuredResult(
-				partial
-					? `Deleted ${removedCount} of ${ids.length} ${noun}s (requested: ${id}). ` +
-						`The rest were not found or could not be removed.`
-					: `Deleted ${noun}${ids.length > 1 ? "s" : ""}: ${id}`,
-				{
-					ids,
-					kind,
-					deleted: true,
-					deleted_count: removedCount || ids.length,
-					...(partial ? { partial: true } : {}),
-				},
-			);
+			// Three outcomes, and the third is "we were not told".
+			const partial =
+				removedCount != null && ids.length > 1 && removedCount < ids.length;
+			const unknownCount = removedCount == null && ids.length > 1;
+
+			let text: string;
+			if (partial) {
+				text =
+					`Deleted ${removedCount} of ${ids.length} ${noun}s (requested: ${id}). ` +
+					`The rest were not found or could not be removed.`;
+			} else if (unknownCount) {
+				// Do not claim all of them went. The server confirmed a removal and
+				// gave no count, so that is exactly what gets reported.
+				text =
+					`Deleted from Hydra DB (requested: ${id}). The server confirmed a removal ` +
+					`but did not say how many of the ${ids.length} ids were removed — ` +
+					`use ${TOOL_NAMES.LIST} to confirm which remain.`;
+			} else {
+				text = `Deleted ${noun}${ids.length > 1 ? "s" : ""}: ${id}`;
+			}
+
+			return structuredResult(text, {
+				ids,
+				kind,
+				deleted: true,
+				// Omitted rather than guessed when the server did not report it.
+				...(removedCount != null ? { deleted_count: removedCount } : {}),
+				...(partial ? { partial: true } : {}),
+				...(unknownCount ? { deleted_count_known: false } : {}),
+			});
 		}
 
 		if (res.success === false) {
@@ -1058,9 +1070,12 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			typeof rawMemoryDeleted === "number" ? rawMemoryDeleted : undefined;
 		const reportedCount = res.deletedCount ?? memoryDeletedCount;
 		const removed = (reportedCount ?? 0) > 0 || rawMemoryDeleted === true;
-		// With no count at all we do not know how many went; assume the request
-		// was honoured in full rather than implying a partial failure.
-		const removedCount = reportedCount ?? (removed ? args.ids.length : 0);
+		// With no count at all, we do not know how many went — and inventing one
+		// is wrong in both directions. Reading the flag as 1 understated a full
+		// removal ("Deleted 1 of 3"); substituting ids.length overstates a partial
+		// one as complete success. So the count stays UNKNOWN and the report says
+		// so, which is the only thing actually observed.
+		const removedCount = reportedCount;
 		if (!removed) {
 			logger.warn(
 				`${TOOL_NAMES.DELETE}: removed nothing for ${kind} ${args.ids.join(", ")}`,
@@ -1371,7 +1386,9 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		ids: z.array(z.string()),
 		kind: z.enum(["memory", "knowledge"]),
 		deleted: z.boolean(),
-		deleted_count: z.number(),
+		/** Absent when the server confirmed a removal without saying how many. */
+		deleted_count: z.number().optional(),
+		deleted_count_known: z.boolean().optional(),
 		partial: z.boolean().optional(),
 		reason: z.string().optional(),
 	};

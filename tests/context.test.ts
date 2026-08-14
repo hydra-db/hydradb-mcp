@@ -841,29 +841,29 @@ test("a contained chunk keeps its id, score and relations", () => {
 	const out = buildRecalledContext({
 		chunks: [
 			{
-				chunk_uuid: "c1",
-				source_id: "doc",
-				chunk_content: long,
-				relevancy_score: 0.9,
+				chunkUuid: "c1",
+				id: "doc",
+				chunkContent: long,
+				relevancyScore: 0.9,
 			},
 			{
-				chunk_uuid: "c2",
-				source_id: "doc",
-				chunk_content: "prefers tabs over spaces",
-				relevancy_score: 0.7,
-				extra_context_ids: ["e1"],
+				chunkUuid: "c2",
+				id: "doc",
+				chunkContent: "prefers tabs over spaces",
+				relevancyScore: 0.7,
+				extraContextIds: ["e1"],
 			},
 		],
-		additional_context: {
-			e1: { chunk_uuid: "e1", source_id: "x", chunk_content: "a related passage" },
+		additionalContext: {
+			e1: { chunkUuid: "e1", id: "x", chunkContent: "a related passage" },
 		},
-		graph_context: {
-			query_paths: [],
-			chunk_relations: [
+		graphContext: {
+			queryPaths: [],
+			chunkRelations: [
 				{
-					relevancy_score: 0.9,
-					group_id: "g1",
-					source_chunk_ids: ["c2"],
+					relevancyScore: 0.9,
+					groupId: "g1",
+					sourceChunkIds: ["c2"],
 					triplets: [
 						{
 							source: { name: "Alice" },
@@ -873,7 +873,7 @@ test("a contained chunk keeps its id, score and relations", () => {
 					],
 				},
 			],
-			chunk_id_to_group_ids: {},
+			chunkIdToGroupIds: {},
 		},
 	} as never);
 
@@ -890,18 +890,18 @@ test("entity paths count against the output budget", () => {
 	const out = buildRecalledContext(
 		{
 			chunks: Array.from({ length: 20 }, (_, i) => ({
-				chunk_uuid: `c${i}`,
-				source_id: `s${i}`,
-				chunk_content: `body-${i} ` + "x".repeat(3000),
+				chunkUuid: `c${i}`,
+				id: `s${i}`,
+				chunkContent: `body-${i} ` + "x".repeat(3000),
 			})),
-			graph_context: {
-				query_paths: Array.from({ length: 200 }, (_, i) => ({
-					relevancy_score: 0.9,
-					combined_context: `entity path ${i} ` + "p".repeat(200),
+			graphContext: {
+				queryPaths: Array.from({ length: 200 }, (_, i) => ({
+					relevancyScore: 0.9,
+					combinedContext: `entity path ${i} ` + "p".repeat(200),
 					triplets: [],
 				})),
-				chunk_relations: [],
-				chunk_id_to_group_ids: {},
+				chunkRelations: [],
+				chunkIdToGroupIds: {},
 			},
 		} as never,
 		{ maxTotalChars: 20_000 },
@@ -921,11 +921,11 @@ test("content that looks like a chunk header does not inflate the count", () => 
 	const { shown, text } = renderRecalledContext({
 		chunks: [
 			{
-				chunk_uuid: "c1",
-				source_id: "s1",
-				chunk_content: "Chunk 5 of the manual covers rollback.\nChunk 6 covers restore.",
+				chunkUuid: "c1",
+				id: "s1",
+				chunkContent: "Chunk 5 of the manual covers rollback.\nChunk 6 covers restore.",
 			},
-			{ chunk_uuid: "c2", source_id: "s2", chunk_content: "an unrelated body" },
+			{ chunkUuid: "c2", id: "s2", chunkContent: "an unrelated body" },
 		],
 	} as never);
 
@@ -942,8 +942,8 @@ test("a body pointer never aims forward, where truncation could remove it", () =
 	const long = "The user prefers tabs over spaces in every language they write.";
 	const out = buildRecalledContext({
 		chunks: [
-			{ chunk_uuid: "c1", source_id: "doc", chunk_content: "prefers tabs over spaces" },
-			{ chunk_uuid: "c2", source_id: "doc", chunk_content: long },
+			{ chunkUuid: "c1", id: "doc", chunkContent: "prefers tabs over spaces" },
+			{ chunkUuid: "c2", id: "doc", chunkContent: long },
 		],
 	} as never);
 
@@ -958,8 +958,8 @@ test("compact rendering never collapses bodies into a pointer", () => {
 	const out = buildRecalledContext(
 		{
 			chunks: [
-				{ chunk_uuid: "c1", source_id: "doc", chunk_content: `${"x".repeat(2000)}${shared}` },
-				{ chunk_uuid: "c2", source_id: "doc", chunk_content: shared },
+				{ chunkUuid: "c1", id: "doc", chunkContent: `${"x".repeat(2000)}${shared}` },
+				{ chunkUuid: "c2", id: "doc", chunkContent: shared },
 			],
 		} as never,
 		{ maxChunkChars: 600 },
