@@ -53,6 +53,29 @@ function kindToType<K extends QueryKind>(kind: K | undefined): K | undefined {
 	return kind;
 }
 
+/**
+ * An SDK logger that cannot corrupt the stdio transport.
+ *
+ * The SDK's own `ConsoleLogger` implements `debug`/`info` via `console.debug` /
+ * `console.info`, which are stdout aliases in Node. On stdio transport stdout IS
+ * the JSON-RPC channel, so a single SDK log line would break the session.
+ *
+ * Not currently live — the SDK's default logger is constructed `silent: true` —
+ * but the exposure is one `logging: { level: "debug" }` away, which is precisely
+ * what someone debugging a production incident reaches for. Passing an explicit
+ * logger pins the safe behaviour instead of inheriting it.
+ */
+const STDERR_LOGGER = {
+	debug: (message: string, ...args: unknown[]) =>
+		console.error("[hydradb-sdk]", message, ...args),
+	info: (message: string, ...args: unknown[]) =>
+		console.error("[hydradb-sdk]", message, ...args),
+	warn: (message: string, ...args: unknown[]) =>
+		console.error("[hydradb-sdk]", message, ...args),
+	error: (message: string, ...args: unknown[]) =>
+		console.error("[hydradb-sdk]", message, ...args),
+};
+
 /** Wrapper options → the SDK's per-request options, omitted when there is nothing to say. */
 function req(opts?: RequestOptions): { abortSignal?: AbortSignal } | undefined {
 	return opts?.signal ? { abortSignal: opts.signal } : undefined;
@@ -426,6 +449,10 @@ export class HydraDB {
 				// a ~3 minute worst case on the slowest tool it exposes.
 				timeoutInSeconds: config.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS,
 				maxRetries: config.maxRetries ?? DEFAULT_MAX_RETRIES,
+				// Never inherit the SDK's console logger: it writes to stdout, which
+				// on stdio transport is the JSON-RPC channel. Only the sink is
+				// overridden — level and silencing keep the SDK's own defaults.
+				logging: { logger: STDERR_LOGGER },
 			});
 		this.context = new ContextResource(client, config.database, config.collection);
 		this.databases = new DatabasesResource(
