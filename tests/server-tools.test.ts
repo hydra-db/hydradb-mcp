@@ -1630,3 +1630,101 @@ test("hydradb_list does not add an ellipsis to a short row", async () => {
 	assert.match(text, /\[m1\] short fact/);
 	assert.doesNotMatch(text, /short fact\.\.\./);
 });
+
+// Every handler returned prose only, so a caller wanting an id had to pull it
+// out of a sentence. structuredContent hands the same facts over already parsed.
+test("hydradb_list returns structured items alongside the text", async () => {
+	const { hydra } = mockHydra({
+		list: {
+			user_memories: [
+				{ memory_id: "m1", memory_content: "prefers tabs" },
+				{ memory_id: "m2", memory_content: "deploys Tuesdays" },
+			],
+			total: 412,
+			pagination: { page: 1, page_size: 2, total_pages: 206, has_next: true },
+		},
+	});
+	const client = await connect(hydra);
+	const result = await client.callTool({
+		name: "hydradb_list",
+		arguments: { kind: "memory" },
+	});
+	await client.close();
+
+	const structured = result.structuredContent as Record<string, unknown>;
+	assert.ok(structured, "list should return structuredContent");
+	assert.equal(structured.kind, "memory");
+	assert.equal(structured.shown, 2);
+	assert.equal(structured.total, 412);
+	assert.equal(structured.has_more, true);
+	assert.deepEqual((structured.items as { id: string }[]).map((i) => i.id), ["m1", "m2"]);
+
+	// The prose must survive for hosts that ignore structured output.
+	assert.match((result.content as { text: string }[])[0]!.text, /2 of 412/);
+});
+
+test("hydradb_ingest returns the created id as structured data", async () => {
+	const { hydra } = mockHydra({
+		ingest: {
+			success: true,
+			successCount: 1,
+			failedCount: 0,
+			results: [{ id: "srv-9", status: "completed", error: "" }],
+		},
+	});
+	const client = await connect(hydra);
+	const result = await client.callTool({
+		name: "hydradb_ingest",
+		arguments: { text: "a note" },
+	});
+	await client.close();
+
+	const structured = result.structuredContent as Record<string, unknown>;
+	assert.equal(structured.id, "srv-9");
+	assert.equal(structured.success_count, 1);
+	assert.equal(structured.failed_count, 0);
+	// Indexing is asynchronous, so a caller that wants to confirm must poll.
+	assert.equal(structured.indexing_pending, true);
+});
+
+test("hydradb_delete reports its outcome as structured data", async () => {
+	const cases: [Record<string, unknown>, boolean][] = [
+		[{ success: true, userMemoryDeleted: 1 }, true],
+		[{ success: true, deletedCount: 0 }, false],
+	];
+
+	for (const [response, expected] of cases) {
+		const { hydra } = mockHydra({ delete: response });
+		const client = await connect(hydra);
+		const result = await client.callTool({
+			name: "hydradb_delete",
+			arguments: { id: "m1", kind: "memory" },
+		});
+		await client.close();
+
+		const structured = result.structuredContent as Record<string, unknown>;
+		assert.equal(structured.id, "m1");
+		assert.equal(structured.kind, "memory");
+		assert.equal(
+			structured.deleted,
+			expected,
+			`deleted flag for ${JSON.stringify(response)}`,
+		);
+	}
+});
+
+// An empty result is still a result; a caller branching on `items` should not
+// have to special-case it.
+test("an empty listing still carries structured content", async () => {
+	const { hydra } = mockHydra({ list: { user_memories: [], total: 0 } });
+	const client = await connect(hydra);
+	const result = await client.callTool({
+		name: "hydradb_list",
+		arguments: { kind: "memory" },
+	});
+	await client.close();
+
+	const structured = result.structuredContent as Record<string, unknown>;
+	assert.deepEqual(structured.items, []);
+	assert.equal(structured.has_more, false);
+});

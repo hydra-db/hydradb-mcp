@@ -34,6 +34,7 @@ const { version: SERVER_VERSION } = require("../package.json") as {
 
 type ToolResult = {
 	content: { type: "text"; text: string }[];
+	structuredContent?: Record<string, unknown>;
 	isError?: boolean;
 };
 
@@ -81,6 +82,24 @@ function generatedSourceId(): string {
 
 function textResult(text: string): ToolResult {
 	return { content: [{ type: "text" as const, text }] };
+}
+
+/**
+ * A result the caller can read OR parse.
+ *
+ * Every handler returned prose only, so a caller wanting an id had to pull it
+ * out of a sentence. `structuredContent` hands over the same facts already
+ * parsed — ids it can pass straight to the next tool, counts it can branch on.
+ *
+ * `content` stays populated alongside it. The MCP spec requires that for hosts
+ * that ignore structured output, and dropping it would break every client that
+ * renders the text.
+ */
+function structuredResult(
+	text: string,
+	structuredContent: Record<string, unknown>,
+): ToolResult {
+	return { content: [{ type: "text" as const, text }], structuredContent };
 }
 
 /**
@@ -448,11 +467,17 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		// possible at all.
 		const id = createdId(res) ?? args.source_id;
 
-		return textResult(
+		return structuredResult(
 			`Saved to Hydra DB${id ? ` (id: ${id})` : ""} ` +
 			`(${res.success_count} success, ${res.failed_count} failed).` +
 			indexingNote(res) +
 			ingestIssues(res),
+			{
+				...(id != null ? { id } : {}),
+				success_count: res.success_count,
+				failed_count: res.failed_count,
+				indexing_pending: true,
+			},
 		);
 	}
 
@@ -485,11 +510,18 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		}, { signal });
 		const res = toAddMemoryResponse(raw);
 
-		return textResult(
+		const conversationId = createdId(res) ?? sourceId;
+		return structuredResult(
 			`Ingested ${turns.length} conversation turn(s) into Hydra DB ` +
-			`(id: ${createdId(res) ?? sourceId}, success: ${res.success_count}, failed: ${res.failed_count})` +
+			`(id: ${conversationId}, success: ${res.success_count}, failed: ${res.failed_count})` +
 			indexingNote(res) +
 			ingestIssues(res),
+			{
+				id: conversationId,
+				success_count: res.success_count,
+				failed_count: res.failed_count,
+				indexing_pending: true,
+			},
 		);
 	}
 
@@ -500,24 +532,32 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 	 * truncated answer, it is a wrong one — the caller reports it as the complete
 	 * inventory. Say what was shown, out of what, and how to reach the rest.
 	 */
+	/**
+	 * Whether another page exists.
+	 *
+	 * `total > shown` is NOT a usable test on its own: on the last page of a large
+	 * corpus it is still true (12 shown of 412) and would point the caller at a
+	 * page that does not exist. Prefer what the server stated, then the page
+	 * arithmetic, and only then the row comparison — which is correct on page 1,
+	 * the only place it is reached.
+	 */
+	function hasMore(shown: number, page: PageInfo, requestedPage?: number): boolean {
+		const total = page.total ?? shown;
+		const current = page.page ?? requestedPage ?? 1;
+		const seen = (current - 1) * (page.page_size ?? shown) + shown;
+		return (
+			page.has_next ??
+			(page.total_pages != null ? current < page.total_pages : seen < total)
+		);
+	}
+
 	function coverage(shown: number, page: PageInfo, requestedPage?: number): string {
 		const total = page.total ?? shown;
 		const current = page.page ?? requestedPage ?? 1;
+		const more = hasMore(shown, page, requestedPage);
 
-		// `total > shown` is NOT a usable "more exists" test on its own: on the
-		// last page of a large corpus it is still true (12 shown of 412) and would
-		// point the caller at a page that does not exist. Prefer what the server
-		// stated, then the page arithmetic, and only then the row comparison —
-		// which is correct on page 1, the only place it is reached.
-		const seen = (current - 1) * (page.page_size ?? shown) + shown;
-		const hasMore =
-			page.has_next ??
-			(page.total_pages != null ? current < page.total_pages : seen < total);
-
-		if (!hasMore && current === 1) return `${shown}`;
-
-		const more = hasMore ? ` — pass page=${current + 1} for more` : "";
-		return `${shown} of ${total} (page ${current})${more}`;
+		if (!more && current === 1) return `${shown}`;
+		return `${shown} of ${total} (page ${current})${more ? ` — pass page=${current + 1} for more` : ""}`;
 	}
 
 	async function runListMemories(args: {
@@ -536,10 +576,21 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		const { memories, page } = toMemoryList(raw);
 
 		if (memories.length === 0) {
-			return textResult(
+			// Declaring an outputSchema obliges EVERY return path to carry structured
+			// content, including this one — a caller branching on `items` should not
+			// have to special-case the empty result.
+			return structuredResult(
 				args.page != null && args.page > 1
 					? `No memories on page ${args.page}.`
 					: "No memories stored yet.",
+				{
+					kind: "memory",
+					items: [],
+					shown: 0,
+					total: page.total ?? 0,
+					page: args.page ?? 1,
+					has_more: false,
+				},
 			);
 		}
 
@@ -552,8 +603,16 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			return `${i + 1}. [${m.memory_id}] ${snippet}`;
 		});
 
-		return textResult(
+		return structuredResult(
 			`${coverage(memories.length, page, args.page)} memories:\n\n${lines.join("\n")}`,
+			{
+				kind: "memory",
+				items: memories.map((m) => ({ id: m.memory_id, content: m.memory_content })),
+				shown: memories.length,
+				total: page.total ?? memories.length,
+				page: page.page ?? args.page ?? 1,
+				has_more: hasMore(memories.length, page, args.page),
+			},
 		);
 	}
 
@@ -573,10 +632,18 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		const { sources, page } = toSourceList(raw);
 
 		if (sources.length === 0) {
-			return textResult(
+			return structuredResult(
 				args.page != null && args.page > 1
 					? `No sources on page ${args.page}.`
 					: "No sources found.",
+				{
+					kind: "knowledge",
+					items: [],
+					shown: 0,
+					total: page.total ?? 0,
+					page: args.page ?? 1,
+					has_more: false,
+				},
 			);
 		}
 
@@ -589,8 +656,20 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		// Was `${total} sources:` — the corpus-wide total printed above a single
 		// page of rows, so "412 sources:" sat over 50 lines with no marker and no
 		// way to reach the other 362.
-		return textResult(
+		return structuredResult(
 			`${coverage(sources.length, page, args.page)} sources:\n\n${lines.join("\n")}`,
+			{
+				kind: "knowledge",
+				items: sources.map((src) => ({
+					id: src.id,
+					...(src.title != null ? { title: src.title } : {}),
+					...(src.type != null ? { type: src.type } : {}),
+				})),
+				shown: sources.length,
+				total: page.total ?? sources.length,
+				page: page.page ?? args.page ?? 1,
+				has_more: hasMore(sources.length, page, args.page),
+			},
 		);
 	}
 
@@ -787,16 +866,29 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 	): ToolResult {
 		const noun = kind === "knowledge" ? "source" : "memory";
 		if (removed) {
-			return textResult(`Deleted ${noun}: ${id}`);
+			return structuredResult(`Deleted ${noun}: ${id}`, {
+				id,
+				kind,
+				deleted: true,
+			});
 		}
 
 		if (res.success === false) {
 			const reason = deleteFailureReason(res);
-			return errorResult(
-				`Could NOT delete ${noun} ${id} — the server refused the request` +
-					`${reason ? `: ${reason}` : " and gave no reason"}. ` +
-					`The ${noun} has not been removed.`,
-			);
+			return {
+				...structuredResult(
+					`Could NOT delete ${noun} ${id} — the server refused the request` +
+						`${reason ? `: ${reason}` : " and gave no reason"}. ` +
+						`The ${noun} has not been removed.`,
+					{
+						id,
+						kind,
+						deleted: false,
+						...(reason ? { reason } : {}),
+					},
+				),
+				isError: true,
+			};
 		}
 
 		// The server succeeded and removed nothing, so no such id exists in this
@@ -805,9 +897,10 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		// reassuring one. A caller that invented an id — the likely case, since
 		// until recently nothing emitted one — reads it as confirmation and tells
 		// the user their data is gone.
-		return textResult(
+		return structuredResult(
 			`No ${noun} with id ${id} exists in this database — nothing was deleted. ` +
 			`Ids come from ${TOOL_NAMES.QUERY} or ${TOOL_NAMES.LIST}; check the id rather than retrying.`,
+			{ id, kind, deleted: false, reason: "not found" },
 		);
 	}
 
@@ -861,6 +954,7 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			openWorldHint?: boolean;
 			idempotentHint?: boolean;
 		},
+		outputSchema?: Record<string, unknown>,
 	) {
 		const desc = TOOL_DESCRIPTIONS[name];
 		const isDeprecated = (DEPRECATED_TOOL_NAMES as readonly string[]).includes(name);
@@ -880,6 +974,7 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 				title: desc.title,
 				description: desc.description,
 				inputSchema: inputSchema as never,
+				...(outputSchema ? { outputSchema: outputSchema as never } : {}),
 				...(annotations ? { annotations } : {}),
 			},
 			wrapped as never,
@@ -1064,6 +1159,39 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.DELETE].params.kind),
 	};
 
+	// Output schemas, declared only where the result is genuinely structured.
+	// Query stays prose: its payload IS text, and forcing it into fields would
+	// duplicate the rendered context rather than replace it.
+	const listOutputSchema = {
+		kind: z.enum(["memory", "knowledge"]),
+		items: z.array(
+			z.object({
+				id: z.string(),
+				title: z.string().optional(),
+				type: z.string().optional(),
+				content: z.string().optional(),
+			}),
+		),
+		shown: z.number(),
+		total: z.number(),
+		page: z.number(),
+		has_more: z.boolean(),
+	};
+
+	const ingestOutputSchema = {
+		id: z.string().optional(),
+		success_count: z.number(),
+		failed_count: z.number(),
+		indexing_pending: z.boolean(),
+	};
+
+	const deleteOutputSchema = {
+		id: z.string(),
+		kind: z.enum(["memory", "knowledge"]),
+		deleted: z.boolean(),
+		reason: z.string().optional(),
+	};
+
 	const statusSchema = {
 		ids: z
 			.array(z.string())
@@ -1186,6 +1314,7 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			);
 		},
 		additiveWrite,
+		ingestOutputSchema,
 	);
 
 	register(
@@ -1212,6 +1341,7 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			);
 		},
 		readOnly,
+		listOutputSchema,
 	);
 
 	register(
@@ -1226,6 +1356,7 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		deleteSchema,
 		(args, extra) => runDelete(args as Parameters<typeof runDelete>[0], extra?.signal),
 		destructive,
+		deleteOutputSchema,
 	);
 
 	register(
