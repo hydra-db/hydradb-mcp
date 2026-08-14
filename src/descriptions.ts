@@ -111,7 +111,11 @@ const PARAM = {
 	fetch_limit:
 		"Maximum characters of text to return (default and maximum: 20000). Lower it when " +
 		"you only need the beginning of a long document.",
-	delete_id: "The ID of the item to delete",
+	delete_id: "A single ID to delete. Prefer `ids` when removing more than one.",
+	delete_ids:
+		"The IDs to delete. Accepts several at once — cleaning up N stale entries is " +
+		"one call, not N. Each is reported separately, and the response says how many " +
+		"were actually removed. This is irreversible.",
 	delete_kind:
 		"Which context family the ID belongs to: 'memory' or 'knowledge' (default: 'memory')",
 	memory_id: "The ID of the memory to delete",
@@ -248,6 +252,7 @@ Take the id from hydradb_query or hydradb_list — never guess one. Confirm with
 
 \`kind\` must match the family the id belongs to. A knowledge source id passed with kind "memory" reports that nothing was deleted while the source is still there.`,
 		params: {
+			ids: PARAM.delete_ids,
 			id: PARAM.delete_id,
 			kind: PARAM.delete_kind,
 		},

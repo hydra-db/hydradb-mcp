@@ -1707,7 +1707,8 @@ test("hydradb_delete reports its outcome as structured data", async () => {
 		await client.close();
 
 		const structured = result.structuredContent as Record<string, unknown>;
-		assert.equal(structured.id, "m1");
+		// `ids` is plural now — delete takes an array, as the SDK always did.
+		assert.deepEqual(structured.ids, ["m1"]);
 		assert.equal(structured.kind, "memory");
 		assert.equal(
 			structured.deleted,
@@ -2009,4 +2010,64 @@ test("hydradb_inspect forwards expiry_seconds", async () => {
 
 	assert.equal(calls.find((c) => c.method === "inspect")?.args.expirySeconds, 300);
 	await client.close();
+});
+
+// The SDK and the wrapper both took `ids: string[]`; only the tool layer
+// singularised it, so cleaning up N stale entries cost N round trips.
+test("hydradb_delete removes several ids in one call", async () => {
+	const { hydra, calls } = mockHydra({
+		delete: { success: true, deletedCount: 3 },
+	});
+	const client = await connect(hydra);
+	const result = await client.callTool({
+		name: "hydradb_delete",
+		arguments: { ids: ["a", "b", "c"], kind: "memory" },
+	});
+	await client.close();
+
+	assert.deepEqual(calls.find((c) => c.method === "delete")?.args.ids, ["a", "b", "c"]);
+	const structured = result.structuredContent as Record<string, unknown>;
+	assert.equal(structured.deleted_count, 3);
+	assert.notEqual(structured.partial, true);
+});
+
+// Saying "Deleted" over a partial result is the overstatement this whole branch
+// of work exists to remove.
+test("hydradb_delete reports a partial removal as partial", async () => {
+	const { hydra } = mockHydra({ delete: { success: true, deletedCount: 1 } });
+	const client = await connect(hydra);
+	const result = await client.callTool({
+		name: "hydradb_delete",
+		arguments: { ids: ["a", "b", "c"], kind: "memory" },
+	});
+	await client.close();
+
+	const text = (result.content as { text: string }[])[0]!.text;
+	assert.match(text, /Deleted 1 of 3/);
+	assert.match(text, /rest were not found/i);
+	assert.equal((result.structuredContent as Record<string, unknown>).partial, true);
+});
+
+test("hydradb_delete still accepts a single id", async () => {
+	const { hydra, calls } = mockHydra({ delete: { success: true, userMemoryDeleted: 1 } });
+	const client = await connect(hydra);
+	const result = await client.callTool({
+		name: "hydradb_delete",
+		arguments: { id: "solo", kind: "memory" },
+	});
+	await client.close();
+
+	assert.deepEqual(calls.find((c) => c.method === "delete")?.args.ids, ["solo"]);
+	assert.match((result.content as { text: string }[])[0]!.text, /Deleted memory: solo/);
+});
+
+test("hydradb_delete says where ids come from when given none", async () => {
+	const { hydra } = mockHydra();
+	const client = await connect(hydra);
+	const result = await client.callTool({ name: "hydradb_delete", arguments: {} });
+	await client.close();
+
+	assert.equal(result.isError, true);
+	const text = (result.content as { text: string }[])[0]!.text;
+	assert.match(text, /do not guess one/);
 });
