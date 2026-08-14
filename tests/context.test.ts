@@ -9,28 +9,28 @@ import {
 import type { RecallResponse } from "../src/types.js";
 
 test("buildRecalledContext includes entity paths, graph relations and extra context", () => {
-	const response: RecallResponse = {
+	const response = {
 		chunks: [
 			{
-				chunk_uuid: "c1",
-				source_id: "s1",
-				chunk_content: "Chunk one body",
-				source_title: "Doc A",
-				extra_context_ids: ["ec1"],
+				chunkUuid: "c1",
+				id: "s1",
+				chunkContent: "Chunk one body",
+				sourceTitle: "Doc A",
+				extraContextIds: ["ec1"],
 			},
 		],
-		graph_context: {
-			query_paths: [
+		graphContext: {
+			queryPaths: [
 				{
-					relevancy_score: 0.9,
-					combined_context: "Alice -> prefers -> tea",
+					relevancyScore: 0.9,
+					combinedContext: "Alice -> prefers -> tea",
 					triplets: [],
 				},
 			],
-			chunk_relations: [
+			chunkRelations: [
 				{
-					relevancy_score: 0.8,
-					group_id: "g1",
+					relevancyScore: 0.8,
+					groupId: "g1",
 					triplets: [
 						{
 							source: { name: "Alice", type: "person", entity_id: "e1" },
@@ -46,16 +46,16 @@ test("buildRecalledContext includes entity paths, graph relations and extra cont
 					],
 				},
 			],
-			chunk_id_to_group_ids: {
+			chunkIdToGroupIds: {
 				c1: ["g1"],
 			},
 		},
-		additional_context: {
+		additionalContext: {
 			ec1: {
-				chunk_uuid: "ec1",
-				source_id: "s2",
-				chunk_content: "Tea helps Alice focus",
-				source_title: "Doc B",
+				chunkUuid: "ec1",
+				id: "s2",
+				chunkContent: "Tea helps Alice focus",
+				sourceTitle: "Doc B",
 			},
 		},
 	};
@@ -74,30 +74,30 @@ test("buildRecalledContext includes entity paths, graph relations and extra cont
 });
 
 test("buildRecalledContext respects maxGroupOccurrences cap", () => {
-	const makeResponse = (): RecallResponse => ({
+	const makeResponse = () => ({
 		chunks: [
 			{
-				chunk_uuid: "c1",
-				source_id: "s1",
-				chunk_content: "Chunk A",
+				chunkUuid: "c1",
+				id: "s1",
+				chunkContent: "Chunk A",
 			},
 			{
-				chunk_uuid: "c2",
-				source_id: "s1",
-				chunk_content: "Chunk B",
+				chunkUuid: "c2",
+				id: "s1",
+				chunkContent: "Chunk B",
 			},
 			{
-				chunk_uuid: "c3",
-				source_id: "s1",
-				chunk_content: "Chunk C",
+				chunkUuid: "c3",
+				id: "s1",
+				chunkContent: "Chunk C",
 			},
 		],
-		graph_context: {
-			query_paths: [],
-			chunk_relations: [
+		graphContext: {
+			queryPaths: [],
+			chunkRelations: [
 				{
-					relevancy_score: 0.9,
-					group_id: "g1",
+					relevancyScore: 0.9,
+					groupId: "g1",
 					triplets: [
 						{
 							source: {
@@ -121,7 +121,7 @@ test("buildRecalledContext respects maxGroupOccurrences cap", () => {
 					],
 				},
 			],
-			chunk_id_to_group_ids: { c1: ["g1"], c2: ["g1"], c3: ["g1"] },
+			chunkIdToGroupIds: { c1: ["g1"], c2: ["g1"], c3: ["g1"] },
 		},
 	});
 
@@ -160,18 +160,18 @@ test("buildRecalledContext respects maxGroupOccurrences cap", () => {
 test("buildRecalledContext fallback path respects maxGroupOccurrences", () => {
 	// Two separate groups, each with one triplet referencing a different chunk.
 	// Neither chunk is in chunk_id_to_group_ids, so fallback path is used.
-	const response: RecallResponse = {
+	const response = {
 		chunks: [
-			{ chunk_uuid: "c1", source_id: "s1", chunk_content: "Chunk A" },
-			{ chunk_uuid: "c2", source_id: "s1", chunk_content: "Chunk B" },
-			{ chunk_uuid: "c3", source_id: "s1", chunk_content: "Chunk C" },
+			{ chunkUuid: "c1", id: "s1", chunkContent: "Chunk A" },
+			{ chunkUuid: "c2", id: "s1", chunkContent: "Chunk B" },
+			{ chunkUuid: "c3", id: "s1", chunkContent: "Chunk C" },
 		],
-		graph_context: {
-			query_paths: [],
-			chunk_relations: [
+		graphContext: {
+			queryPaths: [],
+			chunkRelations: [
 				{
-					relevancy_score: 0.9,
-					group_id: "g1",
+					relevancyScore: 0.9,
+					groupId: "g1",
 					triplets: [
 						{
 							source: { name: "Bob", type: "person", entity_id: "e1" },
@@ -187,8 +187,8 @@ test("buildRecalledContext fallback path respects maxGroupOccurrences", () => {
 					],
 				},
 				{
-					relevancy_score: 0.9,
-					group_id: "g2",
+					relevancyScore: 0.9,
+					groupId: "g2",
 					triplets: [
 						{
 							source: { name: "Bob", type: "person", entity_id: "e1" },
@@ -204,8 +204,8 @@ test("buildRecalledContext fallback path respects maxGroupOccurrences", () => {
 					],
 				},
 				{
-					relevancy_score: 0.9,
-					group_id: "g3",
+					relevancyScore: 0.9,
+					groupId: "g3",
 					triplets: [
 						{
 							source: { name: "Bob", type: "person", entity_id: "e1" },
@@ -222,7 +222,7 @@ test("buildRecalledContext fallback path respects maxGroupOccurrences", () => {
 				},
 			],
 			// No chunk_id_to_group_ids entries — forces fallback path
-			chunk_id_to_group_ids: {},
+			chunkIdToGroupIds: {},
 		},
 	};
 
@@ -241,17 +241,17 @@ test("buildRecalledContext capped primary groups do not trigger fallback", () =>
 	// Chunk c2 is linked to g1 via chunk_id_to_group_ids, but g1 is already
 	// capped from c1. c2 should NOT fall through to the fallback path and
 	// pick up unrelated group g2.
-	const response: RecallResponse = {
+	const response = {
 		chunks: [
-			{ chunk_uuid: "c1", source_id: "s1", chunk_content: "Chunk A" },
-			{ chunk_uuid: "c2", source_id: "s1", chunk_content: "Chunk B" },
+			{ chunkUuid: "c1", id: "s1", chunkContent: "Chunk A" },
+			{ chunkUuid: "c2", id: "s1", chunkContent: "Chunk B" },
 		],
-		graph_context: {
-			query_paths: [],
-			chunk_relations: [
+		graphContext: {
+			queryPaths: [],
+			chunkRelations: [
 				{
-					relevancy_score: 0.9,
-					group_id: "g1",
+					relevancyScore: 0.9,
+					groupId: "g1",
 					triplets: [
 						{
 							source: { name: "Alice", type: "person", entity_id: "e1" },
@@ -267,8 +267,8 @@ test("buildRecalledContext capped primary groups do not trigger fallback", () =>
 					],
 				},
 				{
-					relevancy_score: 0.9,
-					group_id: "g2",
+					relevancyScore: 0.9,
+					groupId: "g2",
 					triplets: [
 						{
 							source: { name: "Unrelated", type: "thing", entity_id: "e3" },
@@ -285,7 +285,7 @@ test("buildRecalledContext capped primary groups do not trigger fallback", () =>
 				},
 			],
 			// Both chunks linked to g1; g2 is NOT linked to any chunk
-			chunk_id_to_group_ids: { c1: ["g1"], c2: ["g1"] },
+			chunkIdToGroupIds: { c1: ["g1"], c2: ["g1"] },
 		},
 	};
 
@@ -300,20 +300,20 @@ test("buildRecalledContext capped primary groups do not trigger fallback", () =>
 });
 
 test("buildRecalledContext filters low-score relations by default", () => {
-	const response: RecallResponse = {
+	const response = {
 		chunks: [
 			{
-				chunk_uuid: "c1",
-				source_id: "s1",
-				chunk_content: "Chunk one body",
+				chunkUuid: "c1",
+				id: "s1",
+				chunkContent: "Chunk one body",
 			},
 		],
-		graph_context: {
-			query_paths: [],
-			chunk_relations: [
+		graphContext: {
+			queryPaths: [],
+			chunkRelations: [
 				{
-					relevancy_score: 0.2,
-					group_id: "g1",
+					relevancyScore: 0.2,
+					groupId: "g1",
 					triplets: [
 						{
 							source: { name: "Alice", type: "person", entity_id: "e1" },
@@ -329,7 +329,7 @@ test("buildRecalledContext filters low-score relations by default", () => {
 					],
 				},
 			],
-			chunk_id_to_group_ids: {
+			chunkIdToGroupIds: {
 				c1: ["g1"],
 			},
 		},
@@ -349,9 +349,9 @@ test("buildRecalledContext unwraps a v2 source envelope", () => {
 	const out = buildRecalledContext({
 		chunks: [
 			{
-				chunk_uuid: "c1",
-				source_id: "s9",
-				chunk_content:
+				chunkUuid: "c1",
+				id: "s9",
+				chunkContent:
 					'{"id":"s9","tenant_id":"t","content":{"text":"the actual body text"}}',
 			},
 		],
@@ -366,9 +366,9 @@ test("buildRecalledContext prefers text over markdown in an envelope", () => {
 	const out = buildRecalledContext({
 		chunks: [
 			{
-				chunk_uuid: "c1",
-				source_id: "s9",
-				chunk_content:
+				chunkUuid: "c1",
+				id: "s9",
+				chunkContent:
 					'{"id":"s9","tenant_id":"t","content":{"text":"plain body","markdown":"# md body"}}',
 			},
 		],
@@ -382,9 +382,9 @@ test("buildRecalledContext falls back to markdown when text is absent", () => {
 	const out = buildRecalledContext({
 		chunks: [
 			{
-				chunk_uuid: "c1",
-				source_id: "s9",
-				chunk_content: '{"id":"s9","tenant_id":"t","content":{"markdown":"# md body"}}',
+				chunkUuid: "c1",
+				id: "s9",
+				chunkContent: '{"id":"s9","tenant_id":"t","content":{"markdown":"# md body"}}',
 			},
 		],
 	} as never);
@@ -403,7 +403,7 @@ test("buildRecalledContext leaves non-envelope content untouched", () => {
 		"a plain sentence about {braces}",
 	]) {
 		const out = buildRecalledContext({
-			chunks: [{ chunk_uuid: "c1", source_id: "s9", chunk_content: body }],
+			chunks: [{ chunkUuid: "c1", id: "s9", chunkContent: body }],
 		} as never);
 		assert.match(
 			out,
@@ -420,14 +420,14 @@ test("buildRecalledContext leaves non-envelope content untouched", () => {
 // output. The graph traversal was paid for and the result discarded.
 test("buildRecalledContext attaches relations linked only by source_chunk_ids", () => {
 	const out = buildRecalledContext({
-		chunks: [{ chunk_uuid: "c1", source_id: "s1", chunk_content: "body" }],
-		graph_context: {
-			query_paths: [],
-			chunk_relations: [
+		chunks: [{ chunkUuid: "c1", id: "s1", chunkContent: "body" }],
+		graphContext: {
+			queryPaths: [],
+			chunkRelations: [
 				{
-					relevancy_score: 0.9,
-					group_id: "g1",
-					source_chunk_ids: ["c1"],
+					relevancyScore: 0.9,
+					groupId: "g1",
+					sourceChunkIds: ["c1"],
 					triplets: [
 						{
 							source: { name: "Alice" },
@@ -438,7 +438,7 @@ test("buildRecalledContext attaches relations linked only by source_chunk_ids", 
 				},
 			],
 			// Deliberately empty: the indirect route cannot find this relation.
-			chunk_id_to_group_ids: {},
+			chunkIdToGroupIds: {},
 		},
 	} as never);
 
@@ -449,14 +449,14 @@ test("buildRecalledContext attaches relations linked only by source_chunk_ids", 
 // When the server links both ways, the relation must appear once, not twice.
 test("buildRecalledContext does not double-attach a relation linked both ways", () => {
 	const out = buildRecalledContext({
-		chunks: [{ chunk_uuid: "c1", source_id: "s1", chunk_content: "body" }],
-		graph_context: {
-			query_paths: [],
-			chunk_relations: [
+		chunks: [{ chunkUuid: "c1", id: "s1", chunkContent: "body" }],
+		graphContext: {
+			queryPaths: [],
+			chunkRelations: [
 				{
-					relevancy_score: 0.9,
-					group_id: "g1",
-					source_chunk_ids: ["c1"],
+					relevancyScore: 0.9,
+					groupId: "g1",
+					sourceChunkIds: ["c1"],
 					triplets: [
 						{
 							source: { name: "Alice" },
@@ -466,7 +466,7 @@ test("buildRecalledContext does not double-attach a relation linked both ways", 
 					],
 				},
 			],
-			chunk_id_to_group_ids: { c1: ["g1"] },
+			chunkIdToGroupIds: { c1: ["g1"] },
 		},
 	} as never);
 
@@ -480,14 +480,14 @@ test("buildRecalledContext does not double-attach a relation linked both ways", 
 // The direct route must not suppress the score filter.
 test("buildRecalledContext still drops low-scoring relations linked directly", () => {
 	const out = buildRecalledContext({
-		chunks: [{ chunk_uuid: "c1", source_id: "s1", chunk_content: "body" }],
-		graph_context: {
-			query_paths: [],
-			chunk_relations: [
+		chunks: [{ chunkUuid: "c1", id: "s1", chunkContent: "body" }],
+		graphContext: {
+			queryPaths: [],
+			chunkRelations: [
 				{
-					relevancy_score: 0.15,
-					group_id: "g1",
-					source_chunk_ids: ["c1"],
+					relevancyScore: 0.15,
+					groupId: "g1",
+					sourceChunkIds: ["c1"],
 					triplets: [
 						{
 							source: { name: "Bob" },
@@ -497,7 +497,7 @@ test("buildRecalledContext still drops low-scoring relations linked directly", (
 					],
 				},
 			],
-			chunk_id_to_group_ids: {},
+			chunkIdToGroupIds: {},
 		},
 	} as never);
 
@@ -509,7 +509,7 @@ test("buildRecalledContext still drops low-scoring relations linked directly", (
 test("buildRecalledContext does not unwrap JSON that merely looks like an envelope", () => {
 	const stored = '{"content":{"text":"a fragment"},"author":"ada","tags":["x"]}';
 	const out = buildRecalledContext({
-		chunks: [{ chunk_uuid: "c1", source_id: "s9", chunk_content: stored }],
+		chunks: [{ chunkUuid: "c1", id: "s9", chunkContent: stored }],
 	} as never);
 
 	// Without an identifying source field this is just a document the user
@@ -526,9 +526,9 @@ test("buildRecalledContext still unwraps a real envelope carrying an id", () => 
 	const out = buildRecalledContext({
 		chunks: [
 			{
-				chunk_uuid: "c1",
-				source_id: "s9",
-				chunk_content:
+				chunkUuid: "c1",
+				id: "s9",
+				chunkContent:
 					'{"id":"s9","tenant_id":"t","content":{"text":"the actual body"}}',
 			},
 		],
@@ -545,7 +545,7 @@ test("buildRecalledContext keeps a document that has an id but also unknown fiel
 	const stored =
 		'{"id":"cfg-1","content":{"text":"the body"},"version":2,"owner":"ada"}';
 	const out = buildRecalledContext({
-		chunks: [{ chunk_uuid: "c1", source_id: "s9", chunk_content: stored }],
+		chunks: [{ chunkUuid: "c1", id: "s9", chunkContent: stored }],
 	} as never);
 
 	assert.ok(
@@ -563,9 +563,9 @@ test("buildRecalledContext unwraps an envelope of pure scoping fields", () => {
 	const out = buildRecalledContext({
 		chunks: [
 			{
-				chunk_uuid: "c1",
-				source_id: "s9",
-				chunk_content:
+				chunkUuid: "c1",
+				id: "s9",
+				chunkContent:
 					'{"id":"s9","tenant_id":"t","sub_tenant_id":"c","content":{"text":"the actual body"}}',
 			},
 		],
@@ -586,7 +586,7 @@ test("a record with populated non-scoping fields is never unwrapped", () => {
 		'{"tenant_id":"t","metadata":{"team":"platform"},"content":{"text":"body"}}',
 	]) {
 		const out = buildRecalledContext({
-			chunks: [{ chunk_uuid: "c1", source_id: "s9", chunk_content: doc }],
+			chunks: [{ chunkUuid: "c1", id: "s9", chunkContent: doc }],
 		} as never);
 		assert.ok(out.includes(doc), `must survive verbatim: ${doc}`);
 	}
@@ -597,9 +597,9 @@ test("an envelope with empty non-scoping fields still unwraps", () => {
 	const out = buildRecalledContext({
 		chunks: [
 			{
-				chunk_uuid: "c1",
-				source_id: "s9",
-				chunk_content:
+				chunkUuid: "c1",
+				id: "s9",
+				chunkContent:
 					'{"id":"s9","tenant_id":"t","title":"","metadata":{},"content":{"text":"the actual body"}}',
 			},
 		],
@@ -616,7 +616,7 @@ test("buildRecalledContext keeps a document whose fields merely look internal", 
 	const stored =
 		'{"id":"doc-1","title":"Notes","timestamp":"2026-01-01","content":{"text":"the body"}}';
 	const out = buildRecalledContext({
-		chunks: [{ chunk_uuid: "c1", source_id: "s9", chunk_content: stored }],
+		chunks: [{ chunkUuid: "c1", id: "s9", chunkContent: stored }],
 	} as never);
 
 	assert.ok(
@@ -636,8 +636,8 @@ test("buildRecalledContext suppresses chunks contained in another chunk", () => 
 
 	const response = {
 		chunks: [
-			{ chunk_uuid: "c1", source_id: "same-doc", chunk_content: long },
-			{ chunk_uuid: "c2", source_id: "same-doc", chunk_content: short },
+			{ chunkUuid: "c1", id: "same-doc", chunkContent: long },
+			{ chunkUuid: "c2", id: "same-doc", chunkContent: short },
 		],
 	} as never;
 
@@ -656,8 +656,8 @@ test("buildRecalledContext suppresses chunks contained in another chunk", () => 
 test("buildRecalledContext keeps genuinely different chunks", () => {
 	const response = {
 		chunks: [
-			{ chunk_uuid: "c1", source_id: "s1", chunk_content: "prefers tabs over spaces" },
-			{ chunk_uuid: "c2", source_id: "s2", chunk_content: "deploys on Tuesday and Thursday" },
+			{ chunkUuid: "c1", id: "s1", chunkContent: "prefers tabs over spaces" },
+			{ chunkUuid: "c2", id: "s2", chunkContent: "deploys on Tuesday and Thursday" },
 		],
 	} as never;
 
@@ -669,8 +669,8 @@ test("buildRecalledContext keeps genuinely different chunks", () => {
 test("containment ignores whitespace and case", () => {
 	const response = {
 		chunks: [
-			{ chunk_uuid: "c1", source_id: "same-doc", chunk_content: "The User Prefers Tabs Over Spaces" },
-			{ chunk_uuid: "c2", source_id: "same-doc", chunk_content: "  prefers   tabs\n over spaces  " },
+			{ chunkUuid: "c1", id: "same-doc", chunkContent: "The User Prefers Tabs Over Spaces" },
+			{ chunkUuid: "c2", id: "same-doc", chunkContent: "  prefers   tabs\n over spaces  " },
 		],
 	} as never;
 
@@ -682,8 +682,8 @@ test("identical chunks collapse to a single rendering", () => {
 	const body = "the user deploys on Tuesday";
 	const response = {
 		chunks: [
-			{ chunk_uuid: "c1", source_id: "one-doc", chunk_content: body, relevancy_score: 0.9 },
-			{ chunk_uuid: "c2", source_id: "one-doc", chunk_content: body, relevancy_score: 0.4 },
+			{ chunkUuid: "c1", id: "one-doc", chunkContent: body, relevancyScore: 0.9 },
+			{ chunkUuid: "c2", id: "one-doc", chunkContent: body, relevancyScore: 0.4 },
 		],
 	} as never;
 
@@ -697,9 +697,9 @@ test("identical chunks collapse to a single rendering", () => {
 test("chunk numbering is contiguous after suppression", () => {
 	const response = {
 		chunks: [
-			{ chunk_uuid: "c1", source_id: "doc-a", chunk_content: "alpha body that is long enough" },
-			{ chunk_uuid: "c2", source_id: "doc-a", chunk_content: "alpha body" },
-			{ chunk_uuid: "c3", source_id: "doc-b", chunk_content: "beta body entirely different" },
+			{ chunkUuid: "c1", id: "doc-a", chunkContent: "alpha body that is long enough" },
+			{ chunkUuid: "c2", id: "doc-a", chunkContent: "alpha body" },
+			{ chunkUuid: "c3", id: "doc-b", chunkContent: "beta body entirely different" },
 		],
 	} as never;
 
@@ -718,15 +718,15 @@ test("extra context is deduped by content, not only by id", () => {
 	const out = buildRecalledContext({
 		chunks: [
 			{
-				chunk_uuid: "c1",
-				source_id: "s1",
-				chunk_content: "chunk one",
-				extra_context_ids: ["e1", "e2"],
+				chunkUuid: "c1",
+				id: "s1",
+				chunkContent: "chunk one",
+				extraContextIds: ["e1", "e2"],
 			},
 		],
-		additional_context: {
-			e1: { chunk_uuid: "e1", source_id: "x", chunk_content: passage },
-			e2: { chunk_uuid: "e2", source_id: "y", chunk_content: `  ${passage}  ` },
+		additionalContext: {
+			e1: { chunkUuid: "e1", id: "x", chunkContent: passage },
+			e2: { chunkUuid: "e2", id: "y", chunkContent: `  ${passage}  ` },
 		},
 	} as never);
 

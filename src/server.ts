@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
-import { toAddMemoryResponse, toMemoryList, toRecallResponse, toSourceList } from "./adapters.js";
+import { toAddMemoryResponse, toMemoryList, toSourceList } from "./adapters.js";
 import type { PageInfo } from "./adapters.js";
 import { resolveConfig } from "./config.js";
 import { renderRecalledContext } from "./context.js";
@@ -326,7 +326,9 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			alpha: 0.8,
 			recencyBias: 0,
 		}, { signal });
-		const res = toRecallResponse(raw);
+		// The renderer reads the SDK payload directly; there is no longer a
+		// snake_case mirror to convert into.
+		const res = raw;
 
 		// The server can return more chunks than were asked for — a live call with
 		// max_results=10 came back with 15, and all 15 were rendered. Honour the

@@ -1,9 +1,10 @@
-// Legacy snake_case domain shapes the MCP render layer still speaks.
+// The ingest result shape the tool layer reports from.
 //
-// The v2 SDK returns camelCase payloads; `src/adapters.ts` maps those back into
-// these shapes so `src/context.ts` (the byte-identical recall renderer) and the
-// tool output strings stay unchanged. These are NOT wire request types — the
-// wrapper owns the SDK request surface.
+// This file used to mirror every recall payload in snake_case so `context.ts`
+// could keep its original field names; that renderer now reads SDK types
+// directly and those mirrors are gone. What is left is the ingest result, which
+// is not a casing mirror — it is the shape the per-item failure reporting reads,
+// and the SDK's own type does not distinguish "no error" from an empty string.
 
 export type MemoryResultItem = {
 	source_id: string;
@@ -26,57 +27,4 @@ export type AddMemoryResponse = {
 	results: MemoryResultItem[];
 	success_count: number;
 	failed_count: number;
-};
-
-export type VectorChunk = {
-	chunk_uuid: string;
-	source_id: string;
-	chunk_content: string;
-	source_type?: string;
-	source_upload_time?: string;
-	source_title?: string;
-	source_last_updated_time?: string;
-	relevancy_score?: number | null;
-	document_metadata?: Record<string, unknown> | null;
-	tenant_metadata?: Record<string, unknown> | null;
-	extra_context_ids?: string[] | null;
-	layout?: string | null;
-};
-
-export type PathTriplet = {
-	source: { name: string; type: string; entity_id: string };
-	relation: {
-		canonical_predicate: string;
-		raw_predicate: string;
-		context: string;
-		confidence?: number;
-		chunk_id?: string | null;
-		relationship_id: string;
-	};
-	target: { name: string; type: string; entity_id: string };
-};
-
-export type ScoredPath = {
-	triplets: PathTriplet[];
-	relevancy_score: number;
-	combined_context?: string | null;
-	group_id?: string | null;
-	/**
-	 * Chunks this relation path was drawn from. The direct chunk→relation link,
-	 * and the mapping the SDK's own renderer prefers; `group_id` plus
-	 * `chunk_id_to_group_ids` is the indirect fallback for when this is absent.
-	 */
-	source_chunk_ids?: string[] | null;
-};
-
-export type GraphContext = {
-	query_paths: ScoredPath[];
-	chunk_relations: ScoredPath[];
-	chunk_id_to_group_ids: Record<string, string[]>;
-};
-
-export type RecallResponse = {
-	chunks: VectorChunk[];
-	graph_context?: GraphContext;
-	additional_context?: Record<string, VectorChunk>;
 };
