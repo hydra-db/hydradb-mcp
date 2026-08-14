@@ -442,9 +442,79 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		);
 	}
 
+	/**
+	 * How much source text one inspect call may put into the caller's context.
+	 *
+	 * Roughly 5k tokens. Large enough that ordinary documents come back whole,
+	 * small enough that no single call can dominate a conversation.
+	 */
+	const INSPECT_CHAR_BUDGET = 20_000;
+
+	/**
+	 * The readable part of an inspect response, bounded.
+	 *
+	 * This was `res.content ?? res.contentBase64 ?? "(no text content)"`, with no
+	 * cap anywhere between the API and the tool result. Two problems:
+	 *
+	 *   - unbounded text. A large ingested document arrives whole, and the caller
+	 *     cannot un-read it or tell in advance how big it is. The tool is
+	 *     annotated readOnlyHint, so clients call it speculatively.
+	 *   - base64. `contentBase64` is the binary fallback and base64 inflates 4/3,
+	 *     so a 1 MB scanned PDF becomes ~1.4M characters — a whole context window
+	 *     in one call. It only fires when text extraction yielded nothing, which
+	 *     is precisely the case a user retries by hand when the first call looks
+	 *     empty.
+	 *
+	 * Binary is never inlined. The caller is told what it is, how big, and how to
+	 * get it — `mode: "url"` already returns a download link.
+	 */
+	function inspectBody(
+		res: {
+			content?: string;
+			contentBase64?: string;
+			contentType?: string;
+			sizeBytes?: number;
+			inferredContent?: string;
+		},
+		offset?: number,
+		limit?: number,
+	): string {
+		if (res.content == null || res.content === "") {
+			if (res.contentBase64) {
+				const size = res.sizeBytes != null ? `${res.sizeBytes} bytes` : "unknown size";
+				const summary = res.inferredContent
+					? `\n\nSummary of the content:\n${res.inferredContent}`
+					: "";
+				return (
+					`(binary ${res.contentType ?? "content"}, ${size} — not shown. ` +
+					`Call again with mode:"url" for a download link.)${summary}`
+				);
+			}
+			return "(no text content)";
+		}
+
+		const start = Math.max(0, offset ?? 0);
+		const budget = Math.min(limit ?? INSPECT_CHAR_BUDGET, INSPECT_CHAR_BUDGET);
+		const total = res.content.length;
+
+		if (start === 0 && total <= budget) return res.content;
+
+		const slice = res.content.slice(start, start + budget);
+		const end = start + slice.length;
+		const more =
+			end < total
+				? ` Call again with offset=${end} for the next ${Math.min(budget, total - end)}.`
+				: "";
+		return (
+			`${slice}\n\n[truncated: showing characters ${start}-${end} of ${total}.${more}]`
+		);
+	}
+
 	async function runInspect(args: {
 		source_id: string;
 		mode?: "content" | "url" | "both";
+		offset?: number;
+		limit?: number;
 	}): Promise<ToolResult> {
 		logger.debug(`${TOOL_NAMES.INSPECT}: ${args.source_id}`);
 
@@ -475,7 +545,7 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		}
 
 		if (mode === "content" || mode === "both") {
-			parts.push(res.content ?? res.contentBase64 ?? "(no text content)");
+			parts.push(inspectBody(res, args.offset, args.limit));
 		}
 
 		return textResult(parts.join("\n\n"));
@@ -748,6 +818,19 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			.enum(["content", "url", "both"])
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INSPECT].params.mode),
+		offset: z
+			.number()
+			.int()
+			.min(0)
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INSPECT].params.offset),
+		limit: z
+			.number()
+			.int()
+			.min(1)
+			.max(INSPECT_CHAR_BUDGET)
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INSPECT].params.limit),
 	};
 
 	const deleteSchema = {

@@ -998,3 +998,60 @@ test("hydradb_list still advertises a next page in the middle of a corpus", asyn
 
 	assert.match(text, /page=3 for more/);
 });
+
+// `res.content ?? res.contentBase64` with no cap anywhere. contentBase64 is the
+// binary fallback and base64 inflates 4/3, so a 1 MB scanned PDF became ~1.4M
+// characters in a single call — a whole context window, unrecoverable, from a
+// tool annotated readOnlyHint that clients call speculatively.
+test("hydradb_inspect never inlines binary content", async () => {
+	const text = await inspectText(
+		{
+			success: true,
+			contentBase64: "A".repeat(200_000),
+			contentType: "application/pdf",
+			sizeBytes: 1_048_576,
+			inferredContent: "A scanned quarterly report.",
+		},
+		{ source_id: "s1" },
+	);
+
+	assert.doesNotMatch(text, /A{100}/, "base64 payload must never reach the caller");
+	assert.match(text, /binary application\/pdf/);
+	assert.match(text, /1048576 bytes/);
+	assert.match(text, /mode:"url"/, "must say how to actually get the file");
+	// The LLM summary is what the caller usually wanted anyway.
+	assert.match(text, /A scanned quarterly report/);
+});
+
+test("hydradb_inspect caps long text and says how to continue", async () => {
+	const body = "x".repeat(50_000);
+	const text = await inspectText(
+		{ success: true, content: body },
+		{ source_id: "s1" },
+	);
+
+	assert.ok(text.length < 25_000, `expected a bounded result, got ${text.length} chars`);
+	assert.match(text, /truncated: showing characters 0-20000 of 50000/);
+	assert.match(text, /offset=20000/);
+});
+
+test("hydradb_inspect honours offset and limit", async () => {
+	const body = "abcdefghij".repeat(1000); // 10k chars
+	const text = await inspectText(
+		{ success: true, content: body },
+		{ source_id: "s1", offset: 5000, limit: 100 },
+	);
+
+	assert.match(text, /showing characters 5000-5100 of 10000/);
+	assert.match(text, /offset=5100/);
+});
+
+test("hydradb_inspect returns short content whole, with no truncation noise", async () => {
+	const text = await inspectText(
+		{ success: true, content: "a short document" },
+		{ source_id: "s1" },
+	);
+
+	assert.match(text, /a short document/);
+	assert.doesNotMatch(text, /truncated/);
+});

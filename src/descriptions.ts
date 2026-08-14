@@ -53,6 +53,12 @@ const PARAM = {
 	fetch_source_id: "The source ID to fetch content for",
 	fetch_mode:
 		"Fetch mode: 'content' for text, 'url' for presigned URL, 'both' for both (default: 'content')",
+	fetch_offset:
+		"Character offset to start reading from (default: 0). Long sources are returned " +
+		"in slices; the response says where it stopped and what offset to pass next.",
+	fetch_limit:
+		"Maximum characters of text to return (default and maximum: 20000). Lower it when " +
+		"you only need the beginning of a long document.",
 	delete_id: "The ID of the item to delete",
 	delete_kind:
 		"Which context family the ID belongs to: 'memory' or 'knowledge' (default: 'memory')",
@@ -152,6 +158,8 @@ export const TOOL_DESCRIPTIONS = {
 		params: {
 			source_id: PARAM.fetch_source_id,
 			mode: PARAM.fetch_mode,
+			offset: PARAM.fetch_offset,
+			limit: PARAM.fetch_limit,
 		},
 	},
 
@@ -237,6 +245,8 @@ export const TOOL_DESCRIPTIONS = {
 		params: {
 			source_id: PARAM.fetch_source_id,
 			mode: PARAM.fetch_mode,
+			offset: PARAM.fetch_offset,
+			limit: PARAM.fetch_limit,
 		},
 	},
 
