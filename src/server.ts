@@ -956,7 +956,9 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		if (removed) {
 			// With several ids the server may remove only some of them, and saying
 			// "Deleted" over a partial result is the kind of overstatement this
-			// whole branch of work exists to remove.
+			// whole branch of work exists to remove. Only claim partial when the
+			// server actually gave us a count — inferring one from a boolean would
+			// invent a failure that may not have happened.
 			const partial = ids.length > 1 && removedCount < ids.length;
 			return structuredResult(
 				partial
@@ -1041,12 +1043,24 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		logger.debug(`${TOOL_NAMES.DELETE}: ${kind} ${args.ids.join(", ")}`);
 
 		const res = await hydra.context.delete({ ids: args.ids, kind }, { signal });
-		const removedCount =
-			(res.deletedCount ?? 0) ||
-			// The backend reports a boolean here, not a count; `> 0` coerces true
-			// to 1 and false to 0, which happens to be right but is worth stating.
-			(res.userMemoryDeleted ? 1 : 0);
-		const removed = removedCount > 0;
+		// `userMemoryDeleted` is a COUNT on the v2 wire — a live delete returned
+		// `{"deletedCount":1,"userMemoryDeleted":1}` — and the SDK types it as a
+		// number. The v1 memory-delete handler returns a boolean for the same
+		// concept, so both are handled: a boolean answers "did anything go?" and
+		// only a number answers "how many?".
+		//
+		// The distinction matters for bulk delete. Reading a bare `true` as 1
+		// would report a successful 3-id removal as "Deleted 1 of 3 … partial",
+		// inventing a failure that did not happen — the mirror image of claiming
+		// success over a genuine partial.
+		const rawMemoryDeleted = res.userMemoryDeleted as number | boolean | undefined;
+		const memoryDeletedCount =
+			typeof rawMemoryDeleted === "number" ? rawMemoryDeleted : undefined;
+		const reportedCount = res.deletedCount ?? memoryDeletedCount;
+		const removed = (reportedCount ?? 0) > 0 || rawMemoryDeleted === true;
+		// With no count at all we do not know how many went; assume the request
+		// was honoured in full rather than implying a partial failure.
+		const removedCount = reportedCount ?? (removed ? args.ids.length : 0);
 		if (!removed) {
 			logger.warn(
 				`${TOOL_NAMES.DELETE}: removed nothing for ${kind} ${args.ids.join(", ")}`,

@@ -745,8 +745,8 @@ test("identical text from DIFFERENT sources is never suppressed", () => {
 	const shared = "Deploys go out on Tuesday and Thursday.";
 	const response = {
 		chunks: [
-			{ chunk_uuid: "c1", source_id: "runbook", chunk_content: shared, relevancy_score: 0.9 },
-			{ chunk_uuid: "c2", source_id: "onboarding", chunk_content: shared, relevancy_score: 0.8 },
+			{ chunkUuid: "c1", id: "runbook", chunkContent: shared, relevancyScore: 0.9 },
+			{ chunkUuid: "c2", id: "onboarding", chunkContent: shared, relevancyScore: 0.8 },
 		],
 	} as never;
 
@@ -761,11 +761,11 @@ test("a substring match across sources is kept", () => {
 	const response = {
 		chunks: [
 			{
-				chunk_uuid: "c1",
-				source_id: "doc-a",
-				chunk_content: "The user prefers tabs over spaces in every language.",
+				chunkUuid: "c1",
+				id: "doc-a",
+				chunkContent: "The user prefers tabs over spaces in every language.",
 			},
-			{ chunk_uuid: "c2", source_id: "doc-b", chunk_content: "prefers tabs over spaces" },
+			{ chunkUuid: "c2", id: "doc-b", chunkContent: "prefers tabs over spaces" },
 		],
 	} as never;
 
@@ -779,15 +779,15 @@ test("extra context with the same text but a different title is kept", () => {
 	const out = buildRecalledContext({
 		chunks: [
 			{
-				chunk_uuid: "c1",
-				source_id: "s1",
-				chunk_content: "chunk one",
-				extra_context_ids: ["e1", "e2"],
+				chunkUuid: "c1",
+				id: "s1",
+				chunkContent: "chunk one",
+				extraContextIds: ["e1", "e2"],
 			},
 		],
-		additional_context: {
-			e1: { chunk_uuid: "e1", source_id: "x", chunk_content: passage, source_title: "Doc A" },
-			e2: { chunk_uuid: "e2", source_id: "y", chunk_content: passage, source_title: "Doc B" },
+		additionalContext: {
+			e1: { chunkUuid: "e1", id: "x", chunkContent: passage, sourceTitle: "Doc A" },
+			e2: { chunkUuid: "e2", id: "y", chunkContent: passage, sourceTitle: "Doc B" },
 		},
 	} as never);
 
@@ -803,21 +803,21 @@ test("a repeated extra-context passage cites where it was shown", () => {
 	const out = buildRecalledContext({
 		chunks: [
 			{
-				chunk_uuid: "c1",
-				source_id: "s1",
-				chunk_content: "first chunk body",
-				extra_context_ids: ["e1"],
+				chunkUuid: "c1",
+				id: "s1",
+				chunkContent: "first chunk body",
+				extraContextIds: ["e1"],
 			},
 			{
-				chunk_uuid: "c2",
-				source_id: "s2",
-				chunk_content: "second chunk body entirely different",
-				extra_context_ids: ["e2"],
+				chunkUuid: "c2",
+				id: "s2",
+				chunkContent: "second chunk body entirely different",
+				extraContextIds: ["e2"],
 			},
 		],
-		additional_context: {
-			e1: { chunk_uuid: "e1", source_id: "x", chunk_content: passage },
-			e2: { chunk_uuid: "e2", source_id: "y", chunk_content: passage },
+		additionalContext: {
+			e1: { chunkUuid: "e1", id: "x", chunkContent: passage },
+			e2: { chunkUuid: "e2", id: "y", chunkContent: passage },
 		},
 	} as never);
 

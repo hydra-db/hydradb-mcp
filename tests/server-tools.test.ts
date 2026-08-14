@@ -2180,3 +2180,44 @@ test("knowledge ingest rejects metadata rather than dropping it", async () => {
 	assert.match((result.content as { text: string }[])[0]!.text, /metadata/);
 	await client.close();
 });
+
+// Greptile, PR #50: `userMemoryDeleted` is a BOOLEAN, not a count. Treating it
+// as 1 turned a successful 3-id delete that reported only that flag into
+// "Deleted 1 of 3 … partial" — understating the result exactly as badly as
+// claiming success over a partial removal would overstate it.
+test("a boolean-only delete response is not reported as partial", async () => {
+	const { hydra } = mockHydra({ delete: { success: true, userMemoryDeleted: true } });
+	const client = await connect(hydra);
+	const result = await client.callTool({
+		name: "hydradb_delete",
+		arguments: { ids: ["a", "b", "c"], kind: "memory" },
+	});
+	await client.close();
+
+	const text = (result.content as { text: string }[])[0]!.text;
+	const structured = result.structuredContent as Record<string, unknown>;
+
+	assert.doesNotMatch(text, /1 of 3/, "a flag is not a count of one");
+	assert.notEqual(structured.partial, true);
+	assert.equal(structured.deleted, true);
+});
+
+// A real count still drives the partial report.
+test("an explicit count still distinguishes partial from complete", async () => {
+	for (const [deletedCount, partial] of [
+		[3, false],
+		[1, true],
+	] as const) {
+		const { hydra } = mockHydra({ delete: { success: true, deletedCount } });
+		const client = await connect(hydra);
+		const result = await client.callTool({
+			name: "hydradb_delete",
+			arguments: { ids: ["a", "b", "c"], kind: "memory" },
+		});
+		await client.close();
+
+		const structured = result.structuredContent as Record<string, unknown>;
+		assert.equal(structured.deleted_count, deletedCount);
+		assert.equal(structured.partial === true, partial, `count ${deletedCount}`);
+	}
+});
