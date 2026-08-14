@@ -299,6 +299,7 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		max_results?: number;
 		mode?: "fast" | "thinking";
 		graph_context?: boolean;
+		detail?: "compact" | "full";
 	}, signal?: AbortSignal): Promise<ToolResult> {
 		// Host-owned default (CONTRACT §2 rule 5): search BOTH families. This tool
 		// used to pin `kind: "memory"`, which made every ingested knowledge source
@@ -307,16 +308,24 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		const kind = args.kind ?? "all";
 		logger.debug(`${TOOL_NAMES.QUERY}: "${args.query}" (kind=${kind})`);
 
+		const maxResults = args.max_results ?? 10;
 		const raw = await hydra.context.query({
 			query: args.query,
 			kind,
-			maxResults: args.max_results ?? 10,
+			maxResults,
 			mode: args.mode ?? "thinking",
 			graphContext: args.graph_context ?? true,
 			alpha: 0.8,
 			recencyBias: 0,
 		}, { signal });
 		const res = toRecallResponse(raw);
+
+		// The server can return more chunks than were asked for — a live call with
+		// max_results=10 came back with 15, and all 15 were rendered. Honour the
+		// parameter here so it means what its description says.
+		if (res.chunks != null && res.chunks.length > maxResults) {
+			res.chunks = res.chunks.slice(0, maxResults);
+		}
 
 		if (!res.chunks || res.chunks.length === 0) {
 			return textResult(`No relevant ${resultNoun(kind)} found in Hydra DB.`);
@@ -331,7 +340,15 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		// It also disagreed with its own header: `Found ${length}` counted every
 		// chunk while the list stopped at 10, so a 15-chunk result announced 15 and
 		// showed 10.
-		const contextStr = buildRecalledContext(res);
+		const compact = (args.detail ?? "compact") === "compact";
+		const contextStr = buildRecalledContext(res, {
+			// Compact keeps every chunk but trims each body and drops the
+			// extra-context blocks; `full` is the unchanged rendering.
+			...(compact
+				? { maxChunkChars: COMPACT_CHUNK_CHARS, includeExtraContext: false }
+				: {}),
+			maxTotalChars: QUERY_CHAR_BUDGET,
+		});
 		// Count what was rendered, not what arrived: chunks wholly contained in
 		// another are suppressed, and a header that counts them disagrees with its
 		// own body.
@@ -705,6 +722,18 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			: text;
 	}
 
+	/**
+	 * Query output ceilings.
+	 *
+	 * Chunk bodies were rendered at full length with no cap of any kind, so one
+	 * query over a corpus of long documents could dominate the caller's context.
+	 * `compact` trims each body and drops the extra-context blocks; `full`
+	 * restores the previous rendering. The total budget applies either way,
+	 * because fifty capped chunks still add up.
+	 */
+	const COMPACT_CHUNK_CHARS = 600;
+	const QUERY_CHAR_BUDGET = 40_000;
+
 	/** Bound any one server-supplied string, marking it when it is shortened. */
 	function clamp(text: string, budget: number): string {
 		if (text.length <= budget) return text;
@@ -1037,6 +1066,10 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			.boolean()
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.graph_context),
+		detail: z
+			.enum(["compact", "full"])
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.detail),
 	};
 
 	const storeSchema = {

@@ -170,10 +170,21 @@ export function buildRecalledContext(
 	opts?: {
 		maxGroupOccurrences?: number;
 		minEvidenceScore?: number;
+		/**
+		 * Per-chunk body ceiling. Unset renders every chunk in full, which is what
+		 * `detail: "full"` asks for.
+		 */
+		maxChunkChars?: number;
+		/** Drop the Extra Context blocks entirely (compact mode). */
+		includeExtraContext?: boolean;
+		/** Total character ceiling for the whole rendering. */
+		maxTotalChars?: number;
 	},
 ): string {
 	const minScore = opts?.minEvidenceScore ?? 0.4;
 	const maxGroupOccurrences = opts?.maxGroupOccurrences;
+	const maxChunkChars = opts?.maxChunkChars;
+	const includeExtraContext = opts?.includeExtraContext ?? true;
 
 	const chunks = response.chunks ?? [];
 	const graphCtx = response.graph_context ?? {
@@ -251,7 +262,13 @@ export function buildRecalledContext(
 			lines.push(`Source: ${title}`);
 		}
 
-		lines.push(extractChunkText(chunk.chunk_content));
+		const bodyText = extractChunkText(chunk.chunk_content);
+		lines.push(
+			maxChunkChars != null && bodyText.length > maxChunkChars
+				? `${bodyText.slice(0, maxChunkChars)}… [chunk truncated: ${bodyText.length} chars; ` +
+					`use detail:"full" or ${"hydradb_inspect"} for the whole source]`
+				: bodyText,
+		);
 
 		const chunkUuid = chunk.chunk_uuid;
 		const linkedGroupIds = chunkToGroupIds[chunkUuid] ?? [];
@@ -329,7 +346,7 @@ export function buildRecalledContext(
 			lines.push(...relationLines);
 		}
 
-		const extraIds = chunk.extra_context_ids ?? [];
+		const extraIds = includeExtraContext ? (chunk.extra_context_ids ?? []) : [];
 		if (extraIds.length > 0 && Object.keys(extraContextMap).length > 0) {
 			const extraLines: string[] = [];
 			for (const ctxId of extraIds) {
@@ -399,6 +416,16 @@ export function buildRecalledContext(
 		output.push(chunkSections.join("\n\n---\n\n"));
 	}
 
-	return output.join("\n");
+	const text = output.join("\n");
+	const budget = opts?.maxTotalChars;
+	if (budget != null && text.length > budget) {
+		// A per-chunk cap does not bound the whole: fifty capped chunks still add
+		// up. The total ceiling is the one that actually protects the caller.
+		return (
+			`${text.slice(0, budget)}\n\n[response truncated at ${budget} of ${text.length} chars. ` +
+			`Narrow the query, lower max_results, or fetch a specific source with hydradb_inspect.]`
+		);
+	}
+	return text;
 }
 

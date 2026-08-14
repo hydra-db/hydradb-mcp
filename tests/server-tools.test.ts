@@ -1861,3 +1861,82 @@ test("a repeated id is still the same filter as the id alone", async () => {
 		"{a} and {a} are the same set and must not be rejected",
 	);
 });
+
+/** Query against a synthetic result set of `n` long chunks. */
+function longChunks(n: number, chars = 3000) {
+	return {
+		chunks: Array.from({ length: n }, (_, i) => ({
+			chunkUuid: `c${i}`,
+			id: `s${i}`,
+			chunkContent: `body-${i} start. ` + "x".repeat(chars),
+			sourceTitle: `Doc ${i}`,
+			relevancyScore: 0.9,
+			extraContextIds: [`e${i}`],
+		})),
+		additionalContext: Object.fromEntries(
+			Array.from({ length: n }, (_, i) => [
+				`e${i}`,
+				{ chunkUuid: `e${i}`, id: `x${i}`, chunkContent: `extra ${i} ` + "y".repeat(700) },
+			]),
+		),
+	};
+}
+
+async function queryText(args: Record<string, unknown>, chunks = longChunks(10)) {
+	const { hydra } = mockHydra({ query: chunks });
+	const client = await connect(hydra);
+	const result = await client.callTool({ name: "hydradb_query", arguments: args });
+	await client.close();
+	return (result.content as { text: string }[])[0]!.text;
+}
+
+// Chunk bodies were rendered at full length with no cap of any kind.
+test("hydradb_query defaults to compact and trims chunk bodies", async () => {
+	const text = await queryText({ query: "q" });
+
+	assert.match(text, /chunk truncated/);
+	assert.doesNotMatch(text, /Extra Context/, "compact omits surrounding-context blocks");
+	// Still shows every chunk — compact trims, it does not drop matches.
+	assert.equal(text.match(/Chunk \d+/g)?.length, 10);
+});
+
+test("detail:full restores whole chunk bodies and extra context", async () => {
+	const text = await queryText({ query: "q", detail: "full" });
+
+	assert.doesNotMatch(text, /chunk truncated/);
+	assert.match(text, /Extra Context/);
+});
+
+test("compact is materially smaller than full", async () => {
+	const compact = await queryText({ query: "q" });
+	const full = await queryText({ query: "q", detail: "full" });
+
+	assert.ok(
+		compact.length < full.length * 0.4,
+		`expected a large reduction, got ${compact.length} vs ${full.length}`,
+	);
+});
+
+// A per-chunk cap does not bound the whole: many capped chunks still add up.
+test("hydradb_query caps the total response even in full detail", async () => {
+	const text = await queryText(
+		{ query: "q", detail: "full", max_results: 50 },
+		longChunks(50, 5000),
+	);
+
+	assert.ok(text.length < 45_000, `expected a bounded response, got ${text.length}`);
+	assert.match(text, /response truncated at 40000/);
+	assert.match(text, /hydradb_inspect/, "must say how to get a source in full");
+});
+
+// A live call with max_results=10 returned 15 chunks, and all 15 were rendered.
+test("max_results actually bounds what is rendered", async () => {
+	const text = await queryText({ query: "q", max_results: 3 }, longChunks(15, 200));
+
+	assert.equal(
+		text.match(/Chunk \d+/g)?.length,
+		3,
+		"the server may return more than asked for; the tool must not render them",
+	);
+	assert.match(text, /Found 3 /);
+});
