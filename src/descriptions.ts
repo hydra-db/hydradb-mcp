@@ -30,7 +30,11 @@ const PARAM = {
 		"(default), or 'knowledge' to store a document as a searchable source. " +
 		"Memory-only options (turns, source_id, infer, is_markdown, user_name) do not " +
 		"apply to knowledge and are rejected rather than ignored.",
-	title: "Optional title for the memory entry (default: 'MCP Memory')",
+	title:
+		"A short, specific label — always set it. This is the ONLY label shown next to " +
+		"this entry in later hydradb_query results, so 'Deployment rollback policy' is " +
+		"useful where a generic one tells you nothing. If omitted, a title is derived " +
+		"from the first line of the text, which is rarely as good as one you choose.",
 	source_id:
 		"Optional identifier for this entry. Ingesting again with an existing source_id " +
 		"REPLACES everything previously stored under it — it does not add to it. Use a fresh " +

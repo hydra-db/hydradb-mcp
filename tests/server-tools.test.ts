@@ -1446,3 +1446,59 @@ test("hydradb_list still serves each family when kind is given", async () => {
 		assert.equal(calls.find((c) => c.method === "list")?.args.type, kind);
 	}
 });
+
+// `title` is the ONLY per-chunk label buildRecalledContext renders, so the old
+// constant default meant fifty untitled saves produced fifty recall results all
+// reading "Source: MCP Memory" — no way to cite a fact's origin, or to tell two
+// chunks apart.
+test("hydradb_ingest derives a title instead of stamping a constant", async () => {
+	const cases: [string, string][] = [
+		["Prefers tabs over spaces in every language.", "Prefers tabs over spaces in every language."],
+		["# Restart runbook\n\nRestart order: api, worker.", "Restart runbook"],
+		["   \n  \n", "Untitled note"],
+	];
+
+	for (const [text, expected] of cases) {
+		const { hydra, calls } = mockHydra();
+		const client = await connect(hydra);
+		await client.callTool({ name: "hydradb_ingest", arguments: { text } });
+
+		const item = (
+			JSON.parse(String(calls.find((c) => c.method === "ingest")!.args.memories)) as Record<string, unknown>[]
+		)[0]!;
+		assert.equal(item.title, expected, `title derived from: ${JSON.stringify(text)}`);
+		assert.notEqual(item.title, "MCP Memory");
+		await client.close();
+	}
+});
+
+test("a long first line is truncated rather than used whole as a title", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+	await client.callTool({
+		name: "hydradb_ingest",
+		arguments: { text: `${"word ".repeat(40)}\nsecond line` },
+	});
+
+	const item = (
+		JSON.parse(String(calls.find((c) => c.method === "ingest")!.args.memories)) as Record<string, unknown>[]
+	)[0]!;
+	assert.ok(String(item.title).length <= 61, `title too long: ${item.title}`);
+	assert.match(String(item.title), /…$/);
+	await client.close();
+});
+
+test("an explicit title always wins", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+	await client.callTool({
+		name: "hydradb_ingest",
+		arguments: { text: "# Heading\n\nbody", title: "Deployment rollback policy" },
+	});
+
+	const item = (
+		JSON.parse(String(calls.find((c) => c.method === "ingest")!.args.memories)) as Record<string, unknown>[]
+	)[0]!;
+	assert.equal(item.title, "Deployment rollback policy");
+	await client.close();
+});

@@ -53,6 +53,28 @@ type ToolResult = {
  * The timestamp prefix is kept because it sorts and reads well; the suffix is
  * what makes it unique.
  */
+/**
+ * A usable title for an entry the caller did not name.
+ *
+ * The default was the constant "MCP Memory". Since `title` is the ONLY per-chunk
+ * label `buildRecalledContext` renders, fifty untitled saves produced fifty
+ * recall results all reading `Source: MCP Memory` — the caller could not cite
+ * where a fact came from, or tell whether two chunks were the same memory. It
+ * also defeats any future filter on title, since every row shares one value.
+ *
+ * Deriving from the first line is a safety net, not the fix. The fix is the
+ * description telling the model to set one; this keeps the failure from being
+ * total when it does not.
+ */
+function defaultTitle(text: string): string {
+	const firstLine = (text.trim().split("\n", 1)[0] ?? "").trim();
+	if (firstLine === "") return "Untitled note";
+	// Ingested documents commonly start with a markdown heading, and the hashes
+	// are noise in a label.
+	const cleaned = firstLine.replace(/^#+\s*/, "").trim() || firstLine;
+	return cleaned.length <= 60 ? cleaned : `${cleaned.slice(0, 57).trimEnd()}…`;
+}
+
 function generatedSourceId(): string {
 	return `mcp-conversation-${Date.now()}-${randomUUID().slice(0, 8)}`;
 }
@@ -411,7 +433,7 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		const raw = await hydra.context.ingest({
 			kind,
 			text: args.text,
-			title: args.title ?? (kind === "memory" ? "MCP Memory" : undefined),
+			title: args.title ?? defaultTitle(args.text),
 			...memoryOnly,
 			// Default stays true. The SDK retries POSTs, so upsert is what keeps a
 			// retried ingest from duplicating — flipping this default would trade a
