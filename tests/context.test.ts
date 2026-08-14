@@ -532,3 +532,39 @@ test("buildRecalledContext still unwraps a real envelope carrying an id", () => 
 	assert.match(out, /the actual body/);
 	assert.doesNotMatch(out, /tenant_id/);
 });
+
+// Greptile, PR #46 (second pass): an `id` alongside `content.text` was still not
+// enough. A stored document can legitimately carry both, and unwrapping it drops
+// every other field.
+test("buildRecalledContext keeps a document that has an id but also unknown fields", () => {
+	const stored =
+		'{"id":"cfg-1","content":{"text":"the body"},"version":2,"owner":"ada"}';
+	const out = buildRecalledContext({
+		chunks: [{ chunk_uuid: "c1", source_id: "s9", chunk_content: stored }],
+	} as never);
+
+	assert.ok(
+		out.includes(stored),
+		"an unrecognised sibling field means this is a document, not an envelope",
+	);
+	assert.match(out, /version/);
+	assert.match(out, /owner/);
+});
+
+// The inverse must still work: a real envelope carries only known fields, so
+// unwrapping it loses nothing.
+test("buildRecalledContext unwraps an envelope whose every sibling is known", () => {
+	const out = buildRecalledContext({
+		chunks: [
+			{
+				chunk_uuid: "c1",
+				source_id: "s9",
+				chunk_content:
+					'{"id":"s9","tenant_id":"t","sub_tenant_id":"c","source_type":"file","created_at":"2026-01-01","content":{"text":"the actual body"}}',
+			},
+		],
+	} as never);
+
+	assert.match(out, /the actual body/);
+	assert.doesNotMatch(out, /tenant_id/);
+});

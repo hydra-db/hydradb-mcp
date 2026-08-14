@@ -37,13 +37,43 @@ function extractChunkText(chunkContent: string | undefined): string {
 	}
 	if (typeof parsed !== "object" || parsed === null) return trimmed;
 
-	// A nested `content.text` is not enough to call something an envelope. A
-	// user can legitimately store a JSON document that happens to have that
-	// shape, and unwrapping it would silently discard every sibling and outer
-	// field — turning a stored document into one of its fragments. Require an
-	// identifying field from the source record as well, so this only fires on
-	// what it was written for.
+	// Unwrap ONLY when nothing would be lost by doing so.
+	//
+	// A nested `content.text` is not evidence of an envelope, and neither is an
+	// `id` alongside it — a user can legitimately store
+	// `{"id":"cfg","content":{"text":"..."},"version":2}`, and unwrapping that
+	// discards `version` silently, turning a stored document into one of its
+	// fragments. So instead of guessing what an envelope looks like, check the
+	// inverse: every key we are about to drop must be one the envelope is known
+	// to carry. An unrecognised sibling means this is someone's document, and it
+	// is returned untouched.
+	//
+	// The asymmetry is deliberate. Leaving a real envelope wrapped is ugly;
+	// unwrapping a real document destroys data.
 	const record = parsed as Record<string, unknown>;
+	const ENVELOPE_KEYS = new Set([
+		"content",
+		"id",
+		"tenant_id",
+		"sub_tenant_id",
+		"source_id",
+		"chunk_id",
+		"source_type",
+		"source_title",
+		"title",
+		"metadata",
+		"additional_metadata",
+		"document_metadata",
+		"tenant_metadata",
+		"created_at",
+		"updated_at",
+		"timestamp",
+	]);
+	const hasUnknownSibling = Object.keys(record).some(
+		(key) => !ENVELOPE_KEYS.has(key),
+	);
+	if (hasUnknownSibling) return trimmed;
+
 	const looksLikeSource = ["id", "tenant_id", "source_id", "chunk_id"].some(
 		(key) => typeof record[key] === "string",
 	);
