@@ -582,3 +582,34 @@ test("hydradb_list distinguishes an empty source page from an empty corpus", asy
 	assert.match(text, /No sources on page 99/);
 	assert.doesNotMatch(text, /No sources found/);
 });
+
+// hydradb_list declared `source_ids` for both families but the memory branch
+// called runListMemories() with no arguments, so the filter was dropped in
+// silence. Worse than an ordinary no-op: source-to-many-memories fan-out is real
+// (that is what source_id does on ingest), so a caller handed 40 unfiltered rows
+// has a coherent explanation ready — "those two sources expanded into 40" — and
+// reports them as filtered. Nothing in the response contradicts it.
+test("hydradb_list honours source_ids when listing memories", async () => {
+	const { calls } = await listText(
+		{ user_memories: [{ memory_id: "m1", memory_content: "x" }], total: 1 },
+		{ kind: "memory", source_ids: ["s1", "s2"] },
+	);
+
+	const call = calls.find((c) => c.method === "list");
+	assert.ok(call, "list should reach the SDK");
+	assert.equal(call.args.type, "memory");
+	assert.deepEqual(
+		call.args.ids,
+		["s1", "s2"],
+		"source_ids must reach the wire, not be silently dropped",
+	);
+});
+
+test("hydradb_list omits ids entirely when source_ids is not given", async () => {
+	const { calls } = await listText(
+		{ user_memories: [], total: 0 },
+		{ kind: "memory" },
+	);
+
+	assert.equal(calls.find((c) => c.method === "list")?.args.ids, undefined);
+});

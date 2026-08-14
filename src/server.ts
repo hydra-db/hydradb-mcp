@@ -303,6 +303,7 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 	}
 
 	async function runListMemories(args: {
+		source_ids?: string[];
 		page?: number;
 		page_size?: number;
 	} = {}): Promise<ToolResult> {
@@ -310,6 +311,7 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 
 		const raw = await hydra.context.list({
 			kind: "memory",
+			ids: args.source_ids,
 			page: args.page,
 			pageSize: args.page_size,
 		});
@@ -707,7 +709,11 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 					page_size: a.page_size,
 				});
 			}
-			return runListMemories({ page: a.page, page_size: a.page_size });
+			return runListMemories({
+				source_ids: a.source_ids,
+				page: a.page,
+				page_size: a.page_size,
+			});
 		},
 		readOnly,
 	);
