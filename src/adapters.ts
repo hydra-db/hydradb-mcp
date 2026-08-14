@@ -127,20 +127,77 @@ export interface MemoryListItem {
 	memory_content: string;
 }
 
+/**
+ * How much of the corpus a listing actually covered.
+ *
+ * The server returns this alongside every listing and both adapters used to
+ * discard it, which is what let one page be presented as the whole store.
+ */
+export interface PageInfo {
+	/** Total rows across all pages, when the server reported one. */
+	total?: number;
+	page?: number;
+	page_size?: number;
+	total_pages?: number;
+	has_next?: boolean;
+}
+
+export interface MemoryList {
+	memories: MemoryListItem[];
+	page: PageInfo;
+}
+
+function num(record: Record<string, unknown>, ...keys: string[]): number | undefined {
+	for (const key of keys) {
+		const value = record[key];
+		if (typeof value === "number") return value;
+	}
+	return undefined;
+}
+
+/**
+ * Pagination metadata, read defensively for the same reason the rows are: the
+ * SDK types this response as `{ inner?: … }` while the live API returns at top
+ * level, and neither shape is guaranteed to carry every field.
+ */
+function toPageInfo(
+	container: Record<string, unknown>,
+	rowCount: number,
+): PageInfo {
+	const meta =
+		(container.pagination as Record<string, unknown> | undefined) ?? {};
+	const total = num(container, "total") ?? num(meta, "total");
+	return {
+		total: total ?? rowCount,
+		page: num(meta, "page"),
+		page_size: num(meta, "page_size", "pageSize"),
+		total_pages: num(meta, "total_pages", "totalPages"),
+		has_next:
+			typeof meta.has_next === "boolean"
+				? meta.has_next
+				: typeof meta.hasNext === "boolean"
+					? meta.hasNext
+					: undefined,
+	};
+}
+
 /** SDK list result → memory rows. Field names vary across v2 records, so read defensively. */
-export function toMemoryList(data: SDK.ListV2SourceListResponse): MemoryListItem[] {
+export function toMemoryList(data: SDK.ListV2SourceListResponse): MemoryList {
 	// Memory listings surface at top-level `user_memories` — not under an
 	// `.inner` wrapper, and not under `sources` (that is the knowledge shape).
 	const d = data as unknown as Record<string, unknown>;
+	const container =
+		(asRecords(d.user_memories) ? d : (d.inner as Record<string, unknown>)) ?? d;
 	const records =
 		asRecords(d.user_memories) ??
 		asRecords((d.inner as Record<string, unknown> | undefined)?.user_memories) ??
 		[];
-	return records.map((record) => ({
+	const memories = records.map((record) => ({
 		memory_id: str(record, "memory_id", "id", "source_id") ?? "",
 		memory_content:
 			str(record, "memory_content", "content", "text", "memory", "title") ?? "",
 	}));
+	return { memories, page: toPageInfo(container, memories.length) };
 }
 
 export interface SourceListItem {

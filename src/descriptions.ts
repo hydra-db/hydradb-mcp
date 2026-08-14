@@ -32,6 +32,13 @@ const PARAM = {
 	kind: "Which context family to list: 'memory' or 'knowledge' (default: 'memory')",
 	source_ids:
 		"Optional array of specific source IDs to filter by. If omitted, lists all sources.",
+	page:
+		"Which page of results to return, 1-indexed (default: 1). The response reports how " +
+		"many of the total it showed; pass the next page to continue rather than assuming " +
+		"the first page is everything.",
+	page_size:
+		"How many items to return per page (1-100). Defaults to the server's page size. " +
+		"Raise it to see more at once; lower it to keep the response small.",
 	fetch_source_id: "The source ID to fetch content for",
 	fetch_mode:
 		"Fetch mode: 'content' for text, 'url' for presigned URL, 'both' for both (default: 'content')",
@@ -121,6 +128,8 @@ export const TOOL_DESCRIPTIONS = {
 		params: {
 			kind: PARAM.kind,
 			source_ids: PARAM.source_ids,
+			page: PARAM.page,
+			page_size: PARAM.page_size,
 		},
 	},
 

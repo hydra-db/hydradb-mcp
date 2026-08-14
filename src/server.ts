@@ -4,6 +4,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
 import { toAddMemoryResponse, toMemoryList, toRecallResponse, toSourceList } from "./adapters.js";
+import type { PageInfo } from "./adapters.js";
 import { resolveConfig } from "./config.js";
 import { buildRecalledContext } from "./context.js";
 import { SERVER_INSTRUCTIONS, TOOL_DESCRIPTIONS } from "./descriptions.js";
@@ -281,21 +282,54 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		);
 	}
 
-	async function runListMemories(): Promise<ToolResult> {
+	/**
+	 * How much of the corpus this page covered, stated plainly.
+	 *
+	 * A listing that shows 50 of 4,000 rows and says "50 memories:" is not a
+	 * truncated answer, it is a wrong one — the caller reports it as the complete
+	 * inventory. Say what was shown, out of what, and how to reach the rest.
+	 */
+	function coverage(shown: number, page: PageInfo, requestedPage?: number): string {
+		const total = page.total ?? shown;
+		const current = page.page ?? requestedPage ?? 1;
+		if (total <= shown && page.has_next !== true && current === 1) {
+			return `${shown}`;
+		}
+		const more =
+			page.has_next === true || total > shown
+				? ` — pass page=${current + 1} for more`
+				: "";
+		return `${shown} of ${total} (page ${current})${more}`;
+	}
+
+	async function runListMemories(args: {
+		page?: number;
+		page_size?: number;
+	} = {}): Promise<ToolResult> {
 		logger.debug(TOOL_NAMES.LIST);
 
-		const raw = await hydra.context.list({ kind: "memory" });
-		const memories = toMemoryList(raw);
+		const raw = await hydra.context.list({
+			kind: "memory",
+			page: args.page,
+			pageSize: args.page_size,
+		});
+		const { memories, page } = toMemoryList(raw);
 
 		if (memories.length === 0) {
-			return textResult("No memories stored yet.");
+			return textResult(
+				args.page != null && args.page > 1
+					? `No memories on page ${args.page}.`
+					: "No memories stored yet.",
+			);
 		}
 
 		const lines = memories.map(
 			(m, i) => `${i + 1}. [${m.memory_id}] ${m.memory_content.slice(0, 150)}`,
 		);
 
-		return textResult(`${memories.length} memories:\n\n${lines.join("\n")}`);
+		return textResult(
+			`${coverage(memories.length, page, args.page)} memories:\n\n${lines.join("\n")}`,
+		);
 	}
 
 	async function runListSources(args: {
@@ -538,6 +572,19 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			.array(z.string())
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.LIST].params.source_ids),
+		page: z
+			.number()
+			.int()
+			.min(1)
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.LIST].params.page),
+		page_size: z
+			.number()
+			.int()
+			.min(1)
+			.max(100)
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.LIST].params.page_size),
 	};
 
 	const listSourcesSchema = {
@@ -634,11 +681,16 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		TOOL_NAMES.LIST,
 		listSchema,
 		(args) => {
-			const a = args as { kind?: "memory" | "knowledge"; source_ids?: string[] };
+			const a = args as {
+				kind?: "memory" | "knowledge";
+				source_ids?: string[];
+				page?: number;
+				page_size?: number;
+			};
 			if ((a.kind ?? "memory") === "knowledge") {
 				return runListSources({ source_ids: a.source_ids });
 			}
-			return runListMemories();
+			return runListMemories({ page: a.page, page_size: a.page_size });
 		},
 		readOnly,
 	);

@@ -152,16 +152,63 @@ test("toAddMemoryResponse carries relations_error on an otherwise successful ite
 test("toMemoryList reads memory rows defensively", () => {
 	// The live API returns memories at top-level `user_memories` (not under
 	// `.inner`, and not under `sources` — that is the knowledge shape).
-	const rows = toMemoryList({
+	const { memories } = toMemoryList({
 		user_memories: [
 			{ memory_id: "m1", memory_content: "prefers dark mode" },
 			{ id: "m2", content: "likes tea" },
 		],
 	});
-	assert.deepEqual(rows, [
+	assert.deepEqual(memories, [
 		{ memory_id: "m1", memory_content: "prefers dark mode" },
 		{ memory_id: "m2", memory_content: "likes tea" },
 	]);
+});
+
+// The server reports how much of the corpus a listing covered; discarding it is
+// what let 50 rows out of 4,000 be presented as the whole store.
+test("toMemoryList carries pagination metadata", () => {
+	const { page } = toMemoryList({
+		user_memories: [{ memory_id: "m1", memory_content: "one" }],
+		total: 412,
+		pagination: { page: 1, page_size: 50, total_pages: 9, has_next: true },
+	} as never);
+
+	assert.equal(page.total, 412);
+	assert.equal(page.page, 1);
+	assert.equal(page.has_next, true);
+	assert.equal(page.total_pages, 9);
+});
+
+// Same defensive reasoning as the rows: the SDK types this under `.inner` while
+// the live API returns at top level, and camelCase appears on some paths.
+test("toMemoryList reads pagination from .inner and camelCase too", () => {
+	const { memories, page } = toMemoryList({
+		inner: {
+			user_memories: [{ memory_id: "m1", memory_content: "one" }],
+			total: 7,
+			pagination: { page: 2, pageSize: 25, totalPages: 4, hasNext: true },
+		},
+	} as never);
+
+	assert.equal(memories.length, 1);
+	assert.equal(page.total, 7);
+	assert.equal(page.page, 2);
+	assert.equal(page.page_size, 25);
+	assert.equal(page.has_next, true);
+});
+
+// With no metadata at all, the row count is the honest answer — never invent a
+// total the server did not report.
+test("toMemoryList falls back to the row count when the server sends no total", () => {
+	const { page } = toMemoryList({
+		user_memories: [
+			{ memory_id: "m1", memory_content: "one" },
+			{ memory_id: "m2", memory_content: "two" },
+		],
+	});
+
+	assert.equal(page.total, 2);
+	assert.equal(page.has_next, undefined);
 });
 
 test("toSourceList reads source rows and total", () => {

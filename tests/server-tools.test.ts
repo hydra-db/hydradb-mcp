@@ -473,3 +473,64 @@ test("hydradb_ingest returns the id the server assigned", async () => {
 	assert.match(text, /id: srv-assigned-9/);
 	assert.doesNotMatch(text, /"a note"/, "should not echo back the caller's own text");
 });
+
+/** Call hydradb_list against a given API response and return the rendered text. */
+async function listText(
+	list: unknown,
+	args: Record<string, unknown> = {},
+): Promise<{ text: string; calls: RecordedCall[] }> {
+	const { hydra, calls } = mockHydra({ list });
+	const client = await connect(hydra);
+	const result = await client.callTool({ name: "hydradb_list", arguments: args });
+	await client.close();
+	return { text: (result.content as { text: string }[])[0]?.text ?? "", calls };
+}
+
+// The listing took no paging arguments and rendered its own row count as the
+// header, so a user with 4,000 memories asking "what do you know about me?" got
+// "50 memories:" and an agent that answered as if that were everything. Page 2
+// was unreachable through the MCP at all.
+test("hydradb_list says how much of the corpus a memory page covered", async () => {
+	const { text } = await listText({
+		user_memories: [
+			{ memory_id: "m1", memory_content: "prefers tabs" },
+			{ memory_id: "m2", memory_content: "deploys Tuesdays" },
+		],
+		total: 412,
+		pagination: { page: 1, page_size: 2, total_pages: 206, has_next: true },
+	});
+
+	assert.match(text, /2 of 412/, "must not present one page as the whole store");
+	assert.match(text, /page 1/);
+	assert.match(text, /page=2/, "must say how to reach the rest");
+});
+
+test("hydradb_list forwards page and page_size for memories", async () => {
+	const { calls } = await listText(
+		{ user_memories: [{ memory_id: "m1", memory_content: "x" }], total: 1 },
+		{ kind: "memory", page: 3, page_size: 25 },
+	);
+
+	const call = calls.find((c) => c.method === "list");
+	assert.ok(call, "list should reach the SDK");
+	assert.equal(call.args.page, 3);
+	assert.equal(call.args.pageSize, 25);
+});
+
+test("hydradb_list stays terse when one page is the whole corpus", async () => {
+	const { text } = await listText({
+		user_memories: [{ memory_id: "m1", memory_content: "prefers tabs" }],
+		total: 1,
+		pagination: { page: 1, page_size: 50, total_pages: 1, has_next: false },
+	});
+
+	assert.match(text, /^1 memories:/);
+	assert.doesNotMatch(text, /page=/, "no next-page hint when there is no next page");
+});
+
+test("hydradb_list distinguishes an empty page from an empty store", async () => {
+	const { text } = await listText({ user_memories: [], total: 400 }, { page: 99 });
+
+	assert.match(text, /No memories on page 99/);
+	assert.doesNotMatch(text, /No memories stored yet/);
+});

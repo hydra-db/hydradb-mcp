@@ -142,7 +142,7 @@ test(
 		// what let PRO-1298's empty-list bug pass its own integration test.
 		const found = await pollUntil("memory appears in list(memory)", async () => {
 			const raw = await hydra.context.list({ kind: "memory" });
-			const memories = toMemoryList(raw);
+			const { memories } = toMemoryList(raw);
 			const match = memories.find((m) => m.memory_content.includes(id));
 			return { value: match ?? null, observed: { listed: memories.length } };
 		});
