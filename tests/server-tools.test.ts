@@ -788,3 +788,85 @@ test("hydradb_inspect reports a soft failure without erroring", async () => {
 	assert.match(text, /Could not fetch source missing/);
 	assert.match(text, /source not found/);
 });
+
+// hydradb_query searches knowledge, hydradb_list browses it, hydradb_inspect
+// reads it and hydradb_delete removes it — and nothing could create it. `kind`
+// was pinned to "memory" at both ingest call sites, so the wrapper's entire
+// knowledge branch was unreachable. A caller told "index this design doc as
+// knowledge" silently produced a memory instead.
+test("hydradb_ingest can write knowledge", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_ingest",
+		arguments: { text: "# Design doc\n\nbody", kind: "knowledge", title: "Design" },
+	});
+
+	assert.notEqual(result.isError, true);
+	const call = calls.find((c) => c.method === "ingest");
+	assert.ok(call, "ingest should reach the SDK");
+	assert.equal(call.args.type, "knowledge");
+	// Knowledge travels as a multipart document, never as a memory item.
+	assert.equal(call.args.memories, undefined);
+	assert.ok(call.args.documents, "knowledge must be sent as a document part");
+
+	await client.close();
+});
+
+test("hydradb_ingest still defaults to memory", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	await client.callTool({
+		name: "hydradb_ingest",
+		arguments: { text: "a note" },
+	});
+
+	const call = calls.find((c) => c.method === "ingest");
+	assert.equal(call?.args.type, "memory");
+	assert.ok(call?.args.memories, "memory must still travel as a memory item");
+
+	await client.close();
+});
+
+// The wrapper rejects memory-only params on the knowledge branch; the server
+// must not send them itself, or every knowledge write would fail.
+test("hydradb_ingest omits memory-only fields when writing knowledge", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_ingest",
+		arguments: { text: "body", kind: "knowledge" },
+	});
+
+	assert.notEqual(
+		result.isError,
+		true,
+		"knowledge ingest must not trip the wrapper's memory-only guard",
+	);
+	await client.close();
+});
+
+test("hydradb_ingest refuses to file a conversation as knowledge", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_ingest",
+		arguments: {
+			turns: [{ user: "hi", assistant: "hello" }],
+			kind: "knowledge",
+		},
+	});
+
+	assert.equal(result.isError, true);
+	assert.match(
+		(result.content as { text: string }[])[0]!.text,
+		/conversations are memories/,
+	);
+	assert.equal(calls.filter((c) => c.method === "ingest").length, 0);
+
+	await client.close();
+});

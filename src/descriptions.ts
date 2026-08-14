@@ -21,6 +21,11 @@ const PARAM = {
 	graph_context:
 		"Whether to include knowledge graph relations in results (default: true)",
 	text: "The information to store in memory",
+	ingest_kind:
+		"What to write: 'memory' for a personal fact, preference or conversation " +
+		"(default), or 'knowledge' to store a document as a searchable source. " +
+		"Memory-only options (turns, source_id, infer, is_markdown, user_name) do not " +
+		"apply to knowledge and are rejected rather than ignored.",
 	title: "Optional title for the memory entry (default: 'MCP Memory')",
 	source_id:
 		"Optional identifier for this entry. Ingesting again with an existing source_id " +
@@ -117,6 +122,7 @@ export const TOOL_DESCRIPTIONS = {
 			"(user/assistant pairs) rather than `text`.",
 		params: {
 			text: PARAM.text,
+			kind: PARAM.ingest_kind,
 			title: PARAM.title,
 			source_id: PARAM.source_id,
 			infer: PARAM.infer,

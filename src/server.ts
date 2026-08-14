@@ -10,7 +10,7 @@ import { resolveConfig } from "./config.js";
 import { buildRecalledContext } from "./context.js";
 import { SERVER_INSTRUCTIONS, TOOL_DESCRIPTIONS } from "./descriptions.js";
 import { HydraDB } from "./hydra/index.js";
-import type { QueryKind } from "./hydra/index.js";
+import type { ContextKind, QueryKind } from "./hydra/index.js";
 import { logger } from "./logger.js";
 import { ALIAS_REPLACEMENTS, DEPRECATED_TOOL_NAMES, TOOL_NAMES } from "./tool-names.js";
 import type { MemoryResultItem } from "./types.js";
@@ -237,22 +237,36 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 
 	async function runStore(args: {
 		text: string;
+		kind?: ContextKind;
 		title?: string;
 		source_id?: string;
 		infer?: boolean;
 		is_markdown?: boolean;
 		overwrite?: boolean;
 	}): Promise<ToolResult> {
-		logger.debug(`${TOOL_NAMES.INGEST}: "${args.text.slice(0, 50)}..."`);
+		const kind = args.kind ?? "memory";
+		logger.debug(`${TOOL_NAMES.INGEST}: "${args.text.slice(0, 50)}..." (kind=${kind})`);
+
+		// The memory item shape has no counterpart on the knowledge path, which
+		// carries only a document and its filename — so those fields are sent only
+		// where they mean something. The wrapper rejects them on the knowledge
+		// branch rather than dropping them, and passing them here unconditionally
+		// would make every knowledge write fail.
+		const memoryOnly =
+			kind === "memory"
+				? {
+						sourceId: args.source_id,
+						infer: args.infer ?? true,
+						isMarkdown: args.is_markdown ?? false,
+						customInstructions: INGEST_INSTRUCTIONS,
+					}
+				: {};
 
 		const raw = await hydra.context.ingest({
-			kind: "memory",
+			kind,
 			text: args.text,
-			title: args.title ?? "MCP Memory",
-			sourceId: args.source_id,
-			infer: args.infer ?? true,
-			isMarkdown: args.is_markdown ?? false,
-			customInstructions: INGEST_INSTRUCTIONS,
+			title: args.title ?? (kind === "memory" ? "MCP Memory" : undefined),
+			...memoryOnly,
 			// Default stays true. The SDK retries POSTs, so upsert is what keeps a
 			// retried ingest from duplicating — flipping this default would trade a
 			// silent overwrite for a silent duplicate.
@@ -599,6 +613,10 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			.string()
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.text),
+		kind: z
+			.enum(["memory", "knowledge"])
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.kind),
 		turns: z
 			.array(turnSchema)
 			.min(1)
@@ -698,6 +716,7 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 	register(TOOL_NAMES.INGEST, ingestSchema, async (args) => {
 		const a = args as {
 			text?: string;
+			kind?: ContextKind;
 			title?: string;
 			source_id?: string;
 			infer?: boolean;
@@ -707,6 +726,16 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			user_name?: string;
 		};
 		const hasTurns = a.turns != null && a.turns.length > 0;
+
+		// A conversation is a memory by definition; there is no knowledge document
+		// made of user/assistant pairs. Reject rather than quietly ingesting it as
+		// the wrong family.
+		if (hasTurns && a.kind === "knowledge") {
+			throw new Error(
+				`${TOOL_NAMES.INGEST} cannot ingest \`turns\` as knowledge — conversations are memories. ` +
+				`Use \`text\` for a knowledge document, or drop \`kind\`.`,
+			);
+		}
 		// `text` and `turns` are mutually exclusive — reject rather than silently
 		// dropping one (the documented "exactly one" contract).
 		if (hasTurns && a.text != null) {
@@ -729,6 +758,7 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		if (a.text != null) {
 			return runStore({
 				text: a.text,
+				kind: a.kind,
 				title: a.title,
 				source_id: a.source_id,
 				infer: a.infer,
