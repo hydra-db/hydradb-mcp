@@ -89,7 +89,13 @@ function send(message) {
 function awaitResponse(id) {
 	return new Promise((resolve) => {
 		const scan = () => {
-			for (const line of stdout.split("\n")) {
+			// Only COMPLETE lines. A response can span two `data` events, leaving an
+			// unterminated fragment at the end of the buffer — parsing that as if it
+			// were a whole message throws, and treating the throw as corruption
+			// would fail a perfectly healthy build. Everything before the last
+			// newline is complete; anything after it is still arriving.
+			const complete = stdout.slice(0, stdout.lastIndexOf("\n") + 1);
+			for (const line of complete.split("\n")) {
 				if (line.trim() === "") continue;
 				let parsed;
 				try {
