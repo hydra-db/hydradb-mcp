@@ -1925,8 +1925,18 @@ test("hydradb_query caps the total response even in full detail", async () => {
 	);
 
 	assert.ok(text.length < 45_000, `expected a bounded response, got ${text.length}`);
-	assert.match(text, /response truncated at 40000/);
+	assert.match(text, /response truncated: showing \d+ of 50 chunks/);
 	assert.match(text, /hydradb_inspect/, "must say how to get a source in full");
+
+	// Greptile, PR #49: the header must count what survived truncation, not what
+	// went in — otherwise it promises source ids the body does not contain.
+	const announced = Number(text.match(/Found (\d+) /)?.[1]);
+	const rendered = (text.match(/^Chunk \d+/gm) ?? []).length;
+	assert.equal(announced, rendered, "header must match the chunks actually shown");
+	assert.ok(rendered < 50, "the budget should have dropped some chunks");
+
+	// And it must never cut a chunk header in half.
+	assert.doesNotMatch(text, /\[id: [^\]]*$/, "a severed id must not be left danging");
 });
 
 // A live call with max_results=10 returned 15 chunks, and all 15 were rendered.

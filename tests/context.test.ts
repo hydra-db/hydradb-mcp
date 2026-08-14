@@ -632,8 +632,8 @@ test("buildRecalledContext suppresses chunks contained in another chunk", () => 
 
 	const response = {
 		chunks: [
-			{ chunk_uuid: "c1", source_id: "s1", chunk_content: long },
-			{ chunk_uuid: "c2", source_id: "s2", chunk_content: short },
+			{ chunk_uuid: "c1", source_id: "same-doc", chunk_content: long },
+			{ chunk_uuid: "c2", source_id: "same-doc", chunk_content: short },
 		],
 	} as never;
 
@@ -664,8 +664,8 @@ test("buildRecalledContext keeps genuinely different chunks", () => {
 test("containment ignores whitespace and case", () => {
 	const response = {
 		chunks: [
-			{ chunk_uuid: "c1", source_id: "s1", chunk_content: "The User Prefers Tabs Over Spaces" },
-			{ chunk_uuid: "c2", source_id: "s2", chunk_content: "  prefers   tabs\n over spaces  " },
+			{ chunk_uuid: "c1", source_id: "same-doc", chunk_content: "The User Prefers Tabs Over Spaces" },
+			{ chunk_uuid: "c2", source_id: "same-doc", chunk_content: "  prefers   tabs\n over spaces  " },
 		],
 	} as never;
 
@@ -677,23 +677,22 @@ test("identical chunks collapse to a single rendering", () => {
 	const body = "the user deploys on Tuesday";
 	const response = {
 		chunks: [
-			{ chunk_uuid: "c1", source_id: "keep-me", chunk_content: body, relevancy_score: 0.9 },
-			{ chunk_uuid: "c2", source_id: "drop-me", chunk_content: body, relevancy_score: 0.4 },
+			{ chunk_uuid: "c1", source_id: "one-doc", chunk_content: body, relevancy_score: 0.9 },
+			{ chunk_uuid: "c2", source_id: "one-doc", chunk_content: body, relevancy_score: 0.4 },
 		],
 	} as never;
 
 	const out = buildRecalledContext(response);
-	assert.match(out, /keep-me/);
-	assert.doesNotMatch(out, /drop-me/);
+	assert.equal(out.match(/Chunk \d/g)?.length, 1);
 });
 
 // Chunk numbering must follow what is rendered, or it points at nothing.
 test("chunk numbering is contiguous after suppression", () => {
 	const response = {
 		chunks: [
-			{ chunk_uuid: "c1", source_id: "s1", chunk_content: "alpha body that is long enough" },
-			{ chunk_uuid: "c2", source_id: "s2", chunk_content: "alpha body" },
-			{ chunk_uuid: "c3", source_id: "s3", chunk_content: "beta body entirely different" },
+			{ chunk_uuid: "c1", source_id: "doc-a", chunk_content: "alpha body that is long enough" },
+			{ chunk_uuid: "c2", source_id: "doc-a", chunk_content: "alpha body" },
+			{ chunk_uuid: "c3", source_id: "doc-b", chunk_content: "beta body entirely different" },
 		],
 	} as never;
 
@@ -726,4 +725,62 @@ test("extra context is deduped by content, not only by id", () => {
 		1,
 		"the same passage under two ids must be emitted once",
 	);
+});
+
+// Greptile, PR #49: suppression must be scoped to ONE source. Two documents can
+// legitimately hold the same sentence, and dropping one of those does not remove
+// duplication — it removes a MATCH, taking its id, score and graph relations with
+// it, so the caller can no longer discover that source at all.
+test("identical text from DIFFERENT sources is never suppressed", () => {
+	const shared = "Deploys go out on Tuesday and Thursday.";
+	const response = {
+		chunks: [
+			{ chunk_uuid: "c1", source_id: "runbook", chunk_content: shared, relevancy_score: 0.9 },
+			{ chunk_uuid: "c2", source_id: "onboarding", chunk_content: shared, relevancy_score: 0.8 },
+		],
+	} as never;
+
+	const out = buildRecalledContext(response);
+
+	assert.equal(renderedChunkCount(response), 2);
+	assert.match(out, /runbook/, "each source id must remain discoverable");
+	assert.match(out, /onboarding/);
+});
+
+test("a substring match across sources is kept", () => {
+	const response = {
+		chunks: [
+			{
+				chunk_uuid: "c1",
+				source_id: "doc-a",
+				chunk_content: "The user prefers tabs over spaces in every language.",
+			},
+			{ chunk_uuid: "c2", source_id: "doc-b", chunk_content: "prefers tabs over spaces" },
+		],
+	} as never;
+
+	assert.equal(renderedChunkCount(response), 2);
+});
+
+// The same passage cited under a different source title is a second citation,
+// not a duplicate — dropping it strips that chunk's attribution entirely.
+test("extra context with the same text but a different title is kept", () => {
+	const passage = "Tea helps Alice focus.";
+	const out = buildRecalledContext({
+		chunks: [
+			{
+				chunk_uuid: "c1",
+				source_id: "s1",
+				chunk_content: "chunk one",
+				extra_context_ids: ["e1", "e2"],
+			},
+		],
+		additional_context: {
+			e1: { chunk_uuid: "e1", source_id: "x", chunk_content: passage, source_title: "Doc A" },
+			e2: { chunk_uuid: "e2", source_id: "y", chunk_content: passage, source_title: "Doc B" },
+		},
+	} as never);
+
+	assert.match(out, /Doc A/);
+	assert.match(out, /Doc B/, "a different attribution is not a duplicate");
 });

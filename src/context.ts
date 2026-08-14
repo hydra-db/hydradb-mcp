@@ -130,7 +130,10 @@ function normalise(text: string): string {
  * Ties are resolved by keeping the earlier (higher-ranked) chunk, and identical
  * bodies collapse to one. O(n^2) over at most 50 items is free.
  */
-function containedChunkIndices(bodies: string[]): Set<number> {
+function containedChunkIndices(
+	bodies: string[],
+	sourceIds: (string | undefined)[],
+): Set<number> {
 	const normalised = bodies.map(normalise);
 	const dropped = new Set<number>();
 
@@ -142,6 +145,18 @@ function containedChunkIndices(bodies: string[]): Set<number> {
 			if (i === j || dropped.has(j)) continue;
 			const b = normalised[j]!;
 			if (b === "") continue;
+
+			// Only within ONE source. Two different sources can legitimately hold
+			// the same sentence — a policy quoted in two documents, the same fact
+			// recorded twice — and suppressing one of those does not remove
+			// duplication, it removes a MATCH: its id, score and graph relations
+			// all disappear, and the caller can no longer discover that source.
+			// The duplication this exists to remove is the overlapping windows
+			// retrieval returns over a single source.
+			const sameSource =
+				sourceIds[i] != null && sourceIds[i] === sourceIds[j];
+			if (!sameSource) continue;
+
 			// Keep the longer body; on an exact tie keep whichever ranked first.
 			const keepsI = a.length > b.length || (a.length === b.length && i < j);
 			if (keepsI && a.includes(b)) dropped.add(j);
@@ -161,8 +176,26 @@ export function renderedChunkCount(response: RecallResponse): number {
 	const chunks = response.chunks ?? [];
 	const contained = containedChunkIndices(
 		chunks.map((c) => extractChunkText(c.chunk_content)),
+		chunks.map((c) => c.source_id),
 	);
 	return chunks.length - contained.size;
+}
+
+/**
+ * Render, and report how many chunks the caller can actually see.
+ *
+ * `buildRecalledContext` returns only the text, so a caller counting chunks had
+ * to compute that separately — and any count computed before the total-character
+ * budget applies overstates what survived it. The header and the body must
+ * describe the same thing.
+ */
+export function renderRecalledContext(
+	response: RecallResponse,
+	opts?: Parameters<typeof buildRecalledContext>[1],
+): { text: string; shown: number } {
+	const text = buildRecalledContext(response, opts);
+	const shown = (text.match(/^Chunk \d+/gm) ?? []).length;
+	return { text, shown };
 }
 
 export function buildRecalledContext(
@@ -227,6 +260,7 @@ export function buildRecalledContext(
 	// them, so the numbering reflects what the caller actually receives.
 	const contained = containedChunkIndices(
 		chunks.map((c) => extractChunkText(c.chunk_content)),
+		chunks.map((c) => c.source_id),
 	);
 	// Extra context is deduped by CONTENT as well as by id: the same passage
 	// arrives under different ids, and an id-keyed check never notices.
@@ -357,7 +391,10 @@ export function buildRecalledContext(
 					const extraContent = extractChunkText(extraChunk.chunk_content);
 					// Keying only on id let byte-identical passages through under
 					// different ids — three ~700-char duplicates in one live sample.
-					const fingerprint = normalise(extraContent);
+					// The title is part of the key: the same passage attributed to a
+					// different source is not a duplicate, it is a second citation,
+					// and dropping it would strip that chunk's attribution.
+					const fingerprint = `${extraChunk.source_title ?? ""}\u0000${normalise(extraContent)}`;
 					if (fingerprint !== "" && seenExtraContent.has(fingerprint)) continue;
 					seenExtraContent.add(fingerprint);
 					const extraTitle = extraChunk.source_title ?? "";
@@ -421,9 +458,30 @@ export function buildRecalledContext(
 	if (budget != null && text.length > budget) {
 		// A per-chunk cap does not bound the whole: fifty capped chunks still add
 		// up. The total ceiling is the one that actually protects the caller.
+		//
+		// Cut at a CHUNK boundary, not mid-string. Slicing the joined text can
+		// sever a chunk header, leaving a partial `[id: …]` the caller might try
+		// to use, and it silently removes whole sections the "Found N" header is
+		// still counting. Dropping whole chunks and saying how many were dropped
+		// keeps the header and the body describing the same thing.
+		const kept: string[] = [];
+		let used = 0;
+		const separator = "\n\n---\n\n";
+		for (const section of chunkSections) {
+			const cost = section.length + (kept.length > 0 ? separator.length : 0);
+			if (used + cost > budget) break;
+			kept.push(section);
+			used += cost;
+		}
+		const dropped = chunkSections.length - kept.length;
+		const head = entityPathLines.length > 0
+			? `=== ENTITY PATHS ===\n${entityPathLines.join("\n")}\n\n`
+			: "";
 		return (
-			`${text.slice(0, budget)}\n\n[response truncated at ${budget} of ${text.length} chars. ` +
-			`Narrow the query, lower max_results, or fetch a specific source with hydradb_inspect.]`
+			`${head}=== CONTEXT ===\n${kept.join(separator)}\n\n` +
+			`[response truncated: showing ${kept.length} of ${chunkSections.length} chunks. ` +
+			`${dropped} omitted to stay within ${budget} characters. Narrow the query, lower ` +
+			`max_results, or fetch a specific source with hydradb_inspect.]`
 		);
 	}
 	return text;

@@ -7,7 +7,7 @@ import { z } from "zod";
 import { toAddMemoryResponse, toMemoryList, toRecallResponse, toSourceList } from "./adapters.js";
 import type { PageInfo } from "./adapters.js";
 import { resolveConfig } from "./config.js";
-import { buildRecalledContext, renderedChunkCount } from "./context.js";
+import { renderRecalledContext } from "./context.js";
 import { SERVER_INSTRUCTIONS, TOOL_DESCRIPTIONS } from "./descriptions.js";
 import { HydraDB } from "./hydra/index.js";
 import type { ContextKind, QueryKind } from "./hydra/index.js";
@@ -341,7 +341,7 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		// chunk while the list stopped at 10, so a 15-chunk result announced 15 and
 		// showed 10.
 		const compact = (args.detail ?? "compact") === "compact";
-		const contextStr = buildRecalledContext(res, {
+		const { text: contextStr, shown } = renderRecalledContext(res, {
 			// Compact keeps every chunk but trims each body and drops the
 			// extra-context blocks; `full` is the unchanged rendering.
 			...(compact
@@ -349,11 +349,6 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 				: {}),
 			maxTotalChars: QUERY_CHAR_BUDGET,
 		});
-		// Count what was rendered, not what arrived: chunks wholly contained in
-		// another are suppressed, and a header that counts them disagrees with its
-		// own body.
-		const shown = renderedChunkCount(res);
-
 		// An id the caller cannot connect to anything is just noise, so name what
 		// accepts it. Without this the ids read as internal bookkeeping.
 		const legend =
