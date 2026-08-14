@@ -415,9 +415,25 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			);
 		}
 
-		const content = res.content ?? res.contentBase64 ?? "(no text content)";
+		const mode = args.mode ?? "content";
+		const parts: string[] = [`Source: ${args.source_id}`];
 
-		return textResult(`Source: ${args.source_id}\n\n${content}`);
+		// `presignedUrl` was never read, so `mode: "url"` — documented in the
+		// schema and the README — returned "(no text content)" and nothing else.
+		// The one mode whose entire purpose is the link never emitted the link.
+		if (mode === "url" || mode === "both") {
+			parts.push(
+				res.presignedUrl
+					? `Download URL (time-limited): ${res.presignedUrl}`
+					: "No download URL available for this source.",
+			);
+		}
+
+		if (mode === "content" || mode === "both") {
+			parts.push(res.content ?? res.contentBase64 ?? "(no text content)");
+		}
+
+		return textResult(parts.join("\n\n"));
 	}
 
 	/**

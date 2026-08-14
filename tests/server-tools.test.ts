@@ -707,3 +707,84 @@ test("hydradb_ingest forwards overwrite:false as an opt-out", async () => {
 		await client.close();
 	}
 });
+
+/** Call hydradb_inspect against a given API response and return the rendered text. */
+async function inspectText(
+	inspect: unknown,
+	args: Record<string, unknown>,
+): Promise<string> {
+	const { hydra } = mockHydra({ inspect });
+	const client = await connect(hydra);
+	const result = await client.callTool({ name: "hydradb_inspect", arguments: args });
+	await client.close();
+	return (result.content as { text: string }[])[0]?.text ?? "";
+}
+
+// presignedUrl was never read, so the one mode whose entire purpose is the link
+// returned "(no text content)". Documented in the schema and the README, and it
+// could not work. There was also no test of runInspect at all.
+test("hydradb_inspect returns the download link for mode url", async () => {
+	const text = await inspectText(
+		{
+			success: true,
+			presignedUrl: "https://example.invalid/signed",
+			content: "the extracted text",
+		},
+		{ source_id: "s1", mode: "url" },
+	);
+
+	assert.match(text, /https:\/\/example\.invalid\/signed/);
+	assert.doesNotMatch(
+		text,
+		/the extracted text/,
+		"url mode asks for the link instead of the content",
+	);
+	assert.doesNotMatch(text, /no text content/);
+});
+
+test("hydradb_inspect returns both link and content for mode both", async () => {
+	const text = await inspectText(
+		{
+			success: true,
+			presignedUrl: "https://example.invalid/signed",
+			content: "the extracted text",
+		},
+		{ source_id: "s1", mode: "both" },
+	);
+
+	assert.match(text, /https:\/\/example\.invalid\/signed/);
+	assert.match(text, /the extracted text/);
+});
+
+test("hydradb_inspect defaults to content and does not mention a link", async () => {
+	const text = await inspectText(
+		{
+			success: true,
+			presignedUrl: "https://example.invalid/signed",
+			content: "the extracted text",
+		},
+		{ source_id: "s1" },
+	);
+
+	assert.match(text, /the extracted text/);
+	assert.doesNotMatch(text, /example\.invalid/);
+});
+
+test("hydradb_inspect says so when a link was asked for and none exists", async () => {
+	const text = await inspectText(
+		{ success: true, content: "the extracted text" },
+		{ source_id: "s1", mode: "url" },
+	);
+
+	assert.match(text, /No download URL available/);
+});
+
+test("hydradb_inspect reports a soft failure without erroring", async () => {
+	const text = await inspectText(
+		{ success: false, error: "source not found" },
+		{ source_id: "missing" },
+	);
+
+	assert.match(text, /Could not fetch source missing/);
+	assert.match(text, /source not found/);
+});
