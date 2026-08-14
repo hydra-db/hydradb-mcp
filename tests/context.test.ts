@@ -337,3 +337,73 @@ test("buildRecalledContext filters low-score relations by default", () => {
 	assert.doesNotMatch(output, /Alice/);
 });
 
+
+// Ingest can store a chunk whose body is the serialised source record rather
+// than the text. Rendered verbatim that ships ids and tenant identifiers into
+// the prompt in place of the content, and the reader has to parse it back out.
+test("buildRecalledContext unwraps a v2 source envelope", () => {
+	const out = buildRecalledContext({
+		chunks: [
+			{
+				chunk_uuid: "c1",
+				source_id: "s9",
+				chunk_content:
+					'{"id":"s9","tenant_id":"t","content":{"text":"the actual body text"}}',
+			},
+		],
+	} as never);
+
+	assert.match(out, /the actual body text/);
+	assert.doesNotMatch(out, /tenant_id/, "internal fields must not reach the prompt");
+	assert.doesNotMatch(out, /"content":/);
+});
+
+test("buildRecalledContext prefers text over markdown in an envelope", () => {
+	const out = buildRecalledContext({
+		chunks: [
+			{
+				chunk_uuid: "c1",
+				source_id: "s9",
+				chunk_content: '{"content":{"text":"plain body","markdown":"# md body"}}',
+			},
+		],
+	} as never);
+
+	assert.match(out, /plain body/);
+	assert.doesNotMatch(out, /# md body/);
+});
+
+test("buildRecalledContext falls back to markdown when text is absent", () => {
+	const out = buildRecalledContext({
+		chunks: [
+			{
+				chunk_uuid: "c1",
+				source_id: "s9",
+				chunk_content: '{"content":{"markdown":"# md body"}}',
+			},
+		],
+	} as never);
+
+	assert.match(out, /# md body/);
+});
+
+// Only the envelope shape is unwrapped. Content that merely looks like JSON, or
+// is malformed, or is a JSON object of some other shape, is left untouched —
+// unwrapping it would silently drop what the user actually stored.
+test("buildRecalledContext leaves non-envelope content untouched", () => {
+	for (const body of [
+		'{"not":"an envelope"}',
+		'{"content":"a string, not an object"}',
+		"{ this is not valid json }",
+		"a plain sentence about {braces}",
+	]) {
+		const out = buildRecalledContext({
+			chunks: [{ chunk_uuid: "c1", source_id: "s9", chunk_content: body }],
+		} as never);
+		assert.match(
+			out,
+			new RegExp(body.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+			`content should be preserved verbatim: ${body}`,
+		);
+	}
+});

@@ -4,6 +4,49 @@ import type {
 	ScoredPath,
 } from "./types.js";
 
+/**
+ * A chunk's readable text, unwrapping the v2 source envelope when present.
+ *
+ * Ingest can store a chunk whose body is the serialised source record rather
+ * than the text itself:
+ *
+ *     {"id":"s9","tenant_id":"t","content":{"text":"the actual body"}}
+ *
+ * Rendered verbatim, that ships ids, tenant identifiers and JSON punctuation
+ * into the prompt in place of the content, and the reader has to parse it back
+ * out. The SDK's own renderer unwraps this (`dist/helpers/buildString.js`);
+ * this port keeps the behaviour without taking the rest of that helper, which
+ * drops the evidence-score filter, extra context and `raw_predicate` handling
+ * below.
+ *
+ * The wire format is snake_case regardless of SDK casing, so the keys checked
+ * here are the wire ones. Anything that does not match the envelope shape is
+ * returned untouched — a chunk that legitimately begins and ends with braces is
+ * left alone.
+ */
+function extractChunkText(chunkContent: string | undefined): string {
+	if (!chunkContent) return "";
+	const trimmed = chunkContent.trim();
+	if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) return trimmed;
+
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(trimmed);
+	} catch {
+		return trimmed;
+	}
+	if (typeof parsed !== "object" || parsed === null) return trimmed;
+
+	const content = (parsed as { content?: unknown }).content;
+	if (typeof content === "object" && content !== null) {
+		for (const key of ["text", "markdown"] as const) {
+			const value = (content as Record<string, unknown>)[key];
+			if (typeof value === "string" && value.trim()) return value.trim();
+		}
+	}
+	return trimmed;
+}
+
 function formatTriplet(triplet: PathTriplet): string {
 	const src = triplet.source?.name ?? "?";
 	const rel = triplet.relation;
@@ -66,7 +109,7 @@ export function buildRecalledContext(
 			lines.push(`Source: ${title}`);
 		}
 
-		lines.push(chunk.chunk_content ?? "");
+		lines.push(extractChunkText(chunk.chunk_content));
 
 		const chunkUuid = chunk.chunk_uuid;
 		const linkedGroupIds = chunkToGroupIds[chunkUuid] ?? [];
@@ -137,7 +180,7 @@ export function buildRecalledContext(
 				const extraChunk = extraContextMap[ctxId];
 				if (extraChunk) {
 					consumedExtraIds.add(ctxId);
-					const extraContent = extraChunk.chunk_content ?? "";
+					const extraContent = extractChunkText(extraChunk.chunk_content);
 					const extraTitle = extraChunk.source_title ?? "";
 					if (extraTitle) {
 						extraLines.push(
