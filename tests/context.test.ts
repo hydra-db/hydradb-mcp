@@ -784,3 +784,41 @@ test("extra context with the same text but a different title is kept", () => {
 	assert.match(out, /Doc A/);
 	assert.match(out, /Doc B/, "a different attribution is not a duplicate");
 });
+
+// Greptile, PR #49: block placement is the ONLY thing tying an extra-context
+// passage to its chunk, so suppressing a repeat outright left the later chunk
+// looking as though it referenced nothing at all.
+test("a repeated extra-context passage cites where it was shown", () => {
+	const passage = "Tea helps Alice focus in the morning.";
+	const out = buildRecalledContext({
+		chunks: [
+			{
+				chunk_uuid: "c1",
+				source_id: "s1",
+				chunk_content: "first chunk body",
+				extra_context_ids: ["e1"],
+			},
+			{
+				chunk_uuid: "c2",
+				source_id: "s2",
+				chunk_content: "second chunk body entirely different",
+				extra_context_ids: ["e2"],
+			},
+		],
+		additional_context: {
+			e1: { chunk_uuid: "e1", source_id: "x", chunk_content: passage },
+			e2: { chunk_uuid: "e2", source_id: "y", chunk_content: passage },
+		},
+	} as never);
+
+	// Sent once...
+	assert.equal(
+		out.match(/Tea helps Alice focus/g)?.length,
+		1,
+		"the passage itself must not be repeated",
+	);
+	// ...but the second chunk still shows that it referenced something.
+	assert.match(out, /same as Chunk 1/);
+	const secondChunk = out.slice(out.indexOf("Chunk 2"));
+	assert.match(secondChunk, /Extra Context:/, "chunk 2 must not look context-free");
+});

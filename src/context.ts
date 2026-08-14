@@ -264,7 +264,10 @@ export function buildRecalledContext(
 	);
 	// Extra context is deduped by CONTENT as well as by id: the same passage
 	// arrives under different ids, and an id-keyed check never notices.
-	const seenExtraContent = new Set<string>();
+	// Maps a passage to the chunk number that already rendered it, so a later
+	// chunk can point at it instead of either repeating it or losing the
+	// association entirely.
+	const seenExtraContent = new Map<string, number>();
 
 	let rendered = 0;
 	for (let i = 0; i < chunks.length; i++) {
@@ -395,8 +398,16 @@ export function buildRecalledContext(
 					// different source is not a duplicate, it is a second citation,
 					// and dropping it would strip that chunk's attribution.
 					const fingerprint = `${extraChunk.source_title ?? ""}\u0000${normalise(extraContent)}`;
-					if (fingerprint !== "" && seenExtraContent.has(fingerprint)) continue;
-					seenExtraContent.add(fingerprint);
+					// Placement is the ONLY thing tying an extra-context block to its
+					// chunk, so suppressing a repeat outright leaves that chunk looking
+					// as though it referenced nothing. Cite where it was shown instead:
+					// the association survives, and the passage is still sent once.
+					const shownIn = fingerprint !== "" ? seenExtraContent.get(fingerprint) : undefined;
+					if (shownIn != null) {
+						extraLines.push(`  Related Context: (same as Chunk ${shownIn})`);
+						continue;
+					}
+					if (fingerprint !== "") seenExtraContent.set(fingerprint, rendered);
 					const extraTitle = extraChunk.source_title ?? "";
 					if (extraTitle) {
 						extraLines.push(
