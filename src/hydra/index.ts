@@ -6,10 +6,17 @@
  * other client repos (per CONTRACT.md).
  */
 
-export { HydraDB, ContextResource, DatabasesResource } from "./client.js";
+export {
+	HydraDB,
+	ContextResource,
+	DatabasesResource,
+	DEFAULT_TIMEOUT_SECONDS,
+	DEFAULT_MAX_RETRIES,
+} from "./client.js";
 export type {
 	HydraConfig,
 	ContextKind,
+	RequestOptions,
 	QueryKind,
 	ConversationTurn,
 	QueryParams,

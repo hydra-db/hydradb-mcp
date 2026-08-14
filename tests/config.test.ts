@@ -125,3 +125,43 @@ test("missing required config throws naming the canonical variable", () => {
 		/HYDRADB_DATABASE/,
 	);
 });
+
+test("timeout and retry overrides are read when set", () => {
+	const { warn, messages } = collect();
+	const config = resolveConfig(
+		{
+			HYDRADB_API_KEY: "key",
+			HYDRADB_DATABASE: "db",
+			HYDRADB_TIMEOUT_SECONDS: "45",
+			HYDRADB_MAX_RETRIES: "0",
+		},
+		warn,
+	);
+
+	assert.equal(config.timeoutSeconds, 45);
+	// Zero is a legitimate choice — "do not retry" — and must survive.
+	assert.equal(config.maxRetries, 0);
+	assert.deepEqual(messages, []);
+});
+
+// A typo'd number should not stop the server from starting. Falling back to the
+// built-in default keeps it running; exiting 1 over a cosmetic env var is worse
+// than the misconfiguration itself.
+test("malformed timeout and retry values fall back rather than throwing", () => {
+	const { warn } = collect();
+	for (const bad of ["abc", "-5", "1.5", ""]) {
+		const config = resolveConfig(
+			{
+				HYDRADB_API_KEY: "key",
+				HYDRADB_DATABASE: "db",
+				HYDRADB_TIMEOUT_SECONDS: bad,
+			},
+			warn,
+		);
+		assert.equal(
+			config.timeoutSeconds,
+			undefined,
+			`"${bad}" should be ignored, not adopted`,
+		);
+	}
+});
