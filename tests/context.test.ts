@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { buildRecalledContext } from "../src/context.js";
+import { buildRecalledContext, renderedChunkCount } from "../src/context.js";
 import type { RecallResponse } from "../src/types.js";
 
 test("buildRecalledContext includes entity paths, graph relations and extra context", () => {
@@ -621,4 +621,109 @@ test("buildRecalledContext keeps a document whose fields merely look internal", 
 	);
 	assert.match(out, /Notes/);
 	assert.match(out, /2026-01-01/);
+});
+
+// Retrieval returns overlapping windows over the same source, so a short chunk
+// is frequently a literal substring of a longer one. In a live 15-chunk sample,
+// 4 were fully contained in another — roughly a quarter of the body re-sent.
+test("buildRecalledContext suppresses chunks contained in another chunk", () => {
+	const long = "The user prefers tabs over spaces in every language they write.";
+	const short = "prefers tabs over spaces";
+
+	const response = {
+		chunks: [
+			{ chunk_uuid: "c1", source_id: "s1", chunk_content: long },
+			{ chunk_uuid: "c2", source_id: "s2", chunk_content: short },
+		],
+	} as never;
+
+	const out = buildRecalledContext(response);
+
+	assert.match(out, /every language they write/, "the longer chunk must survive");
+	assert.equal(
+		out.match(/Chunk \d/g)?.length,
+		1,
+		"the contained chunk should not be rendered at all",
+	);
+	assert.equal(renderedChunkCount(response), 1);
+});
+
+test("buildRecalledContext keeps genuinely different chunks", () => {
+	const response = {
+		chunks: [
+			{ chunk_uuid: "c1", source_id: "s1", chunk_content: "prefers tabs over spaces" },
+			{ chunk_uuid: "c2", source_id: "s2", chunk_content: "deploys on Tuesday and Thursday" },
+		],
+	} as never;
+
+	assert.equal(renderedChunkCount(response), 2);
+	assert.equal(buildRecalledContext(response).match(/Chunk \d/g)?.length, 2);
+});
+
+// Whitespace differences are not content differences.
+test("containment ignores whitespace and case", () => {
+	const response = {
+		chunks: [
+			{ chunk_uuid: "c1", source_id: "s1", chunk_content: "The User Prefers Tabs Over Spaces" },
+			{ chunk_uuid: "c2", source_id: "s2", chunk_content: "  prefers   tabs\n over spaces  " },
+		],
+	} as never;
+
+	assert.equal(renderedChunkCount(response), 1);
+});
+
+// Identical bodies collapse to one, keeping the higher-ranked chunk.
+test("identical chunks collapse to a single rendering", () => {
+	const body = "the user deploys on Tuesday";
+	const response = {
+		chunks: [
+			{ chunk_uuid: "c1", source_id: "keep-me", chunk_content: body, relevancy_score: 0.9 },
+			{ chunk_uuid: "c2", source_id: "drop-me", chunk_content: body, relevancy_score: 0.4 },
+		],
+	} as never;
+
+	const out = buildRecalledContext(response);
+	assert.match(out, /keep-me/);
+	assert.doesNotMatch(out, /drop-me/);
+});
+
+// Chunk numbering must follow what is rendered, or it points at nothing.
+test("chunk numbering is contiguous after suppression", () => {
+	const response = {
+		chunks: [
+			{ chunk_uuid: "c1", source_id: "s1", chunk_content: "alpha body that is long enough" },
+			{ chunk_uuid: "c2", source_id: "s2", chunk_content: "alpha body" },
+			{ chunk_uuid: "c3", source_id: "s3", chunk_content: "beta body entirely different" },
+		],
+	} as never;
+
+	const out = buildRecalledContext(response);
+	assert.match(out, /Chunk 1/);
+	assert.match(out, /Chunk 2/);
+	assert.doesNotMatch(out, /Chunk 3/, "numbering must not skip the suppressed chunk");
+});
+
+// The id-keyed dedupe never noticed the same passage arriving under two ids.
+test("extra context is deduped by content, not only by id", () => {
+	const passage = "Tea helps Alice focus in the morning.";
+	const out = buildRecalledContext({
+		chunks: [
+			{
+				chunk_uuid: "c1",
+				source_id: "s1",
+				chunk_content: "chunk one",
+				extra_context_ids: ["e1", "e2"],
+			},
+		],
+		additional_context: {
+			e1: { chunk_uuid: "e1", source_id: "x", chunk_content: passage },
+			e2: { chunk_uuid: "e2", source_id: "y", chunk_content: `  ${passage}  ` },
+		},
+	} as never);
+
+	assert.equal(
+		out.match(/Tea helps Alice focus/g)?.length,
+		1,
+		"the same passage under two ids must be emitted once",
+	);
 });

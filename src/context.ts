@@ -112,6 +112,59 @@ function formatTriplet(triplet: PathTriplet): string {
 	return `  (${src}) —[${predicate}]→ (${tgt})${ctx}`;
 }
 
+/**
+ * Normalised form for comparing two bodies. Retrieval returns overlapping
+ * windows over the same source, and they rarely differ by more than whitespace.
+ */
+function normalise(text: string): string {
+	return text.replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+/**
+ * Chunk indices whose body is wholly contained in another chunk's body.
+ *
+ * The API returns overlapping windows, so a short chunk is frequently a literal
+ * substring of a longer one — in a live 15-chunk sample, 4 were fully contained
+ * in another, roughly a quarter of the body re-sent for nothing.
+ *
+ * Ties are resolved by keeping the earlier (higher-ranked) chunk, and identical
+ * bodies collapse to one. O(n^2) over at most 50 items is free.
+ */
+function containedChunkIndices(bodies: string[]): Set<number> {
+	const normalised = bodies.map(normalise);
+	const dropped = new Set<number>();
+
+	for (let i = 0; i < normalised.length; i++) {
+		if (dropped.has(i)) continue;
+		const a = normalised[i]!;
+		if (a === "") continue;
+		for (let j = 0; j < normalised.length; j++) {
+			if (i === j || dropped.has(j)) continue;
+			const b = normalised[j]!;
+			if (b === "") continue;
+			// Keep the longer body; on an exact tie keep whichever ranked first.
+			const keepsI = a.length > b.length || (a.length === b.length && i < j);
+			if (keepsI && a.includes(b)) dropped.add(j);
+		}
+	}
+	return dropped;
+}
+
+/**
+ * How many chunks the renderer will actually emit.
+ *
+ * The caller needs this for its "Found N" header. Reporting the raw chunk count
+ * there while the body shows fewer is the same disagreement the removed summary
+ * block had, reintroduced by deduping.
+ */
+export function renderedChunkCount(response: RecallResponse): number {
+	const chunks = response.chunks ?? [];
+	const contained = containedChunkIndices(
+		chunks.map((c) => extractChunkText(c.chunk_content)),
+	);
+	return chunks.length - contained.size;
+}
+
 export function buildRecalledContext(
 	response: RecallResponse,
 	opts?: {
@@ -159,8 +212,20 @@ export function buildRecalledContext(
 	const groupOccurrenceCounts: Record<string, number> = {};
 	const chunkSections: string[] = [];
 
+	// Suppress chunks wholly contained in another chunk before rendering any of
+	// them, so the numbering reflects what the caller actually receives.
+	const contained = containedChunkIndices(
+		chunks.map((c) => extractChunkText(c.chunk_content)),
+	);
+	// Extra context is deduped by CONTENT as well as by id: the same passage
+	// arrives under different ids, and an id-keyed check never notices.
+	const seenExtraContent = new Set<string>();
+
+	let rendered = 0;
 	for (let i = 0; i < chunks.length; i++) {
+		if (contained.has(i)) continue;
 		const chunk = chunks[i]!;
+		rendered++;
 		const lines: string[] = [];
 
 		// The id rides in the chunk header because this block is what a caller
@@ -177,7 +242,7 @@ export function buildRecalledContext(
 			chunk.relevancy_score != null
 				? `  (${Math.round(chunk.relevancy_score * 100)}%)`
 				: "";
-		lines.push(`Chunk ${i + 1}${chunkId ? `  [id: ${chunkId}]` : ""}${score}`);
+		lines.push(`Chunk ${rendered}${chunkId ? `  [id: ${chunkId}]` : ""}${score}`);
 
 		const meta = chunk.document_metadata ?? {};
 		const title =
@@ -273,6 +338,11 @@ export function buildRecalledContext(
 				if (extraChunk) {
 					consumedExtraIds.add(ctxId);
 					const extraContent = extractChunkText(extraChunk.chunk_content);
+					// Keying only on id let byte-identical passages through under
+					// different ids — three ~700-char duplicates in one live sample.
+					const fingerprint = normalise(extraContent);
+					if (fingerprint !== "" && seenExtraContent.has(fingerprint)) continue;
+					seenExtraContent.add(fingerprint);
 					const extraTitle = extraChunk.source_title ?? "";
 					if (extraTitle) {
 						extraLines.push(

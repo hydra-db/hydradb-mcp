@@ -7,7 +7,7 @@ import { z } from "zod";
 import { toAddMemoryResponse, toMemoryList, toRecallResponse, toSourceList } from "./adapters.js";
 import type { PageInfo } from "./adapters.js";
 import { resolveConfig } from "./config.js";
-import { buildRecalledContext } from "./context.js";
+import { buildRecalledContext, renderedChunkCount } from "./context.js";
 import { SERVER_INSTRUCTIONS, TOOL_DESCRIPTIONS } from "./descriptions.js";
 import { HydraDB } from "./hydra/index.js";
 import type { ContextKind, QueryKind } from "./hydra/index.js";
@@ -332,6 +332,10 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		// chunk while the list stopped at 10, so a 15-chunk result announced 15 and
 		// showed 10.
 		const contextStr = buildRecalledContext(res);
+		// Count what was rendered, not what arrived: chunks wholly contained in
+		// another are suppressed, and a header that counts them disagrees with its
+		// own body.
+		const shown = renderedChunkCount(res);
 
 		// An id the caller cannot connect to anything is just noise, so name what
 		// accepts it. Without this the ids read as internal bookkeeping.
@@ -340,7 +344,7 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			`source's full content, or to ${TOOL_NAMES.DELETE} to remove it.`;
 
 		return textResult(
-			`Found ${res.chunks.length} ${resultNoun(kind, res.chunks.length)}:\n\n${contextStr}${legend}`,
+			`Found ${shown} ${resultNoun(kind, shown)}:\n\n${contextStr}${legend}`,
 		);
 	}
 
