@@ -667,3 +667,43 @@ test("an explicit source_id is still used verbatim", async () => {
 
 	await client.close();
 });
+
+// upsert was hardcoded true with no way to opt out, while PARAM.source_id told
+// the caller to reuse a session id — a combination that silently destroys the
+// earlier memory. The default stays true (the SDK retries POSTs, and upsert is
+// what stops a retry duplicating), but it is now the caller's choice.
+test("hydradb_ingest defaults to overwriting, preserving retry safety", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	await client.callTool({
+		name: "hydradb_ingest",
+		arguments: { text: "a note", source_id: "s1" },
+	});
+
+	assert.equal(calls.find((c) => c.method === "ingest")?.args.upsert, "true");
+	await client.close();
+});
+
+test("hydradb_ingest forwards overwrite:false as an opt-out", async () => {
+	for (const path of [
+		{ text: "a note", source_id: "s1", overwrite: false },
+		{
+			turns: [{ user: "hi", assistant: "hello" }],
+			source_id: "s1",
+			overwrite: false,
+		},
+	]) {
+		const { hydra, calls } = mockHydra();
+		const client = await connect(hydra);
+
+		await client.callTool({ name: "hydradb_ingest", arguments: path });
+
+		assert.equal(
+			calls.find((c) => c.method === "ingest")?.args.upsert,
+			"false",
+			`overwrite must reach the wire on both ingest paths (${Object.keys(path).join(",")})`,
+		);
+		await client.close();
+	}
+});

@@ -23,8 +23,14 @@ const PARAM = {
 	text: "The information to store in memory",
 	title: "Optional title for the memory entry (default: 'MCP Memory')",
 	source_id:
-		"Optional source identifier to group related memories together. You can use this as " +
-		"your session ID or any other unique identifier for a conversation",
+		"Optional identifier for this entry. Ingesting again with an existing source_id " +
+		"REPLACES everything previously stored under it — it does not add to it. Use a fresh " +
+		"id (or leave it unset) for each new fact, and reuse an id only when you deliberately " +
+		"mean to overwrite, such as correcting a memory you saved earlier. Leave unset if unsure.",
+	overwrite:
+		"Whether ingesting with an existing source_id may replace what is stored there " +
+		"(default: true). Set false to have the server reject the write instead of " +
+		"overwriting, when you expect to be creating something new.",
 	infer: "Whether Hydra DB should extract insights and build knowledge graph from this text (default: true)",
 	is_markdown: "Whether the text is in markdown format (default: false)",
 	turns: "Array of conversation turns, each with a 'user' and 'assistant' field",
@@ -115,6 +121,7 @@ export const TOOL_DESCRIPTIONS = {
 			source_id: PARAM.source_id,
 			infer: PARAM.infer,
 			is_markdown: PARAM.is_markdown,
+			overwrite: PARAM.overwrite,
 			turns: "Optional conversation turns to ingest instead of `text`; each has a 'user' and 'assistant' field",
 			user_name: PARAM.user_name,
 		},
@@ -176,6 +183,7 @@ export const TOOL_DESCRIPTIONS = {
 			source_id: PARAM.source_id,
 			infer: PARAM.infer,
 			is_markdown: PARAM.is_markdown,
+			overwrite: PARAM.overwrite,
 		},
 	},
 

@@ -241,6 +241,7 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		source_id?: string;
 		infer?: boolean;
 		is_markdown?: boolean;
+		overwrite?: boolean;
 	}): Promise<ToolResult> {
 		logger.debug(`${TOOL_NAMES.INGEST}: "${args.text.slice(0, 50)}..."`);
 
@@ -252,7 +253,10 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			infer: args.infer ?? true,
 			isMarkdown: args.is_markdown ?? false,
 			customInstructions: INGEST_INSTRUCTIONS,
-			upsert: true,
+			// Default stays true. The SDK retries POSTs, so upsert is what keeps a
+			// retried ingest from duplicating — flipping this default would trade a
+			// silent overwrite for a silent duplicate.
+			upsert: args.overwrite ?? true,
 		});
 		const res = toAddMemoryResponse(raw);
 
@@ -277,6 +281,7 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			infer?: boolean;
 			title?: string;
 			isMarkdown?: boolean;
+			overwrite?: boolean;
 		},
 	): Promise<ToolResult> {
 		logger.debug(
@@ -292,7 +297,7 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			title: opts?.title,
 			isMarkdown: opts?.isMarkdown,
 			customInstructions: INGEST_INSTRUCTIONS,
-			upsert: true,
+			upsert: opts?.overwrite ?? true,
 		});
 		const res = toAddMemoryResponse(raw);
 
@@ -564,6 +569,10 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			.boolean()
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.STORE].params.is_markdown),
+		overwrite: z
+			.boolean()
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.STORE].params.overwrite),
 	};
 
 	const ingestSchema = {
@@ -677,6 +686,7 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			source_id?: string;
 			infer?: boolean;
 			is_markdown?: boolean;
+			overwrite?: boolean;
 			turns?: ConversationTurn[];
 			user_name?: string;
 		};
@@ -697,6 +707,7 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 				infer: a.infer,
 				title: a.title,
 				isMarkdown: a.is_markdown,
+				overwrite: a.overwrite,
 			});
 		}
 		if (a.text != null) {
@@ -706,6 +717,7 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 				source_id: a.source_id,
 				infer: a.infer,
 				is_markdown: a.is_markdown,
+				overwrite: a.overwrite,
 			});
 		}
 		throw new Error(
