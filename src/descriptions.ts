@@ -302,6 +302,4 @@ THE TOOLS
 
 Ids flow between these: ${TOOL_NAMES.QUERY} and ${TOOL_NAMES.LIST} emit them, ${TOOL_NAMES.INSPECT}, ${TOOL_NAMES.DELETE} and ${TOOL_NAMES.STATUS} accept them. Never invent one.
 
-Deprecated aliases still work but warn and will be removed; do not use them in new work: ${TOOL_NAMES.SEARCH}, ${TOOL_NAMES.STORE}, ${TOOL_NAMES.INGEST_CONVERSATION}, ${TOOL_NAMES.LIST_MEMORIES}, ${TOOL_NAMES.LIST_SOURCES}, ${TOOL_NAMES.FETCH_CONTENT}, ${TOOL_NAMES.DELETE_MEMORY}.
-
 All tools require HYDRADB_API_KEY and HYDRADB_DATABASE in the environment.`;

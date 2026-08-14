@@ -2,7 +2,11 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { SERVER_INSTRUCTIONS, TOOL_DESCRIPTIONS } from "../src/descriptions.js";
-import { TOOL_NAMES } from "../src/tool-names.js";
+import {
+	CANONICAL_TOOL_NAMES,
+	DEPRECATED_TOOL_NAMES,
+	TOOL_NAMES,
+} from "../src/tool-names.js";
 
 test("all tool names are unique", () => {
 	const names = Object.values(TOOL_NAMES);
@@ -19,12 +23,26 @@ test("all tool names have corresponding descriptions", () => {
 	}
 });
 
-test("server instructions reference all configured tools", () => {
-	for (const toolName of Object.values(TOOL_NAMES)) {
+// Only the CANONICAL tools. The instructions used to enumerate all seven
+// deprecated aliases too, which meant the server taught the model that
+// `hydra_db_ingest_conversation` exists before it had even seen the tool list —
+// and those names beat the canonical ones on literal match.
+test("server instructions reference every canonical tool", () => {
+	for (const toolName of CANONICAL_TOOL_NAMES) {
 		assert.match(
 			SERVER_INSTRUCTIONS,
 			new RegExp(toolName),
 			`Server instructions should mention ${toolName}`,
+		);
+	}
+});
+
+test("server instructions do not advertise deprecated aliases", () => {
+	for (const toolName of DEPRECATED_TOOL_NAMES) {
+		assert.doesNotMatch(
+			SERVER_INSTRUCTIONS,
+			new RegExp(toolName),
+			`Server instructions should not name the deprecated ${toolName}`,
 		);
 	}
 });

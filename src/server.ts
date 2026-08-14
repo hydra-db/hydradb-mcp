@@ -200,6 +200,20 @@ export function inFlightCount(): number {
 	return inFlight;
 }
 
+/**
+ * Whether the deprecated tool aliases are registered.
+ *
+ * Off by default as of 1.2.0. Anyone whose mcp.json still calls the old names
+ * sets HYDRADB_MCP_LEGACY_TOOLS=1 to restore them — one env var, no code change,
+ * and the opt-in is itself the adoption signal that a later removal needs and
+ * that nothing here could previously collect.
+ */
+export function legacyToolsEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+	const raw = env.HYDRADB_MCP_LEGACY_TOOLS;
+	if (raw == null) return false;
+	return ["1", "true", "yes", "on"].includes(raw.trim().toLowerCase());
+}
+
 /** Test-only: reset the once-per-process alias warning dedupe. */
 export function __resetAliasWarnings() {
 	warnedAliases.clear();
@@ -1121,6 +1135,27 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 	);
 
 	// --- Deprecated aliases ---
+	//
+	// Registered only when HYDRADB_MCP_LEGACY_TOOLS is set. Off by default.
+	//
+	// Twelve tools is not the problem; adversarial naming is. The alias names are
+	// systematically better literal matches for how users phrase requests than
+	// the canonical ones — "search my memory" matches hydra_db_search exactly
+	// while hydradb_query needs a synonym step, "list my memories" matches
+	// hydra_db_list_memories verbatim while hydradb_list additionally needs
+	// `kind` inferred. Every canonical tool has a competitor that wins on surface
+	// form AND requires fewer inferential steps to parameterise, against nothing
+	// but a "DEPRECATED" prefix — a negative instruction losing to a positive
+	// lexical match.
+	//
+	// The cost of losing that contest is real capability, not just a warning:
+	// hydra_db_ingest_conversation cannot set kind, overwrite, title, infer or
+	// is_markdown, and hydra_db_store has no path to `turns`. A model that picks
+	// the alias because the name matched silently gets the lesser tool.
+	//
+	// They also cost every conversation ~1,800 tokens of manifest — 55% of it —
+	// before a single call is made.
+	if (legacyToolsEnabled()) {
 
 	register(
 		TOOL_NAMES.SEARCH,
@@ -1176,6 +1211,7 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		const { memory_id } = args as { memory_id: string };
 		return runDelete({ id: memory_id, kind: "memory" }, extra?.signal);
 	});
+	}
 
 	return server.server;
 }

@@ -13,7 +13,12 @@ import {
 	awaitInFlight,
 	createHydraDBServer,
 	inFlightCount,
+	legacyToolsEnabled,
 } from "../src/server.js";
+import {
+	CANONICAL_TOOL_NAMES,
+	DEPRECATED_TOOL_NAMES,
+} from "../src/tool-names.js";
 
 type RecordedCall = { method: string; args: Record<string, unknown> };
 
@@ -142,6 +147,9 @@ test("hydradb_ingest rejects both text and turns rather than dropping one", asyn
 
 test("deprecated alias warns exactly once per process, across two server instances", async () => {
 	__resetAliasWarnings();
+	// Aliases are off by default as of 1.2.0; this test is about their behaviour
+	// when a user has explicitly opted back in.
+	process.env.HYDRADB_MCP_LEGACY_TOOLS = "1";
 
 	const original = console.error;
 	const messages: string[] = [];
@@ -158,6 +166,8 @@ test("deprecated alias warns exactly once per process, across two server instanc
 	} finally {
 		console.error = original;
 	}
+
+	delete process.env.HYDRADB_MCP_LEGACY_TOOLS;
 
 	const warnings = messages.filter((m) => m.includes('"hydra_db_search"'));
 	assert.equal(
@@ -230,6 +240,8 @@ test("hydradb_query forwards an explicit kind to the wire `type`", async () => {
 // who has not migrated off `hydra_db_search` is exactly who hit this bug.
 test("the deprecated hydra_db_search alias also searches knowledge", async () => {
 	__resetAliasWarnings();
+	// Aliases are off by default as of 1.2.0; opt in to exercise this one.
+	process.env.HYDRADB_MCP_LEGACY_TOOLS = "1";
 	const { hydra, calls } = mockHydra();
 	const client = await connect(hydra);
 
@@ -240,6 +252,7 @@ test("the deprecated hydra_db_search alias also searches knowledge", async () =>
 
 	assert.equal(calls.find((c) => c.method === "query")?.args.type, "knowledge");
 
+	delete process.env.HYDRADB_MCP_LEGACY_TOOLS;
 	await client.close();
 });
 
@@ -1312,4 +1325,83 @@ test("calls are accepted again once the shutdown flag is cleared", async () => {
 	assert.equal(calls.length, 1);
 
 	await client.close();
+});
+
+/** Tool names advertised by a server built under the given env. */
+async function listedTools(legacy: string | undefined): Promise<string[]> {
+	const previous = process.env.HYDRADB_MCP_LEGACY_TOOLS;
+	if (legacy == null) delete process.env.HYDRADB_MCP_LEGACY_TOOLS;
+	else process.env.HYDRADB_MCP_LEGACY_TOOLS = legacy;
+
+	const client = await connect(mockHydra().hydra);
+	const { tools } = await client.listTools();
+	await client.close();
+
+	if (previous == null) delete process.env.HYDRADB_MCP_LEGACY_TOOLS;
+	else process.env.HYDRADB_MCP_LEGACY_TOOLS = previous;
+	return tools.map((t) => t.name);
+}
+
+// The alias names are systematically better literal matches for how users
+// phrase requests than the canonical ones ("search my memory" -> hydra_db_search
+// exactly), and picking one costs real capability: hydra_db_ingest_conversation
+// cannot set kind, overwrite, title, infer or is_markdown.
+test("deprecated aliases are not registered by default", async () => {
+	const names = await listedTools(undefined);
+
+	for (const canonical of CANONICAL_TOOL_NAMES) {
+		assert.ok(names.includes(canonical), `${canonical} must always be registered`);
+	}
+	for (const alias of DEPRECATED_TOOL_NAMES) {
+		assert.ok(!names.includes(alias), `${alias} must be off by default`);
+	}
+	assert.equal(names.length, CANONICAL_TOOL_NAMES.length);
+});
+
+test("HYDRADB_MCP_LEGACY_TOOLS restores every alias", async () => {
+	const names = await listedTools("1");
+
+	for (const alias of DEPRECATED_TOOL_NAMES) {
+		assert.ok(names.includes(alias), `${alias} should return when opted in`);
+	}
+	assert.equal(
+		names.length,
+		CANONICAL_TOOL_NAMES.length + DEPRECATED_TOOL_NAMES.length,
+	);
+});
+
+test("the legacy opt-in accepts the usual truthy spellings and nothing else", async () => {
+	for (const on of ["1", "true", "TRUE", "yes", "on", " 1 "]) {
+		assert.ok(legacyToolsEnabled({ HYDRADB_MCP_LEGACY_TOOLS: on }), `"${on}" should enable`);
+	}
+	for (const off of ["0", "false", "no", "off", "", "maybe"]) {
+		assert.ok(
+			!legacyToolsEnabled({ HYDRADB_MCP_LEGACY_TOOLS: off }),
+			`"${off}" should not enable`,
+		);
+	}
+	assert.ok(!legacyToolsEnabled({}));
+});
+
+// The point of the gate is the manifest a client pays for on every conversation.
+test("dropping the aliases materially shrinks the tool manifest", async () => {
+	const measure = async (legacy: string | undefined) => {
+		const previous = process.env.HYDRADB_MCP_LEGACY_TOOLS;
+		if (legacy == null) delete process.env.HYDRADB_MCP_LEGACY_TOOLS;
+		else process.env.HYDRADB_MCP_LEGACY_TOOLS = legacy;
+		const client = await connect(mockHydra().hydra);
+		const size = JSON.stringify((await client.listTools()).tools).length;
+		await client.close();
+		if (previous == null) delete process.env.HYDRADB_MCP_LEGACY_TOOLS;
+		else process.env.HYDRADB_MCP_LEGACY_TOOLS = previous;
+		return size;
+	};
+
+	const lean = await measure(undefined);
+	const withAliases = await measure("1");
+
+	assert.ok(
+		lean < withAliases * 0.75,
+		`expected a substantial reduction, got ${lean} vs ${withAliases} chars`,
+	);
 });
