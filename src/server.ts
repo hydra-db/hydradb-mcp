@@ -322,18 +322,16 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			return textResult(`No relevant ${resultNoun(kind)} found in Hydra DB.`);
 		}
 
+		// No separate summary block. It listed the first 10 chunks truncated to 150
+		// characters each — text that is a verbatim prefix of what the context
+		// block below already renders in full. Every chunk body went to the caller
+		// twice, and the only field the summary carried that the context block did
+		// not was the score, which now rides in the chunk header.
+		//
+		// It also disagreed with its own header: `Found ${length}` counted every
+		// chunk while the list stopped at 10, so a 15-chunk result announced 15 and
+		// showed 10.
 		const contextStr = buildRecalledContext(res);
-		const summary = res.chunks.slice(0, 10).map((c, i) => {
-			const score =
-				c.relevancy_score != null
-					? ` (${Math.round(c.relevancy_score * 100)}%)`
-					: "";
-			const snippet =
-				c.chunk_content.length > 150
-					? `${c.chunk_content.slice(0, 150)}...`
-					: c.chunk_content;
-			return `${i + 1}. [id: ${c.source_id || "unknown"}]${score} ${snippet}`;
-		});
 
 		// An id the caller cannot connect to anything is just noise, so name what
 		// accepts it. Without this the ids read as internal bookkeeping.
@@ -342,7 +340,7 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			`source's full content, or to ${TOOL_NAMES.DELETE} to remove it.`;
 
 		return textResult(
-			`Found ${res.chunks.length} ${resultNoun(kind, res.chunks.length)}:\n\n${summary.join("\n")}\n\n---\nFull context:\n${contextStr}${legend}`,
+			`Found ${res.chunks.length} ${resultNoun(kind, res.chunks.length)}:\n\n${contextStr}${legend}`,
 		);
 	}
 

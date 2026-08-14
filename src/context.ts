@@ -169,7 +169,15 @@ export function buildRecalledContext(
 		// will accept, so a follow-up means guessing an id or listing everything
 		// and matching on prose.
 		const chunkId = chunk.source_id;
-		lines.push(`Chunk ${i + 1}${chunkId ? `  [id: ${chunkId}]` : ""}`);
+		// The score lives here rather than in a separate summary block. It was the
+		// only thing that block carried which this one did not, and reproducing it
+		// meant re-sending a truncated copy of every chunk body to deliver one
+		// percentage per chunk.
+		const score =
+			chunk.relevancy_score != null
+				? `  (${Math.round(chunk.relevancy_score * 100)}%)`
+				: "";
+		lines.push(`Chunk ${i + 1}${chunkId ? `  [id: ${chunkId}]` : ""}${score}`);
 
 		const meta = chunk.document_metadata ?? {};
 		const title =

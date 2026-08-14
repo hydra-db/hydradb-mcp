@@ -463,12 +463,16 @@ test("hydradb_query emits source ids the other tools accept", async () => {
 	});
 	const text = (result.content as { text: string }[])[0]!.text;
 
-	// Both halves of the result: the skimmable summary and the block a caller
-	// actually reads. An id in only one of them is an id the caller may miss.
-	const summary = text.slice(0, text.indexOf("Full context:"));
-	const context = text.slice(text.indexOf("Full context:"));
-	assert.match(summary, /\[id: src-alpha\]/, "summary line must carry the id");
-	assert.match(context, /\[id: src-alpha\]/, "chunk header must carry the id");
+	// One block now, not two. The id rides in the chunk header alongside the
+	// score, which is the only thing the removed summary carried that this did
+	// not.
+	assert.match(text, /\[id: src-alpha\]/, "chunk header must carry the id");
+	assert.match(text, /\(91%\)/, "the score must survive the summary's removal");
+	assert.equal(
+		text.match(/src-alpha/g)?.length,
+		1,
+		"the id should appear once, not once per rendering of the same chunk",
+	);
 
 	// An id with no stated purpose is noise; name what consumes it.
 	assert.match(text, /hydradb_inspect/);
