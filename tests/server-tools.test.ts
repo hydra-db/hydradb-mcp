@@ -1829,3 +1829,31 @@ test("hydradb_list still rejects genuinely different id sets", async () => {
 	assert.equal(result.isError, true);
 	assert.equal(calls.filter((c) => c.method === "list").length, 0);
 });
+
+// Greptile, PR #48: comparing lengths and union size called ["a","b"] and
+// ["a","a"] equivalent, so the handler silently listed records the deprecated
+// filter had excluded.
+test("hydradb_list rejects id sets that differ only by repetition", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+	const result = await client.callTool({
+		name: "hydradb_list",
+		arguments: { kind: "memory", ids: ["a", "b"], source_ids: ["a", "a"] },
+	});
+	await client.close();
+
+	assert.equal(result.isError, true, "these filters ask for different things");
+	assert.equal(calls.filter((c) => c.method === "list").length, 0);
+});
+
+test("a repeated id is still the same filter as the id alone", async () => {
+	const { calls } = await listText(
+		{ user_memories: [], total: 0 },
+		{ kind: "memory", ids: ["a", "a"], source_ids: ["a"] },
+	);
+
+	assert.ok(
+		calls.find((c) => c.method === "list"),
+		"{a} and {a} are the same set and must not be rejected",
+	);
+});

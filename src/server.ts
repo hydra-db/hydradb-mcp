@@ -1364,8 +1364,15 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			// rejecting ["a","b"] against ["b","a"] refuses a request that asked
 			// for exactly one thing, which is worse than the ambiguity the check
 			// exists to catch.
-			const sameIds = (x: string[], y: string[]) =>
-				x.length === y.length && new Set([...x, ...y]).size === new Set(x).size;
+			// Compare DISTINCT members. An earlier version compared lengths and
+			// union size, which called ["a","b"] and ["a","a"] equivalent — same
+			// length, same union size — and then silently listed records the
+			// deprecated filter had excluded.
+			const sameIds = (x: string[], y: string[]) => {
+				const left = new Set(x);
+				const right = new Set(y);
+				return left.size === right.size && [...left].every((v) => right.has(v));
+			};
 			if (
 				a.ids != null &&
 				a.source_ids != null &&
