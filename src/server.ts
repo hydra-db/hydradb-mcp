@@ -1360,10 +1360,16 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 				page?: number;
 				page_size?: number;
 			};
+			// Compare as SETS. These are filters, so order carries no meaning —
+			// rejecting ["a","b"] against ["b","a"] refuses a request that asked
+			// for exactly one thing, which is worse than the ambiguity the check
+			// exists to catch.
+			const sameIds = (x: string[], y: string[]) =>
+				x.length === y.length && new Set([...x, ...y]).size === new Set(x).size;
 			if (
 				a.ids != null &&
 				a.source_ids != null &&
-				JSON.stringify(a.ids) !== JSON.stringify(a.source_ids)
+				!sameIds(a.ids, a.source_ids)
 			) {
 				throw new Error(
 					`${TOOL_NAMES.LIST} received different values for \`ids\` and its deprecated ` +

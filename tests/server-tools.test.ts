@@ -1802,3 +1802,30 @@ test("hydradb_list rejects conflicting ids and source_ids", async () => {
 	assert.equal(result.isError, true);
 	assert.equal(calls.filter((c) => c.method === "list").length, 0);
 });
+
+// Greptile, PR #48: `ids` and `source_ids` are filters, so order carries no
+// meaning. Comparing them as serialized arrays rejected a request that asked for
+// exactly one thing.
+test("hydradb_list accepts the same ids in a different order", async () => {
+	const { calls } = await listText(
+		{ user_memories: [], total: 0 },
+		{ kind: "memory", ids: ["a", "b"], source_ids: ["b", "a"] },
+	);
+
+	const call = calls.find((c) => c.method === "list");
+	assert.ok(call, "an equivalent filter must not be rejected");
+	assert.deepEqual(call.args.ids, ["a", "b"]);
+});
+
+test("hydradb_list still rejects genuinely different id sets", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+	const result = await client.callTool({
+		name: "hydradb_list",
+		arguments: { kind: "memory", ids: ["a", "b"], source_ids: ["a", "c"] },
+	});
+	await client.close();
+
+	assert.equal(result.isError, true);
+	assert.equal(calls.filter((c) => c.method === "list").length, 0);
+});
