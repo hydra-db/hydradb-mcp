@@ -511,14 +511,17 @@ async function listText(
 // "50 memories:" and an agent that answered as if that were everything. Page 2
 // was unreachable through the MCP at all.
 test("hydradb_list says how much of the corpus a memory page covered", async () => {
-	const { text } = await listText({
-		user_memories: [
-			{ memory_id: "m1", memory_content: "prefers tabs" },
-			{ memory_id: "m2", memory_content: "deploys Tuesdays" },
-		],
-		total: 412,
-		pagination: { page: 1, page_size: 2, total_pages: 206, has_next: true },
-	});
+	const { text } = await listText(
+		{
+			user_memories: [
+				{ memory_id: "m1", memory_content: "prefers tabs" },
+				{ memory_id: "m2", memory_content: "deploys Tuesdays" },
+			],
+			total: 412,
+			pagination: { page: 1, page_size: 2, total_pages: 206, has_next: true },
+		},
+		{ kind: "memory" },
+	);
 
 	assert.match(text, /2 of 412/, "must not present one page as the whole store");
 	assert.match(text, /page 1/);
@@ -538,18 +541,24 @@ test("hydradb_list forwards page and page_size for memories", async () => {
 });
 
 test("hydradb_list stays terse when one page is the whole corpus", async () => {
-	const { text } = await listText({
-		user_memories: [{ memory_id: "m1", memory_content: "prefers tabs" }],
-		total: 1,
-		pagination: { page: 1, page_size: 50, total_pages: 1, has_next: false },
-	});
+	const { text } = await listText(
+		{
+			user_memories: [{ memory_id: "m1", memory_content: "prefers tabs" }],
+			total: 1,
+			pagination: { page: 1, page_size: 50, total_pages: 1, has_next: false },
+		},
+		{ kind: "memory" },
+	);
 
 	assert.match(text, /^1 memories:/);
 	assert.doesNotMatch(text, /page=/, "no next-page hint when there is no next page");
 });
 
 test("hydradb_list distinguishes an empty page from an empty store", async () => {
-	const { text } = await listText({ user_memories: [], total: 400 }, { page: 99 });
+	const { text } = await listText(
+		{ user_memories: [], total: 400 },
+		{ kind: "memory", page: 99 },
+	);
 
 	assert.match(text, /No memories on page 99/);
 	assert.doesNotMatch(text, /No memories stored yet/);
@@ -987,7 +996,7 @@ test("hydradb_list does not advertise a next page on the last page", async () =>
 		})),
 		total: 412,
 		pagination: { page: 9, page_size: 50, total_pages: 9, has_next: false },
-	}, { page: 9 });
+	}, { kind: "memory", page: 9 });
 
 	assert.match(text, /12 of 412 \(page 9\)/);
 	assert.doesNotMatch(text, /page=10/, "there is no page 10");
@@ -1001,7 +1010,7 @@ test("hydradb_list infers the last page from total_pages when has_next is absent
 		user_memories: [{ memory_id: "m1", memory_content: "x" }],
 		total: 412,
 		pagination: { page: 9, page_size: 50, total_pages: 9 },
-	}, { page: 9 });
+	}, { kind: "memory", page: 9 });
 
 	assert.doesNotMatch(text, /for more/);
 });
@@ -1014,7 +1023,7 @@ test("hydradb_list still advertises a next page in the middle of a corpus", asyn
 		})),
 		total: 412,
 		pagination: { page: 2, page_size: 50, total_pages: 9, has_next: true },
-	}, { page: 2 });
+	}, { kind: "memory", page: 2 });
 
 	assert.match(text, /page=3 for more/);
 });
@@ -1404,4 +1413,36 @@ test("dropping the aliases materially shrinks the tool manifest", async () => {
 		lean < withAliases * 0.75,
 		`expected a substantial reduction, got ${lean} vs ${withAliases} chars`,
 	);
+});
+
+// `hydradb_list({})` returned memories only and read as the complete inventory,
+// so a caller asking "what does Hydra DB have?" never saw the knowledge corpus —
+// which hydradb_query searches by default. `kind` also meant three different
+// things across three tools (query defaults to `all`, list and delete to
+// `memory`), so a model that learned "kind covers everything" from query read an
+// empty-of-knowledge listing as proof no knowledge exists.
+test("hydradb_list requires kind rather than silently picking one", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	const result = await client.callTool({ name: "hydradb_list", arguments: {} });
+
+	assert.equal(result.isError, true, "omitting kind must not quietly mean 'memory'");
+	assert.equal(
+		calls.filter((c) => c.method === "list").length,
+		0,
+		"no listing should be issued when the corpus is ambiguous",
+	);
+
+	await client.close();
+});
+
+test("hydradb_list still serves each family when kind is given", async () => {
+	for (const kind of ["memory", "knowledge"] as const) {
+		const { calls } = await listText(
+			{ user_memories: [], sources: [], total: 0 },
+			{ kind },
+		);
+		assert.equal(calls.find((c) => c.method === "list")?.args.type, kind);
+	}
 });

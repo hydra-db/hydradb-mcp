@@ -940,9 +940,12 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 	};
 
 	const listSchema = {
+		// Required, not defaulted. `hydradb_list({})` used to return memories only
+		// and read as the complete inventory, so a caller asking "what does Hydra
+		// DB have?" never saw the knowledge corpus — which hydradb_query searches
+		// by default. Same class of bug as the query `kind` pin, on the list path.
 		kind: z
 			.enum(["memory", "knowledge"])
-			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.LIST].params.kind),
 		source_ids: z
 			.array(z.string())
@@ -1106,7 +1109,7 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 				page?: number;
 				page_size?: number;
 			};
-			if ((a.kind ?? "memory") === "knowledge") {
+			if (a.kind === "knowledge") {
 				return runListSources(
 					{ source_ids: a.source_ids, page: a.page, page_size: a.page_size },
 					extra?.signal,

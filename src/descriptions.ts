@@ -44,7 +44,10 @@ const PARAM = {
 	is_markdown: "Whether the text is in markdown format (default: false)",
 	turns: "Array of conversation turns, each with a 'user' and 'assistant' field",
 	user_name: "Optional name of the user for personalisation (default: 'User')",
-	kind: "Which context family to list: 'memory' or 'knowledge' (default: 'memory')",
+	kind:
+		"Which family to list: 'memory' (stored memories) or 'knowledge' (ingested " +
+		"sources). REQUIRED — these are separate corpora with different output, and no " +
+		"single listing covers both. Call this twice to see everything.",
 	source_ids:
 		"Optional array of specific source IDs to filter by. If omitted, lists all sources.",
 	page:
