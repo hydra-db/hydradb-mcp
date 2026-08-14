@@ -20,8 +20,28 @@
  * files rather than tests because the failure being guarded against is "the
  * glob matched nothing", which is visible before a single test runs.
  */
-import { readdirSync } from "node:fs";
+import { readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
+
+/**
+ * List files under `dir`, relative to it, walking subdirectories.
+ *
+ * Hand-rolled rather than `readdirSync(dir, { recursive: true })`: that option
+ * arrived in Node 18.17, and `engines` allows `>=18`. On 18.0-18.16 an unknown
+ * option is IGNORED rather than rejected, so the walk would silently flatten to
+ * one level and nested test files — the exact thing this guard exists to catch —
+ * would become invisible on the very versions where the glob bug bites hardest.
+ */
+function listFiles(dir, prefix = "") {
+	const found = [];
+	for (const entry of readdirSync(dir)) {
+		const full = join(dir, entry);
+		const rel = prefix ? `${prefix}/${entry}` : entry;
+		if (statSync(full).isDirectory()) found.push(...listFiles(full, rel));
+		else found.push(rel);
+	}
+	return found;
+}
 
 /** Directories that must contain test files, and how few is suspicious. */
 const EXPECTED = [
@@ -34,9 +54,7 @@ let failed = false;
 for (const { dir, suffix, min } of EXPECTED) {
 	let files = [];
 	try {
-		files = readdirSync(dir, { recursive: true, encoding: "utf8" }).filter((f) =>
-			f.endsWith(suffix),
-		);
+		files = listFiles(dir).filter((f) => f.endsWith(suffix));
 	} catch (error) {
 		console.error(`[assert-test-files] cannot read ${dir}/: ${error.message}`);
 		failed = true;

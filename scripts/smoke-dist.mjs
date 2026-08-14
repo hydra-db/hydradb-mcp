@@ -14,7 +14,6 @@
  * outbound call.
  */
 import { spawn } from "node:child_process";
-import { once } from "node:events";
 import { existsSync, readFileSync } from "node:fs";
 
 const ENTRY = "dist/index.js";
@@ -79,21 +78,36 @@ function send(message) {
 	child.stdin.write(`${JSON.stringify(message)}\n`);
 }
 
-/** Wait until a JSON-RPC response with the given id appears on stdout. */
-async function awaitResponse(id) {
-	for (;;) {
-		for (const line of stdout.split("\n")) {
-			if (line.trim() === "") continue;
-			let parsed;
-			try {
-				parsed = JSON.parse(line);
-			} catch {
-				fail(`non-JSON on stdout — the transport is corrupted: ${line.slice(0, 200)}`);
+/**
+ * Wait until a JSON-RPC response with the given id appears on stdout.
+ *
+ * The listener is attached BEFORE scanning what has already arrived. Scanning
+ * first and then awaiting a fresh `data` event loses any response that lands in
+ * between, which would hang until the timeout and fail a perfectly healthy
+ * build — a flaky publish gate is worse than none.
+ */
+function awaitResponse(id) {
+	return new Promise((resolve) => {
+		const scan = () => {
+			for (const line of stdout.split("\n")) {
+				if (line.trim() === "") continue;
+				let parsed;
+				try {
+					parsed = JSON.parse(line);
+				} catch {
+					fail(`non-JSON on stdout — the transport is corrupted: ${line.slice(0, 200)}`);
+				}
+				if (parsed.id === id) {
+					child.stdout.off("data", scan);
+					resolve(parsed);
+					return;
+				}
 			}
-			if (parsed.id === id) return parsed;
-		}
-		await once(child.stdout, "data");
-	}
+		};
+		child.stdout.on("data", scan);
+		// Anything already buffered counts too.
+		scan();
+	});
 }
 
 send({
