@@ -92,3 +92,27 @@ test("tool descriptions carry worked examples", () => {
 		}
 	}
 });
+
+// The text/turns rule was stated three different ways: the description said
+// `turns` "rather than" `text` (a preference), the schema marked both optional
+// (both allowed, neither required), and the handler threw on both and on
+// neither. The model discovered the real rule only from a runtime error.
+test("the text/turns rule is stated identically wherever it appears", () => {
+	const ingest = TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST];
+
+	assert.match(ingest.description, /EXACTLY ONE/);
+	for (const param of ["text", "turns"] as const) {
+		assert.match(
+			ingest.params[param],
+			/EXACTLY ONE/,
+			`${param}'s own description must state the rule, since a model may read it alone`,
+		);
+	}
+
+	// And it must not describe the two as interchangeable.
+	assert.doesNotMatch(
+		ingest.description,
+		/rather than `text`/,
+		"'rather than' reads as a preference between two allowed options",
+	);
+});

@@ -913,6 +913,11 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			.max(MAX_TURNS, { message: `at most ${MAX_TURNS} turns per ingest` })
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.turns),
+		// `text` and `turns` are mutually exclusive and exactly one is required.
+		// JSON Schema cannot express that, so the rule lives in three places: the
+		// tool description, these two param descriptions, and the handler check
+		// below. They must agree — a model that reads "provide turns rather than
+		// text" concludes both are allowed and discovers otherwise at runtime.
 		user_name: z
 			.string()
 			.optional()

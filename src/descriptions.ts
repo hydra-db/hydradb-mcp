@@ -20,7 +20,11 @@ const PARAM = {
 	mode: "Recall mode: 'fast' for quick semantic search, 'thinking' for deeper personalised recall with graph traversal (default: 'thinking')",
 	graph_context:
 		"Whether to include knowledge graph relations in results (default: true)",
-	text: "The information to store in memory",
+	text:
+		"The information to store. Provide EXACTLY ONE of `text` or `turns` — passing " +
+		"both is an error, and so is passing neither. Write it standalone: it must still " +
+		"make sense months from now with no surrounding conversation, so resolve pronouns " +
+		"and relative dates ('in March 2026', not 'last week').",
 	ingest_kind:
 		"What to write: 'memory' for a personal fact, preference or conversation " +
 		"(default), or 'knowledge' to store a document as a searchable source. " +
@@ -148,7 +152,11 @@ export const TOOL_DESCRIPTIONS = {
 			infer: PARAM.infer,
 			is_markdown: PARAM.is_markdown,
 			overwrite: PARAM.overwrite,
-			turns: "Optional conversation turns to ingest instead of `text`; each has a 'user' and 'assistant' field",
+			turns:
+				"The conversation to ingest, oldest first, as [{user, assistant}, ...]. Provide " +
+				"EXACTLY ONE of `text` or `turns` — passing both is an error, and so is passing " +
+				"neither. Use this when the exchange itself is worth preserving; when only the " +
+				"conclusion matters, prefer `text` with the distilled fact.",
 			user_name: PARAM.user_name,
 		},
 	},
