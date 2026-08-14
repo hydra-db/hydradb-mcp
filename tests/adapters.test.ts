@@ -91,6 +91,64 @@ test("toAddMemoryResponse maps ingest counts", () => {
 	assert.equal(res.success, true);
 });
 
+// `results` was hardcoded `[]`, so a caller told "1 success, 2 failed" had no
+// reason, no code and no way to tell which item failed.
+test("toAddMemoryResponse carries per-item failures instead of discarding them", () => {
+	const res = toAddMemoryResponse({
+		success: false,
+		message: "partial",
+		successCount: 1,
+		failedCount: 1,
+		results: [
+			{ id: "s-ok", status: "completed", error: "", errorCode: "" },
+			{
+				id: "s-bad",
+				filename: "notes.md",
+				status: "failed",
+				error: "content exceeds maximum size",
+				errorCode: "TOO_LARGE",
+			},
+		],
+	});
+
+	assert.equal(res.results.length, 2);
+	assert.deepEqual(res.results[1], {
+		source_id: "s-bad",
+		title: "notes.md",
+		status: "failed",
+		error: "content exceeds maximum size",
+		error_code: "TOO_LARGE",
+		relations_error: null,
+	});
+	// Empty strings are how the server says "no error"; normalise so callers can
+	// test presence rather than emptiness.
+	assert.equal(res.results[0].error, null);
+	assert.equal(res.results[0].error_code, null);
+});
+
+// An item can be accepted and stored while graph extraction fails. failed_count
+// stays 0, so this is invisible unless the per-item field is carried through.
+test("toAddMemoryResponse carries relations_error on an otherwise successful item", () => {
+	const res = toAddMemoryResponse({
+		success: true,
+		message: "ok",
+		successCount: 1,
+		failedCount: 0,
+		results: [
+			{
+				id: "s1",
+				status: "completed",
+				error: "",
+				relationsError: "entity extraction timed out",
+			},
+		],
+	});
+
+	assert.equal(res.failed_count, 0);
+	assert.equal(res.results[0].error, null);
+	assert.equal(res.results[0].relations_error, "entity extraction timed out");
+});
+
 test("toMemoryList reads memory rows defensively", () => {
 	// The live API returns memories at top-level `user_memories` (not under
 	// `.inner`, and not under `sources` — that is the knowledge shape).

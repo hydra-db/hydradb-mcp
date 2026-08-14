@@ -9,8 +9,15 @@ export type MemoryResultItem = {
 	source_id: string;
 	title?: string | null;
 	status: string;
-	infer: boolean;
 	error?: string | null;
+	/** Machine-readable classification for `error`, when the server sent one. */
+	error_code?: string | null;
+	/**
+	 * Graph extraction can fail on an item the server otherwise accepted. That
+	 * item is stored and findable by text, but unreachable by graph traversal —
+	 * a partial success that looks identical to a full one unless reported.
+	 */
+	relations_error?: string | null;
 };
 
 export type AddMemoryResponse = {

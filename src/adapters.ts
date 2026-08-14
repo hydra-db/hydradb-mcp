@@ -17,6 +17,7 @@ import type { HydraDB as SDK } from "@hydradb/sdk";
 
 import type {
 	AddMemoryResponse,
+	MemoryResultItem,
 	RecallResponse,
 	ScoredPath,
 	VectorChunk,
@@ -70,14 +71,38 @@ export function toRecallResponse(data: SDK.SearchV2RetrievalResult): RecallRespo
 	};
 }
 
-/** SDK ingest result → the legacy `AddMemoryResponse` (success/failed counts). */
+/**
+ * SDK ingest result → `AddMemoryResponse`.
+ *
+ * `results` used to be hardcoded empty here, which discarded every per-item
+ * `status`/`error`/`errorCode`/`relationsError` the server sent. The caller was
+ * left with bare counts — "1 success, 2 failed" with no reason, no code and no
+ * way to tell WHICH item failed — so its only rational recovery was to re-ingest
+ * everything, which (a reused `source_id` replaces, see the upsert regression
+ * test) can destroy the item that succeeded.
+ */
+function toMemoryResultItem(
+	item: SDK.IngestionV2SourceUploadResultItem,
+): MemoryResultItem {
+	return {
+		source_id: item.id ?? "",
+		title: item.filename ?? null,
+		status: item.status ?? "unknown",
+		// The server sends "" rather than omitting these on success; normalise to
+		// null so callers can test presence instead of emptiness.
+		error: item.error || null,
+		error_code: item.errorCode || null,
+		relations_error: item.relationsError || null,
+	};
+}
+
 export function toAddMemoryResponse(
 	data: SDK.IngestionV2SourceUploadResponse,
 ): AddMemoryResponse {
 	return {
 		success: data.success ?? false,
 		message: data.message ?? "",
-		results: [],
+		results: (data.results ?? []).map(toMemoryResultItem),
 		success_count: data.successCount ?? 0,
 		failed_count: data.failedCount ?? 0,
 	};

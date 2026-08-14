@@ -10,11 +10,22 @@ import { __resetAliasWarnings, createHydraDBServer } from "../src/server.js";
 
 type RecordedCall = { method: string; args: Record<string, unknown> };
 
-function mockHydra(): { hydra: HydraDB; calls: RecordedCall[] } {
+/** Per-method response overrides, for tests that care what the API returned. */
+type Responses = Partial<
+	Record<"query" | "ingest" | "list" | "inspect" | "delete", unknown>
+>;
+
+function mockHydra(responses: Responses = {}): {
+	hydra: HydraDB;
+	calls: RecordedCall[];
+} {
 	const calls: RecordedCall[] = [];
 	const record =
-		(method: string, data: unknown) => (args?: Record<string, unknown>) => {
+		(method: string, fallback: unknown) => (args?: Record<string, unknown>) => {
 			calls.push({ method, args: args ?? {} });
+			const data = method in responses
+				? responses[method as keyof Responses]
+				: fallback;
 			return Promise.resolve({ data, success: true });
 		};
 
@@ -309,4 +320,81 @@ test("hydradb_delete reports a successful removal unchanged", async () => {
 	);
 
 	assert.equal(text, "Deleted memory: mem-1");
+});
+
+/** Call hydradb_ingest against a given API response and return the rendered text. */
+async function ingestText(
+	ingest: unknown,
+	args: Record<string, unknown>,
+): Promise<string> {
+	const { hydra } = mockHydra({ ingest });
+	const client = await connect(hydra);
+	const result = await client.callTool({ name: "hydradb_ingest", arguments: args });
+	return ((result.content as { text: string }[])[0]?.text ?? "");
+}
+
+test("hydradb_ingest names which item failed and why", async () => {
+	const text = await ingestText(
+		{
+			success: false,
+			successCount: 1,
+			failedCount: 1,
+			results: [
+				{ id: "s-ok", status: "completed", error: "" },
+				{
+					id: "s-bad",
+					status: "failed",
+					error: "content exceeds maximum size",
+					errorCode: "TOO_LARGE",
+				},
+			],
+		},
+		{ text: "some note" },
+	);
+
+	// Without the id and the reason the caller can only re-ingest everything —
+	// which, since a reused source_id replaces, can destroy what did succeed.
+	assert.match(text, /s-bad/, "the failed item's id must be reported");
+	assert.match(text, /content exceeds maximum size/);
+	assert.match(text, /TOO_LARGE/);
+	assert.doesNotMatch(text, /s-ok/, "successful items should not be listed");
+});
+
+test("hydradb_ingest reports graph extraction failure on a stored item", async () => {
+	const text = await ingestText(
+		{
+			success: true,
+			successCount: 1,
+			failedCount: 0,
+			results: [
+				{
+					id: "s1",
+					status: "completed",
+					error: "",
+					relationsError: "entity extraction timed out",
+				},
+			],
+		},
+		{ text: "some note" },
+	);
+
+	// failed_count is 0 here: the item is stored and text-searchable but will
+	// never be reached by graph traversal. Silent before this.
+	assert.match(text, /0 failed/);
+	assert.match(text, /graph extraction failed/i);
+	assert.match(text, /entity extraction timed out/);
+});
+
+test("hydradb_ingest stays quiet when everything succeeded", async () => {
+	const text = await ingestText(
+		{
+			success: true,
+			successCount: 1,
+			failedCount: 0,
+			results: [{ id: "s1", status: "completed", error: "", errorCode: "" }],
+		},
+		{ text: "some note" },
+	);
+
+	assert.doesNotMatch(text, /Issues:/);
 });

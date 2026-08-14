@@ -11,6 +11,7 @@ import { HydraDB } from "./hydra/index.js";
 import type { QueryKind } from "./hydra/index.js";
 import { logger } from "./logger.js";
 import { ALIAS_REPLACEMENTS, DEPRECATED_TOOL_NAMES, TOOL_NAMES } from "./tool-names.js";
+import type { MemoryResultItem } from "./types.js";
 
 // Host-owned default: silently attached to ingest so Hydra DB extracts the kind
 // of personal context this server cares about. Injected here (not in the
@@ -152,6 +153,45 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		);
 	}
 
+	/** Keep one server-supplied message from crowding out the rest of the result. */
+	function briefly(message: string): string {
+		return message.length > 200 ? `${message.slice(0, 200)}…` : message;
+	}
+
+	/**
+	 * Per-item detail for an ingest that did not fully succeed.
+	 *
+	 * Two distinct outcomes are worth reporting and neither is visible in the
+	 * counts alone:
+	 *
+	 *   - a failed item, where the caller needs the id and the reason to retry
+	 *     just that one rather than re-ingesting everything;
+	 *   - an item the server stored but could not extract relations from, which
+	 *     is a partial success. It is findable by text and unreachable by graph
+	 *     traversal, and `failed_count` stays 0 — so without this line it looks
+	 *     identical to a clean ingest.
+	 *
+	 * Returns "" when there is nothing to say, so the success path stays quiet.
+	 */
+	function ingestIssues(res: { results: MemoryResultItem[] }): string {
+		const lines: string[] = [];
+		for (const item of res.results) {
+			const label = item.source_id || item.title || "(unnamed item)";
+			const failure =
+				item.error ?? (item.status === "failed" ? "ingestion failed" : null);
+			if (failure) {
+				const code = item.error_code ? ` [${item.error_code}]` : "";
+				lines.push(`  - ${label}: ${briefly(failure)}${code}`);
+			} else if (item.relations_error) {
+				lines.push(
+					`  - ${label}: stored, but graph extraction failed — ${briefly(item.relations_error)}. ` +
+					`It is searchable by text but will not be reached by graph traversal.`,
+				);
+			}
+		}
+		return lines.length > 0 ? `\n\nIssues:\n${lines.join("\n")}` : "";
+	}
+
 	async function runStore(args: {
 		text: string;
 		title?: string;
@@ -177,7 +217,8 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			args.text.length > 80 ? `${args.text.slice(0, 80)}...` : args.text;
 
 		return textResult(
-			`Saved to Hydra DB (${res.success_count} success, ${res.failed_count} failed): "${preview}"`,
+			`Saved to Hydra DB (${res.success_count} success, ${res.failed_count} failed): "${preview}"` +
+			ingestIssues(res),
 		);
 	}
 
@@ -209,7 +250,8 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		const res = toAddMemoryResponse(raw);
 
 		return textResult(
-			`Ingested ${turns.length} conversation turn(s) into Hydra DB (source: ${sourceId}, success: ${res.success_count}, failed: ${res.failed_count})`,
+			`Ingested ${turns.length} conversation turn(s) into Hydra DB (source: ${sourceId}, success: ${res.success_count}, failed: ${res.failed_count})` +
+			ingestIssues(res),
 		);
 	}
 
