@@ -373,8 +373,16 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			);
 		}
 
-		const Noun = noun.charAt(0).toUpperCase() + noun.slice(1);
-		return textResult(`${Noun} ${id} was not found or already deleted.`);
+		// The server succeeded and removed nothing, so no such id exists in this
+		// database. "or already deleted" was the same mistake the refusal branch
+		// above was written to fix: it offers a cause we did not observe, and the
+		// reassuring one. A caller that invented an id — the likely case, since
+		// until recently nothing emitted one — reads it as confirmation and tells
+		// the user their data is gone.
+		return textResult(
+			`No ${noun} with id ${id} exists in this database — nothing was deleted. ` +
+			`Ids come from ${TOOL_NAMES.QUERY} or ${TOOL_NAMES.LIST}; check the id rather than retrying.`,
+		);
 	}
 
 	/** The server's own explanation, preferring the per-item error over the summary. */

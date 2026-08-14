@@ -284,7 +284,7 @@ test("hydradb_delete does not claim 'not found' when the server refused", async 
 	assert.match(text, /has not been removed/i);
 	assert.doesNotMatch(
 		text,
-		/not found or already deleted/i,
+		/nothing was deleted/i,
 		"a refusal must not be reported as a missing source",
 	);
 });
@@ -303,14 +303,27 @@ test("hydradb_delete surfaces the per-item error ahead of the summary message", 
 	assert.match(text, /source locked by an active ingestion/);
 });
 
-test("hydradb_delete still reports the benign idempotent case as not found", async () => {
+// The server succeeded and removed nothing: no such id exists. The old wording
+// ("not found OR ALREADY DELETED") offered a cause never observed, and the
+// reassuring one — a caller that guessed an id read it as confirmation and told
+// the user their data was gone.
+test("hydradb_delete states only what it observed when nothing was removed", async () => {
 	const text = await deleteText(
 		{ success: true, deletedCount: 0 },
 		{ id: "mem-1" },
 	);
 
-	assert.match(text, /not found or already deleted/i);
-	assert.doesNotMatch(text, /refused/i);
+	assert.match(text, /no memory with id mem-1 exists/i);
+	assert.match(text, /nothing was deleted/i);
+	assert.doesNotMatch(text, /refused/i, "the server did not refuse; it succeeded");
+	assert.doesNotMatch(
+		text,
+		/already deleted/i,
+		"never claim a prior deletion that was not observed",
+	);
+	// Point at where a real id comes from, so the caller corrects course instead
+	// of retrying the same guess.
+	assert.match(text, /hydradb_query|hydradb_list/);
 });
 
 test("hydradb_delete reports a successful removal unchanged", async () => {
