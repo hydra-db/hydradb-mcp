@@ -301,6 +301,9 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		graph_context?: boolean;
 		detail?: "compact" | "full";
 		operator?: "or" | "and" | "phrase";
+		source_ids?: string[];
+		metadata_filters?: Record<string, unknown>;
+		num_related_chunks?: number;
 	}, signal?: AbortSignal): Promise<ToolResult> {
 		// Host-owned default (CONTRACT §2 rule 5): search BOTH families. This tool
 		// used to pin `kind: "memory"`, which made every ingested knowledge source
@@ -316,6 +319,9 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			maxResults,
 			mode: args.mode ?? "thinking",
 			operator: args.operator,
+			ids: args.source_ids,
+			metadataFilters: args.metadata_filters,
+			numRelatedChunks: args.num_related_chunks,
 			graphContext: args.graph_context ?? true,
 			alpha: 0.8,
 			recencyBias: 0,
@@ -1117,6 +1123,22 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			.enum(["or", "and", "phrase"])
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.operator),
+		source_ids: z
+			.array(z.string())
+			.min(1)
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.source_ids),
+		metadata_filters: z
+			.record(z.unknown())
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.metadata_filters),
+		num_related_chunks: z
+			.number()
+			.int()
+			.min(0)
+			.max(5)
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.num_related_chunks),
 	};
 
 	const storeSchema = {

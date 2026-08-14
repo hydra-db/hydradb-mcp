@@ -2071,3 +2071,60 @@ test("hydradb_delete says where ids come from when given none", async () => {
 	const text = (result.content as { text: string }[])[0]!.text;
 	assert.match(text, /do not guess one/);
 });
+
+// A hard pre-filter: the SDK returns nothing rather than widening when none of
+// the ids match, which is what makes "search inside these documents" reliable.
+test("hydradb_query forwards source_ids as a retrieval filter", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+	await client.callTool({
+		name: "hydradb_query",
+		arguments: { query: "auth flow", source_ids: ["doc-1", "doc-2"] },
+	});
+
+	assert.deepEqual(calls.find((c) => c.method === "query")?.args.ids, ["doc-1", "doc-2"]);
+	await client.close();
+});
+
+test("hydradb_query forwards metadata filters and related-chunk count", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+	await client.callTool({
+		name: "hydradb_query",
+		arguments: {
+			query: "q",
+			metadata_filters: { team: "platform" },
+			num_related_chunks: 2,
+		},
+	});
+
+	const call = calls.find((c) => c.method === "query");
+	assert.deepEqual(call?.args.metadataFilters, { team: "platform" });
+	assert.equal(call?.args.numRelatedChunks, 2);
+	await client.close();
+});
+
+// Each related chunk multiplies response size, so the ceiling is deliberate.
+test("num_related_chunks is capped", async () => {
+	const { hydra } = mockHydra();
+	const client = await connect(hydra);
+	const result = await client.callTool({
+		name: "hydradb_query",
+		arguments: { query: "q", num_related_chunks: 50 },
+	});
+
+	assert.equal(result.isError, true);
+	await client.close();
+});
+
+test("none of the new query filters are sent when unset", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+	await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
+
+	const call = calls.find((c) => c.method === "query");
+	assert.equal(call?.args.ids, undefined);
+	assert.equal(call?.args.metadataFilters, undefined);
+	assert.equal(call?.args.numRelatedChunks, undefined);
+	await client.close();
+});

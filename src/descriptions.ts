@@ -31,6 +31,18 @@ const PARAM = {
 		"the user. 'fast' is plain semantic search and is markedly quicker — use it for a " +
 		"lookup you expect to hit, or when issuing several queries in a row. 'auto' lets " +
 		"Hydra DB pick based on the query.",
+	query_source_ids:
+		"Restrict the search to these source IDs, taken from hydradb_query or " +
+		"hydradb_list. Turns a search into 'search inside these documents'. This is a " +
+		"hard filter: if none of them match, the result is empty rather than widened.",
+	metadata_filters:
+		"Exact-match filters over stored metadata, as {key: value}. Exact match only — " +
+		"no ranges, no partial matches, no dates-since. Only useful for keys you know " +
+		"exist, typically because you set them when ingesting.",
+	num_related_chunks:
+		"Adjacent chunks to attach to each match for surrounding context (default: 0). " +
+		"Each one multiplies the response size, so use 1-2 only when snippets are " +
+		"arriving mid-sentence; prefer hydradb_inspect when you want a whole source.",
 	operator:
 		"How to combine the terms in your query: 'or' (default) matches any, 'and' " +
 		"requires all, 'phrase' matches the words together in order. Reach for 'phrase' " +
@@ -188,6 +200,9 @@ export const TOOL_DESCRIPTIONS = {
 			graph_context: PARAM.graph_context,
 			detail: PARAM.detail,
 			operator: PARAM.operator,
+			source_ids: PARAM.query_source_ids,
+			metadata_filters: PARAM.metadata_filters,
+			num_related_chunks: PARAM.num_related_chunks,
 		},
 	},
 

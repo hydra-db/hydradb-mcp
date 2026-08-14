@@ -107,6 +107,15 @@ export interface QueryParams {
 	graphContext?: boolean;
 	alpha?: number;
 	recencyBias?: number;
+	/**
+	 * Restrict retrieval to these source ids. A hard pre-filter: the server
+	 * returns nothing rather than widening when none match.
+	 */
+	ids?: string[];
+	/** Exact-match filters over stored metadata. No ranges, no partial matches. */
+	metadataFilters?: Record<string, unknown>;
+	/** Adjacent chunks pulled in alongside each match, for surrounding context. */
+	numRelatedChunks?: number;
 	/** Per-call collection override. */
 	collection?: string;
 }
@@ -221,6 +230,9 @@ export class ContextResource extends Resource {
 				graphContext: params.graphContext,
 				alpha: params.alpha,
 				recencyBias: params.recencyBias,
+				ids: params.ids,
+				metadataFilters: params.metadataFilters,
+				numRelatedChunks: params.numRelatedChunks,
 			}, req(opts)),
 		);
 	}
