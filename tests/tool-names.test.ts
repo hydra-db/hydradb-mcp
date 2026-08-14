@@ -116,3 +116,30 @@ test("the text/turns rule is stated identically wherever it appears", () => {
 		"'rather than' reads as a preference between two allowed options",
 	);
 });
+
+// The blurbs restated the type and nothing else — "Recall mode: 'fast' for quick
+// semantic search, 'thinking' for deeper..." tells a model what the values are
+// but not how to choose. Every param here informs a decision; the description
+// has to carry the basis for it.
+test("param descriptions explain the decision, not just the type", () => {
+	const query = TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params;
+	const ingest = TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params;
+
+	// mode: the caller needs to know what 'fast' costs it.
+	assert.match(query.mode, /use it/i, "mode should say when to pick each value");
+
+	// max_results counts chunks, not memories — a distinction that changes what
+	// number a caller picks.
+	assert.match(query.max_results, /chunks, not whole memories/i);
+
+	// infer: nothing previously suggested a reason to ever turn it off.
+	assert.match(ingest.infer, /set false only/i);
+
+	// Every blurb should be substantive rather than a restatement of the enum.
+	for (const [name, text] of Object.entries({ ...query, ...ingest })) {
+		assert.ok(
+			text.length > 80,
+			`${name} description is too thin to inform a choice: ${text}`,
+		);
+	}
+});

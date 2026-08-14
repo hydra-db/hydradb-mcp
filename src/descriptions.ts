@@ -11,15 +11,30 @@ import { ALIAS_REPLACEMENTS, TOOL_NAMES } from "./tool-names.js";
 
 // Shared parameter blurbs, reused across canonical tools and their aliases.
 const PARAM = {
-	query: "The search query to find relevant memories and knowledge",
+	query:
+		"What you want to know, as a natural-language question or topic — this is semantic " +
+		"search, so a full question beats keywords. Search for the CONCEPT, not the words " +
+		"the user used: 'database migration decisions' will find a memory written as 'we " +
+		"settled on Atlas for schema changes'.",
 	query_kind:
 		"Which context family to search: 'memory' for stored user memories, " +
 		"'knowledge' for ingested documents and sources, or 'all' for both " +
 		"(default: 'all'). Leave unset unless you specifically want to exclude one family.",
-	max_results: "Maximum number of chunks to return (1-50, default: 10)",
-	mode: "Recall mode: 'fast' for quick semantic search, 'thinking' for deeper personalised recall with graph traversal (default: 'thinking')",
+	max_results:
+		"Maximum CHUNKS to return (1-50, default: 10). Chunks, not whole memories or " +
+		"documents — several chunks often come from one source. Raise to 20-30 for broad " +
+		"coverage of a topic; drop to 3-5 when you want one specific fact and a small " +
+		"response.",
+	mode:
+		"'thinking' (default) runs graph traversal and personalised reranking: a few " +
+		"seconds, best recall — use it when the answer matters or the question is about " +
+		"the user. 'fast' is plain semantic search and is markedly quicker — use it for a " +
+		"lookup you expect to hit, or when issuing several queries in a row.",
 	graph_context:
-		"Whether to include knowledge graph relations in results (default: true)",
+		"Include knowledge-graph relations (default: true). These are the entity paths — " +
+		"(Alice)-[prefers]->(Tea) — that connect facts across separate memories, and they " +
+		"often carry the answer the matching text alone does not. Set false only when you " +
+		"want the raw matching text and nothing else.",
 	text:
 		"The information to store. Provide EXACTLY ONE of `text` or `turns` — passing " +
 		"both is an error, and so is passing neither. Write it standalone: it must still " +
@@ -44,10 +59,20 @@ const PARAM = {
 		"Whether ingesting with an existing source_id may replace what is stored there " +
 		"(default: true). Set false to have the server reject the write instead of " +
 		"overwriting, when you expect to be creating something new.",
-	infer: "Whether Hydra DB should extract insights and build knowledge graph from this text (default: true)",
-	is_markdown: "Whether the text is in markdown format (default: false)",
+	infer:
+		"Let Hydra DB extract insights and knowledge-graph entities from this text " +
+		"(default: true). Keep it true for anything about the user or their work — that " +
+		"extraction is what makes the content findable by concept later. Set false only to " +
+		"store text verbatim with no interpretation (a config snippet, an exact error " +
+		"string, a code block).",
+	is_markdown:
+		"Set true when `text` contains markdown (headings, lists, code fences) so Hydra DB " +
+		"chunks on structure instead of splitting mid-section. Default false.",
 	turns: "Array of conversation turns, each with a 'user' and 'assistant' field",
-	user_name: "Optional name of the user for personalisation (default: 'User')",
+	user_name:
+		"What to call the user in the stored conversation (default: 'User'). Set it when " +
+		"you know their actual name, so extracted facts read as being about a person " +
+		"rather than about an anonymous participant. Applies to `turns` only.",
 	kind:
 		"Which family to list: 'memory' (stored memories) or 'knowledge' (ingested " +
 		"sources). REQUIRED — these are separate corpora with different output, and no " +
@@ -63,7 +88,9 @@ const PARAM = {
 		"Raise it to see more at once; lower it to keep the response small.",
 	fetch_source_id: "The source ID to fetch content for",
 	fetch_mode:
-		"Fetch mode: 'content' for text, 'url' for presigned URL, 'both' for both (default: 'content')",
+		"'content' (default) returns the text — normally what you want. 'url' returns a " +
+		"short-lived presigned download link INSTEAD of the text, for binary sources or " +
+		"when handing the user a download. 'both' returns text and link.",
 	fetch_offset:
 		"Character offset to start reading from (default: 0). Long sources are returned " +
 		"in slices; the response says where it stopped and what offset to pass next.",
