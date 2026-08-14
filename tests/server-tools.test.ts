@@ -357,7 +357,11 @@ test("hydradb_ingest names which item failed and why", async () => {
 	assert.match(text, /s-bad/, "the failed item's id must be reported");
 	assert.match(text, /content exceeds maximum size/);
 	assert.match(text, /TOO_LARGE/);
-	assert.doesNotMatch(text, /s-ok/, "successful items should not be listed");
+
+	// Scoped to the Issues block: the header legitimately names the created id
+	// of the item that succeeded, so a whole-text check would forbid that too.
+	const issues = text.slice(text.indexOf("Issues:"));
+	assert.doesNotMatch(issues, /s-ok/, "successful items should not be listed as issues");
 });
 
 test("hydradb_ingest reports graph extraction failure on a stored item", async () => {
@@ -397,4 +401,62 @@ test("hydradb_ingest stays quiet when everything succeeded", async () => {
 	);
 
 	assert.doesNotMatch(text, /Issues:/);
+});
+
+// Every audit of this server reached the same finding independently: a recall
+// result carried no value that hydradb_inspect or hydradb_delete would accept,
+// so a follow-up meant guessing an id or listing everything and matching prose.
+// A hallucinated id then hit "not found or already deleted", which reads as
+// success. The composition chain has to be closed at the source.
+test("hydradb_query emits source ids the other tools accept", async () => {
+	const { hydra } = mockHydra({
+		query: {
+			chunks: [
+				{
+					chunkUuid: "c1",
+					id: "src-alpha",
+					chunkContent: "the user prefers tabs",
+					sourceTitle: "Prefs",
+					relevancyScore: 0.91,
+				},
+			],
+		},
+	});
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_query",
+		arguments: { query: "indentation" },
+	});
+	const text = (result.content as { text: string }[])[0]!.text;
+
+	// Both halves of the result: the skimmable summary and the block a caller
+	// actually reads. An id in only one of them is an id the caller may miss.
+	const summary = text.slice(0, text.indexOf("Full context:"));
+	const context = text.slice(text.indexOf("Full context:"));
+	assert.match(summary, /\[id: src-alpha\]/, "summary line must carry the id");
+	assert.match(context, /\[id: src-alpha\]/, "chunk header must carry the id");
+
+	// An id with no stated purpose is noise; name what consumes it.
+	assert.match(text, /hydradb_inspect/);
+	assert.match(text, /hydradb_delete/);
+
+	await client.close();
+});
+
+test("hydradb_ingest returns the id the server assigned", async () => {
+	// The caller supplied no source_id, so this value exists nowhere else and
+	// cannot be derived — without it the memory can never be corrected.
+	const text = await ingestText(
+		{
+			success: true,
+			successCount: 1,
+			failedCount: 0,
+			results: [{ id: "srv-assigned-9", status: "completed", error: "" }],
+		},
+		{ text: "a note" },
+	);
+
+	assert.match(text, /id: srv-assigned-9/);
+	assert.doesNotMatch(text, /"a note"/, "should not echo back the caller's own text");
 });

@@ -51,7 +51,13 @@ export function buildRecalledContext(
 		const chunk = chunks[i]!;
 		const lines: string[] = [];
 
-		lines.push(`Chunk ${i + 1}`);
+		// The id rides in the chunk header because this block is what a caller
+		// actually reads. Without it a recall result is unactionable: there is no
+		// value anywhere in the output that `hydradb_inspect` or `hydradb_delete`
+		// will accept, so a follow-up means guessing an id or listing everything
+		// and matching on prose.
+		const chunkId = chunk.source_id;
+		lines.push(`Chunk ${i + 1}${chunkId ? `  [id: ${chunkId}]` : ""}`);
 
 		const meta = chunk.document_metadata ?? {};
 		const title =

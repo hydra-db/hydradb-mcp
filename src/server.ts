@@ -145,12 +145,33 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 				c.chunk_content.length > 150
 					? `${c.chunk_content.slice(0, 150)}...`
 					: c.chunk_content;
-			return `${i + 1}. ${snippet}${score}`;
+			return `${i + 1}. [id: ${c.source_id || "unknown"}]${score} ${snippet}`;
 		});
 
+		// An id the caller cannot connect to anything is just noise, so name what
+		// accepts it. Without this the ids read as internal bookkeeping.
+		const legend =
+			`\n\n---\nEach [id: …] is a source id: pass one to ${TOOL_NAMES.INSPECT} for that ` +
+			`source's full content, or to ${TOOL_NAMES.DELETE} to remove it.`;
+
 		return textResult(
-			`Found ${res.chunks.length} ${resultNoun(kind, res.chunks.length)}:\n\n${summary.join("\n")}\n\n---\nFull context:\n${contextStr}`,
+			`Found ${res.chunks.length} ${resultNoun(kind, res.chunks.length)}:\n\n${summary.join("\n")}\n\n---\nFull context:\n${contextStr}${legend}`,
 		);
+	}
+
+	/**
+	 * The id the server assigned to the item it just stored.
+	 *
+	 * On the memory path the caller may supply `source_id`, but when it does not
+	 * the server assigns one — and that value appeared nowhere in the tool result,
+	 * so the caller could not later inspect, correct or delete what it had
+	 * written. Reads the first successful item; ingest here is always one item.
+	 */
+	function createdId(res: { results: MemoryResultItem[] }): string | undefined {
+		for (const item of res.results) {
+			if (item.source_id && !item.error) return item.source_id;
+		}
+		return undefined;
 	}
 
 	/** Keep one server-supplied message from crowding out the rest of the result. */
@@ -213,11 +234,15 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		});
 		const res = toAddMemoryResponse(raw);
 
-		const preview =
-			args.text.length > 80 ? `${args.text.slice(0, 80)}...` : args.text;
+		// Was an 80-char echo of the text the caller had just sent — zero
+		// information back to them. The id is the thing they do not have and
+		// cannot derive, and it is what makes correcting this memory later
+		// possible at all.
+		const id = createdId(res) ?? args.source_id;
 
 		return textResult(
-			`Saved to Hydra DB (${res.success_count} success, ${res.failed_count} failed): "${preview}"` +
+			`Saved to Hydra DB${id ? ` (id: ${id})` : ""} ` +
+			`(${res.success_count} success, ${res.failed_count} failed).` +
 			ingestIssues(res),
 		);
 	}
@@ -250,7 +275,8 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		const res = toAddMemoryResponse(raw);
 
 		return textResult(
-			`Ingested ${turns.length} conversation turn(s) into Hydra DB (source: ${sourceId}, success: ${res.success_count}, failed: ${res.failed_count})` +
+			`Ingested ${turns.length} conversation turn(s) into Hydra DB ` +
+			`(id: ${createdId(res) ?? sourceId}, success: ${res.success_count}, failed: ${res.failed_count})` +
 			ingestIssues(res),
 		);
 	}
