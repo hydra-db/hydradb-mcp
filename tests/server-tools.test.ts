@@ -8,6 +8,8 @@ import type { HydraDBClient } from "@hydradb/sdk";
 import { HydraDB } from "../src/hydra/index.js";
 import {
 	__resetAliasWarnings,
+	__resetShutdown,
+	beginShutdown,
 	awaitInFlight,
 	createHydraDBServer,
 	inFlightCount,
@@ -1269,4 +1271,45 @@ test("hydradb_inspect bounds the binary summary too", async () => {
 
 	assert.ok(text.length < 25_000, `summary must obey the budget, got ${text.length} chars`);
 	assert.match(text, /truncated: 60000 chars total/);
+});
+
+// Greptile, PR #47: draining alone leaves a window. A call arriving after the
+// in-flight counter reaches zero but before the transport closes was accepted
+// and then aborted by the close — the caller of an ingest cannot then tell
+// whether the write committed, which is exactly what draining exists to prevent.
+test("no new tool call is accepted once shutdown has begun", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	beginShutdown();
+	try {
+		const result = await client.callTool({
+			name: "hydradb_query",
+			arguments: { query: "q" },
+		});
+
+		assert.equal(result.isError, true, "a call after shutdown must be refused");
+		assert.match(
+			(result.content as { text: string }[])[0]!.text,
+			/shutting down/i,
+		);
+		assert.equal(
+			calls.length,
+			0,
+			"a refused call must not reach the API — that write must not happen",
+		);
+	} finally {
+		__resetShutdown();
+		await client.close();
+	}
+});
+
+test("calls are accepted again once the shutdown flag is cleared", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
+	assert.equal(calls.length, 1);
+
+	await client.close();
 });

@@ -151,7 +151,35 @@ function warnDeprecatedAlias(name: string) {
 let inFlight = 0;
 const idleWaiters: (() => void)[] = [];
 
+/**
+ * Set once shutdown begins, so no NEW call is accepted after that point.
+ *
+ * Draining alone is not enough: a call arriving after the counter reaches zero
+ * but before the transport closes would be accepted, then aborted by the close —
+ * leaving an ingest caller unable to tell whether the write committed, which is
+ * the exact outcome draining exists to prevent.
+ */
+let shuttingDown = false;
+
+/** Stop accepting tool calls. Idempotent. */
+export function beginShutdown(): void {
+	shuttingDown = true;
+}
+
+/** Test-only: allow a fresh server in the same process after a shutdown test. */
+export function __resetShutdown(): void {
+	shuttingDown = false;
+}
+
 function trackInFlight<T>(work: () => Promise<T>): Promise<T> {
+	if (shuttingDown) {
+		return Promise.reject(
+			new Error(
+				"Hydra DB MCP server is shutting down and is not accepting new requests. " +
+				"Retry once it has restarted.",
+			),
+		);
+	}
 	inFlight++;
 	return work().finally(() => {
 		inFlight--;

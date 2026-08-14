@@ -4,7 +4,12 @@ import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { resolveConfig } from "./config.js";
 import { logger } from "./logger.js";
-import { awaitInFlight, createHydraDBServer, inFlightCount } from "./server.js";
+import {
+	awaitInFlight,
+	beginShutdown,
+	createHydraDBServer,
+	inFlightCount,
+} from "./server.js";
 
 // Fail fast with a clean message if required config is missing. Honours the
 // canonical HYDRADB_* names (and the deprecated HYDRA_DB_* aliases).
@@ -55,6 +60,10 @@ function installLifecycle(server: Server) {
 			process.exit(130);
 		}
 		shuttingDown = true;
+		// Stop accepting NEW calls before draining. Without this, a call arriving
+		// after the drain resolves but before the transport closes is accepted and
+		// then aborted, which is the failure draining exists to prevent.
+		beginShutdown();
 		logger.info(`${signal} received — shutting down`);
 
 		const timer = setTimeout(() => {
