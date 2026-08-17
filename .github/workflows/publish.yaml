@@ -28,6 +28,18 @@ jobs:
       - name: Build package
         run: npm run build
 
+      # The build used to be published without ever being executed, so a bundle
+      # that compiled but failed at runtime would reach the registry. This
+      # starts it over stdio, speaks the protocol, and asserts it lists its
+      # tools and reports the version being published.
+      - name: Smoke-test the built package
+        run: npm run smoke
+
+      # `files` decides what actually ships; a missing entry is invisible until
+      # someone installs the package and it does not run.
+      - name: Assert the tarball contents
+        run: npm run check-pack
+
       # The registry answers an unauthorised write to a scoped package with 404,
       # not 401 — it will not confirm the package exists to someone who cannot
       # write it. So a stale NPM_TOKEN surfaces as "404 Not Found - PUT

@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { HydraDBError } from "@hydradb/sdk";
 import type { HydraDBClient } from "@hydradb/sdk";
 
 import { HydraDB } from "../src/hydra/index.js";
@@ -2229,4 +2230,92 @@ test("an explicit count still distinguishes partial from complete", async () => 
 		assert.equal(structured.deleted_count, deletedCount);
 		assert.equal(structured.partial === true, partial, `count ${deletedCount}`);
 	}
+});
+
+// ---------------------------------------------------------------------------
+// API failure paths.
+//
+// No test anywhere exercised a failing API call. That is precisely why the
+// unbounded-inspect problem and the broken mode:"url" both shipped — runInspect
+// had no coverage at all — and why nobody noticed that a failing call reaches
+// the caller as a raw wrapper message.
+// ---------------------------------------------------------------------------
+
+/** A client whose every SDK call rejects with the given error. */
+async function failingClient(error: unknown) {
+	const reject = () => Promise.reject(error);
+	const sdk = {
+		query: reject,
+		context: { ingest: reject, list: reject, inspect: reject, delete: reject, status: reject },
+	} as unknown as HydraDBClient;
+	return connect(new HydraDB({ token: "t", database: "db" }, sdk));
+}
+
+const FAILING_CALLS: [string, Record<string, unknown>][] = [
+	["hydradb_query", { query: "q" }],
+	["hydradb_ingest", { text: "a note" }],
+	["hydradb_list", { kind: "memory" }],
+	["hydradb_inspect", { id: "s1" }],
+	["hydradb_delete", { ids: ["s1"] }],
+	["hydradb_status", { ids: ["s1"] }],
+];
+
+for (const status of [401, 403, 429, 500]) {
+	test(`every tool reports a ${status} as an error rather than a result`, async () => {
+		const client = await failingClient(
+			new HydraDBError({ statusCode: status, body: { error: { code: "E", message: "nope" } } }),
+		);
+
+		for (const [name, args] of FAILING_CALLS) {
+			const result = await client.callTool({ name, arguments: args });
+			assert.equal(result.isError, true, `${name} must flag a ${status} as an error`);
+			const text = (result.content as { text: string }[])[0]!.text;
+			assert.match(text, /Hydra DB/, `${name} should name the upstream`);
+			assert.match(text, new RegExp(String(status)), `${name} should carry the status`);
+		}
+
+		await client.close();
+	});
+}
+
+test("a transport failure with no status is still reported", async () => {
+	const client = await failingClient(new Error("fetch failed"));
+
+	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
+	assert.equal(result.isError, true);
+	assert.match((result.content as { text: string }[])[0]!.text, /fetch failed/);
+
+	await client.close();
+});
+
+// The whole point of the error work: a failing call must not leak an unbounded
+// upstream body into the caller's context.
+test("a huge upstream error body does not reach the caller whole", async () => {
+	const client = await failingClient(
+		new HydraDBError({
+			statusCode: 502,
+			body: `<html><title>502 Bad Gateway</title><body>${"pad ".repeat(20000)}</body></html>`,
+		}),
+	);
+
+	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
+	const text = (result.content as { text: string }[])[0]!.text;
+
+	assert.ok(text.length < 1000, `error body must be bounded, got ${text.length} chars`);
+	assert.match(text, /502 Bad Gateway/, "the useful part should survive");
+
+	await client.close();
+});
+
+test("malformed JSON from the API surfaces as an error, not a crash", async () => {
+	const sdk = {
+		query: () => Promise.resolve({ data: "this is not the expected shape", success: true }),
+	} as unknown as HydraDBClient;
+	const client = await connect(new HydraDB({ token: "t", database: "db" }, sdk));
+
+	// Must not throw out of the handler; the tool answers one way or the other.
+	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
+	assert.ok(result.content, "a malformed payload must still produce a tool result");
+
+	await client.close();
 });

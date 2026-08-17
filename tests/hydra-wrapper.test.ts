@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { HydraDBClient, HydraDBError } from "@hydradb/sdk";
+import { type HydraDBClient, HydraDBError } from "@hydradb/sdk";
 
 import {
 	DEFAULT_MAX_RETRIES,
