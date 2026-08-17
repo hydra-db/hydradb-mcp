@@ -44,9 +44,14 @@ const PARAM = {
 		"Each one multiplies the response size, so use 1-2 only when snippets are " +
 		"arriving mid-sentence; prefer hydradb_inspect when you want a whole source.",
 	operator:
-		"How to combine the terms in your query: 'or' (default) matches any, 'and' " +
-		"requires all, 'phrase' matches the words together in order. Reach for 'phrase' " +
-		"when looking up an exact string such as an error message or a config key.",
+		"Switches this query to KEYWORD retrieval (query_by=text) and says how to " +
+		"combine the terms: 'or' matches any, 'and' requires all, 'phrase' matches the " +
+		"words together in order. Hydra DB accepts an operator only on keyword " +
+		"retrieval, so setting it turns OFF the hybrid semantic search this tool " +
+		"otherwise runs — the query stops matching paraphrases and matches the literal " +
+		"words. Leave it unset for normal searches; set it only when the exact string " +
+		"is the point, such as an error message, a config key, or an identifier. " +
+		"Unset is not 'or': unset is semantic search.",
 	expiry_seconds:
 		"How long the download link stays valid, in seconds. Only meaningful with " +
 		"mode 'url' or 'both'; ignored otherwise.",

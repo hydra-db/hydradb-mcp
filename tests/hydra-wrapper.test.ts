@@ -288,3 +288,72 @@ test("no request options are sent when there is no signal", async () => {
 
 	assert.equal(seen[0], undefined, "an empty options object would be noise on the wire");
 });
+
+// `operator` is keyword syntax and the API takes it only alongside
+// `query_by=text`. The wrapper forwarded the operator and never the retrieval
+// method, so every call that set it came back
+//   Hydra DB /query → 400: INVALID_INPUT: operator is only valid with query_by=text
+function querySdk(): { sdk: HydraDBClient; calls: Record<string, unknown>[] } {
+	const calls: Record<string, unknown>[] = [];
+	const sdk = {
+		query(request: Record<string, unknown>) {
+			calls.push(request);
+			return Promise.resolve({ data: { chunks: [] }, success: true });
+		},
+	} as unknown as HydraDBClient;
+	return { sdk, calls };
+}
+
+test("an operator carries the text retrieval method the API requires", async () => {
+	for (const operator of ["or", "and", "phrase"] as const) {
+		const { sdk, calls } = querySdk();
+		const hydra = new HydraDB({ token: "t", database: "db_test" }, sdk);
+
+		await hydra.context.query({ query: "invoice OR receipt", operator });
+
+		assert.equal(calls[0]?.operator, operator);
+		assert.equal(calls[0]?.queryBy, "text", `operator ${operator} needs query_by=text`);
+	}
+});
+
+test("a query without an operator leaves the retrieval method to the API", async () => {
+	const { sdk, calls } = querySdk();
+	const hydra = new HydraDB({ token: "t", database: "db_test" }, sdk);
+
+	await hydra.context.query({ query: "how does auth work" });
+
+	assert.equal(
+		calls[0]?.queryBy,
+		undefined,
+		"hybrid is the API's default; stating it would claim a default this wrapper never chose",
+	);
+});
+
+test("an explicit queryBy is forwarded and never overridden", async () => {
+	const { sdk, calls } = querySdk();
+	const hydra = new HydraDB({ token: "t", database: "db_test" }, sdk);
+
+	await hydra.context.query({ query: "ECONNRESET", queryBy: "text", operator: "phrase" });
+	await hydra.context.query({ query: "how does auth work", queryBy: "hybrid" });
+
+	assert.equal(calls[0]?.queryBy, "text");
+	assert.equal(calls[0]?.operator, "phrase");
+	assert.equal(calls[1]?.queryBy, "hybrid");
+	assert.equal(calls[1]?.operator, undefined);
+});
+
+test("operator with an explicit hybrid retrieval is rejected, not sent", async () => {
+	const { sdk, calls } = querySdk();
+	const hydra = new HydraDB({ token: "t", database: "db_test" }, sdk);
+
+	await assert.rejects(
+		() => hydra.context.query({ query: "invoice", operator: "and", queryBy: "hybrid" }),
+		(err: unknown) => {
+			assert.ok(err instanceof Error);
+			assert.match(err.message, /operator "and"/);
+			assert.match(err.message, /queryBy "text"/);
+			return true;
+		},
+	);
+	assert.equal(calls.length, 0, "a request that cannot succeed must not reach the wire");
+});
