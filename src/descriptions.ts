@@ -29,7 +29,27 @@ const PARAM = {
 		"'thinking' (default) runs graph traversal and personalised reranking: a few " +
 		"seconds, best recall — use it when the answer matters or the question is about " +
 		"the user. 'fast' is plain semantic search and is markedly quicker — use it for a " +
-		"lookup you expect to hit, or when issuing several queries in a row.",
+		"lookup you expect to hit, or when issuing several queries in a row. 'auto' lets " +
+		"Hydra DB pick based on the query.",
+	query_source_ids:
+		"Restrict the search to these source IDs, taken from hydradb_query or " +
+		"hydradb_list. Turns a search into 'search inside these documents'. This is a " +
+		"hard filter: if none of them match, the result is empty rather than widened.",
+	metadata_filters:
+		"Exact-match filters over stored metadata, as {key: value}. Exact match only — " +
+		"no ranges, no partial matches, no dates-since. Only useful for keys you know " +
+		"exist, typically because you set them when ingesting.",
+	num_related_chunks:
+		"Adjacent chunks to attach to each match for surrounding context (default: 0). " +
+		"Each one multiplies the response size, so use 1-2 only when snippets are " +
+		"arriving mid-sentence; prefer hydradb_inspect when you want a whole source.",
+	operator:
+		"How to combine the terms in your query: 'or' (default) matches any, 'and' " +
+		"requires all, 'phrase' matches the words together in order. Reach for 'phrase' " +
+		"when looking up an exact string such as an error message or a config key.",
+	expiry_seconds:
+		"How long the download link stays valid, in seconds. Only meaningful with " +
+		"mode 'url' or 'both'; ignored otherwise.",
 	graph_context:
 		"Include knowledge-graph relations (default: true). These are the entity paths — " +
 		"(Alice)-[prefers]->(Tea) — that connect facts across separate memories, and they " +
@@ -59,6 +79,14 @@ const PARAM = {
 		"Whether ingesting with an existing source_id may replace what is stored there " +
 		"(default: true). Set false to have the server reject the write instead of " +
 		"overwriting, when you expect to be creating something new.",
+	metadata:
+		"Key/value metadata to store with this entry, as {key: value}. These are the " +
+		"keys hydradb_query's metadata_filters can match on later, so set them when you " +
+		"expect to narrow by them — e.g. {\"project\": \"hydradb\", \"kind\": \"decision\"}.",
+	observation_date:
+		"When the fact was true, as an RFC3339 date — distinct from when you stored it. " +
+		"Use it when saving something historical, so recency reflects the fact rather " +
+		"than the write.",
 	infer:
 		"Let Hydra DB extract insights and knowledge-graph entities from this text " +
 		"(default: true). Keep it true for anything about the user or their work — that " +
@@ -103,7 +131,11 @@ const PARAM = {
 	fetch_limit:
 		"Maximum characters of text to return (default and maximum: 20000). Lower it when " +
 		"you only need the beginning of a long document.",
-	delete_id: "The ID of the item to delete",
+	delete_id: "A single ID to delete. Prefer `ids` when removing more than one.",
+	delete_ids:
+		"The IDs to delete. Accepts several at once — cleaning up N stale entries is " +
+		"one call, not N. Each is reported separately, and the response says how many " +
+		"were actually removed. This is irreversible.",
 	delete_kind:
 		"Which context family the ID belongs to: 'memory' or 'knowledge' (default: 'memory')",
 	memory_id: "The ID of the memory to delete",
@@ -175,6 +207,10 @@ export const TOOL_DESCRIPTIONS = {
 			mode: PARAM.mode,
 			graph_context: PARAM.graph_context,
 			detail: PARAM.detail,
+			operator: PARAM.operator,
+			source_ids: PARAM.query_source_ids,
+			metadata_filters: PARAM.metadata_filters,
+			num_related_chunks: PARAM.num_related_chunks,
 		},
 	},
 
@@ -193,6 +229,8 @@ export const TOOL_DESCRIPTIONS = {
 			infer: PARAM.infer,
 			is_markdown: PARAM.is_markdown,
 			overwrite: PARAM.overwrite,
+			metadata: PARAM.metadata,
+			observation_date: PARAM.observation_date,
 			turns:
 				"The conversation to ingest, oldest first, as [{user, assistant}, ...]. Provide " +
 				"EXACTLY ONE of `text` or `turns` — passing both is an error, and so is passing " +
@@ -227,6 +265,7 @@ Memory rows come back as [id] content. Knowledge rows as [id] — title (type), 
 			mode: PARAM.fetch_mode,
 			offset: PARAM.fetch_offset,
 			limit: PARAM.fetch_limit,
+			expiry_seconds: PARAM.expiry_seconds,
 		},
 	},
 
@@ -238,6 +277,7 @@ Take the id from hydradb_query or hydradb_list — never guess one. Confirm with
 
 \`kind\` must match the family the id belongs to. A knowledge source id passed with kind "memory" reports that nothing was deleted while the source is still there.`,
 		params: {
+			ids: PARAM.delete_ids,
 			id: PARAM.delete_id,
 			kind: PARAM.delete_kind,
 		},
@@ -278,7 +318,15 @@ Take the id from hydradb_query or hydradb_list — never guess one. Confirm with
 			text: PARAM.text,
 			title: PARAM.title,
 			source_id: PARAM.source_id,
-			infer: PARAM.infer,
+			metadata:
+		"Key/value metadata to store with this entry, as {key: value}. These are the " +
+		"keys hydradb_query's metadata_filters can match on later, so set them when you " +
+		"expect to narrow by them — e.g. {\"project\": \"hydradb\", \"kind\": \"decision\"}.",
+	observation_date:
+		"When the fact was true, as an RFC3339 date — distinct from when you stored it. " +
+		"Use it when saving something historical, so recency reflects the fact rather " +
+		"than the write.",
+	infer: PARAM.infer,
 			is_markdown: PARAM.is_markdown,
 			overwrite: PARAM.overwrite,
 		},

@@ -1,8 +1,31 @@
-import type {
-	PathTriplet,
-	RecallResponse,
-	ScoredPath,
-} from "./types.js";
+import type { HydraDB as SDK } from "@hydradb/sdk";
+
+/**
+ * The renderer reads SDK payloads directly.
+ *
+ * There used to be a snake_case mirror of every one of these shapes in
+ * `src/types.ts`, with adapters mapping the SDK's camelCase onto it purely so
+ * this file could keep its original field names. That bought nothing and cost a
+ * translation layer that had to be kept in step with the SDK by hand — and did
+ * silently drop a field once (`sourceChunkIds`).
+ *
+ * Triplet innards stay snake_case even here: the SDK types `relation`/`source`/
+ * `target` as `Record<string, unknown>`, so the wire shape passes through
+ * untouched and `formatTriplet` needs no translation either.
+ */
+type RecallResponse = SDK.SearchV2RetrievalResult;
+type ScoredPath = SDK.SearchScoredPathResponse;
+
+type PathTriplet = {
+	source?: { name?: string };
+	relation?: {
+		canonical_predicate?: string;
+		raw_predicate?: string;
+		context?: string;
+		chunk_id?: string | null;
+	};
+	target?: { name?: string };
+};
 
 /**
  * A chunk's readable text, unwrapping the v2 source envelope when present.
@@ -181,8 +204,8 @@ function containedChunkIndices(
 export function renderedChunkCount(response: RecallResponse): number {
 	const chunks = response.chunks ?? [];
 	const contained = containedChunkIndices(
-		chunks.map((c) => extractChunkText(c.chunk_content)),
-		chunks.map((c) => c.source_id),
+		chunks.map((c) => extractChunkText(c.chunkContent)),
+		chunks.map((c) => c.id),
 	);
 	// Every chunk is still rendered; only duplicated BODIES are collapsed.
 	return chunks.length;
@@ -241,20 +264,20 @@ function render(
 	const includeExtraContext = opts?.includeExtraContext ?? true;
 
 	const chunks = response.chunks ?? [];
-	const graphCtx = response.graph_context ?? {
-		query_paths: [],
-		chunk_relations: [],
-		chunk_id_to_group_ids: {},
+	const graphCtx = response.graphContext ?? {
+		queryPaths: [],
+		chunkRelations: [],
+		chunkIdToGroupIds: {},
 	};
-	const extraContextMap = response.additional_context ?? {};
+	const extraContextMap = response.additionalContext ?? {};
 
-	const rawRelations: ScoredPath[] = graphCtx.chunk_relations ?? [];
+	const rawRelations: ScoredPath[] = graphCtx.chunkRelations ?? [];
 	const relationIndex: Record<string, ScoredPath> = {};
 
 	for (let idx = 0; idx < rawRelations.length; idx++) {
 		const relation = rawRelations[idx]!;
-		if ((relation.relevancy_score ?? 0) < minScore) continue;
-		const groupId = relation.group_id ?? `p_${idx}`;
+		if ((relation.relevancyScore ?? 0) < minScore) continue;
+		const groupId = relation.groupId ?? `p_${idx}`;
 		relationIndex[groupId] = relation;
 	}
 
@@ -265,14 +288,14 @@ function render(
 	// source_chunk_ids was silently dropped from the output.
 	const directRelations: Record<string, [string, ScoredPath][]> = {};
 	for (const [groupId, relation] of Object.entries(relationIndex)) {
-		for (const chunkId of relation.source_chunk_ids ?? []) {
+		for (const chunkId of relation.sourceChunkIds ?? []) {
 			const bucket = directRelations[chunkId];
 			if (bucket) bucket.push([groupId, relation]);
 			else directRelations[chunkId] = [[groupId, relation]];
 		}
 	}
 
-	const chunkToGroupIds = graphCtx.chunk_id_to_group_ids ?? {};
+	const chunkToGroupIds = graphCtx.chunkIdToGroupIds ?? {};
 	const consumedExtraIds = new Set<string>();
 	const groupOccurrenceCounts: Record<string, number> = {};
 	const chunkSections: string[] = [];
@@ -286,8 +309,8 @@ function render(
 	const contained =
 		maxChunkChars == null
 			? containedChunkIndices(
-					chunks.map((c) => extractChunkText(c.chunk_content)),
-					chunks.map((c) => c.source_id),
+					chunks.map((c) => extractChunkText(c.chunkContent)),
+					chunks.map((c) => c.id),
 				)
 			: new Map<number, number>();
 	// Extra context is deduped by CONTENT as well as by id: the same passage
@@ -314,25 +337,25 @@ function render(
 		// value anywhere in the output that `hydradb_inspect` or `hydradb_delete`
 		// will accept, so a follow-up means guessing an id or listing everything
 		// and matching on prose.
-		const chunkId = chunk.source_id;
+		const chunkId = chunk.id;
 		// The score lives here rather than in a separate summary block. It was the
 		// only thing that block carried which this one did not, and reproducing it
 		// meant re-sending a truncated copy of every chunk body to deliver one
 		// percentage per chunk.
 		const score =
-			chunk.relevancy_score != null
-				? `  (${Math.round(chunk.relevancy_score * 100)}%)`
+			chunk.relevancyScore != null
+				? `  (${Math.round(chunk.relevancyScore * 100)}%)`
 				: "";
 		lines.push(`Chunk ${rendered}${chunkId ? `  [id: ${chunkId}]` : ""}${score}`);
 
-		const meta = chunk.document_metadata ?? {};
+		const meta = chunk.additionalMetadata ?? {};
 		const title =
-			chunk.source_title || (meta as Record<string, string>).title;
+			chunk.sourceTitle || (meta as Record<string, string>).title;
 		if (title) {
 			lines.push(`Source: ${title}`);
 		}
 
-		const bodyText = extractChunkText(chunk.chunk_content);
+		const bodyText = extractChunkText(chunk.chunkContent);
 		if (bodyDuplicateOf != null) {
 			lines.push(`(same text as Chunk ${bodyDuplicateOf})`);
 		} else
@@ -343,8 +366,11 @@ function render(
 				: bodyText,
 		);
 
-		const chunkUuid = chunk.chunk_uuid;
-		const linkedGroupIds = chunkToGroupIds[chunkUuid] ?? [];
+		// The SDK types this optional where the old hand-written mirror had it
+		// required. An absent uuid simply matches no relation, which is the
+		// correct outcome — it must not throw and must not match everything.
+		const chunkUuid = chunk.chunkUuid ?? "";
+		const linkedGroupIds: string[] = chunkToGroupIds[chunkUuid] ?? [];
 
 		const matchedRelations: ScoredPath[] = [];
 
@@ -409,8 +435,8 @@ function render(
 				for (const triplet of triplets) {
 					relationLines.push(formatTriplet(triplet));
 				}
-			} else if (rel.combined_context) {
-				relationLines.push(`  ${rel.combined_context}`);
+			} else if (rel.combinedContext) {
+				relationLines.push(`  ${rel.combinedContext}`);
 			}
 		}
 
@@ -419,7 +445,7 @@ function render(
 			lines.push(...relationLines);
 		}
 
-		const extraIds = includeExtraContext ? (chunk.extra_context_ids ?? []) : [];
+		const extraIds = includeExtraContext ? (chunk.extraContextIds ?? []) : [];
 		if (extraIds.length > 0 && Object.keys(extraContextMap).length > 0) {
 			const extraLines: string[] = [];
 			for (const ctxId of extraIds) {
@@ -427,24 +453,24 @@ function render(
 				const extraChunk = extraContextMap[ctxId];
 				if (extraChunk) {
 					consumedExtraIds.add(ctxId);
-					const extraContent = extractChunkText(extraChunk.chunk_content);
+					const extraContent = extractChunkText(extraChunk.chunkContent);
 					// Keying only on id let byte-identical passages through under
 					// different ids — three ~700-char duplicates in one live sample.
 					// The title is part of the key: the same passage attributed to a
 					// different source is not a duplicate, it is a second citation,
 					// and dropping it would strip that chunk's attribution.
-					const fingerprint = `${extraChunk.source_title ?? ""}\u0000${normalise(extraContent)}`;
 					// Placement is the ONLY thing tying an extra-context block to its
 					// chunk, so suppressing a repeat outright leaves that chunk looking
 					// as though it referenced nothing. Cite where it was shown instead:
 					// the association survives, and the passage is still sent once.
+					const fingerprint = `${extraChunk.sourceTitle ?? ""}\u0000${normalise(extraContent)}`;
 					const shownIn = fingerprint !== "" ? seenExtraContent.get(fingerprint) : undefined;
 					if (shownIn != null) {
 						extraLines.push(`  Related Context: (same as Chunk ${shownIn})`);
 						continue;
 					}
 					if (fingerprint !== "") seenExtraContent.set(fingerprint, rendered);
-					const extraTitle = extraChunk.source_title ?? "";
+					const extraTitle = extraChunk.sourceTitle ?? "";
 					if (extraTitle) {
 						extraLines.push(
 							`  Related Context (${extraTitle}): ${extraContent}`,
@@ -464,10 +490,10 @@ function render(
 	}
 
 	const entityPathLines: string[] = [];
-	const rawPaths: ScoredPath[] = graphCtx.query_paths ?? [];
+	const rawPaths: ScoredPath[] = graphCtx.queryPaths ?? [];
 	for (const path of rawPaths) {
-		if (path.combined_context) {
-			entityPathLines.push(path.combined_context);
+		if (path.combinedContext) {
+			entityPathLines.push(path.combinedContext);
 		} else {
 			const triplets = path.triplets ?? [];
 			const segments: string[] = [];

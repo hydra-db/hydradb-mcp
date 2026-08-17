@@ -49,10 +49,6 @@ export interface RequestOptions {
  */
 export type QueryKind = ContextKind | "all";
 
-function kindToType<K extends QueryKind>(kind: K | undefined): K | undefined {
-	return kind;
-}
-
 /**
  * An SDK logger that cannot corrupt the stdio transport.
  *
@@ -111,6 +107,15 @@ export interface QueryParams {
 	graphContext?: boolean;
 	alpha?: number;
 	recencyBias?: number;
+	/**
+	 * Restrict retrieval to these source ids. A hard pre-filter: the server
+	 * returns nothing rather than widening when none match.
+	 */
+	ids?: string[];
+	/** Exact-match filters over stored metadata. No ranges, no partial matches. */
+	metadataFilters?: Record<string, unknown>;
+	/** Adjacent chunks pulled in alongside each match, for surrounding context. */
+	numRelatedChunks?: number;
 	/** Per-call collection override. */
 	collection?: string;
 }
@@ -134,6 +139,19 @@ export interface IngestParams {
 	/** Passed through only when `infer` is truthy (host-owned default text). */
 	customInstructions?: string;
 	upsert?: boolean;
+	/**
+	 * Tenant metadata stored alongside the memory, and matchable later via
+	 * `metadataFilters` on query.
+	 *
+	 * Accepted by the backend (`domain/memories/models.go`) but absent from the
+	 * generated SDK request type, which is why the wrapper carries it explicitly
+	 * inside the memory item rather than as a typed field.
+	 */
+	metadata?: Record<string, unknown>;
+	/** Document-level metadata, matchable via `additional_metadata`. */
+	additionalMetadata?: Record<string, unknown>;
+	/** When the fact was true, as opposed to when it was stored (RFC3339 date). */
+	observationDate?: string;
 	/** Filename to attach when ingesting knowledge text as a document. */
 	filename?: string;
 	collection?: string;
@@ -218,13 +236,16 @@ export class ContextResource extends Resource {
 			this.sdk.query({
 				...this.scope(params.collection),
 				query: params.query,
-				type: kindToType(params.kind),
+				type: params.kind,
 				operator: params.operator,
 				maxResults: params.maxResults,
 				mode: params.mode,
 				graphContext: params.graphContext,
 				alpha: params.alpha,
 				recencyBias: params.recencyBias,
+				ids: params.ids,
+				metadataFilters: params.metadataFilters,
+				numRelatedChunks: params.numRelatedChunks,
 			}, req(opts)),
 		);
 	}
@@ -242,7 +263,7 @@ export class ContextResource extends Resource {
 	): Promise<SDK.IngestionV2SourceUploadResponse> {
 		const request: SDK.IngestContextRequest = {
 			...this.scope(params.collection),
-			type: kindToType(params.kind),
+			type: params.kind,
 		};
 		if (params.upsert != null) {
 			request.upsert = String(params.upsert);
@@ -263,6 +284,13 @@ export class ContextResource extends Resource {
 			if (params.sourceId != null) item.source_id = params.sourceId;
 			if (params.title != null) item.title = params.title;
 			if (params.userName != null) item.user_name = params.userName;
+			if (params.metadata != null) item.metadata = params.metadata;
+			if (params.additionalMetadata != null) {
+				item.additional_metadata = params.additionalMetadata;
+			}
+			if (params.observationDate != null) {
+				item.observation_date = params.observationDate;
+			}
 			request.memories = JSON.stringify([item]);
 		} else {
 			// The knowledge path can only carry the document itself and its
@@ -279,6 +307,9 @@ export class ContextResource extends Resource {
 					["isMarkdown", params.isMarkdown],
 					["customInstructions", params.customInstructions],
 					["userName", params.userName],
+					["metadata", params.metadata],
+					["additionalMetadata", params.additionalMetadata],
+					["observationDate", params.observationDate],
 				] as const
 			)
 				.filter(([, value]) => value != null)
@@ -318,7 +349,7 @@ export class ContextResource extends Resource {
 		return this.call("/context/list", () =>
 			this.sdk.context.list({
 				...this.scope(params.collection),
-				type: kindToType(params.kind),
+				type: params.kind,
 				ids: params.ids,
 				page: params.page,
 				pageSize: params.pageSize,
@@ -362,7 +393,7 @@ export class ContextResource extends Resource {
 			this.sdk.context.relations({
 				...this.scope(params.collection),
 				id: params.id,
-				type: kindToType(params.kind),
+				type: params.kind,
 				limit: params.limit,
 				cursor: params.cursor,
 			}),
@@ -378,7 +409,7 @@ export class ContextResource extends Resource {
 			this.sdk.context.delete({
 				...this.scope(params.collection),
 				ids: params.ids,
-				type: kindToType(params.kind),
+				type: params.kind,
 			}, req(opts)),
 		);
 	}

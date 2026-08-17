@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
-import { toAddMemoryResponse, toMemoryList, toRecallResponse, toSourceList } from "./adapters.js";
+import { toAddMemoryResponse, toMemoryList, toSourceList } from "./adapters.js";
 import type { PageInfo } from "./adapters.js";
 import { resolveConfig } from "./config.js";
 import { renderRecalledContext } from "./context.js";
@@ -297,9 +297,13 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		query: string;
 		kind?: QueryKind;
 		max_results?: number;
-		mode?: "fast" | "thinking";
+		mode?: "fast" | "thinking" | "auto";
 		graph_context?: boolean;
 		detail?: "compact" | "full";
+		operator?: "or" | "and" | "phrase";
+		source_ids?: string[];
+		metadata_filters?: Record<string, unknown>;
+		num_related_chunks?: number;
 	}, signal?: AbortSignal): Promise<ToolResult> {
 		// Host-owned default (CONTRACT §2 rule 5): search BOTH families. This tool
 		// used to pin `kind: "memory"`, which made every ingested knowledge source
@@ -314,11 +318,17 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			kind,
 			maxResults,
 			mode: args.mode ?? "thinking",
+			operator: args.operator,
+			ids: args.source_ids,
+			metadataFilters: args.metadata_filters,
+			numRelatedChunks: args.num_related_chunks,
 			graphContext: args.graph_context ?? true,
 			alpha: 0.8,
 			recencyBias: 0,
 		}, { signal });
-		const res = toRecallResponse(raw);
+		// The renderer reads the SDK payload directly; there is no longer a
+		// snake_case mirror to convert into.
+		const res = raw;
 
 		// The server can return more chunks than were asked for — a live call with
 		// max_results=10 came back with 15, and all 15 were rendered. Honour the
@@ -449,6 +459,8 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		infer?: boolean;
 		is_markdown?: boolean;
 		overwrite?: boolean;
+		metadata?: Record<string, unknown>;
+		observation_date?: string;
 	}, signal?: AbortSignal): Promise<ToolResult> {
 		const kind = args.kind ?? "memory";
 		logger.debug(`${TOOL_NAMES.INGEST}: "${args.text.slice(0, 50)}..." (kind=${kind})`);
@@ -465,6 +477,8 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 						infer: args.infer ?? true,
 						isMarkdown: args.is_markdown ?? false,
 						customInstructions: INGEST_INSTRUCTIONS,
+						metadata: args.metadata,
+						observationDate: args.observation_date,
 					}
 				: {};
 
@@ -812,6 +826,7 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			mode?: "content" | "url" | "both";
 			offset?: number;
 			limit?: number;
+			expiry_seconds?: number;
 		};
 		// Reject a conflict rather than picking one. This server rejects `text`
 		// AND `turns` on ingest for the same reason: silently choosing between two
@@ -830,7 +845,13 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 				`${TOOL_NAMES.QUERY} results or in [brackets] in ${TOOL_NAMES.LIST} output.`,
 			);
 		}
-		return { source_id: id, mode: a.mode, offset: a.offset, limit: a.limit };
+		return {
+			source_id: id,
+			mode: a.mode,
+			offset: a.offset,
+			limit: a.limit,
+			expiry_seconds: a.expiry_seconds,
+		};
 	}
 
 	async function runInspect(args: {
@@ -838,12 +859,14 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		mode?: "content" | "url" | "both";
 		offset?: number;
 		limit?: number;
+		expiry_seconds?: number;
 	}, signal?: AbortSignal): Promise<ToolResult> {
 		logger.debug(`${TOOL_NAMES.INSPECT}: ${args.source_id}`);
 
 		const res = await hydra.context.inspect({
 			id: args.source_id,
 			mode: args.mode ?? "content",
+			expirySeconds: args.expiry_seconds,
 		}, { signal });
 
 		// Soft failure: return a normal (non-error) text result, matching v1.
@@ -923,16 +946,44 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 	 */
 	function deleteReport(
 		kind: "memory" | "knowledge",
-		id: string,
+		ids: string[],
 		res: { success?: boolean; message?: string; results?: unknown },
 		removed: boolean,
+		/** How many were removed, when the server said. `undefined` means unknown. */
+		removedCount?: number,
 	): ToolResult {
 		const noun = kind === "knowledge" ? "source" : "memory";
+		const id = ids.join(", ");
 		if (removed) {
-			return structuredResult(`Deleted ${noun}: ${id}`, {
-				id,
+			// Three outcomes, and the third is "we were not told".
+			const partial =
+				removedCount != null && ids.length > 1 && removedCount < ids.length;
+			const unknownCount = removedCount == null && ids.length > 1;
+
+			let text: string;
+			if (partial) {
+				text =
+					`Deleted ${removedCount} of ${ids.length} ${noun}s (requested: ${id}). ` +
+					`The rest were not found or could not be removed.`;
+			} else if (unknownCount) {
+				// Do not claim all of them went. The server confirmed a removal and
+				// gave no count, so that is exactly what gets reported.
+				text =
+					`Deleted from Hydra DB (requested: ${id}). The server confirmed a removal ` +
+					`but did not say how many of the ${ids.length} ids were removed — ` +
+					`use ${TOOL_NAMES.LIST} to confirm which remain.`;
+			} else {
+				text = `Deleted ${noun}${ids.length > 1 ? "s" : ""}: ${id}`;
+			}
+
+			return structuredResult(text, {
+				ids,
 				kind,
 				deleted: true,
+				// Omitted rather than guessed when the server did not report it.
+				...(removedCount != null ? { deleted_count: removedCount } : {}),
+				...(partial ? { partial: true } : {}),
+				...(unknownCount ? { deleted_count_known: false } : {}),
 			});
 		}
 
@@ -944,9 +995,10 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 						`${reason ? `: ${reason}` : " and gave no reason"}. ` +
 						`The ${noun} has not been removed.`,
 					{
-						id,
+						ids,
 						kind,
 						deleted: false,
+						deleted_count: 0,
 						...(reason ? { reason } : {}),
 					},
 				),
@@ -963,7 +1015,7 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		return structuredResult(
 			`No ${noun} with id ${id} exists in this database — nothing was deleted. ` +
 			`Ids come from ${TOOL_NAMES.QUERY} or ${TOOL_NAMES.LIST}; check the id rather than retrying.`,
-			{ id, kind, deleted: false, reason: "not found" },
+			{ ids, kind, deleted: false, deleted_count: 0, reason: "not found" },
 		);
 	}
 
@@ -982,24 +1034,56 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		return res.message !== "" ? res.message : undefined;
 	}
 
+	/** Accept `ids` or the singular `id`, and say where a real id comes from. */
+	function toDeleteArgs(args: Record<string, unknown>) {
+		const a = args as { id?: string; ids?: string[]; kind?: "memory" | "knowledge" };
+		const ids = a.ids ?? (a.id != null ? [a.id] : []);
+		if (ids.length === 0) {
+			throw new Error(
+				`${TOOL_NAMES.DELETE} requires \`ids\` (or \`id\`). Ids come from ` +
+				`${TOOL_NAMES.QUERY} or ${TOOL_NAMES.LIST} — do not guess one.`,
+			);
+		}
+		return { ids, kind: a.kind };
+	}
+
 	async function runDelete(args: {
-		id: string;
+		ids: string[];
 		kind?: "memory" | "knowledge";
 	}, signal?: AbortSignal): Promise<ToolResult> {
 		const kind = args.kind ?? "memory";
-		logger.debug(`${TOOL_NAMES.DELETE}: ${kind} ${args.id}`);
+		logger.debug(`${TOOL_NAMES.DELETE}: ${kind} ${args.ids.join(", ")}`);
 
-		const res = await hydra.context.delete({ ids: [args.id], kind }, { signal });
-		const removed =
-			(res.userMemoryDeleted ?? 0) > 0 || (res.deletedCount ?? 0) > 0;
+		const res = await hydra.context.delete({ ids: args.ids, kind }, { signal });
+		// `userMemoryDeleted` is a COUNT on the v2 wire — a live delete returned
+		// `{"deletedCount":1,"userMemoryDeleted":1}` — and the SDK types it as a
+		// number. The v1 memory-delete handler returns a boolean for the same
+		// concept, so both are handled: a boolean answers "did anything go?" and
+		// only a number answers "how many?".
+		//
+		// The distinction matters for bulk delete. Reading a bare `true` as 1
+		// would report a successful 3-id removal as "Deleted 1 of 3 … partial",
+		// inventing a failure that did not happen — the mirror image of claiming
+		// success over a genuine partial.
+		const rawMemoryDeleted = res.userMemoryDeleted as number | boolean | undefined;
+		const memoryDeletedCount =
+			typeof rawMemoryDeleted === "number" ? rawMemoryDeleted : undefined;
+		const reportedCount = res.deletedCount ?? memoryDeletedCount;
+		const removed = (reportedCount ?? 0) > 0 || rawMemoryDeleted === true;
+		// With no count at all, we do not know how many went — and inventing one
+		// is wrong in both directions. Reading the flag as 1 understated a full
+		// removal ("Deleted 1 of 3"); substituting ids.length overstates a partial
+		// one as complete success. So the count stays UNKNOWN and the report says
+		// so, which is the only thing actually observed.
+		const removedCount = reportedCount;
 		if (!removed) {
 			logger.warn(
-				`${TOOL_NAMES.DELETE}: removed nothing for ${kind} ${args.id}`,
+				`${TOOL_NAMES.DELETE}: removed nothing for ${kind} ${args.ids.join(", ")}`,
 				{ success: res.success, message: res.message, results: res.results },
 			);
 		}
 
-		return deleteReport(kind, args.id, res, removed);
+		return deleteReport(kind, args.ids, res, removed, removedCount);
 	}
 
 	// --- Registration helper ---
@@ -1059,7 +1143,7 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.max_results),
 		mode: z
-			.enum(["fast", "thinking"])
+			.enum(["fast", "thinking", "auto"])
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.mode),
 		graph_context: z
@@ -1070,6 +1154,26 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			.enum(["compact", "full"])
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.detail),
+		operator: z
+			.enum(["or", "and", "phrase"])
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.operator),
+		source_ids: z
+			.array(z.string())
+			.min(1)
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.source_ids),
+		metadata_filters: z
+			.record(z.unknown())
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.metadata_filters),
+		num_related_chunks: z
+			.number()
+			.int()
+			.min(0)
+			.max(5)
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.num_related_chunks),
 	};
 
 	const storeSchema = {
@@ -1101,8 +1205,20 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.STORE].params.overwrite),
 	};
 
+	const ingestMetadataSchema = {
+		metadata: z
+			.record(z.unknown())
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.metadata),
+		observation_date: z
+			.string()
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.observation_date),
+	};
+
 	const ingestSchema = {
 		...storeSchema,
+		...ingestMetadataSchema,
 		// Canonical ingest accepts EITHER `text` or `turns`, so `text` is optional
 		// here (the `hydra_db_store` alias keeps it required).
 		text: z
@@ -1216,10 +1332,24 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			.max(INSPECT_CHAR_BUDGET)
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INSPECT].params.limit),
+		expiry_seconds: z
+			.number()
+			.int()
+			.min(1)
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INSPECT].params.expiry_seconds),
 	};
 
 	const deleteSchema = {
-		id: z.string().describe(TOOL_DESCRIPTIONS[TOOL_NAMES.DELETE].params.id),
+		ids: z
+			.array(z.string())
+			.min(1)
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.DELETE].params.ids),
+		id: z
+			.string()
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.DELETE].params.id),
 		kind: z
 			.enum(["memory", "knowledge"])
 			.optional()
@@ -1253,9 +1383,13 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 	};
 
 	const deleteOutputSchema = {
-		id: z.string(),
+		ids: z.array(z.string()),
 		kind: z.enum(["memory", "knowledge"]),
 		deleted: z.boolean(),
+		/** Absent when the server confirmed a removal without saying how many. */
+		deleted_count: z.number().optional(),
+		deleted_count_known: z.boolean().optional(),
+		partial: z.boolean().optional(),
 		reason: z.string().optional(),
 	};
 
@@ -1324,6 +1458,8 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			infer?: boolean;
 			is_markdown?: boolean;
 			overwrite?: boolean;
+			metadata?: Record<string, unknown>;
+			observation_date?: string;
 			turns?: ConversationTurn[];
 			user_name?: string;
 		};
@@ -1337,6 +1473,33 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 				`${TOOL_NAMES.INGEST} cannot ingest \`turns\` as knowledge — conversations are memories. ` +
 				`Use \`text\` for a knowledge document, or drop \`kind\`.`,
 			);
+		}
+
+		// The handler strips memory-only fields before calling the wrapper on the
+		// knowledge path, which means the wrapper's own guard never sees them —
+		// so without this they would be dropped in silence, which is the exact
+		// behaviour that guard exists to prevent.
+		if (a.kind === "knowledge") {
+			const memoryOnlyGiven = (
+				[
+					["source_id", a.source_id],
+					["infer", a.infer],
+					["is_markdown", a.is_markdown],
+					["user_name", a.user_name],
+					["metadata", a.metadata],
+					["observation_date", a.observation_date],
+				] as const
+			)
+				.filter(([, value]) => value != null)
+				.map(([name]) => name);
+
+			if (memoryOnlyGiven.length > 0) {
+				throw new Error(
+					`${TOOL_NAMES.INGEST} does not support ${memoryOnlyGiven.join(", ")} for ` +
+					`kind "knowledge" — those apply to memory ingestion only. Drop them, or ` +
+					`ingest this as a memory.`,
+				);
+			}
 		}
 		// `text` and `turns` are mutually exclusive — reject rather than silently
 		// dropping one (the documented "exactly one" contract).
@@ -1372,6 +1535,8 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 					infer: a.infer,
 					is_markdown: a.is_markdown,
 					overwrite: a.overwrite,
+					metadata: a.metadata,
+					observation_date: a.observation_date,
 				},
 				extra?.signal,
 			);
@@ -1444,7 +1609,7 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 	register(
 		TOOL_NAMES.DELETE,
 		deleteSchema,
-		(args, extra) => runDelete(args as Parameters<typeof runDelete>[0], extra?.signal),
+		(args, extra) => runDelete(toDeleteArgs(args), extra?.signal),
 		destructive,
 		deleteOutputSchema,
 	);
@@ -1541,7 +1706,7 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		deleteMemorySchema,
 		(args, extra) => {
 			const { memory_id } = args as { memory_id: string };
-			return runDelete({ id: memory_id, kind: "memory" }, extra?.signal);
+			return runDelete({ ids: [memory_id], kind: "memory" }, extra?.signal);
 		},
 		destructive,
 	);

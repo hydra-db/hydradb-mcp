@@ -1707,7 +1707,8 @@ test("hydradb_delete reports its outcome as structured data", async () => {
 		await client.close();
 
 		const structured = result.structuredContent as Record<string, unknown>;
-		assert.equal(structured.id, "m1");
+		// `ids` is plural now — delete takes an array, as the SDK always did.
+		assert.deepEqual(structured.ids, ["m1"]);
 		assert.equal(structured.kind, "memory");
 		assert.equal(
 			structured.deleted,
@@ -1968,4 +1969,264 @@ test("the whole query response stays within the documented ceiling", async () =>
 	// The framing that has to fit is still present.
 	assert.match(text, /^Found \d+ /);
 	assert.match(text, /hydradb_inspect/);
+});
+
+// Three params the wrapper already forwarded and the tool layer never offered.
+test("hydradb_query forwards operator to the wire", async () => {
+	for (const operator of ["or", "and", "phrase"] as const) {
+		const { hydra, calls } = mockHydra();
+		const client = await connect(hydra);
+		await client.callTool({
+			name: "hydradb_query",
+			arguments: { query: "invoice OR receipt", operator },
+		});
+		assert.equal(calls.find((c) => c.method === "query")?.args.operator, operator);
+		await client.close();
+	}
+});
+
+test("hydradb_query accepts mode auto", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+	const result = await client.callTool({
+		name: "hydradb_query",
+		arguments: { query: "q", mode: "auto" },
+	});
+
+	assert.notEqual(result.isError, true, "auto is a real SDK mode and must be accepted");
+	assert.equal(calls.find((c) => c.method === "query")?.args.mode, "auto");
+	await client.close();
+});
+
+test("hydradb_inspect forwards expiry_seconds", async () => {
+	const { hydra, calls } = mockHydra({
+		inspect: { success: true, presignedUrl: "https://example.invalid/x" },
+	});
+	const client = await connect(hydra);
+	await client.callTool({
+		name: "hydradb_inspect",
+		arguments: { id: "s1", mode: "url", expiry_seconds: 300 },
+	});
+
+	assert.equal(calls.find((c) => c.method === "inspect")?.args.expirySeconds, 300);
+	await client.close();
+});
+
+// The SDK and the wrapper both took `ids: string[]`; only the tool layer
+// singularised it, so cleaning up N stale entries cost N round trips.
+test("hydradb_delete removes several ids in one call", async () => {
+	const { hydra, calls } = mockHydra({
+		delete: { success: true, deletedCount: 3 },
+	});
+	const client = await connect(hydra);
+	const result = await client.callTool({
+		name: "hydradb_delete",
+		arguments: { ids: ["a", "b", "c"], kind: "memory" },
+	});
+	await client.close();
+
+	assert.deepEqual(calls.find((c) => c.method === "delete")?.args.ids, ["a", "b", "c"]);
+	const structured = result.structuredContent as Record<string, unknown>;
+	assert.equal(structured.deleted_count, 3);
+	assert.notEqual(structured.partial, true);
+});
+
+// Saying "Deleted" over a partial result is the overstatement this whole branch
+// of work exists to remove.
+test("hydradb_delete reports a partial removal as partial", async () => {
+	const { hydra } = mockHydra({ delete: { success: true, deletedCount: 1 } });
+	const client = await connect(hydra);
+	const result = await client.callTool({
+		name: "hydradb_delete",
+		arguments: { ids: ["a", "b", "c"], kind: "memory" },
+	});
+	await client.close();
+
+	const text = (result.content as { text: string }[])[0]!.text;
+	assert.match(text, /Deleted 1 of 3/);
+	assert.match(text, /rest were not found/i);
+	assert.equal((result.structuredContent as Record<string, unknown>).partial, true);
+});
+
+test("hydradb_delete still accepts a single id", async () => {
+	const { hydra, calls } = mockHydra({ delete: { success: true, userMemoryDeleted: 1 } });
+	const client = await connect(hydra);
+	const result = await client.callTool({
+		name: "hydradb_delete",
+		arguments: { id: "solo", kind: "memory" },
+	});
+	await client.close();
+
+	assert.deepEqual(calls.find((c) => c.method === "delete")?.args.ids, ["solo"]);
+	assert.match((result.content as { text: string }[])[0]!.text, /Deleted memory: solo/);
+});
+
+test("hydradb_delete says where ids come from when given none", async () => {
+	const { hydra } = mockHydra();
+	const client = await connect(hydra);
+	const result = await client.callTool({ name: "hydradb_delete", arguments: {} });
+	await client.close();
+
+	assert.equal(result.isError, true);
+	const text = (result.content as { text: string }[])[0]!.text;
+	assert.match(text, /do not guess one/);
+});
+
+// A hard pre-filter: the SDK returns nothing rather than widening when none of
+// the ids match, which is what makes "search inside these documents" reliable.
+test("hydradb_query forwards source_ids as a retrieval filter", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+	await client.callTool({
+		name: "hydradb_query",
+		arguments: { query: "auth flow", source_ids: ["doc-1", "doc-2"] },
+	});
+
+	assert.deepEqual(calls.find((c) => c.method === "query")?.args.ids, ["doc-1", "doc-2"]);
+	await client.close();
+});
+
+test("hydradb_query forwards metadata filters and related-chunk count", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+	await client.callTool({
+		name: "hydradb_query",
+		arguments: {
+			query: "q",
+			metadata_filters: { team: "platform" },
+			num_related_chunks: 2,
+		},
+	});
+
+	const call = calls.find((c) => c.method === "query");
+	assert.deepEqual(call?.args.metadataFilters, { team: "platform" });
+	assert.equal(call?.args.numRelatedChunks, 2);
+	await client.close();
+});
+
+// Each related chunk multiplies response size, so the ceiling is deliberate.
+test("num_related_chunks is capped", async () => {
+	const { hydra } = mockHydra();
+	const client = await connect(hydra);
+	const result = await client.callTool({
+		name: "hydradb_query",
+		arguments: { query: "q", num_related_chunks: 50 },
+	});
+
+	assert.equal(result.isError, true);
+	await client.close();
+});
+
+test("none of the new query filters are sent when unset", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+	await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
+
+	const call = calls.find((c) => c.method === "query");
+	assert.equal(call?.args.ids, undefined);
+	assert.equal(call?.args.metadataFilters, undefined);
+	assert.equal(call?.args.numRelatedChunks, undefined);
+	await client.close();
+});
+
+// The backend accepts these on the memory item, and the generated SDK request
+// type does not declare them — so they were invisible from the wrapper up.
+// A metadata FILTER over keys the caller cannot create is close to useless, so
+// this and query's metadata_filters only pay off together.
+test("hydradb_ingest sends metadata and observation_date", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+	await client.callTool({
+		name: "hydradb_ingest",
+		arguments: {
+			text: "Chose Atlas for schema migrations.",
+			metadata: { project: "hydradb", kind: "decision" },
+			observation_date: "2026-03-14",
+		},
+	});
+
+	const item = (
+		JSON.parse(String(calls.find((c) => c.method === "ingest")!.args.memories)) as Record<string, unknown>[]
+	)[0]!;
+	assert.deepEqual(item.metadata, { project: "hydradb", kind: "decision" });
+	assert.equal(item.observation_date, "2026-03-14");
+	await client.close();
+});
+
+test("metadata keys are omitted entirely when not provided", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+	await client.callTool({ name: "hydradb_ingest", arguments: { text: "a note" } });
+
+	const item = (
+		JSON.parse(String(calls.find((c) => c.method === "ingest")!.args.memories)) as Record<string, unknown>[]
+	)[0]!;
+	assert.ok(!("metadata" in item), "an absent field must not be sent as null");
+	assert.ok(!("observation_date" in item));
+	await client.close();
+});
+
+// They belong to the memory item shape, so the knowledge branch must reject
+// them rather than drop them — same rule as every other memory-only field.
+test("knowledge ingest rejects metadata rather than dropping it", async () => {
+	const { hydra } = mockHydra();
+	const client = await connect(hydra);
+	const result = await client.callTool({
+		name: "hydradb_ingest",
+		arguments: { text: "doc body", kind: "knowledge", metadata: { a: 1 } },
+	});
+
+	assert.equal(result.isError, true);
+	assert.match((result.content as { text: string }[])[0]!.text, /metadata/);
+	await client.close();
+});
+
+// Greptile, PR #50: `userMemoryDeleted` is a BOOLEAN, not a count. Treating it
+// as 1 turned a successful 3-id delete that reported only that flag into
+// "Deleted 1 of 3 … partial" — understating the result exactly as badly as
+// claiming success over a partial removal would overstate it.
+test("a boolean-only delete response is not reported as partial", async () => {
+	const { hydra } = mockHydra({ delete: { success: true, userMemoryDeleted: true } });
+	const client = await connect(hydra);
+	const result = await client.callTool({
+		name: "hydradb_delete",
+		arguments: { ids: ["a", "b", "c"], kind: "memory" },
+	});
+	await client.close();
+
+	const text = (result.content as { text: string }[])[0]!.text;
+	const structured = result.structuredContent as Record<string, unknown>;
+
+	assert.doesNotMatch(text, /1 of 3/, "a flag is not a count of one");
+	assert.notEqual(structured.partial, true);
+	assert.equal(structured.deleted, true);
+
+	// Greptile, PR #50 (second pass): nor is it a count of three. Substituting
+	// ids.length overstates a partial removal as complete success, which is the
+	// same fabrication in the other direction. An unknown count is reported as
+	// unknown.
+	assert.equal(structured.deleted_count, undefined, "must not invent a count");
+	assert.equal(structured.deleted_count_known, false);
+	assert.match(text, /did not say how many/);
+	assert.match(text, /hydradb_list/, "must say how to find out");
+});
+
+// A real count still drives the partial report.
+test("an explicit count still distinguishes partial from complete", async () => {
+	for (const [deletedCount, partial] of [
+		[3, false],
+		[1, true],
+	] as const) {
+		const { hydra } = mockHydra({ delete: { success: true, deletedCount } });
+		const client = await connect(hydra);
+		const result = await client.callTool({
+			name: "hydradb_delete",
+			arguments: { ids: ["a", "b", "c"], kind: "memory" },
+		});
+		await client.close();
+
+		const structured = result.structuredContent as Record<string, unknown>;
+		assert.equal(structured.deleted_count, deletedCount);
+		assert.equal(structured.partial === true, partial, `count ${deletedCount}`);
+	}
 });
