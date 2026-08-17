@@ -7,7 +7,7 @@ import { z } from "zod";
 import { toAddMemoryResponse, toMemoryList, toRecallResponse, toSourceList } from "./adapters.js";
 import type { PageInfo } from "./adapters.js";
 import { resolveConfig } from "./config.js";
-import { buildRecalledContext } from "./context.js";
+import { renderRecalledContext } from "./context.js";
 import { SERVER_INSTRUCTIONS, TOOL_DESCRIPTIONS } from "./descriptions.js";
 import { HydraDB } from "./hydra/index.js";
 import type { ContextKind, QueryKind } from "./hydra/index.js";
@@ -299,6 +299,7 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		max_results?: number;
 		mode?: "fast" | "thinking";
 		graph_context?: boolean;
+		detail?: "compact" | "full";
 	}, signal?: AbortSignal): Promise<ToolResult> {
 		// Host-owned default (CONTRACT §2 rule 5): search BOTH families. This tool
 		// used to pin `kind: "memory"`, which made every ingested knowledge source
@@ -307,10 +308,11 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		const kind = args.kind ?? "all";
 		logger.debug(`${TOOL_NAMES.QUERY}: "${args.query}" (kind=${kind})`);
 
+		const maxResults = args.max_results ?? 10;
 		const raw = await hydra.context.query({
 			query: args.query,
 			kind,
-			maxResults: args.max_results ?? 10,
+			maxResults,
 			mode: args.mode ?? "thinking",
 			graphContext: args.graph_context ?? true,
 			alpha: 0.8,
@@ -318,31 +320,48 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		}, { signal });
 		const res = toRecallResponse(raw);
 
+		// The server can return more chunks than were asked for — a live call with
+		// max_results=10 came back with 15, and all 15 were rendered. Honour the
+		// parameter here so it means what its description says.
+		if (res.chunks != null && res.chunks.length > maxResults) {
+			res.chunks = res.chunks.slice(0, maxResults);
+		}
+
 		if (!res.chunks || res.chunks.length === 0) {
 			return textResult(`No relevant ${resultNoun(kind)} found in Hydra DB.`);
 		}
 
-		const contextStr = buildRecalledContext(res);
-		const summary = res.chunks.slice(0, 10).map((c, i) => {
-			const score =
-				c.relevancy_score != null
-					? ` (${Math.round(c.relevancy_score * 100)}%)`
-					: "";
-			const snippet =
-				c.chunk_content.length > 150
-					? `${c.chunk_content.slice(0, 150)}...`
-					: c.chunk_content;
-			return `${i + 1}. [id: ${c.source_id || "unknown"}]${score} ${snippet}`;
-		});
-
-		// An id the caller cannot connect to anything is just noise, so name what
-		// accepts it. Without this the ids read as internal bookkeeping.
+		// No separate summary block. It listed the first 10 chunks truncated to 150
+		// characters each — text that is a verbatim prefix of what the context
+		// block below already renders in full. Every chunk body went to the caller
+		// twice, and the only field the summary carried that the context block did
+		// not was the score, which now rides in the chunk header.
+		//
+		// It also disagreed with its own header: `Found ${length}` counted every
+		// chunk while the list stopped at 10, so a 15-chunk result announced 15 and
+		// showed 10.
+		const compact = (args.detail ?? "compact") === "compact";
+		// The header and the legend are part of the response the caller pays for,
+		// so the renderer gets a budget with room already reserved for them.
+		// Adding framing after the ceiling had been applied put the finished
+		// response over the documented limit — the same mistake as leaving the
+		// entity-path prefix out of the accounting, one layer up.
 		const legend =
 			`\n\n---\nEach [id: …] is a source id: pass one to ${TOOL_NAMES.INSPECT} for that ` +
 			`source's full content, or to ${TOOL_NAMES.DELETE} to remove it.`;
+		const headerAllowance = 120;
+
+		const { text: contextStr, shown } = renderRecalledContext(res, {
+			// Compact keeps every chunk but trims each body and drops the
+			// extra-context blocks; `full` is the unchanged rendering.
+			...(compact
+				? { maxChunkChars: COMPACT_CHUNK_CHARS, includeExtraContext: false }
+				: {}),
+			maxTotalChars: QUERY_CHAR_BUDGET - legend.length - headerAllowance,
+		});
 
 		return textResult(
-			`Found ${res.chunks.length} ${resultNoun(kind, res.chunks.length)}:\n\n${summary.join("\n")}\n\n---\nFull context:\n${contextStr}${legend}`,
+			`Found ${shown} ${resultNoun(kind, shown)}:\n\n${contextStr}${legend}`,
 		);
 	}
 
@@ -703,6 +722,18 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			: text;
 	}
 
+	/**
+	 * Query output ceilings.
+	 *
+	 * Chunk bodies were rendered at full length with no cap of any kind, so one
+	 * query over a corpus of long documents could dominate the caller's context.
+	 * `compact` trims each body and drops the extra-context blocks; `full`
+	 * restores the previous rendering. The total budget applies either way,
+	 * because fifty capped chunks still add up.
+	 */
+	const COMPACT_CHUNK_CHARS = 600;
+	const QUERY_CHAR_BUDGET = 40_000;
+
 	/** Bound any one server-supplied string, marking it when it is shortened. */
 	function clamp(text: string, budget: number): string {
 		if (text.length <= budget) return text;
@@ -1035,6 +1066,10 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			.boolean()
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.graph_context),
+		detail: z
+			.enum(["compact", "full"])
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.detail),
 	};
 
 	const storeSchema = {

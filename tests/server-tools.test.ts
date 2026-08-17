@@ -463,12 +463,16 @@ test("hydradb_query emits source ids the other tools accept", async () => {
 	});
 	const text = (result.content as { text: string }[])[0]!.text;
 
-	// Both halves of the result: the skimmable summary and the block a caller
-	// actually reads. An id in only one of them is an id the caller may miss.
-	const summary = text.slice(0, text.indexOf("Full context:"));
-	const context = text.slice(text.indexOf("Full context:"));
-	assert.match(summary, /\[id: src-alpha\]/, "summary line must carry the id");
-	assert.match(context, /\[id: src-alpha\]/, "chunk header must carry the id");
+	// One block now, not two. The id rides in the chunk header alongside the
+	// score, which is the only thing the removed summary carried that this did
+	// not.
+	assert.match(text, /\[id: src-alpha\]/, "chunk header must carry the id");
+	assert.match(text, /\(91%\)/, "the score must survive the summary's removal");
+	assert.equal(
+		text.match(/src-alpha/g)?.length,
+		1,
+		"the id should appear once, not once per rendering of the same chunk",
+	);
 
 	// An id with no stated purpose is noise; name what consumes it.
 	assert.match(text, /hydradb_inspect/);
@@ -1856,4 +1860,112 @@ test("a repeated id is still the same filter as the id alone", async () => {
 		calls.find((c) => c.method === "list"),
 		"{a} and {a} are the same set and must not be rejected",
 	);
+});
+
+/** Query against a synthetic result set of `n` long chunks. */
+function longChunks(n: number, chars = 3000) {
+	return {
+		chunks: Array.from({ length: n }, (_, i) => ({
+			chunkUuid: `c${i}`,
+			id: `s${i}`,
+			chunkContent: `body-${i} start. ` + "x".repeat(chars),
+			sourceTitle: `Doc ${i}`,
+			relevancyScore: 0.9,
+			extraContextIds: [`e${i}`],
+		})),
+		additionalContext: Object.fromEntries(
+			Array.from({ length: n }, (_, i) => [
+				`e${i}`,
+				{ chunkUuid: `e${i}`, id: `x${i}`, chunkContent: `extra ${i} ` + "y".repeat(700) },
+			]),
+		),
+	};
+}
+
+async function queryText(args: Record<string, unknown>, chunks = longChunks(10)) {
+	const { hydra } = mockHydra({ query: chunks });
+	const client = await connect(hydra);
+	const result = await client.callTool({ name: "hydradb_query", arguments: args });
+	await client.close();
+	return (result.content as { text: string }[])[0]!.text;
+}
+
+// Chunk bodies were rendered at full length with no cap of any kind.
+test("hydradb_query defaults to compact and trims chunk bodies", async () => {
+	const text = await queryText({ query: "q" });
+
+	assert.match(text, /chunk truncated/);
+	assert.doesNotMatch(text, /Extra Context/, "compact omits surrounding-context blocks");
+	// Still shows every chunk — compact trims, it does not drop matches.
+	assert.equal(text.match(/Chunk \d+/g)?.length, 10);
+});
+
+test("detail:full restores whole chunk bodies and extra context", async () => {
+	const text = await queryText({ query: "q", detail: "full" });
+
+	assert.doesNotMatch(text, /chunk truncated/);
+	assert.match(text, /Extra Context/);
+});
+
+test("compact is materially smaller than full", async () => {
+	const compact = await queryText({ query: "q" });
+	const full = await queryText({ query: "q", detail: "full" });
+
+	assert.ok(
+		compact.length < full.length * 0.4,
+		`expected a large reduction, got ${compact.length} vs ${full.length}`,
+	);
+});
+
+// A per-chunk cap does not bound the whole: many capped chunks still add up.
+test("hydradb_query caps the total response even in full detail", async () => {
+	const text = await queryText(
+		{ query: "q", detail: "full", max_results: 50 },
+		longChunks(50, 5000),
+	);
+
+	assert.ok(text.length < 45_000, `expected a bounded response, got ${text.length}`);
+	assert.match(text, /response truncated: showing \d+ of 50 chunks/);
+	assert.match(text, /hydradb_inspect/, "must say how to get a source in full");
+
+	// Greptile, PR #49: the header must count what survived truncation, not what
+	// went in — otherwise it promises source ids the body does not contain.
+	const announced = Number(text.match(/Found (\d+) /)?.[1]);
+	const rendered = (text.match(/^Chunk \d+/gm) ?? []).length;
+	assert.equal(announced, rendered, "header must match the chunks actually shown");
+	assert.ok(rendered < 50, "the budget should have dropped some chunks");
+
+	// And it must never cut a chunk header in half.
+	assert.doesNotMatch(text, /\[id: [^\]]*$/, "a severed id must not be left danging");
+});
+
+// A live call with max_results=10 returned 15 chunks, and all 15 were rendered.
+test("max_results actually bounds what is rendered", async () => {
+	const text = await queryText({ query: "q", max_results: 3 }, longChunks(15, 200));
+
+	assert.equal(
+		text.match(/Chunk \d+/g)?.length,
+		3,
+		"the server may return more than asked for; the tool must not render them",
+	);
+	assert.match(text, /Found 3 /);
+});
+
+// Greptile, PR #49: the header and legend were appended after the renderer had
+// applied its ceiling, so the finished response exceeded the documented limit.
+test("the whole query response stays within the documented ceiling", async () => {
+	const text = await queryText(
+		{ query: "q", detail: "full", max_results: 50 },
+		longChunks(50, 5000),
+	);
+
+	// 40k is the documented ceiling for the response the caller receives, not
+	// for one component of it.
+	assert.ok(
+		text.length <= 40_000,
+		`the finished response must fit the ceiling, got ${text.length}`,
+	);
+	// The framing that has to fit is still present.
+	assert.match(text, /^Found \d+ /);
+	assert.match(text, /hydradb_inspect/);
 });
