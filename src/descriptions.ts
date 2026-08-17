@@ -83,10 +83,15 @@ const PARAM = {
 		"Key/value metadata to store with this entry, as {key: value}. These are the " +
 		"keys hydradb_query's metadata_filters can match on later, so set them when you " +
 		"expect to narrow by them — e.g. {\"project\": \"hydradb\", \"kind\": \"decision\"}.",
+	// The format is stated as the server's own, YYYY-MM-DD. This said "RFC3339",
+	// which is a date-TIME format: a caller that followed it sent
+	// "2026-08-17T00:00:00Z" and got 400 INVALID_INPUT back from /context/ingest.
 	observation_date:
-		"When the fact was true, as an RFC3339 date — distinct from when you stored it. " +
-		"Use it when saving something historical, so recency reflects the fact rather " +
-		"than the write.",
+		'When the fact was true, as a calendar date YYYY-MM-DD (e.g. "2026-07-04") — ' +
+		"distinct from when you stored it. Use it when saving something historical, so " +
+		"recency reflects the fact rather than the write. The server stores a date and no " +
+		"time of day: a date-time is truncated to its date part, and anything that is not " +
+		"a date is rejected.",
 	infer:
 		"Let Hydra DB extract insights and knowledge-graph entities from this text " +
 		"(default: true). Keep it true for anything about the user or their work — that " +
@@ -318,15 +323,11 @@ Take the id from hydradb_query or hydradb_list — never guess one. Confirm with
 			text: PARAM.text,
 			title: PARAM.title,
 			source_id: PARAM.source_id,
-			metadata:
-		"Key/value metadata to store with this entry, as {key: value}. These are the " +
-		"keys hydradb_query's metadata_filters can match on later, so set them when you " +
-		"expect to narrow by them — e.g. {\"project\": \"hydradb\", \"kind\": \"decision\"}.",
-	observation_date:
-		"When the fact was true, as an RFC3339 date — distinct from when you stored it. " +
-		"Use it when saving something historical, so recency reflects the fact rather " +
-		"than the write.",
-	infer: PARAM.infer,
+			// These two were verbatim copies of the PARAM blurbs. A copy is how the
+			// RFC3339 defect would survive being fixed in one place.
+			metadata: PARAM.metadata,
+			observation_date: PARAM.observation_date,
+			infer: PARAM.infer,
 			is_markdown: PARAM.is_markdown,
 			overwrite: PARAM.overwrite,
 		},
