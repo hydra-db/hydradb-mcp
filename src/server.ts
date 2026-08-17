@@ -34,8 +34,31 @@ const { version: SERVER_VERSION } = require("../package.json") as {
 
 type ToolResult = {
 	content: { type: "text"; text: string }[];
+	structuredContent?: Record<string, unknown>;
 	isError?: boolean;
 };
+
+/**
+ * A usable title for an entry the caller did not name.
+ *
+ * The default was the constant "MCP Memory". Since `title` is the ONLY per-chunk
+ * label `buildRecalledContext` renders, fifty untitled saves produced fifty
+ * recall results all reading `Source: MCP Memory` — the caller could not cite
+ * where a fact came from, or tell whether two chunks were the same memory. It
+ * also defeats any future filter on title, since every row shares one value.
+ *
+ * Deriving from the first line is a safety net, not the fix. The fix is the
+ * description telling the model to set one; this keeps the failure from being
+ * total when it does not.
+ */
+function defaultTitle(text: string): string {
+	const firstLine = (text.trim().split("\n", 1)[0] ?? "").trim();
+	if (firstLine === "") return "Untitled note";
+	// Ingested documents commonly start with a markdown heading, and the hashes
+	// are noise in a label.
+	const cleaned = firstLine.replace(/^#+\s*/, "").trim() || firstLine;
+	return cleaned.length <= 60 ? cleaned : `${cleaned.slice(0, 57).trimEnd()}…`;
+}
 
 /**
  * A source id for a conversation the caller did not name.
@@ -59,6 +82,24 @@ function generatedSourceId(): string {
 
 function textResult(text: string): ToolResult {
 	return { content: [{ type: "text" as const, text }] };
+}
+
+/**
+ * A result the caller can read OR parse.
+ *
+ * Every handler returned prose only, so a caller wanting an id had to pull it
+ * out of a sentence. `structuredContent` hands over the same facts already
+ * parsed — ids it can pass straight to the next tool, counts it can branch on.
+ *
+ * `content` stays populated alongside it. The MCP spec requires that for hosts
+ * that ignore structured output, and dropping it would break every client that
+ * renders the text.
+ */
+function structuredResult(
+	text: string,
+	structuredContent: Record<string, unknown>,
+): ToolResult {
+	return { content: [{ type: "text" as const, text }], structuredContent };
 }
 
 /**
@@ -198,6 +239,20 @@ export function awaitInFlight(): Promise<void> {
 /** How many tool calls are currently running. Exported for tests and logging. */
 export function inFlightCount(): number {
 	return inFlight;
+}
+
+/**
+ * Whether the deprecated tool aliases are registered.
+ *
+ * Off by default as of 1.2.0. Anyone whose mcp.json still calls the old names
+ * sets HYDRADB_MCP_LEGACY_TOOLS=1 to restore them — one env var, no code change,
+ * and the opt-in is itself the adoption signal that a later removal needs and
+ * that nothing here could previously collect.
+ */
+export function legacyToolsEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+	const raw = env.HYDRADB_MCP_LEGACY_TOOLS;
+	if (raw == null) return false;
+	return ["1", "true", "yes", "on"].includes(raw.trim().toLowerCase());
 }
 
 /** Test-only: reset the once-per-process alias warning dedupe. */
@@ -397,7 +452,7 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		const raw = await hydra.context.ingest({
 			kind,
 			text: args.text,
-			title: args.title ?? (kind === "memory" ? "MCP Memory" : undefined),
+			title: args.title ?? defaultTitle(args.text),
 			...memoryOnly,
 			// Default stays true. The SDK retries POSTs, so upsert is what keeps a
 			// retried ingest from duplicating — flipping this default would trade a
@@ -412,11 +467,17 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		// possible at all.
 		const id = createdId(res) ?? args.source_id;
 
-		return textResult(
+		return structuredResult(
 			`Saved to Hydra DB${id ? ` (id: ${id})` : ""} ` +
 			`(${res.success_count} success, ${res.failed_count} failed).` +
 			indexingNote(res) +
 			ingestIssues(res),
+			{
+				...(id != null ? { id } : {}),
+				success_count: res.success_count,
+				failed_count: res.failed_count,
+				indexing_pending: true,
+			},
 		);
 	}
 
@@ -449,11 +510,18 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		}, { signal });
 		const res = toAddMemoryResponse(raw);
 
-		return textResult(
+		const conversationId = createdId(res) ?? sourceId;
+		return structuredResult(
 			`Ingested ${turns.length} conversation turn(s) into Hydra DB ` +
-			`(id: ${createdId(res) ?? sourceId}, success: ${res.success_count}, failed: ${res.failed_count})` +
+			`(id: ${conversationId}, success: ${res.success_count}, failed: ${res.failed_count})` +
 			indexingNote(res) +
 			ingestIssues(res),
+			{
+				id: conversationId,
+				success_count: res.success_count,
+				failed_count: res.failed_count,
+				indexing_pending: true,
+			},
 		);
 	}
 
@@ -464,24 +532,32 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 	 * truncated answer, it is a wrong one — the caller reports it as the complete
 	 * inventory. Say what was shown, out of what, and how to reach the rest.
 	 */
+	/**
+	 * Whether another page exists.
+	 *
+	 * `total > shown` is NOT a usable test on its own: on the last page of a large
+	 * corpus it is still true (12 shown of 412) and would point the caller at a
+	 * page that does not exist. Prefer what the server stated, then the page
+	 * arithmetic, and only then the row comparison — which is correct on page 1,
+	 * the only place it is reached.
+	 */
+	function hasMore(shown: number, page: PageInfo, requestedPage?: number): boolean {
+		const total = page.total ?? shown;
+		const current = page.page ?? requestedPage ?? 1;
+		const seen = (current - 1) * (page.page_size ?? shown) + shown;
+		return (
+			page.has_next ??
+			(page.total_pages != null ? current < page.total_pages : seen < total)
+		);
+	}
+
 	function coverage(shown: number, page: PageInfo, requestedPage?: number): string {
 		const total = page.total ?? shown;
 		const current = page.page ?? requestedPage ?? 1;
+		const more = hasMore(shown, page, requestedPage);
 
-		// `total > shown` is NOT a usable "more exists" test on its own: on the
-		// last page of a large corpus it is still true (12 shown of 412) and would
-		// point the caller at a page that does not exist. Prefer what the server
-		// stated, then the page arithmetic, and only then the row comparison —
-		// which is correct on page 1, the only place it is reached.
-		const seen = (current - 1) * (page.page_size ?? shown) + shown;
-		const hasMore =
-			page.has_next ??
-			(page.total_pages != null ? current < page.total_pages : seen < total);
-
-		if (!hasMore && current === 1) return `${shown}`;
-
-		const more = hasMore ? ` — pass page=${current + 1} for more` : "";
-		return `${shown} of ${total} (page ${current})${more}`;
+		if (!more && current === 1) return `${shown}`;
+		return `${shown} of ${total} (page ${current})${more ? ` — pass page=${current + 1} for more` : ""}`;
 	}
 
 	async function runListMemories(args: {
@@ -500,19 +576,51 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		const { memories, page } = toMemoryList(raw);
 
 		if (memories.length === 0) {
-			return textResult(
+			// Declaring an outputSchema obliges EVERY return path to carry structured
+			// content, including this one — a caller branching on `items` should not
+			// have to special-case the empty result.
+			return structuredResult(
 				args.page != null && args.page > 1
 					? `No memories on page ${args.page}.`
 					: "No memories stored yet.",
+				{
+					kind: "memory",
+					items: [],
+					shown: 0,
+					total: page.total ?? 0,
+					page: args.page ?? 1,
+					has_more: false,
+				},
 			);
 		}
 
-		const lines = memories.map(
-			(m, i) => `${i + 1}. [${m.memory_id}] ${m.memory_content.slice(0, 150)}`,
-		);
+		const lines = memories.map((m, i) => {
+			// The query path appends "..." when it truncates; this one did not, so a
+			// half sentence read as a complete fact.
+			const content = m.memory_content;
+			const snippet =
+				content.length > 150 ? `${content.slice(0, 150)}...` : content;
+			return `${i + 1}. [${m.memory_id}] ${snippet}`;
+		});
 
-		return textResult(
+		return structuredResult(
 			`${coverage(memories.length, page, args.page)} memories:\n\n${lines.join("\n")}`,
+			{
+				kind: "memory",
+				// Bounded like the text preview. The structured payload previously
+				// carried every memory_content in full, so a host consuming it got
+				// megabytes from a routine inventory call while the prose beside it
+				// showed 150 characters per row. Structured output is a different
+				// encoding of the same answer, not a bypass of its limits.
+				items: memories.map((m) => ({
+					id: m.memory_id,
+					content: clampPreview(m.memory_content),
+				})),
+				shown: memories.length,
+				total: page.total ?? memories.length,
+				page: page.page ?? args.page ?? 1,
+				has_more: hasMore(memories.length, page, args.page),
+			},
 		);
 	}
 
@@ -532,10 +640,18 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		const { sources, page } = toSourceList(raw);
 
 		if (sources.length === 0) {
-			return textResult(
+			return structuredResult(
 				args.page != null && args.page > 1
 					? `No sources on page ${args.page}.`
 					: "No sources found.",
+				{
+					kind: "knowledge",
+					items: [],
+					shown: 0,
+					total: page.total ?? 0,
+					page: args.page ?? 1,
+					has_more: false,
+				},
 			);
 		}
 
@@ -548,8 +664,20 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		// Was `${total} sources:` — the corpus-wide total printed above a single
 		// page of rows, so "412 sources:" sat over 50 lines with no marker and no
 		// way to reach the other 362.
-		return textResult(
+		return structuredResult(
 			`${coverage(sources.length, page, args.page)} sources:\n\n${lines.join("\n")}`,
+			{
+				kind: "knowledge",
+				items: sources.map((src) => ({
+					id: src.id,
+					...(src.title != null ? { title: src.title } : {}),
+					...(src.type != null ? { type: src.type } : {}),
+				})),
+				shown: sources.length,
+				total: page.total ?? sources.length,
+				page: page.page ?? args.page ?? 1,
+				has_more: hasMore(sources.length, page, args.page),
+			},
 		);
 	}
 
@@ -560,6 +688,20 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 	 * small enough that no single call can dominate a conversation.
 	 */
 	const INSPECT_CHAR_BUDGET = 20_000;
+
+	/**
+	 * The per-row preview length shared by the text and structured listings.
+	 *
+	 * They must agree: a caller reading `structuredContent` and a caller reading
+	 * the prose should get the same answer, not two different ones.
+	 */
+	const LIST_PREVIEW_CHARS = 150;
+
+	function clampPreview(text: string): string {
+		return text.length > LIST_PREVIEW_CHARS
+			? `${text.slice(0, LIST_PREVIEW_CHARS)}...`
+			: text;
+	}
 
 	/** Bound any one server-supplied string, marking it when it is shortened. */
 	function clamp(text: string, budget: number): string {
@@ -629,6 +771,35 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		return (
 			`${slice}\n\n[truncated: showing characters ${start}-${end} of ${total}.${more}]`
 		);
+	}
+
+	/** Accept either spelling, and say so when neither is present. */
+	function toInspectArgs(args: Record<string, unknown>) {
+		const a = args as {
+			id?: string;
+			source_id?: string;
+			mode?: "content" | "url" | "both";
+			offset?: number;
+			limit?: number;
+		};
+		// Reject a conflict rather than picking one. This server rejects `text`
+		// AND `turns` on ingest for the same reason: silently choosing between two
+		// values the caller deliberately supplied means acting on a target they
+		// did not ask for, and here that target can be a DELETE.
+		if (a.id != null && a.source_id != null && a.id !== a.source_id) {
+			throw new Error(
+				`${TOOL_NAMES.INSPECT} received different values for \`id\` (${a.id}) and its ` +
+				`deprecated alias \`source_id\` (${a.source_id}). Pass only \`id\`.`,
+			);
+		}
+		const id = a.id ?? a.source_id;
+		if (!id) {
+			throw new Error(
+				`${TOOL_NAMES.INSPECT} requires \`id\` — the value shown as [id: …] in ` +
+				`${TOOL_NAMES.QUERY} results or in [brackets] in ${TOOL_NAMES.LIST} output.`,
+			);
+		}
+		return { source_id: id, mode: a.mode, offset: a.offset, limit: a.limit };
 	}
 
 	async function runInspect(args: {
@@ -727,16 +898,29 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 	): ToolResult {
 		const noun = kind === "knowledge" ? "source" : "memory";
 		if (removed) {
-			return textResult(`Deleted ${noun}: ${id}`);
+			return structuredResult(`Deleted ${noun}: ${id}`, {
+				id,
+				kind,
+				deleted: true,
+			});
 		}
 
 		if (res.success === false) {
 			const reason = deleteFailureReason(res);
-			return errorResult(
-				`Could NOT delete ${noun} ${id} — the server refused the request` +
-					`${reason ? `: ${reason}` : " and gave no reason"}. ` +
-					`The ${noun} has not been removed.`,
-			);
+			return {
+				...structuredResult(
+					`Could NOT delete ${noun} ${id} — the server refused the request` +
+						`${reason ? `: ${reason}` : " and gave no reason"}. ` +
+						`The ${noun} has not been removed.`,
+					{
+						id,
+						kind,
+						deleted: false,
+						...(reason ? { reason } : {}),
+					},
+				),
+				isError: true,
+			};
 		}
 
 		// The server succeeded and removed nothing, so no such id exists in this
@@ -745,9 +929,10 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		// reassuring one. A caller that invented an id — the likely case, since
 		// until recently nothing emitted one — reads it as confirmation and tells
 		// the user their data is gone.
-		return textResult(
+		return structuredResult(
 			`No ${noun} with id ${id} exists in this database — nothing was deleted. ` +
 			`Ids come from ${TOOL_NAMES.QUERY} or ${TOOL_NAMES.LIST}; check the id rather than retrying.`,
+			{ id, kind, deleted: false, reason: "not found" },
 		);
 	}
 
@@ -797,9 +982,11 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		) => Promise<ToolResult>,
 		annotations?: {
 			readOnlyHint?: boolean;
+			destructiveHint?: boolean;
 			openWorldHint?: boolean;
 			idempotentHint?: boolean;
 		},
+		outputSchema?: Record<string, unknown>,
 	) {
 		const desc = TOOL_DESCRIPTIONS[name];
 		const isDeprecated = (DEPRECATED_TOOL_NAMES as readonly string[]).includes(name);
@@ -819,6 +1006,7 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 				title: desc.title,
 				description: desc.description,
 				inputSchema: inputSchema as never,
+				...(outputSchema ? { outputSchema: outputSchema as never } : {}),
 				...(annotations ? { annotations } : {}),
 			},
 			wrapped as never,
@@ -899,6 +1087,11 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			.max(MAX_TURNS, { message: `at most ${MAX_TURNS} turns per ingest` })
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.turns),
+		// `text` and `turns` are mutually exclusive and exactly one is required.
+		// JSON Schema cannot express that, so the rule lives in three places: the
+		// tool description, these two param descriptions, and the handler check
+		// below. They must agree — a model that reads "provide turns rather than
+		// text" concludes both are allowed and discovers otherwise at runtime.
 		user_name: z
 			.string()
 			.optional()
@@ -921,14 +1114,21 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 	};
 
 	const listSchema = {
+		// Required, not defaulted. `hydradb_list({})` used to return memories only
+		// and read as the complete inventory, so a caller asking "what does Hydra
+		// DB have?" never saw the knowledge corpus — which hydradb_query searches
+		// by default. Same class of bug as the query `kind` pin, on the list path.
 		kind: z
 			.enum(["memory", "knowledge"])
-			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.LIST].params.kind),
-		source_ids: z
+		ids: z
 			.array(z.string())
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.LIST].params.source_ids),
+		source_ids: z
+			.array(z.string())
+			.optional()
+			.describe("Deprecated alias for `ids`."),
 		page: z
 			.number()
 			.int()
@@ -952,9 +1152,18 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 	};
 
 	const inspectSchema = {
+		// CONTRACT §1 says a source's identifier field is `id`, but this surface
+		// spelled one concept three ways across tools meant to chain: inspect took
+		// `source_id`, list took `source_ids`, delete took `id`. `id` is canonical
+		// here; the old spelling stays accepted so nothing breaks.
+		id: z
+			.string()
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INSPECT].params.source_id),
 		source_id: z
 			.string()
-			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INSPECT].params.source_id),
+			.optional()
+			.describe("Deprecated alias for `id`."),
 		mode: z
 			.enum(["content", "url", "both"])
 			.optional()
@@ -982,6 +1191,39 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.DELETE].params.kind),
 	};
 
+	// Output schemas, declared only where the result is genuinely structured.
+	// Query stays prose: its payload IS text, and forcing it into fields would
+	// duplicate the rendered context rather than replace it.
+	const listOutputSchema = {
+		kind: z.enum(["memory", "knowledge"]),
+		items: z.array(
+			z.object({
+				id: z.string(),
+				title: z.string().optional(),
+				type: z.string().optional(),
+				content: z.string().optional(),
+			}),
+		),
+		shown: z.number(),
+		total: z.number(),
+		page: z.number(),
+		has_more: z.boolean(),
+	};
+
+	const ingestOutputSchema = {
+		id: z.string().optional(),
+		success_count: z.number(),
+		failed_count: z.number(),
+		indexing_pending: z.boolean(),
+	};
+
+	const deleteOutputSchema = {
+		id: z.string(),
+		kind: z.enum(["memory", "knowledge"]),
+		deleted: z.boolean(),
+		reason: z.string().optional(),
+	};
+
 	const statusSchema = {
 		ids: z
 			.array(z.string())
@@ -995,11 +1237,35 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.DELETE_MEMORY].params.memory_id),
 	};
 
-	const readOnly = { readOnlyHint: true, idempotentHint: true };
-	const searchAnnotations = {
+	// `destructiveHint` was missing from the annotations type, so no tool could
+	// declare it — and the MCP spec defaults it to TRUE for any non-readonly
+	// tool. A spec-following host therefore read hydradb_ingest as destructive
+	// and could prompt the user before every proactive save, which is exactly the
+	// behaviour the instructions now ask for. Meanwhile hydradb_delete, which IS
+	// destructive, was landing there only by absence — one refactor adding an
+	// explicit `readOnlyHint: false` would have flipped it.
+	//
+	// All four are stated on every tool so none of them depends on a default.
+	const readOnly = {
 		readOnlyHint: true,
-		openWorldHint: true,
+		destructiveHint: false,
 		idempotentHint: true,
+		openWorldHint: true,
+	};
+	const searchAnnotations = readOnly;
+	/** Adds context; never removes any. Repeating it is not a no-op. */
+	const additiveWrite = {
+		readOnlyHint: false,
+		destructiveHint: false,
+		idempotentHint: false,
+		openWorldHint: true,
+	};
+	/** Removes context irreversibly. Repeating it is harmless once it is gone. */
+	const destructive = {
+		readOnlyHint: false,
+		destructiveHint: true,
+		idempotentHint: true,
+		openWorldHint: true,
 	};
 
 	// --- Canonical tools ---
@@ -1011,7 +1277,10 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		searchAnnotations,
 	);
 
-	register(TOOL_NAMES.INGEST, ingestSchema, async (args, extra) => {
+	register(
+		TOOL_NAMES.INGEST,
+		ingestSchema,
+		async (args, extra) => {
 		const a = args as {
 			text?: string;
 			kind?: ContextKind;
@@ -1072,10 +1341,13 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 				extra?.signal,
 			);
 		}
-		throw new Error(
-			`${TOOL_NAMES.INGEST} requires either \`text\` (a note) or \`turns\` (a conversation).`,
-		);
-	});
+			throw new Error(
+				`${TOOL_NAMES.INGEST} requires either \`text\` (a note) or \`turns\` (a conversation).`,
+			);
+		},
+		additiveWrite,
+		ingestOutputSchema,
+	);
 
 	register(
 		TOOL_NAMES.LIST,
@@ -1083,34 +1355,63 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		(args, extra) => {
 			const a = args as {
 				kind?: "memory" | "knowledge";
+				ids?: string[];
 				source_ids?: string[];
 				page?: number;
 				page_size?: number;
 			};
-			if ((a.kind ?? "memory") === "knowledge") {
+			// Compare as SETS. These are filters, so order carries no meaning —
+			// rejecting ["a","b"] against ["b","a"] refuses a request that asked
+			// for exactly one thing, which is worse than the ambiguity the check
+			// exists to catch.
+			// Compare DISTINCT members. An earlier version compared lengths and
+			// union size, which called ["a","b"] and ["a","a"] equivalent — same
+			// length, same union size — and then silently listed records the
+			// deprecated filter had excluded.
+			const sameIds = (x: string[], y: string[]) => {
+				const left = new Set(x);
+				const right = new Set(y);
+				return left.size === right.size && [...left].every((v) => right.has(v));
+			};
+			if (
+				a.ids != null &&
+				a.source_ids != null &&
+				!sameIds(a.ids, a.source_ids)
+			) {
+				throw new Error(
+					`${TOOL_NAMES.LIST} received different values for \`ids\` and its deprecated ` +
+					`alias \`source_ids\`. Pass only \`ids\`.`,
+				);
+			}
+			const ids = a.ids ?? a.source_ids;
+			if (a.kind === "knowledge") {
 				return runListSources(
-					{ source_ids: a.source_ids, page: a.page, page_size: a.page_size },
+					{ source_ids: ids, page: a.page, page_size: a.page_size },
 					extra?.signal,
 				);
 			}
 			return runListMemories(
-				{ source_ids: a.source_ids, page: a.page, page_size: a.page_size },
+				{ source_ids: ids, page: a.page, page_size: a.page_size },
 				extra?.signal,
 			);
 		},
 		readOnly,
+		listOutputSchema,
 	);
 
 	register(
 		TOOL_NAMES.INSPECT,
 		inspectSchema,
-		(args, extra) =>
-			runInspect(args as Parameters<typeof runInspect>[0], extra?.signal),
+		(args, extra) => runInspect(toInspectArgs(args), extra?.signal),
 		readOnly,
 	);
 
-	register(TOOL_NAMES.DELETE, deleteSchema, (args, extra) =>
-		runDelete(args as Parameters<typeof runDelete>[0], extra?.signal),
+	register(
+		TOOL_NAMES.DELETE,
+		deleteSchema,
+		(args, extra) => runDelete(args as Parameters<typeof runDelete>[0], extra?.signal),
+		destructive,
+		deleteOutputSchema,
 	);
 
 	register(
@@ -1121,6 +1422,27 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 	);
 
 	// --- Deprecated aliases ---
+	//
+	// Registered only when HYDRADB_MCP_LEGACY_TOOLS is set. Off by default.
+	//
+	// Twelve tools is not the problem; adversarial naming is. The alias names are
+	// systematically better literal matches for how users phrase requests than
+	// the canonical ones — "search my memory" matches hydra_db_search exactly
+	// while hydradb_query needs a synonym step, "list my memories" matches
+	// hydra_db_list_memories verbatim while hydradb_list additionally needs
+	// `kind` inferred. Every canonical tool has a competitor that wins on surface
+	// form AND requires fewer inferential steps to parameterise, against nothing
+	// but a "DEPRECATED" prefix — a negative instruction losing to a positive
+	// lexical match.
+	//
+	// The cost of losing that contest is real capability, not just a warning:
+	// hydra_db_ingest_conversation cannot set kind, overwrite, title, infer or
+	// is_markdown, and hydra_db_store has no path to `turns`. A model that picks
+	// the alias because the name matched silently gets the lesser tool.
+	//
+	// They also cost every conversation ~1,800 tokens of manifest — 55% of it —
+	// before a single call is made.
+	if (legacyToolsEnabled()) {
 
 	register(
 		TOOL_NAMES.SEARCH,
@@ -1129,11 +1451,17 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		searchAnnotations,
 	);
 
-	register(TOOL_NAMES.STORE, storeSchema, (args, extra) =>
-		runStore(args as Parameters<typeof runStore>[0], extra?.signal),
+	register(
+		TOOL_NAMES.STORE,
+		storeSchema,
+		(args, extra) => runStore(args as Parameters<typeof runStore>[0], extra?.signal),
+		additiveWrite,
 	);
 
-	register(TOOL_NAMES.INGEST_CONVERSATION, conversationSchema, (args, extra) => {
+	register(
+		TOOL_NAMES.INGEST_CONVERSATION,
+		conversationSchema,
+		(args, extra) => {
 		const a = args as {
 			turns: ConversationTurn[];
 			source_id: string;
@@ -1141,13 +1469,15 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		};
 		// The deprecated alias keeps its historical shape (user_name only; infer
 		// on, no title/markdown). The canonical hydradb_ingest forwards the rest.
-		return runIngestConversation(
-			a.turns,
-			a.source_id,
-			{ userName: a.user_name },
-			extra?.signal,
-		);
-	});
+			return runIngestConversation(
+				a.turns,
+				a.source_id,
+				{ userName: a.user_name },
+				extra?.signal,
+			);
+		},
+		additiveWrite,
+	);
 
 	register(
 		TOOL_NAMES.LIST_MEMORIES,
@@ -1167,15 +1497,20 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 	register(
 		TOOL_NAMES.FETCH_CONTENT,
 		inspectSchema,
-		(args, extra) =>
-			runInspect(args as Parameters<typeof runInspect>[0], extra?.signal),
+		(args, extra) => runInspect(toInspectArgs(args), extra?.signal),
 		readOnly,
 	);
 
-	register(TOOL_NAMES.DELETE_MEMORY, deleteMemorySchema, (args, extra) => {
-		const { memory_id } = args as { memory_id: string };
-		return runDelete({ id: memory_id, kind: "memory" }, extra?.signal);
-	});
+	register(
+		TOOL_NAMES.DELETE_MEMORY,
+		deleteMemorySchema,
+		(args, extra) => {
+			const { memory_id } = args as { memory_id: string };
+			return runDelete({ id: memory_id, kind: "memory" }, extra?.signal);
+		},
+		destructive,
+	);
+	}
 
 	return server.server;
 }

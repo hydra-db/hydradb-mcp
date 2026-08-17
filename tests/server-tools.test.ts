@@ -13,7 +13,12 @@ import {
 	awaitInFlight,
 	createHydraDBServer,
 	inFlightCount,
+	legacyToolsEnabled,
 } from "../src/server.js";
+import {
+	CANONICAL_TOOL_NAMES,
+	DEPRECATED_TOOL_NAMES,
+} from "../src/tool-names.js";
 
 type RecordedCall = { method: string; args: Record<string, unknown> };
 
@@ -142,6 +147,9 @@ test("hydradb_ingest rejects both text and turns rather than dropping one", asyn
 
 test("deprecated alias warns exactly once per process, across two server instances", async () => {
 	__resetAliasWarnings();
+	// Aliases are off by default as of 1.2.0; this test is about their behaviour
+	// when a user has explicitly opted back in.
+	process.env.HYDRADB_MCP_LEGACY_TOOLS = "1";
 
 	const original = console.error;
 	const messages: string[] = [];
@@ -158,6 +166,8 @@ test("deprecated alias warns exactly once per process, across two server instanc
 	} finally {
 		console.error = original;
 	}
+
+	delete process.env.HYDRADB_MCP_LEGACY_TOOLS;
 
 	const warnings = messages.filter((m) => m.includes('"hydra_db_search"'));
 	assert.equal(
@@ -230,6 +240,8 @@ test("hydradb_query forwards an explicit kind to the wire `type`", async () => {
 // who has not migrated off `hydra_db_search` is exactly who hit this bug.
 test("the deprecated hydra_db_search alias also searches knowledge", async () => {
 	__resetAliasWarnings();
+	// Aliases are off by default as of 1.2.0; opt in to exercise this one.
+	process.env.HYDRADB_MCP_LEGACY_TOOLS = "1";
 	const { hydra, calls } = mockHydra();
 	const client = await connect(hydra);
 
@@ -240,6 +252,7 @@ test("the deprecated hydra_db_search alias also searches knowledge", async () =>
 
 	assert.equal(calls.find((c) => c.method === "query")?.args.type, "knowledge");
 
+	delete process.env.HYDRADB_MCP_LEGACY_TOOLS;
 	await client.close();
 });
 
@@ -498,14 +511,17 @@ async function listText(
 // "50 memories:" and an agent that answered as if that were everything. Page 2
 // was unreachable through the MCP at all.
 test("hydradb_list says how much of the corpus a memory page covered", async () => {
-	const { text } = await listText({
-		user_memories: [
-			{ memory_id: "m1", memory_content: "prefers tabs" },
-			{ memory_id: "m2", memory_content: "deploys Tuesdays" },
-		],
-		total: 412,
-		pagination: { page: 1, page_size: 2, total_pages: 206, has_next: true },
-	});
+	const { text } = await listText(
+		{
+			user_memories: [
+				{ memory_id: "m1", memory_content: "prefers tabs" },
+				{ memory_id: "m2", memory_content: "deploys Tuesdays" },
+			],
+			total: 412,
+			pagination: { page: 1, page_size: 2, total_pages: 206, has_next: true },
+		},
+		{ kind: "memory" },
+	);
 
 	assert.match(text, /2 of 412/, "must not present one page as the whole store");
 	assert.match(text, /page 1/);
@@ -525,18 +541,24 @@ test("hydradb_list forwards page and page_size for memories", async () => {
 });
 
 test("hydradb_list stays terse when one page is the whole corpus", async () => {
-	const { text } = await listText({
-		user_memories: [{ memory_id: "m1", memory_content: "prefers tabs" }],
-		total: 1,
-		pagination: { page: 1, page_size: 50, total_pages: 1, has_next: false },
-	});
+	const { text } = await listText(
+		{
+			user_memories: [{ memory_id: "m1", memory_content: "prefers tabs" }],
+			total: 1,
+			pagination: { page: 1, page_size: 50, total_pages: 1, has_next: false },
+		},
+		{ kind: "memory" },
+	);
 
 	assert.match(text, /^1 memories:/);
 	assert.doesNotMatch(text, /page=/, "no next-page hint when there is no next page");
 });
 
 test("hydradb_list distinguishes an empty page from an empty store", async () => {
-	const { text } = await listText({ user_memories: [], total: 400 }, { page: 99 });
+	const { text } = await listText(
+		{ user_memories: [], total: 400 },
+		{ kind: "memory", page: 99 },
+	);
 
 	assert.match(text, /No memories on page 99/);
 	assert.doesNotMatch(text, /No memories stored yet/);
@@ -974,7 +996,7 @@ test("hydradb_list does not advertise a next page on the last page", async () =>
 		})),
 		total: 412,
 		pagination: { page: 9, page_size: 50, total_pages: 9, has_next: false },
-	}, { page: 9 });
+	}, { kind: "memory", page: 9 });
 
 	assert.match(text, /12 of 412 \(page 9\)/);
 	assert.doesNotMatch(text, /page=10/, "there is no page 10");
@@ -988,7 +1010,7 @@ test("hydradb_list infers the last page from total_pages when has_next is absent
 		user_memories: [{ memory_id: "m1", memory_content: "x" }],
 		total: 412,
 		pagination: { page: 9, page_size: 50, total_pages: 9 },
-	}, { page: 9 });
+	}, { kind: "memory", page: 9 });
 
 	assert.doesNotMatch(text, /for more/);
 });
@@ -1001,7 +1023,7 @@ test("hydradb_list still advertises a next page in the middle of a corpus", asyn
 		})),
 		total: 412,
 		pagination: { page: 2, page_size: 50, total_pages: 9, has_next: true },
-	}, { page: 2 });
+	}, { kind: "memory", page: 2 });
 
 	assert.match(text, /page=3 for more/);
 });
@@ -1312,4 +1334,526 @@ test("calls are accepted again once the shutdown flag is cleared", async () => {
 	assert.equal(calls.length, 1);
 
 	await client.close();
+});
+
+/** Tool names advertised by a server built under the given env. */
+async function listedTools(legacy: string | undefined): Promise<string[]> {
+	const previous = process.env.HYDRADB_MCP_LEGACY_TOOLS;
+	if (legacy == null) delete process.env.HYDRADB_MCP_LEGACY_TOOLS;
+	else process.env.HYDRADB_MCP_LEGACY_TOOLS = legacy;
+
+	const client = await connect(mockHydra().hydra);
+	const { tools } = await client.listTools();
+	await client.close();
+
+	if (previous == null) delete process.env.HYDRADB_MCP_LEGACY_TOOLS;
+	else process.env.HYDRADB_MCP_LEGACY_TOOLS = previous;
+	return tools.map((t) => t.name);
+}
+
+// The alias names are systematically better literal matches for how users
+// phrase requests than the canonical ones ("search my memory" -> hydra_db_search
+// exactly), and picking one costs real capability: hydra_db_ingest_conversation
+// cannot set kind, overwrite, title, infer or is_markdown.
+test("deprecated aliases are not registered by default", async () => {
+	const names = await listedTools(undefined);
+
+	for (const canonical of CANONICAL_TOOL_NAMES) {
+		assert.ok(names.includes(canonical), `${canonical} must always be registered`);
+	}
+	for (const alias of DEPRECATED_TOOL_NAMES) {
+		assert.ok(!names.includes(alias), `${alias} must be off by default`);
+	}
+	assert.equal(names.length, CANONICAL_TOOL_NAMES.length);
+});
+
+test("HYDRADB_MCP_LEGACY_TOOLS restores every alias", async () => {
+	const names = await listedTools("1");
+
+	for (const alias of DEPRECATED_TOOL_NAMES) {
+		assert.ok(names.includes(alias), `${alias} should return when opted in`);
+	}
+	assert.equal(
+		names.length,
+		CANONICAL_TOOL_NAMES.length + DEPRECATED_TOOL_NAMES.length,
+	);
+});
+
+test("the legacy opt-in accepts the usual truthy spellings and nothing else", async () => {
+	for (const on of ["1", "true", "TRUE", "yes", "on", " 1 "]) {
+		assert.ok(legacyToolsEnabled({ HYDRADB_MCP_LEGACY_TOOLS: on }), `"${on}" should enable`);
+	}
+	for (const off of ["0", "false", "no", "off", "", "maybe"]) {
+		assert.ok(
+			!legacyToolsEnabled({ HYDRADB_MCP_LEGACY_TOOLS: off }),
+			`"${off}" should not enable`,
+		);
+	}
+	assert.ok(!legacyToolsEnabled({}));
+});
+
+// The point of the gate is the manifest a client pays for on every conversation.
+test("dropping the aliases materially shrinks the tool manifest", async () => {
+	const measure = async (legacy: string | undefined) => {
+		const previous = process.env.HYDRADB_MCP_LEGACY_TOOLS;
+		if (legacy == null) delete process.env.HYDRADB_MCP_LEGACY_TOOLS;
+		else process.env.HYDRADB_MCP_LEGACY_TOOLS = legacy;
+		const client = await connect(mockHydra().hydra);
+		const size = JSON.stringify((await client.listTools()).tools).length;
+		await client.close();
+		if (previous == null) delete process.env.HYDRADB_MCP_LEGACY_TOOLS;
+		else process.env.HYDRADB_MCP_LEGACY_TOOLS = previous;
+		return size;
+	};
+
+	const lean = await measure(undefined);
+	const withAliases = await measure("1");
+
+	assert.ok(
+		lean < withAliases * 0.75,
+		`expected a substantial reduction, got ${lean} vs ${withAliases} chars`,
+	);
+});
+
+// `hydradb_list({})` returned memories only and read as the complete inventory,
+// so a caller asking "what does Hydra DB have?" never saw the knowledge corpus —
+// which hydradb_query searches by default. `kind` also meant three different
+// things across three tools (query defaults to `all`, list and delete to
+// `memory`), so a model that learned "kind covers everything" from query read an
+// empty-of-knowledge listing as proof no knowledge exists.
+test("hydradb_list requires kind rather than silently picking one", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	const result = await client.callTool({ name: "hydradb_list", arguments: {} });
+
+	assert.equal(result.isError, true, "omitting kind must not quietly mean 'memory'");
+	assert.equal(
+		calls.filter((c) => c.method === "list").length,
+		0,
+		"no listing should be issued when the corpus is ambiguous",
+	);
+
+	await client.close();
+});
+
+test("hydradb_list still serves each family when kind is given", async () => {
+	for (const kind of ["memory", "knowledge"] as const) {
+		const { calls } = await listText(
+			{ user_memories: [], sources: [], total: 0 },
+			{ kind },
+		);
+		assert.equal(calls.find((c) => c.method === "list")?.args.type, kind);
+	}
+});
+
+// `title` is the ONLY per-chunk label buildRecalledContext renders, so the old
+// constant default meant fifty untitled saves produced fifty recall results all
+// reading "Source: MCP Memory" — no way to cite a fact's origin, or to tell two
+// chunks apart.
+test("hydradb_ingest derives a title instead of stamping a constant", async () => {
+	const cases: [string, string][] = [
+		["Prefers tabs over spaces in every language.", "Prefers tabs over spaces in every language."],
+		["# Restart runbook\n\nRestart order: api, worker.", "Restart runbook"],
+		["   \n  \n", "Untitled note"],
+	];
+
+	for (const [text, expected] of cases) {
+		const { hydra, calls } = mockHydra();
+		const client = await connect(hydra);
+		await client.callTool({ name: "hydradb_ingest", arguments: { text } });
+
+		const item = (
+			JSON.parse(String(calls.find((c) => c.method === "ingest")!.args.memories)) as Record<string, unknown>[]
+		)[0]!;
+		assert.equal(item.title, expected, `title derived from: ${JSON.stringify(text)}`);
+		assert.notEqual(item.title, "MCP Memory");
+		await client.close();
+	}
+});
+
+test("a long first line is truncated rather than used whole as a title", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+	await client.callTool({
+		name: "hydradb_ingest",
+		arguments: { text: `${"word ".repeat(40)}\nsecond line` },
+	});
+
+	const item = (
+		JSON.parse(String(calls.find((c) => c.method === "ingest")!.args.memories)) as Record<string, unknown>[]
+	)[0]!;
+	assert.ok(String(item.title).length <= 61, `title too long: ${item.title}`);
+	assert.match(String(item.title), /…$/);
+	await client.close();
+});
+
+test("an explicit title always wins", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+	await client.callTool({
+		name: "hydradb_ingest",
+		arguments: { text: "# Heading\n\nbody", title: "Deployment rollback policy" },
+	});
+
+	const item = (
+		JSON.parse(String(calls.find((c) => c.method === "ingest")!.args.memories)) as Record<string, unknown>[]
+	)[0]!;
+	assert.equal(item.title, "Deployment rollback policy");
+	await client.close();
+});
+
+// `destructiveHint` was absent from the register() annotations type, so no tool
+// could declare it — and the MCP spec defaults it to TRUE for any non-readonly
+// tool. A spec-following host therefore read hydradb_ingest as destructive and
+// could prompt before every proactive save, killing the behaviour the
+// instructions ask for. hydradb_delete meanwhile was destructive only by
+// absence, one refactor away from flipping.
+test("every tool declares all four behaviour hints explicitly", async () => {
+	process.env.HYDRADB_MCP_LEGACY_TOOLS = "1";
+	const client = await connect(mockHydra().hydra);
+	const { tools } = await client.listTools();
+	delete process.env.HYDRADB_MCP_LEGACY_TOOLS;
+
+	for (const tool of tools) {
+		const a = tool.annotations ?? {};
+		for (const hint of [
+			"readOnlyHint",
+			"destructiveHint",
+			"idempotentHint",
+			"openWorldHint",
+		] as const) {
+			assert.equal(
+				typeof a[hint],
+				"boolean",
+				`${tool.name} must state ${hint} rather than inherit a default`,
+			);
+		}
+	}
+	await client.close();
+});
+
+test("reads are read-only, writes are not, and only deletes are destructive", async () => {
+	process.env.HYDRADB_MCP_LEGACY_TOOLS = "1";
+	const client = await connect(mockHydra().hydra);
+	const { tools } = await client.listTools();
+	delete process.env.HYDRADB_MCP_LEGACY_TOOLS;
+
+	const hint = (name: string) =>
+		tools.find((t) => t.name === name)!.annotations as Record<string, boolean>;
+
+	for (const name of [
+		"hydradb_query",
+		"hydradb_list",
+		"hydradb_inspect",
+		"hydradb_status",
+	]) {
+		assert.equal(hint(name).readOnlyHint, true, `${name} should be read-only`);
+		assert.equal(hint(name).destructiveHint, false);
+	}
+
+	// Ingest writes but never removes; a host must not gate it behind a
+	// destructive-action prompt.
+	for (const name of ["hydradb_ingest", "hydra_db_store", "hydra_db_ingest_conversation"]) {
+		assert.equal(hint(name).readOnlyHint, false, `${name} writes`);
+		assert.equal(
+			hint(name).destructiveHint,
+			false,
+			`${name} adds context and must not read as destructive`,
+		);
+	}
+
+	for (const name of ["hydradb_delete", "hydra_db_delete_memory"]) {
+		assert.equal(hint(name).destructiveHint, true, `${name} removes data irreversibly`);
+	}
+
+	await client.close();
+});
+
+// CONTRACT §1 says a source's identifier field is `id`, but one concept was
+// spelled three ways across tools designed to chain: inspect took `source_id`,
+// list took `source_ids`, delete took `id`.
+test("hydradb_inspect accepts the canonical id and the old spelling", async () => {
+	for (const args of [{ id: "s1" }, { source_id: "s1" }]) {
+		const { hydra, calls } = mockHydra({ inspect: { success: true, content: "body" } });
+		const client = await connect(hydra);
+		const result = await client.callTool({ name: "hydradb_inspect", arguments: args });
+
+		assert.notEqual(result.isError, true, `should accept ${JSON.stringify(args)}`);
+		assert.equal(calls.find((c) => c.method === "inspect")?.args.id, "s1");
+		await client.close();
+	}
+});
+
+test("hydradb_inspect says where an id comes from when none is given", async () => {
+	const { hydra } = mockHydra();
+	const client = await connect(hydra);
+	const result = await client.callTool({ name: "hydradb_inspect", arguments: {} });
+
+	assert.equal(result.isError, true);
+	const text = (result.content as { text: string }[])[0]!.text;
+	assert.match(text, /requires `id`/);
+	assert.match(text, /hydradb_query|hydradb_list/);
+	await client.close();
+});
+
+test("hydradb_list accepts ids and the old source_ids spelling", async () => {
+	for (const key of ["ids", "source_ids"] as const) {
+		const { calls } = await listText(
+			{ user_memories: [], total: 0 },
+			{ kind: "memory", [key]: ["s1", "s2"] },
+		);
+		assert.deepEqual(calls.find((c) => c.method === "list")?.args.ids, ["s1", "s2"]);
+	}
+});
+
+// The query path marks truncation with "..."; the listing did not, so a caller
+// read a half sentence as a whole fact.
+test("hydradb_list marks a truncated memory row", async () => {
+	const { text } = await listText(
+		{
+			user_memories: [{ memory_id: "m1", memory_content: "x".repeat(300) }],
+			total: 1,
+		},
+		{ kind: "memory" },
+	);
+
+	assert.match(text, /x{150}\.\.\./, "a truncated row must say it was truncated");
+});
+
+test("hydradb_list does not add an ellipsis to a short row", async () => {
+	const { text } = await listText(
+		{ user_memories: [{ memory_id: "m1", memory_content: "short fact" }], total: 1 },
+		{ kind: "memory" },
+	);
+
+	assert.match(text, /\[m1\] short fact/);
+	assert.doesNotMatch(text, /short fact\.\.\./);
+});
+
+// Every handler returned prose only, so a caller wanting an id had to pull it
+// out of a sentence. structuredContent hands the same facts over already parsed.
+test("hydradb_list returns structured items alongside the text", async () => {
+	const { hydra } = mockHydra({
+		list: {
+			user_memories: [
+				{ memory_id: "m1", memory_content: "prefers tabs" },
+				{ memory_id: "m2", memory_content: "deploys Tuesdays" },
+			],
+			total: 412,
+			pagination: { page: 1, page_size: 2, total_pages: 206, has_next: true },
+		},
+	});
+	const client = await connect(hydra);
+	const result = await client.callTool({
+		name: "hydradb_list",
+		arguments: { kind: "memory" },
+	});
+	await client.close();
+
+	const structured = result.structuredContent as Record<string, unknown>;
+	assert.ok(structured, "list should return structuredContent");
+	assert.equal(structured.kind, "memory");
+	assert.equal(structured.shown, 2);
+	assert.equal(structured.total, 412);
+	assert.equal(structured.has_more, true);
+	assert.deepEqual((structured.items as { id: string }[]).map((i) => i.id), ["m1", "m2"]);
+
+	// The prose must survive for hosts that ignore structured output.
+	assert.match((result.content as { text: string }[])[0]!.text, /2 of 412/);
+});
+
+test("hydradb_ingest returns the created id as structured data", async () => {
+	const { hydra } = mockHydra({
+		ingest: {
+			success: true,
+			successCount: 1,
+			failedCount: 0,
+			results: [{ id: "srv-9", status: "completed", error: "" }],
+		},
+	});
+	const client = await connect(hydra);
+	const result = await client.callTool({
+		name: "hydradb_ingest",
+		arguments: { text: "a note" },
+	});
+	await client.close();
+
+	const structured = result.structuredContent as Record<string, unknown>;
+	assert.equal(structured.id, "srv-9");
+	assert.equal(structured.success_count, 1);
+	assert.equal(structured.failed_count, 0);
+	// Indexing is asynchronous, so a caller that wants to confirm must poll.
+	assert.equal(structured.indexing_pending, true);
+});
+
+test("hydradb_delete reports its outcome as structured data", async () => {
+	const cases: [Record<string, unknown>, boolean][] = [
+		[{ success: true, userMemoryDeleted: 1 }, true],
+		[{ success: true, deletedCount: 0 }, false],
+	];
+
+	for (const [response, expected] of cases) {
+		const { hydra } = mockHydra({ delete: response });
+		const client = await connect(hydra);
+		const result = await client.callTool({
+			name: "hydradb_delete",
+			arguments: { id: "m1", kind: "memory" },
+		});
+		await client.close();
+
+		const structured = result.structuredContent as Record<string, unknown>;
+		assert.equal(structured.id, "m1");
+		assert.equal(structured.kind, "memory");
+		assert.equal(
+			structured.deleted,
+			expected,
+			`deleted flag for ${JSON.stringify(response)}`,
+		);
+	}
+});
+
+// An empty result is still a result; a caller branching on `items` should not
+// have to special-case it.
+test("an empty listing still carries structured content", async () => {
+	const { hydra } = mockHydra({ list: { user_memories: [], total: 0 } });
+	const client = await connect(hydra);
+	const result = await client.callTool({
+		name: "hydradb_list",
+		arguments: { kind: "memory" },
+	});
+	await client.close();
+
+	const structured = result.structuredContent as Record<string, unknown>;
+	assert.deepEqual(structured.items, []);
+	assert.equal(structured.has_more, false);
+});
+
+// Greptile, PR #48: the structured payload carried every memory_content in
+// full while the prose beside it showed 150 characters per row — so a host
+// consuming structured output got megabytes from a routine inventory call.
+// Structured output is a different encoding of the same answer, not a bypass
+// of its limits.
+test("structured list items are bounded like the text preview", async () => {
+	const { hydra } = mockHydra({
+		list: {
+			user_memories: Array.from({ length: 20 }, (_, i) => ({
+				memory_id: `m${i}`,
+				memory_content: "x".repeat(5000),
+			})),
+			total: 20,
+		},
+	});
+	const client = await connect(hydra);
+	const result = await client.callTool({
+		name: "hydradb_list",
+		arguments: { kind: "memory" },
+	});
+	await client.close();
+
+	const items = (result.structuredContent as { items: { content: string }[] }).items;
+	for (const item of items) {
+		assert.ok(
+			item.content.length <= 153,
+			`structured content must be previewed, got ${item.content.length} chars`,
+		);
+	}
+	assert.ok(JSON.stringify(items).length < 5000, "the whole payload must stay small");
+});
+
+// Silently picking one of two conflicting values means acting on a target the
+// caller did not ask for — and for delete, that target gets destroyed.
+test("hydradb_inspect rejects conflicting id and source_id", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+	const result = await client.callTool({
+		name: "hydradb_inspect",
+		arguments: { id: "wanted", source_id: "different" },
+	});
+	await client.close();
+
+	assert.equal(result.isError, true);
+	assert.match((result.content as { text: string }[])[0]!.text, /different values/);
+	assert.equal(calls.filter((c) => c.method === "inspect").length, 0);
+});
+
+test("matching id and source_id are accepted", async () => {
+	const { hydra, calls } = mockHydra({ inspect: { success: true, content: "body" } });
+	const client = await connect(hydra);
+	const result = await client.callTool({
+		name: "hydradb_inspect",
+		arguments: { id: "same", source_id: "same" },
+	});
+	await client.close();
+
+	assert.notEqual(result.isError, true);
+	assert.equal(calls.find((c) => c.method === "inspect")?.args.id, "same");
+});
+
+test("hydradb_list rejects conflicting ids and source_ids", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+	const result = await client.callTool({
+		name: "hydradb_list",
+		arguments: { kind: "memory", ids: ["a"], source_ids: ["b"] },
+	});
+	await client.close();
+
+	assert.equal(result.isError, true);
+	assert.equal(calls.filter((c) => c.method === "list").length, 0);
+});
+
+// Greptile, PR #48: `ids` and `source_ids` are filters, so order carries no
+// meaning. Comparing them as serialized arrays rejected a request that asked for
+// exactly one thing.
+test("hydradb_list accepts the same ids in a different order", async () => {
+	const { calls } = await listText(
+		{ user_memories: [], total: 0 },
+		{ kind: "memory", ids: ["a", "b"], source_ids: ["b", "a"] },
+	);
+
+	const call = calls.find((c) => c.method === "list");
+	assert.ok(call, "an equivalent filter must not be rejected");
+	assert.deepEqual(call.args.ids, ["a", "b"]);
+});
+
+test("hydradb_list still rejects genuinely different id sets", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+	const result = await client.callTool({
+		name: "hydradb_list",
+		arguments: { kind: "memory", ids: ["a", "b"], source_ids: ["a", "c"] },
+	});
+	await client.close();
+
+	assert.equal(result.isError, true);
+	assert.equal(calls.filter((c) => c.method === "list").length, 0);
+});
+
+// Greptile, PR #48: comparing lengths and union size called ["a","b"] and
+// ["a","a"] equivalent, so the handler silently listed records the deprecated
+// filter had excluded.
+test("hydradb_list rejects id sets that differ only by repetition", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+	const result = await client.callTool({
+		name: "hydradb_list",
+		arguments: { kind: "memory", ids: ["a", "b"], source_ids: ["a", "a"] },
+	});
+	await client.close();
+
+	assert.equal(result.isError, true, "these filters ask for different things");
+	assert.equal(calls.filter((c) => c.method === "list").length, 0);
+});
+
+test("a repeated id is still the same filter as the id alone", async () => {
+	const { calls } = await listText(
+		{ user_memories: [], total: 0 },
+		{ kind: "memory", ids: ["a", "a"], source_ids: ["a"] },
+	);
+
+	assert.ok(
+		calls.find((c) => c.method === "list"),
+		"{a} and {a} are the same set and must not be rejected",
+	);
 });

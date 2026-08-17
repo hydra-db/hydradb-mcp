@@ -11,22 +11,45 @@ import { ALIAS_REPLACEMENTS, TOOL_NAMES } from "./tool-names.js";
 
 // Shared parameter blurbs, reused across canonical tools and their aliases.
 const PARAM = {
-	query: "The search query to find relevant memories and knowledge",
+	query:
+		"What you want to know, as a natural-language question or topic — this is semantic " +
+		"search, so a full question beats keywords. Search for the CONCEPT, not the words " +
+		"the user used: 'database migration decisions' will find a memory written as 'we " +
+		"settled on Atlas for schema changes'.",
 	query_kind:
 		"Which context family to search: 'memory' for stored user memories, " +
 		"'knowledge' for ingested documents and sources, or 'all' for both " +
 		"(default: 'all'). Leave unset unless you specifically want to exclude one family.",
-	max_results: "Maximum number of chunks to return (1-50, default: 10)",
-	mode: "Recall mode: 'fast' for quick semantic search, 'thinking' for deeper personalised recall with graph traversal (default: 'thinking')",
+	max_results:
+		"Maximum CHUNKS to return (1-50, default: 10). Chunks, not whole memories or " +
+		"documents — several chunks often come from one source. Raise to 20-30 for broad " +
+		"coverage of a topic; drop to 3-5 when you want one specific fact and a small " +
+		"response.",
+	mode:
+		"'thinking' (default) runs graph traversal and personalised reranking: a few " +
+		"seconds, best recall — use it when the answer matters or the question is about " +
+		"the user. 'fast' is plain semantic search and is markedly quicker — use it for a " +
+		"lookup you expect to hit, or when issuing several queries in a row.",
 	graph_context:
-		"Whether to include knowledge graph relations in results (default: true)",
-	text: "The information to store in memory",
+		"Include knowledge-graph relations (default: true). These are the entity paths — " +
+		"(Alice)-[prefers]->(Tea) — that connect facts across separate memories, and they " +
+		"often carry the answer the matching text alone does not. Set false only when you " +
+		"want the raw matching text and nothing else.",
+	text:
+		"The information to store. Provide EXACTLY ONE of `text` or `turns` — passing " +
+		"both is an error, and so is passing neither. Write it standalone: it must still " +
+		"make sense months from now with no surrounding conversation, so resolve pronouns " +
+		"and relative dates ('in March 2026', not 'last week').",
 	ingest_kind:
 		"What to write: 'memory' for a personal fact, preference or conversation " +
 		"(default), or 'knowledge' to store a document as a searchable source. " +
 		"Memory-only options (turns, source_id, infer, is_markdown, user_name) do not " +
 		"apply to knowledge and are rejected rather than ignored.",
-	title: "Optional title for the memory entry (default: 'MCP Memory')",
+	title:
+		"A short, specific label — always set it. This is the ONLY label shown next to " +
+		"this entry in later hydradb_query results, so 'Deployment rollback policy' is " +
+		"useful where a generic one tells you nothing. If omitted, a title is derived " +
+		"from the first line of the text, which is rarely as good as one you choose.",
 	source_id:
 		"Optional identifier for this entry. Ingesting again with an existing source_id " +
 		"REPLACES everything previously stored under it — it does not add to it. Use a fresh " +
@@ -36,11 +59,24 @@ const PARAM = {
 		"Whether ingesting with an existing source_id may replace what is stored there " +
 		"(default: true). Set false to have the server reject the write instead of " +
 		"overwriting, when you expect to be creating something new.",
-	infer: "Whether Hydra DB should extract insights and build knowledge graph from this text (default: true)",
-	is_markdown: "Whether the text is in markdown format (default: false)",
+	infer:
+		"Let Hydra DB extract insights and knowledge-graph entities from this text " +
+		"(default: true). Keep it true for anything about the user or their work — that " +
+		"extraction is what makes the content findable by concept later. Set false only to " +
+		"store text verbatim with no interpretation (a config snippet, an exact error " +
+		"string, a code block).",
+	is_markdown:
+		"Set true when `text` contains markdown (headings, lists, code fences) so Hydra DB " +
+		"chunks on structure instead of splitting mid-section. Default false.",
 	turns: "Array of conversation turns, each with a 'user' and 'assistant' field",
-	user_name: "Optional name of the user for personalisation (default: 'User')",
-	kind: "Which context family to list: 'memory' or 'knowledge' (default: 'memory')",
+	user_name:
+		"What to call the user in the stored conversation (default: 'User'). Set it when " +
+		"you know their actual name, so extracted facts read as being about a person " +
+		"rather than about an anonymous participant. Applies to `turns` only.",
+	kind:
+		"Which family to list: 'memory' (stored memories) or 'knowledge' (ingested " +
+		"sources). REQUIRED — these are separate corpora with different output, and no " +
+		"single listing covers both. Call this twice to see everything.",
 	source_ids:
 		"Optional array of specific source IDs to filter by. If omitted, lists all sources.",
 	page:
@@ -52,7 +88,9 @@ const PARAM = {
 		"Raise it to see more at once; lower it to keep the response small.",
 	fetch_source_id: "The source ID to fetch content for",
 	fetch_mode:
-		"Fetch mode: 'content' for text, 'url' for presigned URL, 'both' for both (default: 'content')",
+		"'content' (default) returns the text — normally what you want. 'url' returns a " +
+		"short-lived presigned download link INSTEAD of the text, for binary sources or " +
+		"when handing the user a download. 'both' returns text and link.",
 	fetch_offset:
 		"Character offset to start reading from (default: 0). Long sources are returned " +
 		"in slices; the response says where it stopped and what offset to pass next.",
@@ -69,20 +107,32 @@ function deprecated(alias: string, body: string): string {
 	return `DEPRECATED — use \`${ALIAS_REPLACEMENTS[alias]}\` instead. ${body}`;
 }
 
-const SEARCH_BODY =
-	"Search through Hydra DB State-of-the-art agentic context — both stored memories AND " +
-	"ingested knowledge sources (documents, files, playbooks). Returns relevant chunks with " +
-	"graph-enriched context including entity paths and knowledge graph relations. " +
-	"Use this to find previously stored information, past conversations, user preferences, " +
-	"or any document that has been ingested into Hydra DB. Searches both families by default; " +
-	"pass `kind` to narrow to one. " +
-	"Supports both fast semantic search and deeper thinking mode with graph traversal.";
+const SEARCH_BODY = `Search Hydra DB for anything the user has stored: memories (facts, preferences, decisions, past conversations) and ingested knowledge sources (documents, files, playbooks). Returns matching chunks with their source id, a relevance score, and knowledge-graph context — the entity paths and relations that connect facts across separate sources.
 
-const STORE_BODY =
-	"Save important information to Hydra DB State-of-the-art agentic memory. Use this to persist " +
-	"facts, preferences, decisions, notes, or any text the user wants remembered across " +
-	"sessions. Hydra DB automatically extracts insights, preferences, and builds a knowledge " +
-	"graph from the stored content. Supports plain text and markdown.";
+CALL THIS BEFORE ANSWERING whenever the answer could depend on the user's history, preferences, prior decisions, project details, or a document they have ingested — including when you are merely unsure. A query that returns nothing costs one call; answering from a blank slate costs the user a correction.
+
+Searches both families by default. Every result carries \`[id: …]\` — pass it to hydradb_inspect for the full source, or to hydradb_delete to remove it.
+
+Examples:
+  {"query": "how does the user prefer code review feedback"}
+  {"query": "postgres connection pooling decision", "kind": "knowledge"}
+  {"query": "deploy checklist", "mode": "fast", "max_results": 5}`;
+
+const STORE_BODY = `Save information to Hydra DB so it outlives this session. Hydra DB extracts insights, preferences and knowledge-graph entities from what you store.
+
+Provide EXACTLY ONE of:
+  \`text\`  — a note, fact, decision, or document body
+  \`turns\` — user/assistant pairs from a conversation
+Passing both is an error; passing neither is an error.
+
+Save proactively: when the user states a preference, makes a decision, corrects you, or reveals a durable fact about themselves or their work, store it without being asked. Store the distilled fact rather than the raw exchange, and always set \`title\` — it is the only label shown next to this entry in later search results. Before saving something you suspect is already stored, query for it first rather than adding a near-duplicate.
+
+Never store secrets, credentials, or anything the user asked you not to keep.
+
+Examples:
+  {"text": "Prefers tabs over spaces in every language; rejected two prettier configs that used spaces.", "title": "Indentation preference"}
+  {"turns": [{"user": "let's go with Postgres", "assistant": "Agreed, I'll set up the schema."}], "title": "Datastore decision"}
+  {"text": "# Runbook\\n\\nRestart order: api, worker, scheduler.", "kind": "knowledge", "title": "Restart runbook"}`;
 
 const CONVERSATION_BODY =
 	"Ingest one or more user-assistant conversation turns into Hydra DB memory. " +
@@ -100,10 +150,11 @@ const LIST_SOURCES_BODY =
 	"and metadata. Use this to see what data sources have been ingested and to find " +
 	"source IDs for fetching content.";
 
-const INSPECT_BODY =
-	"Fetch the full content of a specific source by its source ID from Hydra DB. " +
-	"Returns the original text content that was ingested. Use this to retrieve " +
-	"the complete content of a previously stored source.";
+const INSPECT_BODY = `Fetch the full original content of ONE stored item by its id. Use it after hydradb_query or hydradb_list when a truncated chunk or listing row is not enough and you need the whole document.
+
+The id is the value shown as \`[id: …]\` in hydradb_query results and in [brackets] in hydradb_list output. Ids are not guessable — take one from those tools rather than constructing it.
+
+Long sources come back in slices; the response says where it stopped and what offset continues it. Binary sources are never inlined — you get their type and size, and \`mode: "url"\` returns a download link.`;
 
 export const TOOL_DESCRIPTIONS = {
 	// --- Canonical tools (CONTRACT §3) ---
@@ -122,10 +173,11 @@ export const TOOL_DESCRIPTIONS = {
 
 	[TOOL_NAMES.INGEST]: {
 		title: "Ingest into Hydra DB",
-		description:
-			STORE_BODY +
-			" To ingest a conversation instead of a single note, provide `turns` " +
-			"(user/assistant pairs) rather than `text`.",
+		// STORE_BODY already states the text/turns rule as "exactly one of". The
+		// sentence that used to be appended here said "provide `turns` … rather
+		// than `text`", which reads as a preference between two allowed options
+		// and contradicts it.
+		description: STORE_BODY,
 		params: {
 			text: PARAM.text,
 			kind: PARAM.ingest_kind,
@@ -134,16 +186,24 @@ export const TOOL_DESCRIPTIONS = {
 			infer: PARAM.infer,
 			is_markdown: PARAM.is_markdown,
 			overwrite: PARAM.overwrite,
-			turns: "Optional conversation turns to ingest instead of `text`; each has a 'user' and 'assistant' field",
+			turns:
+				"The conversation to ingest, oldest first, as [{user, assistant}, ...]. Provide " +
+				"EXACTLY ONE of `text` or `turns` — passing both is an error, and so is passing " +
+				"neither. Use this when the exchange itself is worth preserving; when only the " +
+				"conclusion matters, prefer `text` with the distilled fact.",
 			user_name: PARAM.user_name,
 		},
 	},
 
 	[TOOL_NAMES.LIST]: {
 		title: "List Hydra DB Context",
-		description:
-			"List stored memories or ingested knowledge sources in Hydra DB. " +
-			"Use `kind` to choose which family to browse.",
+		description: `Enumerate what is stored in Hydra DB — every memory (kind: "memory") or every knowledge source (kind: "knowledge"). These are SEPARATE corpora and this tool returns one at a time: listing memories tells you nothing about which knowledge sources exist, and vice versa. Call it twice to see everything.
+
+Use it for inventory questions ("what do you remember about me?", "which documents are indexed?") and to obtain ids. For "what do you know about X", use hydradb_query instead — listing everything and reading it is far more expensive and loses relevance ranking.
+
+Results are paginated. The response says how many of the total it showed and how to reach the rest; do not treat the first page as the whole store.
+
+Memory rows come back as [id] content. Knowledge rows as [id] — title (type), with no content — pass an id to hydradb_inspect for the text.`,
 		params: {
 			kind: PARAM.kind,
 			source_ids: PARAM.source_ids,
@@ -165,9 +225,11 @@ export const TOOL_DESCRIPTIONS = {
 
 	[TOOL_NAMES.DELETE]: {
 		title: "Delete from Hydra DB",
-		description:
-			"Delete a memory or knowledge source from Hydra DB by its ID. " +
-			"Use `kind` to select which family the ID belongs to. This action is irreversible.",
+		description: `Permanently remove one memory or one knowledge source from Hydra DB by id. This cannot be undone; there is no trash.
+
+Take the id from hydradb_query or hydradb_list — never guess one. Confirm with the user before deleting anything they did not name: "forget that I use vim" authorises deleting that memory; "clean up my memories" authorises nothing until they have seen the list.
+
+\`kind\` must match the family the id belongs to. A knowledge source id passed with kind "memory" reports that nothing was deleted while the source is still there.`,
 		params: {
 			id: PARAM.delete_id,
 			kind: PARAM.delete_kind,
@@ -262,22 +324,24 @@ export const TOOL_DESCRIPTIONS = {
 	},
 } as const;
 
-export const SERVER_INSTRUCTIONS =
-	"Hydra DB MCP server for State-of-the-art agentic memory management. " +
-	`Use ${TOOL_NAMES.QUERY} to search stored memories and ingested knowledge sources together, ` +
-	"with knowledge-graph context; pass `kind` to restrict it to one family. " +
-	`Use ${TOOL_NAMES.INGEST} to save information (a note via 'text', or a conversation via 'turns'). ` +
-	`Use ${TOOL_NAMES.LIST} to browse stored memories or knowledge sources. ` +
-	`Use ${TOOL_NAMES.INSPECT} to retrieve the full content of a source. ` +
-	`Use ${TOOL_NAMES.DELETE} to remove a memory or knowledge source. ` +
-	`Use ${TOOL_NAMES.STATUS} to check whether an ingested source has finished indexing — ` +
-	"ingestion is asynchronous, so content is not searchable the instant it is saved. " +
-	"Deprecated aliases remain available for backward compatibility but should not be used in new integrations: " +
-	`${TOOL_NAMES.SEARCH} → ${TOOL_NAMES.QUERY}, ` +
-	`${TOOL_NAMES.STORE} → ${TOOL_NAMES.INGEST}, ` +
-	`${TOOL_NAMES.INGEST_CONVERSATION} → ${TOOL_NAMES.INGEST}, ` +
-	`${TOOL_NAMES.LIST_MEMORIES} → ${TOOL_NAMES.LIST}, ` +
-	`${TOOL_NAMES.LIST_SOURCES} → ${TOOL_NAMES.LIST}, ` +
-	`${TOOL_NAMES.FETCH_CONTENT} → ${TOOL_NAMES.INSPECT}, ` +
-	`${TOOL_NAMES.DELETE_MEMORY} → ${TOOL_NAMES.DELETE}. ` +
-	"All tools require a valid Hydra DB API key and tenant ID configured via environment variables.";
+export const SERVER_INSTRUCTIONS = `Hydra DB is the user's persistent memory across sessions. It holds two separate families: memory (facts, preferences, decisions, past conversations) and knowledge (ingested documents and sources). ${TOOL_NAMES.QUERY} searches both together.
+
+WHEN TO USE IT
+
+- Before answering anything that could depend on the user's history, preferences, prior decisions, project details, or a document they have ingested, call ${TOOL_NAMES.QUERY} FIRST — including when you are merely unsure. One query at the start of a task is cheap; answering from a blank slate costs the user a correction. Never ask the user to repeat something Hydra DB may already hold.
+- After the user states a preference, makes a decision, corrects you, or reveals a durable fact about themselves or their work, call ${TOOL_NAMES.INGEST} to save it without being asked. Save the distilled fact, not the transcript: "prefers pnpm over npm in every repo", not "user said maybe we should try pnpm".
+- Never store secrets, credentials, one-off task chatter, or anything the user asked you not to keep.
+- "Remember this" maps to ${TOOL_NAMES.INGEST}, "forget that" to ${TOOL_NAMES.DELETE}, and "what do you know about me" to ${TOOL_NAMES.QUERY} — do not answer that last one from the current conversation alone.
+
+THE TOOLS
+
+- ${TOOL_NAMES.QUERY} — semantic search across memory and knowledge, with knowledge-graph context. Your default read. Every result carries an id.
+- ${TOOL_NAMES.INGEST} — write. A note or document via 'text', or a conversation via 'turns' (exactly one of the two).
+- ${TOOL_NAMES.LIST} — the full inventory of ONE family. Use it for "what do you have?"; for "what do you know about X" use ${TOOL_NAMES.QUERY} instead.
+- ${TOOL_NAMES.INSPECT} — the complete original content of one source you already have an id for.
+- ${TOOL_NAMES.DELETE} — irreversible removal of one item by id.
+- ${TOOL_NAMES.STATUS} — whether an ingested source has finished indexing. Ingestion is asynchronous, so a query issued straight after a save can legitimately return nothing.
+
+Ids flow between these: ${TOOL_NAMES.QUERY} and ${TOOL_NAMES.LIST} emit them, ${TOOL_NAMES.INSPECT}, ${TOOL_NAMES.DELETE} and ${TOOL_NAMES.STATUS} accept them. Never invent one.
+
+All tools require HYDRADB_API_KEY and HYDRADB_DATABASE in the environment.`;
