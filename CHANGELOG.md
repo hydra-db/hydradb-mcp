@@ -5,6 +5,42 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.1] - 2026-08-17
+
+### Fixed
+
+Two parameters added in 1.2.0 could not succeed under any input. Both failed as a
+remote 400 on a call the caller had already committed to, so the whole tool call
+was lost to a value that had a working form.
+
+- **`operator` on `hydradb_query` failed on every call that set it.** Hydra DB
+  honours an operator only when the request also asks for keyword retrieval, and
+  this server never sent `query_by` — so the parameter answered
+  `400 INVALID_INPUT: operator is only valid with query_by=text` whatever it was
+  set to. An operator now carries the retrieval method it requires, and the one
+  self-contradicting combination (an operator with explicitly hybrid retrieval)
+  is refused here rather than sent out to fail. The cost of that pairing is now
+  in the parameter description instead of being discoverable by 400: setting an
+  operator turns off the hybrid semantic search this tool otherwise runs, so the
+  query matches literal words rather than the concept. The description also stops
+  calling `or` the default, which invited callers to pass it redundantly and lose
+  semantic matching for nothing. The hybrid-only `alpha` weighting is no longer
+  sent on those queries, where there are no two retrieval lanes to weigh.
+- **`observation_date` on `hydradb_ingest` documented a format the API
+  rejects.** The description asked for an RFC3339 date, which is a date-*time*: a
+  model that followed it sent `2026-08-17T00:00:00Z` and lost the entire ingest to
+  `400 INVALID_INPUT: … is not a valid ISO-8601 date (want YYYY-MM-DD)`, on a
+  value that would have worked as `2026-08-17`. The description and the README now
+  state `YYYY-MM-DD` with a worked example, and the schema carries the pattern so
+  the constraint reaches the model choosing the value. A date-time is the form a
+  model reaches for when writing a date in JSON, so it is accepted and kept as its
+  date part — trimmed textually, which keeps the day the caller wrote where
+  converting to UTC would move `2026-08-17T23:00:00-08:00` to the 18th and record
+  a date nobody named. Anything that is not a date is rejected before the request
+  goes out. The deprecated `hydra_db_store` alias held verbatim copies of this
+  blurb and the `metadata` one; both now reference the shared text, which is how
+  the fix stays fixed.
+
 ## [1.2.0] - 2026-08-14
 
 ### ⚠️ Migration required if you call the old tool names
@@ -162,6 +198,7 @@ so neither the caller nor the user learned anything had gone wrong.
 - Canonical HydraDB tool vocabulary (`hydradb_*`), with the previous `hydra_db_*`
   names kept as deprecated aliases.
 
+[1.2.1]: https://github.com/hydra-db/hydradb-mcp/releases/tag/v1.2.1
 [1.2.0]: https://github.com/hydra-db/hydradb-mcp/releases/tag/v1.2.0
 [1.1.1]: https://github.com/hydra-db/hydradb-mcp/releases/tag/v1.1.1
 [1.1.0]: https://github.com/hydra-db/hydradb-mcp/releases/tag/v1.1.0
