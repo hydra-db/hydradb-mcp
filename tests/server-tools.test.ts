@@ -6,7 +6,14 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { HydraDBClient } from "@hydradb/sdk";
 
 import { HydraDB } from "../src/hydra/index.js";
-import { __resetAliasWarnings, createHydraDBServer } from "../src/server.js";
+import {
+	__resetAliasWarnings,
+	__resetShutdown,
+	beginShutdown,
+	awaitInFlight,
+	createHydraDBServer,
+	inFlightCount,
+} from "../src/server.js";
 
 type RecordedCall = { method: string; args: Record<string, unknown> };
 
@@ -997,4 +1004,312 @@ test("hydradb_list still advertises a next page in the middle of a corpus", asyn
 	}, { page: 2 });
 
 	assert.match(text, /page=3 for more/);
+});
+
+// `res.content ?? res.contentBase64` with no cap anywhere. contentBase64 is the
+// binary fallback and base64 inflates 4/3, so a 1 MB scanned PDF became ~1.4M
+// characters in a single call — a whole context window, unrecoverable, from a
+// tool annotated readOnlyHint that clients call speculatively.
+test("hydradb_inspect never inlines binary content", async () => {
+	const text = await inspectText(
+		{
+			success: true,
+			contentBase64: "A".repeat(200_000),
+			contentType: "application/pdf",
+			sizeBytes: 1_048_576,
+			inferredContent: "A scanned quarterly report.",
+		},
+		{ source_id: "s1" },
+	);
+
+	assert.doesNotMatch(text, /A{100}/, "base64 payload must never reach the caller");
+	assert.match(text, /binary application\/pdf/);
+	assert.match(text, /1048576 bytes/);
+	assert.match(text, /mode:"url"/, "must say how to actually get the file");
+	// The LLM summary is what the caller usually wanted anyway.
+	assert.match(text, /A scanned quarterly report/);
+});
+
+test("hydradb_inspect caps long text and says how to continue", async () => {
+	const body = "x".repeat(50_000);
+	const text = await inspectText(
+		{ success: true, content: body },
+		{ source_id: "s1" },
+	);
+
+	assert.ok(text.length < 25_000, `expected a bounded result, got ${text.length} chars`);
+	assert.match(text, /truncated: showing characters 0-20000 of 50000/);
+	assert.match(text, /offset=20000/);
+});
+
+test("hydradb_inspect honours offset and limit", async () => {
+	const body = "abcdefghij".repeat(1000); // 10k chars
+	const text = await inspectText(
+		{ success: true, content: body },
+		{ source_id: "s1", offset: 5000, limit: 100 },
+	);
+
+	assert.match(text, /showing characters 5000-5100 of 10000/);
+	assert.match(text, /offset=5100/);
+});
+
+test("hydradb_inspect returns short content whole, with no truncation noise", async () => {
+	const text = await inspectText(
+		{ success: true, content: "a short document" },
+		{ source_id: "s1" },
+	);
+
+	assert.match(text, /a short document/);
+	assert.doesNotMatch(text, /truncated/);
+});
+
+// text and turns were unbounded. The whole payload is materialised before it is
+// sent, so an oversized body is best case a 413 after uploading all of it,
+// worst case an OOM in this process.
+test("hydradb_ingest rejects oversized text locally", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_ingest",
+		arguments: { text: "x".repeat(1_000_001) },
+	});
+
+	assert.equal(result.isError, true);
+	assert.match((result.content as { text: string }[])[0]!.text, /at most 1000000 characters/);
+	assert.equal(
+		calls.filter((c) => c.method === "ingest").length,
+		0,
+		"an oversized body must not be uploaded before being rejected",
+	);
+
+	await client.close();
+});
+
+test("hydradb_ingest rejects too many turns locally", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_ingest",
+		arguments: {
+			turns: Array.from({ length: 501 }, () => ({ user: "hi", assistant: "hello" })),
+		},
+	});
+
+	assert.equal(result.isError, true);
+	assert.match((result.content as { text: string }[])[0]!.text, /at most 500 turns/);
+	assert.equal(calls.filter((c) => c.method === "ingest").length, 0);
+
+	await client.close();
+});
+
+test("hydradb_ingest accepts a realistically large document", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_ingest",
+		arguments: { text: "x".repeat(500_000) },
+	});
+
+	assert.notEqual(result.isError, true, "the ceiling must not reject ordinary documents");
+	assert.equal(calls.filter((c) => c.method === "ingest").length, 1);
+
+	await client.close();
+});
+
+
+/** Call a tool and return both the rendered text and the isError flag. */
+async function callRaw(
+	responses: Responses,
+	name: string,
+	args: Record<string, unknown>,
+): Promise<{ text: string; isError: unknown }> {
+	const { hydra } = mockHydra(responses);
+	const client = await connect(hydra);
+	const result = await client.callTool({ name, arguments: args });
+	await client.close();
+	return {
+		text: (result.content as { text: string }[])[0]?.text ?? "",
+		isError: result.isError,
+	};
+}
+
+// Three contracts for "it didn't work" used to coexist: thrown errors became
+// isError:true, while a failed inspect and a server-REFUSED delete returned
+// plain text with isError absent. A client branching on isError read
+// "Could NOT delete X - the server refused" as a success.
+test("a failed inspect is flagged as an error", async () => {
+	const { text, isError } = await callRaw(
+		{ inspect: { success: false, error: "source not found" } },
+		"hydradb_inspect",
+		{ source_id: "missing" },
+	);
+
+	assert.equal(isError, true);
+	// The wording is deliberate and survives the flag — a thrown error would
+	// replace it with something generic.
+	assert.match(text, /Could not fetch source missing: source not found/);
+});
+
+test("a server-refused delete is flagged as an error", async () => {
+	const { text, isError } = await callRaw(
+		{
+			delete: {
+				success: false,
+				message: "Source is still processing; retry deletion after ingestion completes",
+				deletedCount: 0,
+				results: [{ id: "s1", error: "Source is still processing" }],
+			},
+		},
+		"hydradb_delete",
+		{ id: "s1", kind: "knowledge" },
+	);
+
+	assert.equal(isError, true);
+	assert.match(text, /Could NOT delete/);
+});
+
+// The benign case is NOT an error: the server succeeded, the id simply is not
+// there. Flagging it would push callers to retry something that cannot succeed.
+test("a delete that found nothing is not flagged as an error", async () => {
+	const { text, isError } = await callRaw(
+		{ delete: { success: true, deletedCount: 0 } },
+		"hydradb_delete",
+		{ id: "mem-1" },
+	);
+
+	assert.notEqual(isError, true);
+	assert.match(text, /nothing was deleted/i);
+});
+
+test("a successful delete is not flagged as an error", async () => {
+	const { isError } = await callRaw(
+		{ delete: { success: true, userMemoryDeleted: 1 } },
+		"hydradb_delete",
+		{ id: "mem-1" },
+	);
+
+	assert.notEqual(isError, true);
+});
+
+// Greptile, PR #47: server.close() tears down the transport but does not wait
+// for handlers already running, so SIGTERM during an ingest killed the process
+// mid-write — and since a reused source_id replaces, "did it commit?" is not a
+// question the caller can settle by retrying.
+test("in-flight tool calls are tracked so shutdown can wait for them", async () => {
+	let release!: () => void;
+	const blocked = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+
+	const sdk = {
+		query: async () => {
+			await blocked;
+			return { data: { chunks: [] }, success: true };
+		},
+	} as unknown as HydraDBClient;
+
+	const client = await connect(new HydraDB({ token: "t", database: "db" }, sdk));
+
+	assert.equal(inFlightCount(), 0, "nothing should be in flight before the call");
+
+	const call = client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
+	// Let the handler start.
+	await new Promise((r) => setTimeout(r, 10));
+	assert.equal(inFlightCount(), 1, "the running call must be visible to shutdown");
+
+	// awaitInFlight must not resolve while the handler is still running.
+	let drained = false;
+	void awaitInFlight().then(() => {
+		drained = true;
+	});
+	await new Promise((r) => setTimeout(r, 10));
+	assert.equal(drained, false, "drain resolved while a call was still running");
+
+	release();
+	await call;
+	await new Promise((r) => setTimeout(r, 10));
+
+	assert.equal(inFlightCount(), 0);
+	assert.equal(drained, true, "drain must resolve once the last call finishes");
+
+	await client.close();
+});
+
+test("a failing tool call still decrements the in-flight count", async () => {
+	const sdk = {
+		query: () => Promise.reject(new Error("boom")),
+	} as unknown as HydraDBClient;
+	const client = await connect(new HydraDB({ token: "t", database: "db" }, sdk));
+
+	await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
+
+	assert.equal(
+		inFlightCount(),
+		0,
+		"a thrown handler must not leave the process permanently undrainable",
+	);
+	await client.close();
+});
+
+// Greptile, PR #47: the binary branch appended the server's summary without
+// applying the budget, so the path that exists to keep this response small
+// became its own way of blowing past it.
+test("hydradb_inspect bounds the binary summary too", async () => {
+	const text = await inspectText(
+		{
+			success: true,
+			contentBase64: "AAAA",
+			contentType: "application/pdf",
+			sizeBytes: 1024,
+			inferredContent: "y".repeat(60_000),
+		},
+		{ source_id: "s1" },
+	);
+
+	assert.ok(text.length < 25_000, `summary must obey the budget, got ${text.length} chars`);
+	assert.match(text, /truncated: 60000 chars total/);
+});
+
+// Greptile, PR #47: draining alone leaves a window. A call arriving after the
+// in-flight counter reaches zero but before the transport closes was accepted
+// and then aborted by the close — the caller of an ingest cannot then tell
+// whether the write committed, which is exactly what draining exists to prevent.
+test("no new tool call is accepted once shutdown has begun", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	beginShutdown();
+	try {
+		const result = await client.callTool({
+			name: "hydradb_query",
+			arguments: { query: "q" },
+		});
+
+		assert.equal(result.isError, true, "a call after shutdown must be refused");
+		assert.match(
+			(result.content as { text: string }[])[0]!.text,
+			/shutting down/i,
+		);
+		assert.equal(
+			calls.length,
+			0,
+			"a refused call must not reach the API — that write must not happen",
+		);
+	} finally {
+		__resetShutdown();
+		await client.close();
+	}
+});
+
+test("calls are accepted again once the shutdown flag is cleared", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
+	assert.equal(calls.length, 1);
+
+	await client.close();
 });

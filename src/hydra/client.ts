@@ -24,6 +24,25 @@ import { translateError } from "./errors.js";
 export type ContextKind = "memory" | "knowledge";
 
 /**
+ * Sized to fit inside a typical MCP host's tool timeout rather than outlast it,
+ * so a stalled call fails with a HydraDB diagnostic the caller can act on
+ * instead of a generic host-side timeout carrying no information.
+ */
+export const DEFAULT_TIMEOUT_SECONDS = 30;
+export const DEFAULT_MAX_RETRIES = 2;
+
+/**
+ * Per-call transport controls, separate from the domain params.
+ *
+ * `signal` carries the host's cancellation into the SDK. Without it a cancelled
+ * MCP tool call leaves the outbound HTTP request in flight: the caller has given
+ * up, and the process keeps working and keeps retrying on its behalf.
+ */
+export interface RequestOptions {
+	signal?: AbortSignal;
+}
+
+/**
  * Retrieval accepts a third corpus selector the write/list paths do not: `all`,
  * which searches memories and knowledge together. Only `context.query` takes it
  * — ingesting or deleting "all" is meaningless, so those stay `ContextKind`.
@@ -32,6 +51,34 @@ export type QueryKind = ContextKind | "all";
 
 function kindToType<K extends QueryKind>(kind: K | undefined): K | undefined {
 	return kind;
+}
+
+/**
+ * An SDK logger that cannot corrupt the stdio transport.
+ *
+ * The SDK's own `ConsoleLogger` implements `debug`/`info` via `console.debug` /
+ * `console.info`, which are stdout aliases in Node. On stdio transport stdout IS
+ * the JSON-RPC channel, so a single SDK log line would break the session.
+ *
+ * Not currently live — the SDK's default logger is constructed `silent: true` —
+ * but the exposure is one `logging: { level: "debug" }` away, which is precisely
+ * what someone debugging a production incident reaches for. Passing an explicit
+ * logger pins the safe behaviour instead of inheriting it.
+ */
+const STDERR_LOGGER = {
+	debug: (message: string, ...args: unknown[]) =>
+		console.error("[hydradb-sdk]", message, ...args),
+	info: (message: string, ...args: unknown[]) =>
+		console.error("[hydradb-sdk]", message, ...args),
+	warn: (message: string, ...args: unknown[]) =>
+		console.error("[hydradb-sdk]", message, ...args),
+	error: (message: string, ...args: unknown[]) =>
+		console.error("[hydradb-sdk]", message, ...args),
+};
+
+/** Wrapper options → the SDK's per-request options, omitted when there is nothing to say. */
+function req(opts?: RequestOptions): { abortSignal?: AbortSignal } | undefined {
+	return opts?.signal ? { abortSignal: opts.signal } : undefined;
 }
 
 export interface HydraConfig {
@@ -43,6 +90,16 @@ export interface HydraConfig {
 	collection?: string;
 	/** Optional base URL override; defaults to the SDK's environment. */
 	baseUrl?: string;
+	/**
+	 * Per-attempt deadline. The SDK's own default is 60s, which combined with its
+	 * 2 retries means a persistently failing endpoint can occupy a caller for
+	 * ~3 minutes with no output — far longer than any MCP host waits, so in
+	 * practice the host times out first and the caller gets a generic error with
+	 * no HydraDB diagnostic while this process keeps retrying.
+	 */
+	timeoutSeconds?: number;
+	/** Retries per call. The SDK defaults to 2; set explicitly so it is a choice. */
+	maxRetries?: number;
 }
 
 export interface QueryParams {
@@ -153,7 +210,10 @@ export class ContextResource extends Resource {
 	}
 
 	/** The single retrieval entry point (SDK `client.query`). */
-	query(params: QueryParams): Promise<SDK.SearchV2RetrievalResult> {
+	query(
+		params: QueryParams,
+		opts?: RequestOptions,
+	): Promise<SDK.SearchV2RetrievalResult> {
 		return this.call("/query", () =>
 			this.sdk.query({
 				...this.scope(params.collection),
@@ -165,7 +225,7 @@ export class ContextResource extends Resource {
 				graphContext: params.graphContext,
 				alpha: params.alpha,
 				recencyBias: params.recencyBias,
-			}),
+			}, req(opts)),
 		);
 	}
 
@@ -176,7 +236,10 @@ export class ContextResource extends Resource {
 	 * Every other failure in this wrapper rejects, and a caller that only handles
 	 * `.catch()` would otherwise see this one escape as a synchronous throw.
 	 */
-	async ingest(params: IngestParams): Promise<SDK.IngestionV2SourceUploadResponse> {
+	async ingest(
+		params: IngestParams,
+		opts?: RequestOptions,
+	): Promise<SDK.IngestionV2SourceUploadResponse> {
 		const request: SDK.IngestContextRequest = {
 			...this.scope(params.collection),
 			type: kindToType(params.kind),
@@ -242,11 +305,16 @@ export class ContextResource extends Resource {
 			}
 		}
 
-		return this.call("/context/ingest", () => this.sdk.context.ingest(request));
+		return this.call("/context/ingest", () =>
+			this.sdk.context.ingest(request, req(opts)),
+		);
 	}
 
 	/** List memories or knowledge sources (SDK `context.list`). */
-	list(params: ListParams = {}): Promise<SDK.ListV2SourceListResponse> {
+	list(
+		params: ListParams = {},
+		opts?: RequestOptions,
+	): Promise<SDK.ListV2SourceListResponse> {
 		return this.call("/context/list", () =>
 			this.sdk.context.list({
 				...this.scope(params.collection),
@@ -254,31 +322,35 @@ export class ContextResource extends Resource {
 				ids: params.ids,
 				page: params.page,
 				pageSize: params.pageSize,
-			}),
+			}, req(opts)),
 		);
 	}
 
 	/** Fetch a source's content (SDK `context.inspect`; was "fetch content"). */
-	inspect(params: InspectParams): Promise<SDK.FetchV2SourceFetchResponse> {
+	inspect(
+		params: InspectParams,
+		opts?: RequestOptions,
+	): Promise<SDK.FetchV2SourceFetchResponse> {
 		return this.call("/context/inspect", () =>
 			this.sdk.context.inspect({
 				...this.scope(params.collection),
 				id: params.id,
 				mode: params.mode,
 				expirySeconds: params.expirySeconds,
-			}),
+			}, req(opts)),
 		);
 	}
 
 	/** Per-source indexing progress (SDK `context.status`). */
 	ingestionStatus(
 		params: IngestionStatusParams,
+		opts?: RequestOptions,
 	): Promise<SDK.IngestionV2BatchProcessingStatus> {
 		return this.call("/context/status", () =>
 			this.sdk.context.status({
 				...this.scope(params.collection),
 				ids: params.ids,
-			}),
+			}, req(opts)),
 		);
 	}
 
@@ -298,13 +370,16 @@ export class ContextResource extends Resource {
 	}
 
 	/** Delete memories or knowledge sources (SDK `context.delete`). */
-	delete(params: DeleteParams): Promise<SDK.SourcesMemoryDeleteResponse> {
+	delete(
+		params: DeleteParams,
+		opts?: RequestOptions,
+	): Promise<SDK.SourcesMemoryDeleteResponse> {
 		return this.call("/context", () =>
 			this.sdk.context.delete({
 				...this.scope(params.collection),
 				ids: params.ids,
 				type: kindToType(params.kind),
-			}),
+			}, req(opts)),
 		);
 	}
 }
@@ -369,6 +444,15 @@ export class HydraDB {
 			new HydraDBClient({
 				token: config.token,
 				...(config.baseUrl != null ? { baseUrl: config.baseUrl } : {}),
+				// Both are stated rather than inherited. The SDK's defaults (60s,
+				// 2 retries) were never chosen by this server, and their product is
+				// a ~3 minute worst case on the slowest tool it exposes.
+				timeoutInSeconds: config.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS,
+				maxRetries: config.maxRetries ?? DEFAULT_MAX_RETRIES,
+				// Never inherit the SDK's console logger: it writes to stdout, which
+				// on stdio transport is the JSON-RPC channel. Only the sink is
+				// overridden — level and silencing keep the SDK's own defaults.
+				logging: { logger: STDERR_LOGGER },
 			});
 		this.context = new ContextResource(client, config.database, config.collection);
 		this.databases = new DatabasesResource(

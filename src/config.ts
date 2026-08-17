@@ -13,6 +13,8 @@ export interface HydraDBConfig {
 	database: string;
 	collection: string;
 	baseUrl?: string;
+	timeoutSeconds?: number;
+	maxRetries?: number;
 }
 
 export type EnvSource = Record<string, string | undefined>;
@@ -83,5 +85,34 @@ export function resolveConfig(
 
 	const baseUrl = readEnv(env, "HYDRADB_BASE_URL", "HYDRA_DB_BASE_URL", warn);
 
-	return { apiKey, database, collection, baseUrl };
+	// Included only when actually set, so the resolved config says what the
+	// environment said rather than carrying a row of undefined knobs.
+	const timeoutSeconds = positiveInt(env.HYDRADB_TIMEOUT_SECONDS);
+	const maxRetries = nonNegativeInt(env.HYDRADB_MAX_RETRIES);
+
+	return {
+		apiKey,
+		database,
+		collection,
+		baseUrl,
+		...(timeoutSeconds != null ? { timeoutSeconds } : {}),
+		...(maxRetries != null ? { maxRetries } : {}),
+	};
+}
+
+/**
+ * Numeric overrides are ignored rather than fatal when malformed.
+ *
+ * A typo'd timeout should not stop the server from starting — falling back to
+ * the built-in default keeps it running, and the alternative (exit 1 on a
+ * cosmetic env var) is worse than the misconfiguration.
+ */
+function positiveInt(raw: string | undefined): number | undefined {
+	const value = Number(raw);
+	return raw != null && Number.isInteger(value) && value > 0 ? value : undefined;
+}
+
+function nonNegativeInt(raw: string | undefined): number | undefined {
+	const value = Number(raw);
+	return raw != null && Number.isInteger(value) && value >= 0 ? value : undefined;
 }
