@@ -1,6 +1,6 @@
 {
   "name": "@hydradb/mcp",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "description": "MCP server for Hydra DB: State-of-the-art agentic memory with recall, ingest, and knowledge graph context",
   "license": "Apache-2.0",
   "type": "module",
@@ -10,7 +10,8 @@
   },
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "CHANGELOG.md"
   ],
   "scripts": {
     "build": "tsc",
