@@ -117,6 +117,23 @@ test("the text/turns rule is stated identically wherever it appears", () => {
 	);
 });
 
+// The blurb said "RFC3339", which is a date-TIME format the API rejects with a
+// 400. A format in a description is only useful if it is the one the server
+// takes, so it is stated as YYYY-MM-DD with a worked example — everywhere it
+// appears, aliases included.
+test("observation_date documents the format the server accepts", () => {
+	for (const tool of [TOOL_NAMES.INGEST, TOOL_NAMES.STORE] as const) {
+		const text = TOOL_DESCRIPTIONS[tool].params.observation_date;
+		assert.match(text, /YYYY-MM-DD/, `${tool} must name the accepted format`);
+		assert.match(text, /\d{4}-\d{2}-\d{2}/, `${tool} should show a real date`);
+		assert.doesNotMatch(
+			text,
+			/RFC ?3339/i,
+			`${tool} must not send callers to a date-time format the API rejects`,
+		);
+	}
+});
+
 // The blurbs restated the type and nothing else — "Recall mode: 'fast' for quick
 // semantic search, 'thinking' for deeper..." tells a model what the values are
 // but not how to choose. Every param here informs a decision; the description

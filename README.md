@@ -67,7 +67,7 @@ or `turns`.
 | `infer` | boolean | No | Extract insights and graph entities (default: true) |
 | `is_markdown` | boolean | No | Chunk on markdown structure (default: false) |
 | `metadata` | object | No | Key/value metadata, matchable later via `metadata_filters` |
-| `observation_date` | string | No | When the fact was true (RFC3339), vs when it was stored |
+| `observation_date` | string | No | When the fact was true, as `YYYY-MM-DD` (e.g. `2026-07-04`), vs when it was stored |
 | `user_name` | string | No | What to call the user, used with `turns` (default: `User`) |
 
 \* Passing both is an error; passing neither is an error.

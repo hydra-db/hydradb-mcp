@@ -163,6 +163,25 @@ const turnSchema = z.object({
 
 type ConversationTurn = { user: string; assistant: string };
 
+/**
+ * `observation_date` is a CALENDAR date. The server answers anything finer with
+ * `400 INVALID_INPUT: observation_date "2026-08-17T00:00:00Z" is not a valid
+ * ISO-8601 date (want YYYY-MM-DD)`, and a model writing a date in JSON reaches
+ * for the date-time form first — so the date-time is accepted here and trimmed
+ * to the date the caller wrote, rather than left to fail as a 400 from a remote
+ * service after the request has gone out.
+ *
+ * Trimming is textual on purpose: it keeps the date as written, where converting
+ * to UTC first would move "2026-08-17T23:00:00-08:00" to the 18th and silently
+ * record a different day than the caller meant. The time of day is the only
+ * thing dropped, and it is the part the server has nowhere to store.
+ *
+ * Anything that is not a date at all still fails, before the network.
+ */
+const OBSERVATION_DATE_PATTERN =
+	/^\d{4}-\d{2}-\d{2}(?:[Tt ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:[Zz]|[+-]\d{2}:?\d{2})?)?$/;
+const CALENDAR_DATE_LENGTH = "YYYY-MM-DD".length;
+
 // Deprecated aliases emit exactly one stderr warning PER PROCESS naming the
 // canonical replacement (CONTRACT §3). The dedupe state is module-scoped so the
 // guarantee holds across multiple server instances in the same process, and is
@@ -1212,6 +1231,12 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.metadata),
 		observation_date: z
 			.string()
+			.regex(OBSERVATION_DATE_PATTERN, {
+				message:
+					"observation_date must be a calendar date as YYYY-MM-DD (e.g. 2026-07-04); " +
+					"a date-time is accepted and kept as its date part",
+			})
+			.transform((value) => value.slice(0, CALENDAR_DATE_LENGTH))
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.observation_date),
 	};

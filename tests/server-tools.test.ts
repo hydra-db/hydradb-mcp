@@ -2167,6 +2167,87 @@ test("metadata keys are omitted entirely when not provided", async () => {
 	await client.close();
 });
 
+// The tool description used to say "RFC3339", and the API answers a date-time
+// with `400 INVALID_INPUT: … is not a valid ISO-8601 date (want YYYY-MM-DD)`.
+// A model writing a date in JSON reaches for the date-time form, so the date
+// part is kept rather than the whole call being lost to a remote 400.
+test("an ISO date-time observation_date is kept as its calendar date", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+	await client.callTool({
+		name: "hydradb_ingest",
+		arguments: {
+			text: "Shipped the v2 ingest path.",
+			observation_date: "2026-08-17T00:00:00Z",
+		},
+	});
+
+	const item = (
+		JSON.parse(String(calls.find((c) => c.method === "ingest")!.args.memories)) as Record<string, unknown>[]
+	)[0]!;
+	assert.equal(item.observation_date, "2026-08-17");
+	await client.close();
+});
+
+// Trimming is textual: converting to UTC first would move this to the 18th and
+// record a day the caller never named.
+test("a date-time with an offset keeps the date the caller wrote", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+	await client.callTool({
+		name: "hydradb_ingest",
+		arguments: { text: "a note", observation_date: "2026-08-17T23:00:00-08:00" },
+	});
+
+	const item = (
+		JSON.parse(String(calls.find((c) => c.method === "ingest")!.args.memories)) as Record<string, unknown>[]
+	)[0]!;
+	assert.equal(item.observation_date, "2026-08-17");
+	await client.close();
+});
+
+// Rejected here, not by the API: the caller gets the format in the error and
+// nothing leaves the process.
+test("a non-date observation_date is rejected before the request goes out", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+	const result = await client.callTool({
+		name: "hydradb_ingest",
+		arguments: { text: "a note", observation_date: "last Tuesday" },
+	});
+
+	assert.equal(result.isError, true);
+	assert.match((result.content as { text: string }[])[0]!.text, /YYYY-MM-DD/);
+	assert.equal(
+		calls.find((c) => c.method === "ingest"),
+		undefined,
+		"an invalid date must not reach the API",
+	);
+	await client.close();
+});
+
+// The constraint has to reach the model that is choosing the value, not just
+// the handler that receives it.
+test("observation_date advertises its format in the input schema", async () => {
+	const client = await connect(mockHydra().hydra);
+	const { tools } = await client.listTools();
+	await client.close();
+
+	const properties = tools.find((t) => t.name === "hydradb_ingest")!.inputSchema
+		.properties as Record<string, { pattern?: string; description?: string }>;
+	const observationDate = properties.observation_date!;
+
+	assert.ok(
+		observationDate.pattern != null,
+		"the schema should carry the accepted date pattern",
+	);
+	const pattern = new RegExp(observationDate.pattern);
+	assert.ok(pattern.test("2026-07-04"), "a calendar date is the documented form");
+	assert.ok(pattern.test("2026-07-04T00:00:00Z"), "a date-time is accepted too");
+	assert.ok(!pattern.test("last Tuesday"));
+	assert.match(String(observationDate.description), /YYYY-MM-DD/);
+});
+
 // They belong to the memory item shape, so the knowledge branch must reject
 // them rather than drop them — same rule as every other memory-only field.
 test("knowledge ingest rejects metadata rather than dropping it", async () => {
