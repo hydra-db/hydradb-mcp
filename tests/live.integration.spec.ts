@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { toMemoryList, toSourceList } from "../src/adapters.js";
 import { resolveConfig } from "../src/config.js";
 import { HydraDB } from "../src/hydra/index.js";
+import { SCHEMA_QUERIES } from "../src/cypher.js";
 import { HydraWrapperError } from "../src/hydra/errors.js";
 
 const RUN_LIVE_TESTS = process.env.RUN_LIVE_TESTS === "true";
@@ -384,6 +385,144 @@ test(
 			deleted.success,
 			true,
 			`cleanup delete failed for ${sourceId}: ${JSON.stringify(deleted)}`,
+		);
+	},
+);
+
+// --- BYOG graph (PRO-1681) ---
+//
+// These exercise the hand-rolled `/byog/*` transport, which no unit test can
+// reach: the graph unit tests replace `hydra.graph` wholesale so they can assert
+// on which requests the tools DECIDE to make, which means the HTTP path, the
+// envelope unwrapping and the error translation are only ever covered here.
+//
+// The graph scope is separate from the memory scope, so these use their own env
+// vars and skip independently rather than borrowing HYDRADB_DATABASE — pointing
+// Cypher at a memory database reads an empty graph rather than failing, which
+// would make a broken run look like a passing one.
+
+const graphDatabase =
+	process.env.HYDRADB_GRAPH_DATABASE || process.env.HYDRADB_DATABASE;
+const graphSkipReason = skipReason
+	? skipReason
+	: !graphDatabase
+		? "HYDRADB_GRAPH_DATABASE (or HYDRADB_DATABASE) is required for graph tests"
+		: false;
+
+test(
+	"live: BYOG round-trips a write, a read, a traversal and a drop",
+	{ skip: graphSkipReason },
+	async () => {
+		const config = resolveConfig();
+		const hydra = new HydraDB({
+			token: config.apiKey,
+			database: config.database,
+			collection: config.collection,
+			...(config.baseUrl != null ? { baseUrl: config.baseUrl } : {}),
+		});
+
+		const database = graphDatabase as string;
+		// A collection of its own, dropped at the end, so a live run cannot
+		// disturb data someone else is using.
+		const collection = `mcp-live-${Date.now()}`;
+		const scope = { database, collection };
+
+		try {
+			// Collections auto-create on first write; there is no create call.
+			const created = await hydra.graph.query({
+				...scope,
+				query:
+					"UNWIND $rows AS row MERGE (p:Person {ext_id: row.ext_id}) SET p += row " +
+					"RETURN count(p) AS created",
+				params: {
+					rows: [
+						{ ext_id: "a", name: "Alice", role: "admin" },
+						{ ext_id: "b", name: "Bob", role: "analyst" },
+					],
+				},
+			});
+			assert.equal(created[0]?.created, 2, `unexpected write result: ${JSON.stringify(created)}`);
+
+			// The collection now exists and is listed.
+			const collections = await hydra.graph.listCollections({ database });
+			assert.ok(
+				collections.includes(collection),
+				`${collection} missing from ${JSON.stringify(collections)}`,
+			);
+
+			await hydra.graph.query({
+				...scope,
+				query:
+					"MATCH (a:Person {ext_id:'a'}),(b:Person {ext_id:'b'}) " +
+					"MERGE (a)-[:KNOWS {since: 2020}]->(b) RETURN 1 AS ok",
+			});
+
+			// A node comes back flat: properties merged with the renderer-added
+			// `id` and `labels`. The renderer in src/cypher.ts depends on exactly
+			// this shape, so assert it rather than assuming it holds.
+			const nodes = await hydra.graph.query({
+				...scope,
+				query: "MATCH (p:Person {ext_id:'a'}) RETURN p",
+			});
+			const node = nodes[0]?.p as Record<string, unknown>;
+			assert.ok(node, `expected a node row, got ${JSON.stringify(nodes)}`);
+			assert.ok(Array.isArray(node.labels), "a node must carry `labels`");
+			assert.equal(node.name, "Alice");
+
+			// A path arrives assembled as {nodes, edges} in traversal order.
+			const paths = await hydra.graph.query({
+				...scope,
+				query:
+					"MATCH (a:Person {ext_id:'a'}),(b:Person {ext_id:'b'}) " +
+					"RETURN shortestPath((a)-[*..6]->(b)) AS p",
+			});
+			const path = paths[0]?.p as { nodes?: unknown[]; edges?: unknown[] };
+			assert.ok(Array.isArray(path?.nodes), "a path must carry `nodes`");
+			assert.ok(Array.isArray(path?.edges), "a path must carry `edges`");
+
+			// Every schema query must still be accepted — this is the guard against
+			// the derived schema silently rotting if the dialect moves.
+			for (const [name, query] of Object.entries(SCHEMA_QUERIES)) {
+				await hydra.graph.query({
+					...scope,
+					query,
+					params: query.includes("$sample") ? { sample: 100 } : undefined,
+				});
+				assert.ok(true, `${name} accepted`);
+			}
+		} finally {
+			await hydra.graph.dropCollection({ database, collection });
+		}
+	},
+);
+
+test(
+	"live: BYOG rejects procedure calls before executing anything",
+	{ skip: graphSkipReason },
+	async () => {
+		const config = resolveConfig();
+		const hydra = new HydraDB({
+			token: config.apiKey,
+			database: config.database,
+			collection: config.collection,
+			...(config.baseUrl != null ? { baseUrl: config.baseUrl } : {}),
+		});
+
+		// The premise behind deriving the schema from plain Cypher rather than
+		// calling a procedure. If this ever starts succeeding, the local guard in
+		// unsupportedConstruct() is refusing something the server would now run.
+		await assert.rejects(
+			() =>
+				hydra.graph.query({
+					database: graphDatabase as string,
+					collection: "mcp-live-probe",
+					query: "CALL db.labels()",
+				}),
+			(err: unknown) => {
+				assert.ok(err instanceof HydraWrapperError);
+				assert.equal(err.status, 400);
+				return true;
+			},
 		);
 	},
 );

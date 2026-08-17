@@ -16,6 +16,47 @@ MCP (Model Context Protocol) server for [Hydra DB](https://hydradb.com), the sta
 Ids flow between these: `hydradb_query` and `hydradb_list` emit them;
 `hydradb_inspect`, `hydradb_delete` and `hydradb_status` accept them.
 
+### Graph tools (Cypher)
+
+Hydra DB also runs **property graphs you model and own end to end**, queried in [Cypher](https://docs.hydradb.com/essentials/v2/graph-collections-byog). This is a different product surface from the memory and knowledge above, and nothing crosses between them: `hydradb_query` cannot see graph data, and `hydradb_graph_query` cannot see memories.
+
+| Tool | What it does |
+|---|---|
+| `hydradb_graph_query` | Run **read-only** Cypher — traversal, paths, neighbourhoods, aggregation |
+| `hydradb_graph_write` | Run Cypher that **mutates** — CREATE, MERGE, SET, DELETE, indexes |
+| `hydradb_graph_schema` | What labels, relationship types and properties a collection actually holds |
+| `hydradb_graph_collections` | List the graphs in a graph database |
+| `hydradb_graph_admin` | Create a graph database; drop a collection or a database |
+
+Reads and writes are separate tools so a host can auto-approve one and gate the other: `hydradb_graph_query` is annotated `readOnlyHint`, and `hydradb_graph_write` `destructiveHint`.
+
+```jsonc
+// Everyone Alice knows within four hops
+{"query": "MATCH (a:Person {name:$n})-[:KNOWS*1..4]->(r) RETURN DISTINCT r.name AS name",
+ "params": {"n": "Alice"}}
+
+// Bulk load, re-runnable after a failure
+{"query": "UNWIND $rows AS row MERGE (p:Person {ext_id: row.ext_id}) SET p += row",
+ "params": {"rows": [{"ext_id": "a", "name": "Alice"}]}}
+```
+
+**Differences from Neo4j** worth knowing before you write Cypher. Each is rejected *before* execution, so a rejected query changes nothing and fails identically on retry:
+
+- Procedure calls (`CALL db.*`, `CALL apoc.*`) are rejected. `CALL { ... }` subqueries are fine. Use `hydradb_graph_schema`, which derives the schema from plain Cypher rather than from APOC.
+- `LOAD CSV` is rejected — pass data through `params` instead.
+- Existence checks are bare pattern predicates (`WHERE (p)-[:KNOWS]->()`); `EXISTS { ... }` and `exists()` are not accepted.
+- `shortestPath` belongs in `RETURN`/`WITH`, not `MATCH p = ...`, and must be directed.
+- `EXPLAIN`/`PROFILE` **execute** the query rather than planning it — do not use them to preview one.
+
+Collections auto-create on first write, so there is no create-collection call. Requests are capped at 256 KiB (enforced locally, before upload) and large result sets are truncated server-side — paginate with `ORDER BY ... SKIP $offset LIMIT $limit`.
+
+To turn the graph tools off, or restrict them to reads:
+
+```
+HYDRADB_MCP_GRAPH_TOOLS=0   # withhold all five
+HYDRADB_GRAPH_READONLY=1    # withhold hydradb_graph_write and hydradb_graph_admin
+```
+
 ### Deprecated aliases
 
 The previous `hydra_db_*` tool names are **no longer registered by default** as
@@ -145,6 +186,15 @@ Checks whether ingested sources have finished indexing.
 | `HYDRADB_TIMEOUT_SECONDS` | Per-attempt request timeout     | `30`                      |
 | `HYDRADB_MAX_RETRIES` | Retries per request (0 disables)    | `2`                       |
 | `HYDRADB_MCP_LEGACY_TOOLS` | Register the deprecated `hydra_db_*` tools | *off* |
+| `HYDRADB_GRAPH_DATABASE` | Default graph database for the Cypher tools | `HYDRADB_DATABASE` |
+| `HYDRADB_GRAPH_COLLECTION` | Default graph collection | `default` |
+| `HYDRADB_MCP_GRAPH_TOOLS` | Register the graph tools (`0` withholds them) | *on* |
+| `HYDRADB_GRAPH_READONLY` | Withhold the mutating graph tools | *off* |
+
+A graph database is a **different namespace** from the memory database: the same
+name can exist as both, and Cypher aimed at the wrong one reads an empty graph
+rather than failing. Every graph tool also takes `database` and `collection`
+per call, overriding these defaults.
 
 The legacy `HYDRA_DB_*` names — `HYDRA_DB_API_KEY`, `HYDRA_DB_TENANT_ID`,
 `HYDRA_DB_SUB_TENANT_ID`, `HYDRA_DB_BASE_URL`, `HYDRA_DB_LOG_LEVEL` — remain

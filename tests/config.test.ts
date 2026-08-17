@@ -27,6 +27,14 @@ test("canonical HYDRADB_* names are read as primary with no warning", () => {
 		database: "db",
 		collection: "col",
 		baseUrl: "https://custom.example.com",
+		// The graph scope defaults off the memory database, so one HYDRADB_DATABASE
+		// is enough to address a same-named graph without extra configuration.
+		graph: {
+			enabled: true,
+			readOnly: false,
+			database: "db",
+			collection: "default",
+		},
 	});
 	assert.deepEqual(messages, []);
 });

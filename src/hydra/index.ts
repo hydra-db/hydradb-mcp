@@ -28,5 +28,12 @@ export type {
 	DeleteParams,
 	CreateDatabaseParams,
 } from "./client.js";
-export { HydraWrapperError, translateError } from "./errors.js";
+export { GraphResource } from "./graph.js";
+export type {
+	GraphConfig,
+	GraphQueryParams,
+	GraphScopeParams,
+	GraphRow,
+} from "./graph.js";
+export { HydraWrapperError, responseError, translateError } from "./errors.js";
 export { unwrap } from "./envelope.js";

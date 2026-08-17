@@ -15,6 +15,47 @@ export interface HydraDBConfig {
 	baseUrl?: string;
 	timeoutSeconds?: number;
 	maxRetries?: number;
+	graph: GraphConfig;
+}
+
+/**
+ * Scope and gating for the BYOG graph tools.
+ *
+ * A graph database is a DIFFERENT namespace from the memory database: the same
+ * name can exist as both, and a Cypher query aimed at the wrong one silently
+ * reads an empty graph rather than failing. So the graph scope is configured
+ * separately, and every graph tool also takes a per-call override.
+ */
+export interface GraphConfig {
+	/** Whether the graph tools are registered at all. */
+	enabled: boolean;
+	/** Refuse to register the mutating tools, mirroring Neo4j's read-only mode. */
+	readOnly: boolean;
+	/**
+	 * Default graph database. Falls back to HYDRADB_DATABASE — convenient when
+	 * one name is used for both, and harmless otherwise because the tools accept
+	 * `database` per call.
+	 */
+	database: string;
+	/** Default graph collection. */
+	collection: string;
+}
+
+const DEFAULT_GRAPH_COLLECTION = "default";
+
+/**
+ * Env flags are read permissively in one direction only.
+ *
+ * A user who writes `HYDRADB_GRAPH_READONLY=true` meaning "on" must not get
+ * "off" because only `1` was accepted — the failure mode is a server that
+ * accepts writes when its operator believed it would not.
+ */
+function flag(raw: string | undefined, fallback: boolean): boolean {
+	if (raw == null || raw.trim() === "") return fallback;
+	const value = raw.trim().toLowerCase();
+	if (["1", "true", "yes", "on"].includes(value)) return true;
+	if (["0", "false", "no", "off"].includes(value)) return false;
+	return fallback;
 }
 
 export type EnvSource = Record<string, string | undefined>;
@@ -97,6 +138,29 @@ export function resolveConfig(
 		baseUrl,
 		...(timeoutSeconds != null ? { timeoutSeconds } : {}),
 		...(maxRetries != null ? { maxRetries } : {}),
+		graph: resolveGraphConfig(env, database),
+	};
+}
+
+/**
+ * Graph scope and gating, resolved on its own.
+ *
+ * Separate from `resolveConfig` because it must be resolvable WITHOUT an API key
+ * or a memory database: tests construct a server around an injected client and
+ * never set those, and making the graph tools depend on them would mean the
+ * graph surface could not be exercised without a full credential set.
+ */
+export function resolveGraphConfig(
+	env: EnvSource = process.env,
+	fallbackDatabase = "",
+): GraphConfig {
+	return {
+		enabled: flag(env.HYDRADB_MCP_GRAPH_TOOLS, true),
+		readOnly: flag(env.HYDRADB_GRAPH_READONLY, false),
+		// Not `readEnv` — these are new names with no legacy spelling to alias,
+		// and inventing a deprecated one would be noise.
+		database: env.HYDRADB_GRAPH_DATABASE?.trim() || fallbackDatabase,
+		collection: env.HYDRADB_GRAPH_COLLECTION?.trim() || DEFAULT_GRAPH_COLLECTION,
 	};
 }
 

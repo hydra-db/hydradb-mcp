@@ -14,6 +14,18 @@ export const TOOL_NAMES = {
 	DELETE: "hydradb_delete",
 	STATUS: "hydradb_status",
 
+	// BYOG graph tools (PRO-1681). A separate family with its own prefix: these
+	// address graph collections the user models and writes in Cypher, which are
+	// a different namespace from the memory/knowledge corpora above. Sharing a
+	// name between the two would be the worst possible outcome — a model
+	// reaching for `hydradb_query` to run Cypher, or for the graph tool to
+	// search memories.
+	GRAPH_QUERY: "hydradb_graph_query",
+	GRAPH_WRITE: "hydradb_graph_write",
+	GRAPH_SCHEMA: "hydradb_graph_schema",
+	GRAPH_COLLECTIONS: "hydradb_graph_collections",
+	GRAPH_ADMIN: "hydradb_graph_admin",
+
 	// Deprecated aliases — kept working for backward compatibility.
 	SEARCH: "hydra_db_search",
 	STORE: "hydra_db_store",
@@ -33,6 +45,21 @@ export const CANONICAL_TOOL_NAMES = [
 	TOOL_NAMES.INSPECT,
 	TOOL_NAMES.DELETE,
 	TOOL_NAMES.STATUS,
+] as const;
+
+/** The BYOG graph family, registered together and gated together. */
+export const GRAPH_TOOL_NAMES = [
+	TOOL_NAMES.GRAPH_QUERY,
+	TOOL_NAMES.GRAPH_WRITE,
+	TOOL_NAMES.GRAPH_SCHEMA,
+	TOOL_NAMES.GRAPH_COLLECTIONS,
+	TOOL_NAMES.GRAPH_ADMIN,
+] as const;
+
+/** The graph tools that mutate, withheld when the server is in read-only mode. */
+export const GRAPH_WRITE_TOOL_NAMES = [
+	TOOL_NAMES.GRAPH_WRITE,
+	TOOL_NAMES.GRAPH_ADMIN,
 ] as const;
 
 export const DEPRECATED_TOOL_NAMES = [

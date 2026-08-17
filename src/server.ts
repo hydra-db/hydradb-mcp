@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 
@@ -6,8 +7,18 @@ import { z } from "zod";
 
 import { toAddMemoryResponse, toMemoryList, toSourceList } from "./adapters.js";
 import type { PageInfo } from "./adapters.js";
-import { resolveConfig } from "./config.js";
+import { resolveConfig, resolveGraphConfig } from "./config.js";
+import type { GraphConfig } from "./config.js";
 import { renderRecalledContext } from "./context.js";
+import {
+	COLLECTION_PATTERN,
+	MAX_BODY_BYTES,
+	SCHEMA_QUERIES,
+	SCHEMA_SAMPLE,
+	renderRows,
+	unsupportedConstruct,
+	writeClausesIn,
+} from "./cypher.js";
 import { SERVER_INSTRUCTIONS, TOOL_DESCRIPTIONS } from "./descriptions.js";
 import { HydraDB } from "./hydra/index.js";
 import type { ContextKind, QueryKind } from "./hydra/index.js";
@@ -279,7 +290,14 @@ export function __resetAliasWarnings() {
 	warnedAliases.clear();
 }
 
-export function createHydraDBServer(hydraOverride?: HydraDB) {
+export function createHydraDBServer(
+	hydraOverride?: HydraDB,
+	/**
+	 * Graph scope/gating override, for tests and embedders. Without it the graph
+	 * config is read from the environment exactly as the rest of the config is.
+	 */
+	graphOverride?: Partial<GraphConfig>,
+) {
 	const server = new McpServer(
 		{
 			name: "hydradb-mcp",
@@ -291,8 +309,10 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 	);
 
 	let hydra: HydraDB;
+	let graphConfig: GraphConfig;
 	if (hydraOverride) {
 		hydra = hydraOverride;
+		graphConfig = { ...resolveGraphConfig(), ...graphOverride };
 	} else {
 		const config = resolveConfig();
 		hydra = new HydraDB({
@@ -305,6 +325,7 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 				: {}),
 			...(config.maxRetries != null ? { maxRetries: config.maxRetries } : {}),
 		});
+		graphConfig = { ...config.graph, ...graphOverride };
 		logger.info(
 			`Hydra DB connected (database=${config.database}, collection=${config.collection})`,
 		);
@@ -1110,6 +1131,363 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		return deleteReport(kind, args.ids, res, removed, removedCount);
 	}
 
+	// --- BYOG graph handlers ---
+
+	/**
+	 * The scope a graph call runs against.
+	 *
+	 * Resolved per call rather than captured once, so a caller can address a
+	 * second graph without reconfiguring the server. The collection name is
+	 * validated here because the server's rule is a documented charset and
+	 * rejecting locally names it, where the remote failure is a bare 400.
+	 */
+	function graphScope(args: { database?: string; collection?: string }): {
+		database: string;
+		collection: string;
+	} {
+		const database = args.database?.trim() || graphConfig.database;
+		const collection = args.collection?.trim() || graphConfig.collection;
+
+		if (!database) {
+			throw new Error(
+				"No graph database configured. Set HYDRADB_GRAPH_DATABASE (or HYDRADB_DATABASE), " +
+				"or pass `database` on this call.",
+			);
+		}
+		if (!COLLECTION_PATTERN.test(collection)) {
+			throw new Error(
+				`Invalid graph collection name "${collection}". Collection names must match ` +
+				"[A-Za-z0-9][A-Za-z0-9_-]{0,63} — start with a letter or digit, then letters, " +
+				"digits, underscores or hyphens, up to 64 characters.",
+			);
+		}
+		return { database, collection };
+	}
+
+	/**
+	 * Refuse an oversized request before it goes out.
+	 *
+	 * The server answers a body over 256 KiB with 413, but only after receiving
+	 * all of it — so on the bulk loads where this actually happens, the remote
+	 * check is the slowest possible way to learn the batch was too big. Measured
+	 * in BYTES, not characters: the cap is on the encoded body, and non-ASCII
+	 * property values are where a "small enough" batch stops being one.
+	 */
+	function assertBodyFits(query: string, params?: Record<string, unknown>): void {
+		let bytes: number;
+		try {
+			bytes = Buffer.byteLength(JSON.stringify({ query, params }) ?? "", "utf8");
+		} catch {
+			throw new Error(
+				"`params` could not be serialised to JSON — it must contain only plain " +
+				"values (strings, numbers, booleans, null, arrays, objects).",
+			);
+		}
+		if (bytes > MAX_BODY_BYTES) {
+			throw new Error(
+				`This request is ${Math.round(bytes / 1024)} KiB, over Hydra DB's ` +
+				`${MAX_BODY_BYTES / 1024} KiB limit. Split it into batches — send rows in ` +
+				"chunks with `UNWIND $rows AS row ...` (about 500 rows per call is a good start).",
+			);
+		}
+	}
+
+	/** Shared by the read and write tools; they differ only in which guard they apply. */
+	async function runGraphCypher(
+		args: {
+			query: string;
+			params?: Record<string, unknown>;
+			database?: string;
+			collection?: string;
+			max_rows?: number;
+		},
+		expect: "read" | "write",
+		signal?: AbortSignal,
+	): Promise<ToolResult> {
+		const scope = graphScope(args);
+		const clauses = writeClausesIn(args.query);
+		const writes = clauses.length > 0;
+
+		// The guard is the entire reason these are two tools. A host that
+		// auto-approves the read tool is relying on this check, so it runs before
+		// anything touches the network.
+		if (expect === "read" && writes) {
+			return errorResult(
+				`${TOOL_NAMES.GRAPH_QUERY} is read-only and this query contains ` +
+				`${clauses.join(", ")}. Nothing was executed. Use ${TOOL_NAMES.GRAPH_WRITE} ` +
+				"to run it.",
+			);
+		}
+		if (expect === "write" && !writes) {
+			return errorResult(
+				`${TOOL_NAMES.GRAPH_WRITE} expects a query that modifies the graph, and this ` +
+				`one has no write clause. Nothing was executed. Use ${TOOL_NAMES.GRAPH_QUERY} ` +
+				"to read.",
+			);
+		}
+
+		// Named locally so the caller gets the reason and the alternative together,
+		// rather than a remote validation error to interpret.
+		const unsupported = unsupportedConstruct(args.query);
+		if (unsupported) return errorResult(`${unsupported} Nothing was executed.`);
+
+		assertBodyFits(args.query, args.params);
+
+		logger.debug(
+			`${expect === "read" ? TOOL_NAMES.GRAPH_QUERY : TOOL_NAMES.GRAPH_WRITE}: ` +
+			`${scope.database}/${scope.collection}`,
+		);
+
+		const rows = await hydra.graph.query(
+			{ ...scope, query: args.query, params: args.params },
+			{ signal },
+		);
+
+		// A write with no RETURN legitimately yields zero rows. Reporting that as
+		// "no results" invites the caller to retry a write that already committed.
+		if (rows.length === 0) {
+			return structuredResult(
+				expect === "write"
+					? `Write completed against ${scope.database}/${scope.collection}. The query ` +
+						"returned no rows, which is expected when it has no RETURN clause."
+					: `No rows matched in ${scope.database}/${scope.collection}.`,
+				{ database: scope.database, collection: scope.collection, rows: [], row_count: 0 },
+			);
+		}
+
+		const maxRows = args.max_rows ?? 100;
+		const rendered = renderRows(rows, { maxRows });
+
+		return structuredResult(
+			`${rows.length} row(s) from ${scope.database}/${scope.collection}:\n\n${rendered}`,
+			{
+				database: scope.database,
+				collection: scope.collection,
+				// Bounded the same way the prose is: structured output is a different
+				// encoding of the same answer, not a bypass of its limits.
+				rows: rows.slice(0, maxRows),
+				row_count: rows.length,
+			},
+		);
+	}
+
+	async function runGraphSchema(
+		args: { database?: string; collection?: string; sample?: number },
+		signal?: AbortSignal,
+	): Promise<ToolResult> {
+		const scope = graphScope(args);
+		const sample = args.sample ?? SCHEMA_SAMPLE;
+		logger.debug(`${TOOL_NAMES.GRAPH_SCHEMA}: ${scope.database}/${scope.collection}`);
+
+		const run = (query: string, params?: Record<string, unknown>) =>
+			hydra.graph.query({ ...scope, query, params }, { signal });
+
+		// Issued together: they are five independent reads against the same
+		// collection, and serialising them would multiply the latency of a call
+		// that is already the first thing a caller makes.
+		const [labels, relTypes, nodeProps, relProps, shape] = await Promise.all([
+			run(SCHEMA_QUERIES.labels),
+			run(SCHEMA_QUERIES.relationshipTypes),
+			run(SCHEMA_QUERIES.nodeProperties, { sample }),
+			run(SCHEMA_QUERIES.relationshipProperties, { sample }),
+			run(SCHEMA_QUERIES.shape, { sample }),
+		]);
+
+		if (labels.length === 0 && relTypes.length === 0) {
+			return structuredResult(
+				`The graph collection ${scope.database}/${scope.collection} is empty — no nodes ` +
+				"and no relationships. Reading a collection that has never been written to is " +
+				`not an error; write to it with ${TOOL_NAMES.GRAPH_WRITE} and it is created ` +
+				"on first write.",
+				{
+					database: scope.database,
+					collection: scope.collection,
+					labels: [],
+					relationship_types: [],
+					empty: true,
+				},
+			);
+		}
+
+		// Group the flat (label, key) rows into one line per label.
+		const keysByOwner = (rows: Record<string, unknown>[], ownerKey: string) => {
+			const grouped = new Map<string, string[]>();
+			for (const row of rows) {
+				const owner = String(row[ownerKey] ?? "");
+				const key = String(row.key ?? "");
+				if (owner === "" || key === "") continue;
+				const list = grouped.get(owner) ?? [];
+				list.push(key);
+				grouped.set(owner, list);
+			}
+			return grouped;
+		};
+
+		const nodeKeys = keysByOwner(nodeProps, "label");
+		const relKeys = keysByOwner(relProps, "type");
+
+		const lines: string[] = [];
+
+		lines.push("Node labels:");
+		if (labels.length === 0) lines.push("  (none)");
+		for (const row of labels) {
+			const label = String(row.label ?? "?");
+			const props = nodeKeys.get(label) ?? [];
+			lines.push(
+				`  (:${label}) ×${row.count ?? "?"}` +
+				(props.length > 0 ? ` — ${props.join(", ")}` : " — no properties"),
+			);
+		}
+
+		lines.push("", "Relationship types:");
+		if (relTypes.length === 0) lines.push("  (none)");
+		for (const row of relTypes) {
+			const type = String(row.type ?? "?");
+			const props = relKeys.get(type) ?? [];
+			lines.push(
+				`  [:${type}] ×${row.count ?? "?"}` +
+				(props.length > 0 ? ` — ${props.join(", ")}` : ""),
+			);
+		}
+
+		if (shape.length > 0) {
+			lines.push("", "Connections:");
+			for (const row of shape) {
+				const from = Array.isArray(row.start) ? row.start.join(":") : String(row.start);
+				const to = Array.isArray(row.end) ? row.end.join(":") : String(row.end);
+				lines.push(`  (:${from})-[:${row.rel}]->(:${to})`);
+			}
+		}
+
+		// Say so rather than letting a sampled answer read as exhaustive.
+		lines.push(
+			"",
+			`Property keys and connections are derived from a sample of ${sample} nodes and ` +
+			"relationships, so rare ones may be missing. Counts are exact.",
+		);
+
+		return structuredResult(
+			`Schema of ${scope.database}/${scope.collection}:\n\n${lines.join("\n")}`,
+			{
+				database: scope.database,
+				collection: scope.collection,
+				labels: labels.map((row) => ({
+					label: String(row.label ?? ""),
+					count: row.count,
+					properties: nodeKeys.get(String(row.label ?? "")) ?? [],
+				})),
+				relationship_types: relTypes.map((row) => ({
+					type: String(row.type ?? ""),
+					count: row.count,
+					properties: relKeys.get(String(row.type ?? "")) ?? [],
+				})),
+				connections: shape,
+				sampled: sample,
+			},
+		);
+	}
+
+	async function runGraphCollections(
+		args: { database?: string },
+		signal?: AbortSignal,
+	): Promise<ToolResult> {
+		const database = args.database?.trim() || graphConfig.database;
+		if (!database) {
+			throw new Error(
+				"No graph database configured. Set HYDRADB_GRAPH_DATABASE (or HYDRADB_DATABASE), " +
+				"or pass `database` on this call.",
+			);
+		}
+		logger.debug(`${TOOL_NAMES.GRAPH_COLLECTIONS}: ${database}`);
+
+		const collections = await hydra.graph.listCollections({ database }, { signal });
+
+		if (collections.length === 0) {
+			return structuredResult(
+				`No graph collections in ${database} yet. Collections are created by their ` +
+				`first write — run one with ${TOOL_NAMES.GRAPH_WRITE}.`,
+				{ database, collections: [], count: 0 },
+			);
+		}
+
+		return structuredResult(
+			`${collections.length} graph collection(s) in ${database}:\n` +
+			collections.map((name) => `  - ${name}`).join("\n"),
+			{ database, collections, count: collections.length },
+		);
+	}
+
+	async function runGraphAdmin(
+		args: { action: string; database?: string; collection?: string },
+		signal?: AbortSignal,
+	): Promise<ToolResult> {
+		const database = args.database?.trim() || graphConfig.database;
+		if (!database) {
+			throw new Error(
+				"No graph database configured. Set HYDRADB_GRAPH_DATABASE (or HYDRADB_DATABASE), " +
+				"or pass `database` on this call.",
+			);
+		}
+		logger.debug(`${TOOL_NAMES.GRAPH_ADMIN}: ${args.action} ${database}`);
+
+		if (args.action === "create_database") {
+			const res = await hydra.graph.createDatabase(database, { signal });
+			return structuredResult(
+				`Created graph database "${database}" (status: ${res.status ?? "ready"}). ` +
+				"Collections are created by their first write; there is no create-collection step.",
+				{ action: args.action, database, status: res.status ?? "ready", created: true },
+			);
+		}
+
+		if (args.action === "drop_collection") {
+			const collection = args.collection?.trim();
+			if (!collection) {
+				throw new Error(
+					`${TOOL_NAMES.GRAPH_ADMIN} action "drop_collection" requires \`collection\` — ` +
+					"the name of the graph to drop. Nothing was deleted.",
+				);
+			}
+			await hydra.graph.dropCollection({ database, collection }, { signal });
+			// The endpoint is idempotent and does not report whether anything was
+			// there, so this states what was requested rather than claiming a
+			// removal that may not have had anything to remove.
+			return structuredResult(
+				`Dropped graph collection "${collection}" from ${database}, along with all its ` +
+				"data. This call is idempotent, so it also succeeds when the collection did " +
+				"not exist.",
+				{ action: args.action, database, collection, dropped: true },
+			);
+		}
+
+		if (args.action === "drop_database") {
+			const res = await hydra.graph.dropDatabase(database, { signal });
+			const dropped = res.deleted_collections ?? [];
+			const listed =
+				dropped.length > 0 ? ` Collections removed: ${dropped.join(", ")}.` : "";
+			// `deleted: false` is a real, different outcome — the database predates
+			// BYOG and only its graph collections went. Reporting it as a full drop
+			// would tell the user something is gone that is still there.
+			return structuredResult(
+				res.deleted === false
+					? `Dropped the graph collections in "${database}", but NOT the database itself — ` +
+						"it was created through the standard database API, so remove it there." +
+						listed
+					: `Dropped graph database "${database}" and everything in it.${listed}`,
+				{
+					action: args.action,
+					database,
+					database_deleted: res.deleted ?? true,
+					deleted_collections: dropped,
+				},
+			);
+		}
+
+		throw new Error(
+			`${TOOL_NAMES.GRAPH_ADMIN} received an unknown action "${args.action}". ` +
+			'Valid actions are "create_database", "drop_collection" and "drop_database".',
+		);
+	}
+
 	// --- Registration helper ---
 
 	function register(
@@ -1436,6 +1814,98 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.DELETE_MEMORY].params.memory_id),
 	};
 
+	// --- BYOG graph schemas ---
+
+	const graphScopeSchema = {
+		database: z
+			.string()
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.GRAPH_QUERY].params.database),
+		collection: z
+			.string()
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.GRAPH_QUERY].params.collection),
+	};
+
+	/**
+	 * Cypher text is bounded like every other free-text input on this server.
+	 * The 256 KiB body cap covers query plus params together and is checked in
+	 * the handler; this only stops an absurd query string before it gets there.
+	 */
+	const MAX_CYPHER_CHARS = 100_000;
+
+	const graphCypherSchema = {
+		query: z
+			.string()
+			.min(1, { message: "query must not be empty" })
+			.max(MAX_CYPHER_CHARS, {
+				message: `query must be at most ${MAX_CYPHER_CHARS} characters`,
+			})
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.GRAPH_QUERY].params.query),
+		params: z
+			.record(z.unknown())
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.GRAPH_QUERY].params.params),
+		...graphScopeSchema,
+		max_rows: z
+			.number()
+			.int()
+			.min(1)
+			.max(1000)
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.GRAPH_QUERY].params.max_rows),
+	};
+
+	const graphWriteSchema = {
+		...graphCypherSchema,
+		query: z
+			.string()
+			.min(1, { message: "query must not be empty" })
+			.max(MAX_CYPHER_CHARS, {
+				message: `query must be at most ${MAX_CYPHER_CHARS} characters`,
+			})
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.GRAPH_WRITE].params.query),
+	};
+
+	const graphSchemaSchema = {
+		...graphScopeSchema,
+		sample: z
+			.number()
+			.int()
+			.min(1)
+			.max(10_000)
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.GRAPH_SCHEMA].params.sample),
+	};
+
+	const graphCollectionsSchema = {
+		database: z
+			.string()
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.GRAPH_COLLECTIONS].params.database),
+	};
+
+	const graphAdminSchema = {
+		action: z
+			.enum(["create_database", "drop_collection", "drop_database"])
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.GRAPH_ADMIN].params.action),
+		database: z
+			.string()
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.GRAPH_ADMIN].params.database),
+		collection: z
+			.string()
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.GRAPH_ADMIN].params.collection),
+	};
+
+	const graphRowsOutputSchema = {
+		database: z.string(),
+		collection: z.string(),
+		rows: z.array(z.record(z.unknown())),
+		row_count: z.number(),
+	};
+
 	// `destructiveHint` was missing from the annotations type, so no tool could
 	// declare it — and the MCP spec defaults it to TRUE for any non-readonly
 	// tool. A spec-following host therefore read hydradb_ingest as destructive
@@ -1650,6 +2120,78 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 		(args, extra) => runStatus(args as Parameters<typeof runStatus>[0], extra?.signal),
 		readOnly,
 	);
+
+	// --- BYOG graph tools (PRO-1681) ---
+	//
+	// A separate product surface from the memory/knowledge tools above: property
+	// graphs the user models and owns, addressed in Cypher. Registered by
+	// default so the capability is discoverable — the feature exists today and
+	// no client surfaces it — and gated by two independent switches:
+	//
+	//   HYDRADB_MCP_GRAPH_TOOLS=0  withholds all five, for memory-only users who
+	//                              do not want the manifest cost.
+	//   HYDRADB_GRAPH_READONLY=1   withholds the two that mutate. This is the
+	//                              stronger guarantee: a tool that is never
+	//                              registered cannot be called, where a runtime
+	//                              refusal depends on the check being reached.
+	if (graphConfig.enabled) {
+		register(
+			TOOL_NAMES.GRAPH_QUERY,
+			graphCypherSchema,
+			(args, extra) =>
+				runGraphCypher(
+					args as Parameters<typeof runGraphCypher>[0],
+					"read",
+					extra?.signal,
+				),
+			readOnly,
+			graphRowsOutputSchema,
+		);
+
+		register(
+			TOOL_NAMES.GRAPH_SCHEMA,
+			graphSchemaSchema,
+			(args, extra) =>
+				runGraphSchema(args as Parameters<typeof runGraphSchema>[0], extra?.signal),
+			readOnly,
+		);
+
+		register(
+			TOOL_NAMES.GRAPH_COLLECTIONS,
+			graphCollectionsSchema,
+			(args, extra) =>
+				runGraphCollections(
+					args as Parameters<typeof runGraphCollections>[0],
+					extra?.signal,
+				),
+			readOnly,
+		);
+
+		if (!graphConfig.readOnly) {
+			register(
+				TOOL_NAMES.GRAPH_WRITE,
+				graphWriteSchema,
+				(args, extra) =>
+					runGraphCypher(
+						args as Parameters<typeof runGraphCypher>[0],
+						"write",
+						extra?.signal,
+					),
+				// Not `additiveWrite`: this tool runs arbitrary Cypher, and DELETE is
+				// as reachable through it as CREATE. A host must be able to gate it.
+				destructive,
+				graphRowsOutputSchema,
+			);
+
+			register(
+				TOOL_NAMES.GRAPH_ADMIN,
+				graphAdminSchema,
+				(args, extra) =>
+					runGraphAdmin(args as Parameters<typeof runGraphAdmin>[0], extra?.signal),
+				destructive,
+			);
+		}
+	}
 
 	// --- Deprecated aliases ---
 	//
