@@ -5,7 +5,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { HydraDBClient } from "@hydradb/sdk";
 
-import { HydraDB } from "../src/hydra/index.js";
+import { GraphResource, HydraDB, HydraWrapperError } from "../src/hydra/index.js";
 import type { GraphRow } from "../src/hydra/index.js";
 import { createHydraDBServer } from "../src/server.js";
 import { GRAPH_TOOL_NAMES, TOOL_NAMES } from "../src/tool-names.js";
@@ -480,6 +480,129 @@ test("a full drop reports the database as gone", async () => {
 	});
 
 	assert.match(textOf(result), /Dropped graph database "crm"/);
+
+	await client.close();
+});
+
+// --- Transport: response shapes and size accounting ---
+//
+// These reach the real GraphResource, which the tests above deliberately
+// replace. `fetch` is stubbed so no request leaves the process.
+
+function withFetch<T>(
+	respond: (url: string, init: RequestInit) => { status?: number; body: unknown },
+	run: (graph: GraphResource) => Promise<T>,
+): Promise<T> {
+	const original = globalThis.fetch;
+	globalThis.fetch = (async (url: unknown, init: unknown) => {
+		const { status = 200, body } = respond(String(url), init as RequestInit);
+		return {
+			ok: status >= 200 && status < 300,
+			status,
+			text: async () => JSON.stringify(body),
+		} as Response;
+	}) as typeof fetch;
+	const graph = new GraphResource({ token: "t", maxRetries: 0 });
+	return run(graph).finally(() => {
+		globalThis.fetch = original;
+	});
+}
+
+/**
+ * An empty array is an ordinary answer here — a query that matched nothing, or
+ * a write with no RETURN. Coercing a malformed response into one would make a
+ * broken integration indistinguishable from a true negative, which is the one
+ * case a caller cannot debug.
+ */
+test("a non-array query payload throws rather than reading as no rows", async () => {
+	await withFetch(
+		() => ({ body: { success: true, data: { unexpected: "object" } } }),
+		async (graph) => {
+			await assert.rejects(
+				() => graph.query({ database: "d", collection: "c", query: "MATCH (n) RETURN n" }),
+				(err: unknown) => {
+					assert.ok(err instanceof HydraWrapperError);
+					assert.match(err.message, /response-shape mismatch, not an empty result/);
+					return true;
+				},
+			);
+		},
+	);
+});
+
+test("a genuinely empty result is still an empty result", async () => {
+	// The live API returns `data: []` for a write with no RETURN, so this must
+	// stay a success rather than being swept up by the shape check.
+	await withFetch(
+		() => ({ body: { success: true, data: [] } }),
+		async (graph) => {
+			assert.deepEqual(
+				await graph.query({ database: "d", collection: "c", query: "MATCH (n) SET n.x = 1" }),
+				[],
+			);
+		},
+	);
+});
+
+test("a malformed collections payload throws rather than reading as none", async () => {
+	await withFetch(
+		() => ({ body: { success: true, data: { wrong: true } } }),
+		async (graph) => {
+			await assert.rejects(
+				() => graph.listCollections({ database: "d" }),
+				(err: unknown) => {
+					assert.ok(err instanceof HydraWrapperError);
+					assert.match(err.message, /collections/);
+					return true;
+				},
+			);
+		},
+	);
+});
+
+test("an empty collections list is still an empty list", async () => {
+	await withFetch(
+		() => ({ body: { success: true, data: { collections: [] } } }),
+		async (graph) => {
+			assert.deepEqual(await graph.listCollections({ database: "d" }), []);
+		},
+	);
+});
+
+/**
+ * The size check must measure the body the transport actually sends.
+ *
+ * `database` and `collection` are serialised alongside the query, so a payload
+ * sitting just under the cap on `query` + `params` alone passed locally and was
+ * rejected remotely with a 413 — after the whole thing had been uploaded, which
+ * is the outcome the check exists to avoid.
+ */
+test("the size check accounts for database and collection, not just the query", async () => {
+	const { hydra, calls } = mockGraph();
+	const client = await connect(hydra);
+
+	// Sized so query+params alone fit under 256 KiB, but the full body does not.
+	const query = "UNWIND $rows AS row CREATE (n:T) SET n = row";
+	const longDatabase = "d".repeat(4_000);
+	const filler = "x".repeat(262_144 - query.length - 2_200);
+
+	// Guard the guard: if this ever stops holding, the test would pass for the
+	// wrong reason — rejecting a payload that was over the cap on the query
+	// alone, and proving nothing about the scope fields.
+	assert.ok(
+		Buffer.byteLength(JSON.stringify({ query, params: { blob: filler } }), "utf8") <
+			262_144,
+		"query+params alone must fit, or this test proves nothing about scope",
+	);
+
+	const result = await client.callTool({
+		name: TOOL_NAMES.GRAPH_QUERY,
+		arguments: { query, params: { blob: filler }, database: longDatabase, collection: "c" },
+	});
+
+	assert.equal(result.isError, true);
+	assert.match(textOf(result), /256 KiB limit/);
+	assert.equal(calls.length, 0, "an oversized body must not be uploaded to be rejected");
 
 	await client.close();
 });

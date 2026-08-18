@@ -62,6 +62,32 @@ function isRetryable(status: number): boolean {
 	return status === 429 || (status >= 500 && status <= 599);
 }
 
+/**
+ * A 2xx whose body is not the shape this endpoint promises.
+ *
+ * Raised rather than coerced to an empty result. An empty array is a perfectly
+ * ordinary answer here — a query that matched nothing, a database with no
+ * graphs — so silently substituting one for a malformed response makes a broken
+ * integration indistinguishable from a true negative, which is the one case a
+ * caller cannot debug. The `path` and a bounded preview of what actually
+ * arrived are carried through so the failure is actionable.
+ */
+function unexpectedShape(path: string, expected: string, got: unknown): HydraWrapperError {
+	let preview: string;
+	try {
+		preview = JSON.stringify(got) ?? String(got);
+	} catch {
+		preview = String(got);
+	}
+	if (preview.length > 200) preview = `${preview.slice(0, 200)}…`;
+	return new HydraWrapperError(
+		`Hydra DB ${path} → ERR: expected ${expected}, got ${preview}. ` +
+		"This is a response-shape mismatch, not an empty result.",
+		path,
+		{ body: got },
+	);
+}
+
 export class GraphResource {
 	private readonly baseUrl: string;
 	private readonly timeoutMs: number;
@@ -93,10 +119,15 @@ export class GraphResource {
 			...(params.params != null ? { params: params.params } : {}),
 		};
 		const rows = await this.send<unknown>("/byog/query", "POST", body, opts);
-		// The endpoint always returns an array of row objects on success. Anything
-		// else means the contract moved; surface that rather than pretending the
-		// result was empty.
-		return Array.isArray(rows) ? (rows as GraphRow[]) : [];
+		// `data` is ALWAYS an array on success — verified against the live API,
+		// including a write with no RETURN, which yields `[]`. So anything else
+		// means the response contract moved, and coercing it to `[]` would
+		// present that as a legitimate "no rows matched": the caller would read a
+		// broken integration as an empty graph and act on it. Fail loudly instead.
+		if (!Array.isArray(rows)) {
+			throw unexpectedShape("/byog/query", "an array of row objects", rows);
+		}
+		return rows as GraphRow[];
 	}
 
 	/** Create a graph database (`POST /byog/databases`). Ready immediately. */
@@ -118,7 +149,17 @@ export class GraphResource {
 			undefined,
 			opts,
 		);
-		return Array.isArray(res?.collections) ? (res.collections as string[]) : [];
+		// Same reasoning as `query`: a missing or non-array `collections` is a
+		// contract change, and reporting it as "no collections yet" would send
+		// the caller off to create graphs that already exist.
+		if (!Array.isArray(res?.collections)) {
+			throw unexpectedShape(
+				"/byog/collections",
+				"an object with a `collections` array",
+				res,
+			);
+		}
+		return res.collections as string[];
 	}
 
 	/** Drop one collection and all its data (`DELETE /byog/collections`). Idempotent. */

@@ -1171,10 +1171,20 @@ export function createHydraDBServer(
 	 * in BYTES, not characters: the cap is on the encoded body, and non-ASCII
 	 * property values are where a "small enough" batch stops being one.
 	 */
-	function assertBodyFits(query: string, params?: Record<string, unknown>): void {
+	function assertBodyFits(body: {
+		database: string;
+		collection: string;
+		query: string;
+		params?: Record<string, unknown>;
+	}): void {
 		let bytes: number;
 		try {
-			bytes = Buffer.byteLength(JSON.stringify({ query, params }) ?? "", "utf8");
+			// The WHOLE body, not just the caller's two fields. `database` and
+			// `collection` are serialised alongside the query, so measuring
+			// without them let a payload sitting just under the cap pass here and
+			// be rejected remotely with a 413 — after the entire thing had been
+			// uploaded, which is the outcome this check exists to avoid.
+			bytes = Buffer.byteLength(JSON.stringify(body) ?? "", "utf8");
 		} catch {
 			throw new Error(
 				"`params` could not be serialised to JSON — it must contain only plain " +
@@ -1232,7 +1242,7 @@ export function createHydraDBServer(
 		const unsupported = unsupportedConstruct(args.query);
 		if (unsupported) return errorResult(`${unsupported} Nothing was executed.`);
 
-		assertBodyFits(args.query, args.params);
+		assertBodyFits({ ...scope, query: args.query, params: args.params });
 
 		logger.debug(`${TOOL_NAMES.GRAPH_QUERY}: ${scope.database}/${scope.collection}`);
 
