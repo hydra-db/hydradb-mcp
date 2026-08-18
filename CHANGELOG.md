@@ -5,6 +5,86 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added — graph (BYOG) tools
+
+Hydra DB's **graph database** offering is now reachable from the MCP. Previously
+this server exposed only the application offering (memory and knowledge); the
+property graphs users model and own end to end, queried in Cypher, had no client
+surface at all despite being [documented](https://docs.hydradb.com/essentials/v2/graph-collections-byog)
+and live.
+
+Three new tools, all additive — nothing about the existing six changed:
+
+| Tool | Annotation | What it does |
+|---|---|---|
+| `hydradb_graph_query` | `destructiveHint` | Cypher, reads and writes alike |
+| `hydradb_graph_collections` | `readOnlyHint` | List the graphs in a graph database |
+| `hydradb_graph_admin` | `destructiveHint` | Create a graph database; drop a collection or database |
+
+This covers [Neo4j's MCP server](https://github.com/neo4j-contrib/mcp-neo4j)
+`read_neo4j_cypher` and `write_neo4j_cypher`, plus the graph database lifecycle
+its Aura server covers. Two of its capabilities are deliberately **not**
+reproduced:
+
+**One Cypher tool, not a read/write pair.** Neo4j splits `read_neo4j_cypher`
+from `write_neo4j_cypher` so a host can auto-approve one and gate the other.
+That split is only sound if the read/write classifier is right on every query,
+and any classifier over Cypher text is a heuristic — Neo4j's own is a substring
+scan that refuses `MATCH (p:Person) WHERE p.name = "CREATE something" RETURN
+p.name`, a query HydraDB accepts and that mutates nothing. Rather than ship a
+tool whose contract ("this one never writes") rests on a heuristic, there is one
+tool, annotated destructive, and the host gates the whole graph surface. No
+classifier ships at all.
+
+**No schema tool.** Neo4j's `get_neo4j_schema` runs `CALL apoc.meta.schema()`,
+which HydraDB rejects outright. A derived equivalent is not part of the product,
+so none ships. Callers discover a collection's structure the same way they query
+it — `MATCH (n) UNWIND labels(n) AS l RETURN l, count(*) AS c ORDER BY l` — and
+the tool description says so.
+
+Also worth recording: **`EXPLAIN` is not a preview.** `EXPLAIN MATCH (p:Person)
+RETURN p` returns live rows rather than a plan, so it is documented as something
+not to reach for.
+
+The 256 KiB body cap IS enforced before upload, since the remote `413` arrives
+only after the whole oversized batch has been sent — that is a transport fact
+the client owns, not a rule about what Cypher means.
+
+Registered by default, with one switch: `HYDRADB_MCP_GRAPH_TOOLS=0` withholds
+all three, for memory-only users who do not want the extra tool definitions in
+every conversation.
+
+**The client does not inspect your Cypher.** No read/write classification, no
+read-only mode, no local pre-rejection of unsupported constructs. All of those
+would put a second, worse implementation of the server's rules inside a client,
+able only to agree with the server or to be wrong — and being wrong means
+refusing a query HydraDB would have run. The server rejects unsupported
+constructs before executing anything (verified: a query mixing `CREATE` with a
+procedure call leaves the node count unchanged) and its messages are more
+specific than the ones this server used to produce. Queries are sent verbatim.
+
+Withholding the tools is the only lockdown offered, because it is the only one
+that is actually a guarantee.
+
+New configuration: `HYDRADB_GRAPH_DATABASE` (falls back to `HYDRADB_DATABASE`)
+and `HYDRADB_GRAPH_COLLECTION` (defaults to `default`). A graph database is a
+different namespace from the memory database, so every graph tool also accepts
+`database` and `collection` per call.
+
+### Internal
+
+- `HydraDB.graph` is a hand-rolled HTTP path, not an SDK call: `@hydradb/sdk`
+  at the pinned 2.1.2 has no `byog` resource, so the endpoints are unreachable
+  through it. It sits behind the same wrapper surface, unwraps the same envelope
+  by shape and raises the same `HydraWrapperError`, so callers cannot tell which
+  methods go through the SDK. When the SDK grows a `byog` resource, that one file
+  is replaced and nothing above it changes. The exact SDK pin is unaffected —
+  there is no generated name to be insulated from yet.
+- `responseError()` added to the wrapper's error module so failures from the
+  non-SDK path are formatted through the same code as SDK failures, keeping the
+  error code, the server's message and the request id.
 ## [1.2.1] - 2026-08-17
 
 ### Fixed

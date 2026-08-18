@@ -144,6 +144,31 @@ function truncate(text: string): string {
 }
 
 /**
+ * Build the same error from a raw HTTP response, for calls that do not go
+ * through the SDK.
+ *
+ * The BYOG endpoints have no SDK resource to throw `HydraDBError`, so
+ * `translateError` alone would send every one of their failures down its
+ * generic branch and drop the response body — losing the error code, the
+ * server's explanation and the request id, which on a rejected Cypher query is
+ * the entire diagnosis.
+ *
+ * Routing them here instead keeps ONE formatting path, so a BYOG failure and an
+ * SDK failure are indistinguishable to everything above the wrapper.
+ */
+export function responseError(
+	path: string,
+	status: number,
+	body: unknown,
+): HydraWrapperError {
+	return new HydraWrapperError(
+		`Hydra DB ${path} → ${status}: ${bodyToString(body)}`,
+		path,
+		{ status, body },
+	);
+}
+
+/**
  * Translate any error thrown by an SDK call into a `HydraWrapperError` carrying
  * the byte-identical `Hydra DB ${path} → ${status}: ${body}` message.
  */

@@ -151,6 +151,42 @@ const PARAM = {
 	memory_id: "The ID of the memory to delete",
 } as const;
 
+/** Parameter blurbs for the BYOG graph tools. */
+const GRAPH_PARAM = {
+	query:
+		"The Cypher to run — a read (MATCH/RETURN, traversal, aggregation) or a write " +
+		"(CREATE, MERGE, SET, DELETE, REMOVE, FOREACH, index statements). Write data as " +
+		"$parameters, not as string-concatenated literals, and alias every returned " +
+		"expression (`RETURN n.name AS name`). Prefer MERGE on a key you own over bare " +
+		"CREATE so a retry cannot duplicate. Deletes are irreversible.",
+	params:
+		"Values referenced by $name in the query, as {name: value}. Always pass user data " +
+		"this way rather than building it into the query text: parameters are bound safely " +
+		"and keep query plans cacheable. Lists work too — `UNWIND $rows AS row` with " +
+		'{"rows": [...]} is the supported way to write many nodes in one call.',
+	database:
+		"Graph database to run against. Defaults to the server's configured graph " +
+		"database. This is a DIFFERENT namespace from the memory/knowledge database — a " +
+		"query aimed at the wrong one reads an empty graph rather than failing.",
+	collection:
+		"Graph collection to run against. Defaults to the server's configured graph " +
+		"collection. Each collection is an independent graph; a query sees exactly one " +
+		"and never another's data.",
+	max_rows:
+		"Maximum rows to render in the response (default: 100). Caps what reaches the " +
+		"conversation, not what the query computes — to actually limit the work, put " +
+		"`LIMIT` in the Cypher.",
+	action:
+		'Which operation to perform: "create_database", "drop_collection", or ' +
+		'"drop_database". The two drops are irreversible.',
+	admin_database:
+		"The graph database to create or drop, or the one containing the collection " +
+		"being dropped. Defaults to the server's configured graph database — pass it " +
+		"explicitly for any drop, so the target is stated rather than inherited.",
+	admin_collection:
+		'The collection to drop. Required for "drop_collection" and ignored otherwise.',
+} as const;
+
 function deprecated(alias: string, body: string): string {
 	return `DEPRECATED — use \`${ALIAS_REPLACEMENTS[alias]}\` instead. ${body}`;
 }
@@ -203,6 +239,61 @@ const INSPECT_BODY = `Fetch the full original content of ONE stored item by its 
 The id is the value shown as \`[id: …]\` in hydradb_query results and in [brackets] in hydradb_list output. Ids are not guessable — take one from those tools rather than constructing it.
 
 Long sources come back in slices; the response says where it stopped and what offset continues it. Binary sources are never inlined — you get their type and size, and \`mode: "url"\` returns a download link.`;
+
+/**
+ * The dialect notes every graph tool needs to state.
+ *
+ * These are not general Cypher advice — each one is a construct that a model
+ * trained on Neo4j will reach for and that HydraDB REJECTS before running
+ * anything. A rejected query fails identically on retry, so the only way out is
+ * knowing the rule beforehand.
+ */
+const CYPHER_DIALECT = `HydraDB runs your Cypher verbatim and never rewrites it. Near-complete openCypher, with these differences from Neo4j:
+  - Procedure calls are rejected — no \`CALL db.*\`, no \`CALL apoc.*\`. \`CALL { ... }\` subqueries ARE supported. To learn a collection's structure, query it: \`MATCH (n) UNWIND labels(n) AS l RETURN l, count(*) AS c ORDER BY l\`.
+  - \`LOAD CSV\` is rejected. Pass data through \`params\`: \`UNWIND $rows AS row MERGE (n:Thing {id: row.id}) SET n += row\`.
+  - Existence checks are bare pattern predicates — \`WHERE (p)-[:KNOWS]->()\`. The \`EXISTS { ... }\` block and the \`exists()\` function are not accepted.
+  - \`shortestPath\` goes in RETURN or WITH (not \`MATCH p = ...\`) and the traversal must be directed.
+  - Do NOT use \`EXPLAIN\`/\`PROFILE\` to preview a query: they EXECUTE it rather than planning it.`;
+
+const GRAPH_SCOPE = `Queries run against exactly ONE collection — collections never see each other's data, so \`MATCH (n) RETURN n\` returns that collection's nodes and nothing else. \`database\` and \`collection\` default to the server's configured graph scope; pass them to target another.`;
+
+const GRAPH_QUERY_BODY = `Run Cypher against a HydraDB graph collection — reads and writes alike. This is the graph database product: property graphs you model and own end to end, entirely separate from the memory/knowledge corpora that ${TOOL_NAMES.QUERY} searches.
+
+Reads are what a graph is for — multi-hop traversal, variable-length paths, neighbourhood expansion, shortest paths, aggregation over relationships:
+  MATCH (a:Person {name:$n})-[:KNOWS*1..4]->(reach) RETURN DISTINCT reach.name AS name
+  MATCH (p:Person {name:$n})-[r]-(nbr) RETURN type(r) AS rel, nbr.name AS neighbor
+  MATCH (a:Person {name:$x}),(b:Person {name:$y}) RETURN shortestPath((a)-[:KNOWS*..8]->(b)) AS path
+
+Writes go through this same tool — CREATE, MERGE, SET, DELETE, REMOVE, FOREACH, and index management:
+  UNWIND $rows AS row MERGE (p:Person {ext_id: row.ext_id}) SET p += row
+
+THIS TOOL CAN DESTROY DATA. \`MATCH (n:Person) DELETE n\` empties a label and \`DETACH DELETE\` also removes its relationships; neither can be undone and there is no trash. Confirm with the user before running anything destructive they did not explicitly ask for, and prefer MERGE on a key you own over bare CREATE — a retried CREATE duplicates nodes where a MERGE does not.
+
+Always pass user data through \`params\` rather than building it into the query string: parameters are bound safely and keep query plans cacheable.
+
+ALIAS EVERYTHING you intend to read — \`RETURN n.name AS name\`. Unaliased expressions are keyed by their raw expression text.
+
+Large results are silently truncated server-side, so paginate anything that could be big: \`ORDER BY ... SKIP $offset LIMIT $limit\`. Without ORDER BY, the rows you lose are arbitrary.
+
+Collections auto-create on first write, so there is no create-collection call. A write with no RETURN succeeds with zero rows — that is success, not failure. Requests are capped at 256 KiB, so batch bulk loads (~500 rows per call is a good start).
+
+${GRAPH_SCOPE}
+
+${CYPHER_DIALECT}`;
+
+const GRAPH_COLLECTIONS_BODY = `List the graph collections in a graph database. Each collection is an independent graph with its own nodes, relationships and schema.
+
+Use it to discover what exists before querying, or to confirm a write created the collection you expected. Collections auto-create on first write, so a name missing here has simply never been written to.`;
+
+const GRAPH_ADMIN_BODY = `Manage graph databases and collections. Pick one \`action\`:
+
+  "create_database"  — create a graph database. Ready immediately, no provisioning wait. Fails if the name already exists.
+  "drop_collection"  — drop ONE collection and all its data. Idempotent: dropping a collection that does not exist succeeds.
+  "drop_database"    — drop EVERY collection in the database, and the database itself if it was created as a graph database.
+
+The two drops are IRREVERSIBLE and there is no trash. Confirm with the user before either, and never infer one from a vague instruction — "clean up my graph" authorises nothing until the user has seen ${TOOL_NAMES.GRAPH_COLLECTIONS} output and named what should go.
+
+There is no create-collection action: collections come into existence on their first write via ${TOOL_NAMES.GRAPH_QUERY}.`;
 
 export const TOOL_DESCRIPTIONS = {
 	// --- Canonical tools (CONTRACT §3) ---
@@ -307,6 +398,38 @@ Take the id from hydradb_query or hydradb_list — never guess one. Confirm with
 		},
 	},
 
+	// --- BYOG graph tools (PRO-1681) ---
+
+	[TOOL_NAMES.GRAPH_QUERY]: {
+		title: "Query Graph (Cypher)",
+		description: GRAPH_QUERY_BODY,
+		params: {
+			query: GRAPH_PARAM.query,
+			params: GRAPH_PARAM.params,
+			database: GRAPH_PARAM.database,
+			collection: GRAPH_PARAM.collection,
+			max_rows: GRAPH_PARAM.max_rows,
+		},
+	},
+
+	[TOOL_NAMES.GRAPH_COLLECTIONS]: {
+		title: "List Graph Collections",
+		description: GRAPH_COLLECTIONS_BODY,
+		params: {
+			database: GRAPH_PARAM.database,
+		},
+	},
+
+	[TOOL_NAMES.GRAPH_ADMIN]: {
+		title: "Manage Graph Databases",
+		description: GRAPH_ADMIN_BODY,
+		params: {
+			action: GRAPH_PARAM.action,
+			database: GRAPH_PARAM.admin_database,
+			collection: GRAPH_PARAM.admin_collection,
+		},
+	},
+
 	// --- Deprecated aliases ---
 
 	[TOOL_NAMES.SEARCH]: {
@@ -405,4 +528,16 @@ THE TOOLS
 
 Ids flow between these: ${TOOL_NAMES.QUERY} and ${TOOL_NAMES.LIST} emit them, ${TOOL_NAMES.INSPECT}, ${TOOL_NAMES.DELETE} and ${TOOL_NAMES.STATUS} accept them. Never invent one.
 
-All tools require HYDRADB_API_KEY and HYDRADB_DATABASE in the environment.`;
+THE GRAPH TOOLS (a separate product surface)
+
+Hydra DB also runs property graphs the user models and owns end to end, queried in Cypher. These are NOT the same store as the memory and knowledge above, and nothing crosses between them: ${TOOL_NAMES.QUERY} cannot see graph data, and ${TOOL_NAMES.GRAPH_QUERY} cannot see memories.
+
+- ${TOOL_NAMES.GRAPH_QUERY} — Cypher, reads and writes alike: traversal, paths, neighbourhoods, aggregation, CREATE/MERGE/SET/DELETE. It can destroy data, so confirm before running anything destructive the user did not ask for.
+- ${TOOL_NAMES.GRAPH_COLLECTIONS} — which graphs exist in a graph database.
+- ${TOOL_NAMES.GRAPH_ADMIN} — create a graph database, drop a collection, drop a database. Irreversible; confirm first.
+
+Choose by the question, not the vocabulary: "what has the user told me about X" is ${TOOL_NAMES.QUERY}; "how is X connected to Y in my graph" is ${TOOL_NAMES.GRAPH_QUERY}. If the user has written Cypher, or speaks of nodes, labels, relationships and traversals they themselves created, they mean the graph tools.
+
+Working against an unfamiliar collection, discover its structure by querying it — \`MATCH (n) UNWIND labels(n) AS l RETURN l, count(*) AS c ORDER BY l\` — rather than guessing labels, which yields empty results that look like missing data.
+
+All tools require HYDRADB_API_KEY and HYDRADB_DATABASE in the environment. The graph tools additionally read HYDRADB_GRAPH_DATABASE and HYDRADB_GRAPH_COLLECTION for their default scope, and can be disabled with HYDRADB_MCP_GRAPH_TOOLS=0.`;

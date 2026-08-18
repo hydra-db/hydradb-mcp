@@ -20,6 +20,7 @@ import type { HydraDB as SDK } from "@hydradb/sdk";
 
 import { unwrap } from "./envelope.js";
 import { translateError } from "./errors.js";
+import { GraphResource } from "./graph.js";
 
 export type ContextKind = "memory" | "knowledge";
 
@@ -511,6 +512,11 @@ export class DatabasesResource extends Resource {
 export class HydraDB {
 	readonly context: ContextResource;
 	readonly databases: DatabasesResource;
+	/**
+	 * BYOG graph operations. Not backed by the SDK — see ./graph.ts for why —
+	 * but exposed here so callers reach every HydraDB surface through one object.
+	 */
+	readonly graph: GraphResource;
 
 	constructor(config: HydraConfig, sdk?: HydraDBClient) {
 		const client =
@@ -534,5 +540,11 @@ export class HydraDB {
 			config.database,
 			config.collection,
 		);
+		this.graph = new GraphResource({
+			token: config.token,
+			...(config.baseUrl != null ? { baseUrl: config.baseUrl } : {}),
+			timeoutSeconds: config.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS,
+			maxRetries: config.maxRetries ?? DEFAULT_MAX_RETRIES,
+		});
 	}
 }
