@@ -15,42 +15,37 @@ property graphs users model and own end to end, queried in Cypher, had no client
 surface at all despite being [documented](https://docs.hydradb.com/essentials/v2/graph-collections-byog)
 and live.
 
-Five new tools, all additive — nothing about the existing six changed:
+Three new tools, all additive — nothing about the existing six changed:
 
 | Tool | Annotation | What it does |
 |---|---|---|
-| `hydradb_graph_query` | `readOnlyHint` | Read-only Cypher: traversal, paths, neighbourhoods, aggregation |
-| `hydradb_graph_write` | `destructiveHint` | Cypher that mutates |
-| `hydradb_graph_schema` | `readOnlyHint` | Labels, relationship types, properties, endpoint shape |
+| `hydradb_graph_query` | `destructiveHint` | Cypher, reads and writes alike |
 | `hydradb_graph_collections` | `readOnlyHint` | List the graphs in a graph database |
 | `hydradb_graph_admin` | `destructiveHint` | Create a graph database; drop a collection or database |
 
-This reaches feature parity with [Neo4j's MCP server](https://github.com/neo4j-contrib/mcp-neo4j)
-(`read_neo4j_cypher`, `write_neo4j_cypher`, `get_neo4j_schema`), plus the graph
-database lifecycle its Aura server covers. Neo4j's memory server has no
-counterpart here because that capability already ships as this server's memory
-tools.
+This covers [Neo4j's MCP server](https://github.com/neo4j-contrib/mcp-neo4j)
+`read_neo4j_cypher` and `write_neo4j_cypher`, plus the graph database lifecycle
+its Aura server covers. Two of its capabilities are deliberately **not**
+reproduced:
 
-Three decisions are worth recording, each forced by something observed against
-the live API rather than assumed:
+**One Cypher tool, not a read/write pair.** Neo4j splits `read_neo4j_cypher`
+from `write_neo4j_cypher` so a host can auto-approve one and gate the other.
+That split is only sound if the read/write classifier is right on every query,
+and any classifier over Cypher text is a heuristic — Neo4j's own is a substring
+scan that refuses `MATCH (p:Person) WHERE p.name = "CREATE something" RETURN
+p.name`, a query HydraDB accepts and that mutates nothing. Rather than ship a
+tool whose contract ("this one never writes") rests on a heuristic, there is one
+tool, annotated destructive, and the host gates the whole graph surface.
 
-**Reads and writes are separate tools, and the guard is literal-aware.** Neo4j
-classifies a query by scanning the raw text for write keywords. That refuses
-`MATCH (p:Person) WHERE p.name = "CREATE something" RETURN p.name` — a query
-HydraDB accepts and that mutates nothing. Our detector blanks string literals,
-comments and backticked identifiers before scanning, so a keyword inside data is
-not mistaken for a clause. The split is what lets a host auto-approve reads while
-gating mutations.
+**No schema tool.** Neo4j's `get_neo4j_schema` runs `CALL apoc.meta.schema()`,
+which HydraDB rejects outright. A derived equivalent is not part of the product,
+so none ships. Callers discover a collection's structure the same way they query
+it — `MATCH (n) UNWIND labels(n) AS l RETURN l, count(*) AS c ORDER BY l` — and
+the tool description says so.
 
-**The schema is derived from plain Cypher, not from a procedure.** HydraDB
-rejects every procedure call, so `CALL apoc.meta.schema()` — how Neo4j's
-`get_neo4j_schema` works — is unavailable. `hydradb_graph_schema` assembles the
-same picture from five aggregate queries and states that property keys come from
-a sample rather than letting a partial answer read as exhaustive.
-
-**`EXPLAIN` is not a preview.** `EXPLAIN MATCH (p:Person) RETURN p` returns live
-rows rather than a plan, so it is documented as something not to reach for, and
-no read-only guarantee is built on it.
+Also worth recording: **`EXPLAIN` is not a preview.** `EXPLAIN MATCH (p:Person)
+RETURN p` returns live rows rather than a plan, so it is documented as something
+not to reach for.
 
 Constructs HydraDB rejects before execution (`CALL` procedures, `LOAD CSV`) are
 caught locally and answered with the reason and the supported alternative — the
@@ -59,13 +54,15 @@ local failure is immediate and specific where the remote one is neither. The
 256 KiB body cap is likewise enforced before upload, since the remote `413`
 arrives only after the whole oversized batch has been sent.
 
-Registered by default, with two independent switches:
+Registered by default, with two switches:
 
-- `HYDRADB_MCP_GRAPH_TOOLS=0` withholds all five, for memory-only users who do
+- `HYDRADB_MCP_GRAPH_TOOLS=0` withholds all three, for memory-only users who do
   not want the extra tool definitions in every conversation.
-- `HYDRADB_GRAPH_READONLY=1` withholds the two that mutate. They are not
-  registered at all rather than refused at call time — a tool that does not
-  exist cannot be invoked.
+- `HYDRADB_GRAPH_READONLY=1` withholds `hydradb_graph_admin` outright and makes
+  `hydradb_graph_query` decline mutating Cypher. The Cypher tool stays
+  registered because it is also the only way to *read* a graph. This is an
+  operator control rather than a per-call guarantee, and it is fail-safe: a
+  misclassification refuses a query instead of permitting a write.
 
 New configuration: `HYDRADB_GRAPH_DATABASE` (falls back to `HYDRADB_DATABASE`)
 and `HYDRADB_GRAPH_COLLECTION` (defaults to `default`). A graph database is a

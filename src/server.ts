@@ -13,8 +13,6 @@ import { renderRecalledContext } from "./context.js";
 import {
 	COLLECTION_PATTERN,
 	MAX_BODY_BYTES,
-	SCHEMA_QUERIES,
-	SCHEMA_SAMPLE,
 	renderRows,
 	unsupportedConstruct,
 	writeClausesIn,
@@ -1192,7 +1190,19 @@ export function createHydraDBServer(
 		}
 	}
 
-	/** Shared by the read and write tools; they differ only in which guard they apply. */
+	/**
+	 * The single Cypher entry point: reads and writes go through one tool.
+	 *
+	 * These were two tools, split the way Neo4j's MCP splits them so a host could
+	 * auto-approve reads and gate writes. That split only works if the
+	 * read/write classifier is exactly right on every query, and a classifier
+	 * over Cypher text is a heuristic — it cannot be. Rather than have a tool
+	 * whose contract ("this one never writes") rests on a heuristic, there is one
+	 * tool, annotated destructive, and the host gates the whole graph surface.
+	 *
+	 * The classifier survives for `HYDRADB_GRAPH_READONLY` only, where a wrong
+	 * answer refuses a query instead of permitting a write.
+	 */
 	async function runGraphCypher(
 		args: {
 			query: string;
@@ -1201,28 +1211,19 @@ export function createHydraDBServer(
 			collection?: string;
 			max_rows?: number;
 		},
-		expect: "read" | "write",
 		signal?: AbortSignal,
 	): Promise<ToolResult> {
 		const scope = graphScope(args);
 		const clauses = writeClausesIn(args.query);
 		const writes = clauses.length > 0;
 
-		// The guard is the entire reason these are two tools. A host that
-		// auto-approves the read tool is relying on this check, so it runs before
-		// anything touches the network.
-		if (expect === "read" && writes) {
+		// Operator-configured read-only mode. Deliberately fail-safe: the only
+		// consequence of a misclassification here is a refused query, and the
+		// operator opted into that trade by setting the flag.
+		if (graphConfig.readOnly && writes) {
 			return errorResult(
-				`${TOOL_NAMES.GRAPH_QUERY} is read-only and this query contains ` +
-				`${clauses.join(", ")}. Nothing was executed. Use ${TOOL_NAMES.GRAPH_WRITE} ` +
-				"to run it.",
-			);
-		}
-		if (expect === "write" && !writes) {
-			return errorResult(
-				`${TOOL_NAMES.GRAPH_WRITE} expects a query that modifies the graph, and this ` +
-				`one has no write clause. Nothing was executed. Use ${TOOL_NAMES.GRAPH_QUERY} ` +
-				"to read.",
+				`This server is in read-only mode (HYDRADB_GRAPH_READONLY) and this query ` +
+				`contains ${clauses.join(", ")}. Nothing was executed.`,
 			);
 		}
 
@@ -1233,10 +1234,7 @@ export function createHydraDBServer(
 
 		assertBodyFits(args.query, args.params);
 
-		logger.debug(
-			`${expect === "read" ? TOOL_NAMES.GRAPH_QUERY : TOOL_NAMES.GRAPH_WRITE}: ` +
-			`${scope.database}/${scope.collection}`,
-		);
+		logger.debug(`${TOOL_NAMES.GRAPH_QUERY}: ${scope.database}/${scope.collection}`);
 
 		const rows = await hydra.graph.query(
 			{ ...scope, query: args.query, params: args.params },
@@ -1247,7 +1245,10 @@ export function createHydraDBServer(
 		// "no results" invites the caller to retry a write that already committed.
 		if (rows.length === 0) {
 			return structuredResult(
-				expect === "write"
+				// A write with no RETURN legitimately yields zero rows. Reporting
+				// that as "no results" invites the caller to retry a write that
+				// already committed.
+				writes
 					? `Write completed against ${scope.database}/${scope.collection}. The query ` +
 						"returned no rows, which is expected when it has no RETURN clause."
 					: `No rows matched in ${scope.database}/${scope.collection}.`,
@@ -1271,122 +1272,6 @@ export function createHydraDBServer(
 		);
 	}
 
-	async function runGraphSchema(
-		args: { database?: string; collection?: string; sample?: number },
-		signal?: AbortSignal,
-	): Promise<ToolResult> {
-		const scope = graphScope(args);
-		const sample = args.sample ?? SCHEMA_SAMPLE;
-		logger.debug(`${TOOL_NAMES.GRAPH_SCHEMA}: ${scope.database}/${scope.collection}`);
-
-		const run = (query: string, params?: Record<string, unknown>) =>
-			hydra.graph.query({ ...scope, query, params }, { signal });
-
-		// Issued together: they are five independent reads against the same
-		// collection, and serialising them would multiply the latency of a call
-		// that is already the first thing a caller makes.
-		const [labels, relTypes, nodeProps, relProps, shape] = await Promise.all([
-			run(SCHEMA_QUERIES.labels),
-			run(SCHEMA_QUERIES.relationshipTypes),
-			run(SCHEMA_QUERIES.nodeProperties, { sample }),
-			run(SCHEMA_QUERIES.relationshipProperties, { sample }),
-			run(SCHEMA_QUERIES.shape, { sample }),
-		]);
-
-		if (labels.length === 0 && relTypes.length === 0) {
-			return structuredResult(
-				`The graph collection ${scope.database}/${scope.collection} is empty — no nodes ` +
-				"and no relationships. Reading a collection that has never been written to is " +
-				`not an error; write to it with ${TOOL_NAMES.GRAPH_WRITE} and it is created ` +
-				"on first write.",
-				{
-					database: scope.database,
-					collection: scope.collection,
-					labels: [],
-					relationship_types: [],
-					empty: true,
-				},
-			);
-		}
-
-		// Group the flat (label, key) rows into one line per label.
-		const keysByOwner = (rows: Record<string, unknown>[], ownerKey: string) => {
-			const grouped = new Map<string, string[]>();
-			for (const row of rows) {
-				const owner = String(row[ownerKey] ?? "");
-				const key = String(row.key ?? "");
-				if (owner === "" || key === "") continue;
-				const list = grouped.get(owner) ?? [];
-				list.push(key);
-				grouped.set(owner, list);
-			}
-			return grouped;
-		};
-
-		const nodeKeys = keysByOwner(nodeProps, "label");
-		const relKeys = keysByOwner(relProps, "type");
-
-		const lines: string[] = [];
-
-		lines.push("Node labels:");
-		if (labels.length === 0) lines.push("  (none)");
-		for (const row of labels) {
-			const label = String(row.label ?? "?");
-			const props = nodeKeys.get(label) ?? [];
-			lines.push(
-				`  (:${label}) ×${row.count ?? "?"}` +
-				(props.length > 0 ? ` — ${props.join(", ")}` : " — no properties"),
-			);
-		}
-
-		lines.push("", "Relationship types:");
-		if (relTypes.length === 0) lines.push("  (none)");
-		for (const row of relTypes) {
-			const type = String(row.type ?? "?");
-			const props = relKeys.get(type) ?? [];
-			lines.push(
-				`  [:${type}] ×${row.count ?? "?"}` +
-				(props.length > 0 ? ` — ${props.join(", ")}` : ""),
-			);
-		}
-
-		if (shape.length > 0) {
-			lines.push("", "Connections:");
-			for (const row of shape) {
-				const from = Array.isArray(row.start) ? row.start.join(":") : String(row.start);
-				const to = Array.isArray(row.end) ? row.end.join(":") : String(row.end);
-				lines.push(`  (:${from})-[:${row.rel}]->(:${to})`);
-			}
-		}
-
-		// Say so rather than letting a sampled answer read as exhaustive.
-		lines.push(
-			"",
-			`Property keys and connections are derived from a sample of ${sample} nodes and ` +
-			"relationships, so rare ones may be missing. Counts are exact.",
-		);
-
-		return structuredResult(
-			`Schema of ${scope.database}/${scope.collection}:\n\n${lines.join("\n")}`,
-			{
-				database: scope.database,
-				collection: scope.collection,
-				labels: labels.map((row) => ({
-					label: String(row.label ?? ""),
-					count: row.count,
-					properties: nodeKeys.get(String(row.label ?? "")) ?? [],
-				})),
-				relationship_types: relTypes.map((row) => ({
-					type: String(row.type ?? ""),
-					count: row.count,
-					properties: relKeys.get(String(row.type ?? "")) ?? [],
-				})),
-				connections: shape,
-				sampled: sample,
-			},
-		);
-	}
-
 	async function runGraphCollections(
 		args: { database?: string },
 		signal?: AbortSignal,
@@ -1405,7 +1290,7 @@ export function createHydraDBServer(
 		if (collections.length === 0) {
 			return structuredResult(
 				`No graph collections in ${database} yet. Collections are created by their ` +
-				`first write — run one with ${TOOL_NAMES.GRAPH_WRITE}.`,
+				`first write — run one with ${TOOL_NAMES.GRAPH_QUERY}.`,
 				{ database, collections: [], count: 0 },
 			);
 		}
@@ -1856,28 +1741,6 @@ export function createHydraDBServer(
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.GRAPH_QUERY].params.max_rows),
 	};
 
-	const graphWriteSchema = {
-		...graphCypherSchema,
-		query: z
-			.string()
-			.min(1, { message: "query must not be empty" })
-			.max(MAX_CYPHER_CHARS, {
-				message: `query must be at most ${MAX_CYPHER_CHARS} characters`,
-			})
-			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.GRAPH_WRITE].params.query),
-	};
-
-	const graphSchemaSchema = {
-		...graphScopeSchema,
-		sample: z
-			.number()
-			.int()
-			.min(1)
-			.max(10_000)
-			.optional()
-			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.GRAPH_SCHEMA].params.sample),
-	};
-
 	const graphCollectionsSchema = {
 		database: z
 			.string()
@@ -2128,32 +1991,26 @@ export function createHydraDBServer(
 	// default so the capability is discoverable — the feature exists today and
 	// no client surfaces it — and gated by two independent switches:
 	//
-	//   HYDRADB_MCP_GRAPH_TOOLS=0  withholds all five, for memory-only users who
-	//                              do not want the manifest cost.
-	//   HYDRADB_GRAPH_READONLY=1   withholds the two that mutate. This is the
-	//                              stronger guarantee: a tool that is never
-	//                              registered cannot be called, where a runtime
-	//                              refusal depends on the check being reached.
+	//   HYDRADB_MCP_GRAPH_TOOLS=0  withholds all three, for memory-only users
+	//                              who do not want the manifest cost.
+	//   HYDRADB_GRAPH_READONLY=1   withholds hydradb_graph_admin outright, and
+	//                              makes hydradb_graph_query decline mutating
+	//                              Cypher. The Cypher tool stays registered
+	//                              because it is also the only way to READ a
+	//                              graph — withholding it would remove the
+	//                              surface rather than restrict it.
 	if (graphConfig.enabled) {
 		register(
 			TOOL_NAMES.GRAPH_QUERY,
 			graphCypherSchema,
 			(args, extra) =>
-				runGraphCypher(
-					args as Parameters<typeof runGraphCypher>[0],
-					"read",
-					extra?.signal,
-				),
-			readOnly,
+				runGraphCypher(args as Parameters<typeof runGraphCypher>[0], extra?.signal),
+			// Destructive, not read-only: this one tool runs arbitrary Cypher, so
+			// DELETE is as reachable through it as MATCH. Annotating it any other
+			// way would tell a host it is safe to auto-approve, which is exactly
+			// the claim the removed read/write split could not actually back.
+			destructive,
 			graphRowsOutputSchema,
-		);
-
-		register(
-			TOOL_NAMES.GRAPH_SCHEMA,
-			graphSchemaSchema,
-			(args, extra) =>
-				runGraphSchema(args as Parameters<typeof runGraphSchema>[0], extra?.signal),
-			readOnly,
 		);
 
 		register(
@@ -2168,21 +2025,6 @@ export function createHydraDBServer(
 		);
 
 		if (!graphConfig.readOnly) {
-			register(
-				TOOL_NAMES.GRAPH_WRITE,
-				graphWriteSchema,
-				(args, extra) =>
-					runGraphCypher(
-						args as Parameters<typeof runGraphCypher>[0],
-						"write",
-						extra?.signal,
-					),
-				// Not `additiveWrite`: this tool runs arbitrary Cypher, and DELETE is
-				// as reachable through it as CREATE. A host must be able to gate it.
-				destructive,
-				graphRowsOutputSchema,
-			);
-
 			register(
 				TOOL_NAMES.GRAPH_ADMIN,
 				graphAdminSchema,

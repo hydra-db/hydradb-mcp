@@ -22,13 +22,11 @@ Hydra DB also runs **property graphs you model and own end to end**, queried in 
 
 | Tool | What it does |
 |---|---|
-| `hydradb_graph_query` | Run **read-only** Cypher — traversal, paths, neighbourhoods, aggregation |
-| `hydradb_graph_write` | Run Cypher that **mutates** — CREATE, MERGE, SET, DELETE, indexes |
-| `hydradb_graph_schema` | What labels, relationship types and properties a collection actually holds |
+| `hydradb_graph_query` | Run Cypher — reads **and** writes |
 | `hydradb_graph_collections` | List the graphs in a graph database |
 | `hydradb_graph_admin` | Create a graph database; drop a collection or a database |
 
-Reads and writes are separate tools so a host can auto-approve one and gate the other: `hydradb_graph_query` is annotated `readOnlyHint`, and `hydradb_graph_write` `destructiveHint`.
+`hydradb_graph_query` is annotated `destructiveHint`, because it runs arbitrary Cypher and `DELETE` is as reachable through it as `MATCH`. There is deliberately **no** separate read-only Cypher tool: splitting reads from writes means promising a host that one tool never writes, and that promise can only be backed by classifying Cypher text — a heuristic, and so not a promise worth making. One tool makes no claim it cannot keep, and the host gates the whole graph surface.
 
 ```jsonc
 // Everyone Alice knows within four hops
@@ -42,7 +40,7 @@ Reads and writes are separate tools so a host can auto-approve one and gate the 
 
 **Differences from Neo4j** worth knowing before you write Cypher. Each is rejected *before* execution, so a rejected query changes nothing and fails identically on retry:
 
-- Procedure calls (`CALL db.*`, `CALL apoc.*`) are rejected. `CALL { ... }` subqueries are fine. Use `hydradb_graph_schema`, which derives the schema from plain Cypher rather than from APOC.
+- Procedure calls (`CALL db.*`, `CALL apoc.*`) are rejected. `CALL { ... }` subqueries are fine. There is no schema tool and no `apoc.meta.schema()`; to learn a collection's structure, query it — `MATCH (n) UNWIND labels(n) AS l RETURN l, count(*) AS c ORDER BY l`.
 - `LOAD CSV` is rejected — pass data through `params` instead.
 - Existence checks are bare pattern predicates (`WHERE (p)-[:KNOWS]->()`); `EXISTS { ... }` and `exists()` are not accepted.
 - `shortestPath` belongs in `RETURN`/`WITH`, not `MATCH p = ...`, and must be directed.
@@ -50,12 +48,14 @@ Reads and writes are separate tools so a host can auto-approve one and gate the 
 
 Collections auto-create on first write, so there is no create-collection call. Requests are capped at 256 KiB (enforced locally, before upload) and large result sets are truncated server-side — paginate with `ORDER BY ... SKIP $offset LIMIT $limit`.
 
-To turn the graph tools off, or restrict them to reads:
+To turn the graph tools off, or restrict them:
 
 ```
-HYDRADB_MCP_GRAPH_TOOLS=0   # withhold all five
-HYDRADB_GRAPH_READONLY=1    # withhold hydradb_graph_write and hydradb_graph_admin
+HYDRADB_MCP_GRAPH_TOOLS=0   # withhold all three
+HYDRADB_GRAPH_READONLY=1    # withhold hydradb_graph_admin; decline mutating Cypher
 ```
+
+Read-only mode is an operator control, not a per-call guarantee: `hydradb_graph_query` stays registered (it is also the only way to *read* a graph) and declines queries it detects as mutating. That detection is fail-safe — a wrong answer refuses a query rather than permitting a write.
 
 ### Deprecated aliases
 
@@ -189,7 +189,7 @@ Checks whether ingested sources have finished indexing.
 | `HYDRADB_GRAPH_DATABASE` | Default graph database for the Cypher tools | `HYDRADB_DATABASE` |
 | `HYDRADB_GRAPH_COLLECTION` | Default graph collection | `default` |
 | `HYDRADB_MCP_GRAPH_TOOLS` | Register the graph tools (`0` withholds them) | *on* |
-| `HYDRADB_GRAPH_READONLY` | Withhold the mutating graph tools | *off* |
+| `HYDRADB_GRAPH_READONLY` | Withhold `hydradb_graph_admin`; decline mutating Cypher | *off* |
 
 A graph database is a **different namespace** from the memory database: the same
 name can exist as both, and Cypher aimed at the wrong one reads an empty graph

@@ -4,7 +4,6 @@ import { test } from "node:test";
 import {
 	COLLECTION_PATTERN,
 	MAX_BODY_BYTES,
-	SCHEMA_QUERIES,
 	isWriteQuery,
 	renderRows,
 	renderValue,
@@ -119,27 +118,6 @@ test("a procedure name inside a string literal is not a procedure call", () => {
 		unsupportedConstruct(`MATCH (n) WHERE n.doc = "CALL db.labels()" RETURN n`),
 		undefined,
 	);
-});
-
-// --- Schema queries ---
-
-test("no schema query uses a procedure call", () => {
-	// The whole point of deriving the schema: HydraDB rejects CALL db.* and
-	// apoc.*, so a schema query that used one would fail before it ran.
-	for (const [name, query] of Object.entries(SCHEMA_QUERIES)) {
-		assert.equal(
-			unsupportedConstruct(query),
-			undefined,
-			`${name} must not use a rejected construct`,
-		);
-		assert.equal(isWriteQuery(query), false, `${name} must be read-only`);
-	}
-});
-
-test("sampled schema queries bind their limit as a parameter", () => {
-	for (const name of ["nodeProperties", "relationshipProperties", "shape"] as const) {
-		assert.match(SCHEMA_QUERIES[name], /\$sample/, `${name} should bind $sample`);
-	}
 });
 
 // --- Collection names ---

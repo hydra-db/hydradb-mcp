@@ -4,7 +4,6 @@ import assert from "node:assert/strict";
 import { toMemoryList, toSourceList } from "../src/adapters.js";
 import { resolveConfig } from "../src/config.js";
 import { HydraDB } from "../src/hydra/index.js";
-import { SCHEMA_QUERIES } from "../src/cypher.js";
 import { HydraWrapperError } from "../src/hydra/errors.js";
 
 const RUN_LIVE_TESTS = process.env.RUN_LIVE_TESTS === "true";
@@ -480,16 +479,16 @@ test(
 			assert.ok(Array.isArray(path?.nodes), "a path must carry `nodes`");
 			assert.ok(Array.isArray(path?.edges), "a path must carry `edges`");
 
-			// Every schema query must still be accepted — this is the guard against
-			// the derived schema silently rotting if the dialect moves.
-			for (const [name, query] of Object.entries(SCHEMA_QUERIES)) {
-				await hydra.graph.query({
-					...scope,
-					query,
-					params: query.includes("$sample") ? { sample: 100 } : undefined,
-				});
-				assert.ok(true, `${name} accepted`);
-			}
+			// Aggregating over labels is how a caller discovers a collection's
+			// structure without a schema procedure, so it must keep working.
+			const labels = await hydra.graph.query({
+				...scope,
+				query: "MATCH (n) UNWIND labels(n) AS label RETURN label, count(*) AS count",
+			});
+			assert.ok(
+				labels.some((row) => row.label === "Person"),
+				`expected a Person label, got ${JSON.stringify(labels)}`,
+			);
 		} finally {
 			await hydra.graph.dropCollection({ database, collection });
 		}

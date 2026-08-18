@@ -21,8 +21,6 @@ export const TOOL_NAMES = {
 	// reaching for `hydradb_query` to run Cypher, or for the graph tool to
 	// search memories.
 	GRAPH_QUERY: "hydradb_graph_query",
-	GRAPH_WRITE: "hydradb_graph_write",
-	GRAPH_SCHEMA: "hydradb_graph_schema",
 	GRAPH_COLLECTIONS: "hydradb_graph_collections",
 	GRAPH_ADMIN: "hydradb_graph_admin",
 
@@ -50,17 +48,18 @@ export const CANONICAL_TOOL_NAMES = [
 /** The BYOG graph family, registered together and gated together. */
 export const GRAPH_TOOL_NAMES = [
 	TOOL_NAMES.GRAPH_QUERY,
-	TOOL_NAMES.GRAPH_WRITE,
-	TOOL_NAMES.GRAPH_SCHEMA,
 	TOOL_NAMES.GRAPH_COLLECTIONS,
 	TOOL_NAMES.GRAPH_ADMIN,
 ] as const;
 
-/** The graph tools that mutate, withheld when the server is in read-only mode. */
-export const GRAPH_WRITE_TOOL_NAMES = [
-	TOOL_NAMES.GRAPH_WRITE,
-	TOOL_NAMES.GRAPH_ADMIN,
-] as const;
+/**
+ * The graph tool withheld entirely in read-only mode.
+ *
+ * `hydradb_graph_query` is NOT in this list even though it can write: it is the
+ * only way to read a graph, so withholding it would take the whole surface
+ * away. In read-only mode it stays registered and declines mutating Cypher.
+ */
+export const GRAPH_WRITE_TOOL_NAMES = [TOOL_NAMES.GRAPH_ADMIN] as const;
 
 export const DEPRECATED_TOOL_NAMES = [
 	TOOL_NAMES.SEARCH,

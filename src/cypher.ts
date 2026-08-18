@@ -2,16 +2,12 @@
  * Cypher analysis and result rendering for the BYOG (Bring Your Own Graph)
  * tools.
  *
- * This file owns three things that have nothing to do with transport, so they
- * can be tested without a network:
+ * This file owns two things that have nothing to do with transport, so they can
+ * be tested without a network:
  *
- *   - deciding whether a query WRITES, so the read tool can refuse one;
- *   - the plain-Cypher queries that stand in for the schema procedures HydraDB
- *     does not expose;
+ *   - deciding whether a query WRITES, which backs the opt-in read-only mode;
  *   - turning the server's row objects back into something readable.
  */
-
-import { TOOL_NAMES } from "./tool-names.js";
 
 /**
  * Clauses that mutate the graph.
@@ -145,11 +141,13 @@ export function writeClausesIn(query: string): string[] {
 /**
  * Whether this query mutates the graph.
  *
- * Deliberately conservative in one direction only: it may call a read a write
- * (a variable named `set` is impossible, but an exotic construct might slip
- * through), and the cost of that is a caller being told to use the write tool.
- * The reverse — calling a write a read — is what must never happen, because
- * that is what the read-only guarantee rests on.
+ * This is NOT used to route between tools — there is one Cypher tool, and it
+ * runs whatever it is given. It backs only the opt-in `HYDRADB_GRAPH_READONLY`
+ * mode, where the sole consequence of a wrong answer is a refused query.
+ *
+ * That asymmetry is deliberate. The detector is conservative in one direction:
+ * it may call a read a write (cost: an operator-configured server declines a
+ * query it could have run), never a write a read. Nothing else depends on it.
  */
 export function isWriteQuery(query: string): boolean {
 	return writeClausesIn(query).length > 0;
@@ -174,8 +172,7 @@ export function unsupportedConstruct(query: string): string | undefined {
 	if (call && call[1] == null) {
 		return (
 			"HydraDB rejects procedure calls (`CALL db.*`, `CALL apoc.*`) before running " +
-			"them. `CALL { ... }` subqueries are supported. For schema information use " +
-			`${TOOL_NAMES.GRAPH_SCHEMA}, which derives it from plain Cypher.`
+			"them. `CALL { ... }` subqueries are supported."
 		);
 	}
 
@@ -201,37 +198,6 @@ export const MAX_BODY_BYTES = 256 * 1024;
 
 /** Collection names the server accepts. Rejecting locally names the rule. */
 export const COLLECTION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
-
-/**
- * The plain-Cypher stand-ins for the schema procedures BYOG does not expose.
- *
- * Neo4j's `get_neo4j_schema` runs `CALL apoc.meta.schema()`. HydraDB rejects
- * every procedure call, so the schema is assembled from four aggregates
- * instead. Each is a pure read, each is bounded by a sample limit, and each was
- * verified against a live BYOG collection.
- *
- * The sample bound matters: on a large graph an unbounded `MATCH (n)` scan is
- * exactly the shape that hits the 8s read budget and comes back as a 400 telling
- * you to add a LIMIT.
- */
-export const SCHEMA_QUERIES = {
-	labels:
-		"MATCH (n) UNWIND labels(n) AS label RETURN label, count(*) AS count ORDER BY label",
-	relationshipTypes:
-		"MATCH ()-[r]->() RETURN type(r) AS type, count(*) AS count ORDER BY type",
-	nodeProperties:
-		"MATCH (n) WITH n LIMIT $sample UNWIND labels(n) AS label UNWIND keys(n) AS key " +
-		"RETURN label, key, count(*) AS count ORDER BY label, key",
-	relationshipProperties:
-		"MATCH ()-[r]->() WITH r LIMIT $sample UNWIND keys(r) AS key " +
-		"RETURN type(r) AS type, key, count(*) AS count ORDER BY type, key",
-	shape:
-		"MATCH (a)-[r]->(b) WITH a, r, b LIMIT $sample " +
-		"RETURN DISTINCT labels(a) AS start, type(r) AS rel, labels(b) AS end ORDER BY rel",
-} as const;
-
-/** How many rows each sampled schema query looks at. */
-export const SCHEMA_SAMPLE = 1000;
 
 // --- Result rendering ---
 

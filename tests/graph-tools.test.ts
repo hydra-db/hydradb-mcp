@@ -114,47 +114,77 @@ test("HYDRADB_MCP_GRAPH_TOOLS=0 withholds the whole family", async () => {
 });
 
 /**
- * Read-only mode withholds the mutating tools rather than refusing them at call
- * time. A tool that is never registered cannot be invoked at all, where a
- * runtime refusal only holds if the check is reached.
+ * Read-only mode withholds the admin tool outright, but keeps the Cypher tool
+ * registered — it is also the only way to READ a graph, so withholding it would
+ * remove the surface rather than restrict it. Writes are declined at call time.
  */
-test("read-only mode registers the reads and withholds the writes", async () => {
+test("read-only mode keeps the Cypher tool and withholds admin", async () => {
 	const { hydra } = mockGraph();
 	const client = await connect(hydra, { readOnly: true });
 
 	const names = (await client.listTools()).tools.map((t) => t.name);
 	assert.ok(names.includes(TOOL_NAMES.GRAPH_QUERY));
-	assert.ok(names.includes(TOOL_NAMES.GRAPH_SCHEMA));
 	assert.ok(names.includes(TOOL_NAMES.GRAPH_COLLECTIONS));
-	assert.ok(!names.includes(TOOL_NAMES.GRAPH_WRITE), "write tool must be withheld");
 	assert.ok(!names.includes(TOOL_NAMES.GRAPH_ADMIN), "admin tool must be withheld");
 
 	await client.close();
 });
 
-test("the read tool is annotated read-only and the write tool destructive", async () => {
+/**
+ * There is ONE Cypher tool and it is annotated destructive.
+ *
+ * The previous read/write split promised a host that one of the two never
+ * wrote, and that promise rested on classifying Cypher text — a heuristic. A
+ * single destructive tool makes no claim it cannot keep.
+ */
+test("the Cypher tool is annotated destructive, not read-only", async () => {
 	const { hydra } = mockGraph();
 	const client = await connect(hydra);
 
 	const { tools } = await client.listTools();
-	const read = tools.find((t) => t.name === TOOL_NAMES.GRAPH_QUERY);
-	const write = tools.find((t) => t.name === TOOL_NAMES.GRAPH_WRITE);
+	const cypher = tools.find((t) => t.name === TOOL_NAMES.GRAPH_QUERY);
 
-	assert.equal(read?.annotations?.readOnlyHint, true);
-	assert.equal(read?.annotations?.destructiveHint, false);
-	// Arbitrary Cypher reaches DELETE as easily as CREATE, so a host must be
-	// able to gate this one.
-	assert.equal(write?.annotations?.readOnlyHint, false);
-	assert.equal(write?.annotations?.destructiveHint, true);
+	assert.equal(cypher?.annotations?.readOnlyHint, false);
+	assert.equal(cypher?.annotations?.destructiveHint, true);
 
 	await client.close();
 });
 
-// --- The read/write guard ---
+// --- One tool runs both reads and writes ---
 
-test("the read tool refuses a write and issues no request", async () => {
-	const { hydra, calls } = mockGraph();
+test("the Cypher tool runs a write", async () => {
+	const { hydra, calls } = mockGraph(() => [{ created: 1 }]);
 	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: TOOL_NAMES.GRAPH_QUERY,
+		arguments: { query: "CREATE (n:Person {name: 'Alice'}) RETURN 1 AS created" },
+	});
+
+	assert.notEqual(result.isError, true, "a write must not be refused");
+	assert.equal(calls.length, 1);
+
+	await client.close();
+});
+
+test("the Cypher tool runs a read", async () => {
+	const { hydra, calls } = mockGraph(() => [{ name: "Alice" }]);
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: TOOL_NAMES.GRAPH_QUERY,
+		arguments: { query: "MATCH (p:Person) RETURN p.name AS name" },
+	});
+
+	assert.notEqual(result.isError, true);
+	assert.equal(calls.length, 1);
+
+	await client.close();
+});
+
+test("read-only mode declines a write before the network", async () => {
+	const { hydra, calls } = mockGraph();
+	const client = await connect(hydra, { readOnly: true });
 
 	const result = await client.callTool({
 		name: TOOL_NAMES.GRAPH_QUERY,
@@ -162,22 +192,20 @@ test("the read tool refuses a write and issues no request", async () => {
 	});
 
 	assert.equal(result.isError, true);
-	assert.match(textOf(result), /read-only/);
-	assert.match(textOf(result), /CREATE/);
+	assert.match(textOf(result), /read-only mode/);
 	assert.match(textOf(result), /Nothing was executed/);
-	assert.equal(calls.length, 0, "a refused write must never reach the network");
+	assert.equal(calls.length, 0, "a declined write must never reach the network");
 
 	await client.close();
 });
 
 /**
- * The false positive that motivated a literal-aware detector. Verified against
- * the live API: this query is accepted and mutates nothing, but Neo4j's
- * substring scan would refuse it.
+ * Even in read-only mode the classifier must not refuse this. It is a pure read
+ * that HydraDB accepts, and Neo4j's substring scan would reject it.
  */
-test("the read tool allows a write keyword inside a string literal", async () => {
+test("read-only mode allows a write keyword inside a string literal", async () => {
 	const { hydra, calls } = mockGraph(() => [{ name: "Alice" }]);
-	const client = await connect(hydra);
+	const client = await connect(hydra, { readOnly: true });
 
 	const result = await client.callTool({
 		name: TOOL_NAMES.GRAPH_QUERY,
@@ -187,23 +215,7 @@ test("the read tool allows a write keyword inside a string literal", async () =>
 	});
 
 	assert.notEqual(result.isError, true, "a pure read must not be refused");
-	assert.equal(calls.length, 1, "the query should have been executed");
-
-	await client.close();
-});
-
-test("the write tool refuses a pure read and issues no request", async () => {
-	const { hydra, calls } = mockGraph();
-	const client = await connect(hydra);
-
-	const result = await client.callTool({
-		name: TOOL_NAMES.GRAPH_WRITE,
-		arguments: { query: "MATCH (n) RETURN n" },
-	});
-
-	assert.equal(result.isError, true);
-	assert.match(textOf(result), /no write clause/);
-	assert.equal(calls.length, 0);
+	assert.equal(calls.length, 1);
 
 	await client.close();
 });
@@ -219,7 +231,6 @@ test("a procedure call is refused locally with the alternative named", async () 
 
 	assert.equal(result.isError, true);
 	assert.match(textOf(result), /procedure calls/i);
-	assert.match(textOf(result), new RegExp(TOOL_NAMES.GRAPH_SCHEMA));
 	assert.equal(calls.length, 0, "a rejected construct must not be sent");
 
 	await client.close();
@@ -230,7 +241,7 @@ test("LOAD CSV is refused locally", async () => {
 	const client = await connect(hydra);
 
 	const result = await client.callTool({
-		name: TOOL_NAMES.GRAPH_WRITE,
+		name: TOOL_NAMES.GRAPH_QUERY,
 		arguments: { query: "LOAD CSV FROM 'file:///x.csv' AS row CREATE (n {v: row[0]})" },
 	});
 
@@ -318,7 +329,7 @@ test("a write returning no rows reads as success, not as an empty result", async
 	const client = await connect(hydra);
 
 	const result = await client.callTool({
-		name: TOOL_NAMES.GRAPH_WRITE,
+		name: TOOL_NAMES.GRAPH_QUERY,
 		arguments: { query: "MATCH (n:Person) SET n.seen = true" },
 	});
 
@@ -356,7 +367,7 @@ test("an oversized request is refused before the network", async () => {
 	// Over the documented 256 KiB body cap.
 	const rows = Array.from({ length: 20_000 }, (_, i) => ({ id: i, pad: "x".repeat(20) }));
 	const result = await client.callTool({
-		name: TOOL_NAMES.GRAPH_WRITE,
+		name: TOOL_NAMES.GRAPH_QUERY,
 		arguments: { query: "UNWIND $rows AS row CREATE (n:T) SET n = row", params: { rows } },
 	});
 
@@ -365,67 +376,6 @@ test("an oversized request is refused before the network", async () => {
 	// The remedy, not just the refusal.
 	assert.match(textOf(result), /UNWIND/);
 	assert.equal(calls.length, 0, "an oversized body must not be uploaded to be rejected");
-
-	await client.close();
-});
-
-// --- Schema ---
-
-test("schema is derived from plain Cypher, with no procedure call", async () => {
-	const { hydra, calls } = mockGraph((query) => {
-		if (query.includes("UNWIND labels(n) AS label RETURN label")) {
-			return [{ label: "Person", count: 2 }];
-		}
-		if (query.includes("RETURN type(r) AS type, count(*)")) {
-			return [{ type: "KNOWS", count: 1 }];
-		}
-		if (query.includes("UNWIND keys(n) AS key")) {
-			return [
-				{ label: "Person", key: "name", count: 2 },
-				{ label: "Person", key: "role", count: 2 },
-			];
-		}
-		if (query.includes("UNWIND keys(r) AS key")) {
-			return [{ type: "KNOWS", key: "since", count: 1 }];
-		}
-		return [{ start: ["Person"], rel: "KNOWS", end: ["Person"] }];
-	});
-	const client = await connect(hydra);
-
-	const result = await client.callTool({
-		name: TOOL_NAMES.GRAPH_SCHEMA,
-		arguments: {},
-	});
-
-	const text = textOf(result);
-	assert.match(text, /\(:Person\) ×2 — name, role/);
-	assert.match(text, /\[:KNOWS\] ×1 — since/);
-	assert.match(text, /\(:Person\)-\[:KNOWS\]->\(:Person\)/);
-	// A sampled answer must not read as exhaustive.
-	assert.match(text, /derived from a sample/);
-
-	for (const call of calls) {
-		assert.ok(
-			!/\bCALL\s+[a-z]/i.test(String(call.args.query)),
-			`schema must not use a procedure call: ${call.args.query}`,
-		);
-	}
-
-	await client.close();
-});
-
-test("an empty collection is reported as empty rather than as a failure", async () => {
-	const { hydra } = mockGraph(() => []);
-	const client = await connect(hydra);
-
-	const result = await client.callTool({
-		name: TOOL_NAMES.GRAPH_SCHEMA,
-		arguments: {},
-	});
-
-	assert.notEqual(result.isError, true);
-	assert.match(textOf(result), /is empty/);
-	assert.match(textOf(result), /not an error/);
 
 	await client.close();
 });
@@ -443,7 +393,7 @@ test("listing collections reports the empty case usefully", async () => {
 
 	assert.match(textOf(result), /No graph collections/);
 	// Collections auto-create, so the next step is a write, not a create call.
-	assert.match(textOf(result), new RegExp(TOOL_NAMES.GRAPH_WRITE));
+	assert.match(textOf(result), new RegExp(TOOL_NAMES.GRAPH_QUERY));
 
 	await client.close();
 });

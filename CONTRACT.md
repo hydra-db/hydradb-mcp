@@ -1,7 +1,9 @@
 <!--
   This file is the SHARED HydraDB client contract (PRO-1298).
-  The master copy is maintained centrally and committed verbatim to all four client repos:
-    hydradb-cli · hydradb-mcp · openclaw-hydradb · hydradb-claude-code
+  The master copy is maintained centrally and committed verbatim to all four client repos,
+  which form two groups (see §0):
+    Group 1 (agent plugins):  hydradb-claude-code · openclaw-hydradb
+    Group 2 (direct clients): hydradb-cli · hydradb-mcp
   Do not edit a single repo's copy in isolation. A change is one PR per repo against this one text.
 -->
 
@@ -15,6 +17,35 @@ Why this exists: the SDK's method names are generated from OpenAPI **summary tex
 `x-fern-sdk-method-name` overrides, and its CI auto-bumps only the patch digit while publishing on
 merge — so a breaking rename can arrive as `2.1.2 → 2.1.3`. The wrapper is the firewall that keeps
 that churn from reaching users. It is the reason we pin the SDK **exactly**, never with `^`/`~`/`>=`.
+
+---
+
+## 0. Client groups
+
+The four clients are organised into **two groups**. A client belongs to exactly one.
+
+| Group | Clients | What they are |
+|---|---|---|
+| **Group 1** | `hydradb-claude-code` (Claude Code plugin) · `openclaw-hydradb` (OpenClaw plugin) | **Agent plugins.** They extend a host agent that is already running. HydraDB is reached through skills, slash commands and agent tools; the end user never invokes them directly. |
+| **Group 2** | `hydradb-cli` · `hydradb-mcp` | **Direct clients.** A person or a program drives them on purpose — a terminal command, or an MCP server a host connects to. Their surface is the product. |
+
+Groups are the unit of coordination. A change that alters a shared surface is landed
+across **every client in the group together**, so the two clients in a group never
+disagree in a release. Concretely:
+
+- **Group 1** shares the plugin idiom: slash-command names, skill front-matter, and the
+  `--json` state shapes marketplace-shipped skill files parse. A rename in one is a rename
+  in both.
+- **Group 2** shares the *invocation* surface: command and tool names, flag and parameter
+  spelling, and the `--output json` / `structuredContent` shapes that `jq` and MCP hosts
+  parse. When both clients expose the same capability they expose it the same way — the
+  same verbs, the same scope flags, the same defaults.
+
+This does **not** relax anything below. §1's vocabulary, §2's wrapper rules and §3's alias
+policy bind every client in both groups. Groups say who moves together, not who is exempt.
+
+Where a capability exists in only one group, that is a deliberate product decision and is
+recorded as such, not treated as drift for the other group to catch up on.
 
 ---
 
@@ -103,6 +134,11 @@ current SDK method internally. Language casing: `snake_case` in Python, `camelCa
 | `context.ingestionStatus(database, ids)` | `context.status(…)` | **renamed away from `status`** |
 | `context.relations(database, id?, …)` | `context.relations(…)` | — |
 | `context.delete(database, ids, kind)` | `context.delete(…)` | one path for memory + knowledge |
+| `graph.query(database, collection, query, params?)` | *(none — raw `POST /byog/query`)* | BYOG Cypher; **no SDK resource at 2.1.2** |
+| `graph.createDatabase(database)` | *(none — raw `POST /byog/databases`)* | — |
+| `graph.collections(database)` | *(none — raw `GET /byog/collections`)* | — |
+| `graph.dropCollection(database, collection)` | *(none — raw `DELETE /byog/collections`)* | idempotent |
+| `graph.dropDatabase(database)` | *(none — raw `DELETE /byog/databases`)* | `deleted:false` ⇒ collections only |
 
 Rules every wrapper obeys:
 
@@ -119,6 +155,12 @@ Rules every wrapper obeys:
    under hook budgets, defaults, output shapes). These are listed per-client in the plan.
 6. **Send `API-Version: 2`.** (The SDK does this; a client that previously sent no version header is
    changing server behaviour by adopting it — that is intended, but must be tested, not assumed.)
+7. **A hand-rolled path is still the wrapper.** Some endpoints have no SDK resource — BYOG
+   (`/byog/*`) has none at `2.1.2`. Those are called directly, but from *inside* the wrapper and
+   behind the same surface: same envelope-by-shape unwrapping, same `API-Version: 2` header, same
+   translated error type. A caller must not be able to tell which methods went through the SDK.
+   When the SDK grows the resource, only that one file changes. This does not weaken rule 1 — an
+   endpoint the SDK does not expose has no generated name to be insulated from.
 
 ---
 
