@@ -70,7 +70,6 @@ async function connect(hydra: HydraDB, graphOverride?: Record<string, unknown>) 
 		database: "graph_db",
 		collection: "graph_col",
 		enabled: true,
-		readOnly: false,
 		...graphOverride,
 	});
 	const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -109,23 +108,6 @@ test("HYDRADB_MCP_GRAPH_TOOLS=0 withholds the whole family", async () => {
 	}
 	// The memory surface is untouched by the graph gate.
 	assert.ok(names.includes(TOOL_NAMES.QUERY));
-
-	await client.close();
-});
-
-/**
- * Read-only mode withholds the admin tool outright, but keeps the Cypher tool
- * registered — it is also the only way to READ a graph, so withholding it would
- * remove the surface rather than restrict it. Writes are declined at call time.
- */
-test("read-only mode keeps the Cypher tool and withholds admin", async () => {
-	const { hydra } = mockGraph();
-	const client = await connect(hydra, { readOnly: true });
-
-	const names = (await client.listTools()).tools.map((t) => t.name);
-	assert.ok(names.includes(TOOL_NAMES.GRAPH_QUERY));
-	assert.ok(names.includes(TOOL_NAMES.GRAPH_COLLECTIONS));
-	assert.ok(!names.includes(TOOL_NAMES.GRAPH_ADMIN), "admin tool must be withheld");
 
 	await client.close();
 });
@@ -178,76 +160,6 @@ test("the Cypher tool runs a read", async () => {
 
 	assert.notEqual(result.isError, true);
 	assert.equal(calls.length, 1);
-
-	await client.close();
-});
-
-test("read-only mode declines a write before the network", async () => {
-	const { hydra, calls } = mockGraph();
-	const client = await connect(hydra, { readOnly: true });
-
-	const result = await client.callTool({
-		name: TOOL_NAMES.GRAPH_QUERY,
-		arguments: { query: "CREATE (n:Person {name: 'Alice'})" },
-	});
-
-	assert.equal(result.isError, true);
-	assert.match(textOf(result), /read-only mode/);
-	assert.match(textOf(result), /Nothing was executed/);
-	assert.equal(calls.length, 0, "a declined write must never reach the network");
-
-	await client.close();
-});
-
-/**
- * Even in read-only mode the classifier must not refuse this. It is a pure read
- * that HydraDB accepts, and Neo4j's substring scan would reject it.
- */
-test("read-only mode allows a write keyword inside a string literal", async () => {
-	const { hydra, calls } = mockGraph(() => [{ name: "Alice" }]);
-	const client = await connect(hydra, { readOnly: true });
-
-	const result = await client.callTool({
-		name: TOOL_NAMES.GRAPH_QUERY,
-		arguments: {
-			query: 'MATCH (p:Person) WHERE p.name = "CREATE something" RETURN p.name AS name',
-		},
-	});
-
-	assert.notEqual(result.isError, true, "a pure read must not be refused");
-	assert.equal(calls.length, 1);
-
-	await client.close();
-});
-
-test("a procedure call is refused locally with the alternative named", async () => {
-	const { hydra, calls } = mockGraph();
-	const client = await connect(hydra);
-
-	const result = await client.callTool({
-		name: TOOL_NAMES.GRAPH_QUERY,
-		arguments: { query: "CALL db.labels()" },
-	});
-
-	assert.equal(result.isError, true);
-	assert.match(textOf(result), /procedure calls/i);
-	assert.equal(calls.length, 0, "a rejected construct must not be sent");
-
-	await client.close();
-});
-
-test("LOAD CSV is refused locally", async () => {
-	const { hydra, calls } = mockGraph();
-	const client = await connect(hydra);
-
-	const result = await client.callTool({
-		name: TOOL_NAMES.GRAPH_QUERY,
-		arguments: { query: "LOAD CSV FROM 'file:///x.csv' AS row CREATE (n {v: row[0]})" },
-	});
-
-	assert.equal(result.isError, true);
-	assert.match(textOf(result), /LOAD CSV/);
-	assert.equal(calls.length, 0);
 
 	await client.close();
 });
@@ -321,10 +233,13 @@ test("params are forwarded to the graph resource", async () => {
 });
 
 /**
- * A write with no RETURN legitimately yields zero rows. Reporting that as "no
- * results" invites the caller to retry a write that already committed.
+ * Zero rows is reported without guessing whether the query read or wrote.
+ *
+ * Classifying it would mean lexing the Cypher, which this server no longer
+ * does. Naming both readings is enough to stop a caller re-running a write that
+ * already committed because the result "looked empty".
  */
-test("a write returning no rows reads as success, not as an empty result", async () => {
+test("an empty result names both readings rather than guessing", async () => {
 	const { hydra } = mockGraph(() => []);
 	const client = await connect(hydra);
 
@@ -334,8 +249,30 @@ test("a write returning no rows reads as success, not as an empty result", async
 	});
 
 	assert.notEqual(result.isError, true);
-	assert.match(textOf(result), /Write completed/);
-	assert.match(textOf(result), /expected when it has no RETURN/);
+	assert.match(textOf(result), /returned 0 rows/);
+	assert.match(textOf(result), /nothing matched/);
+	assert.match(textOf(result), /do not re-run it/);
+
+	await client.close();
+});
+
+/**
+ * The server rejects unsupported constructs itself, before executing anything —
+ * verified live: a query mixing CREATE with a procedure call left the node
+ * count unchanged. So the query is sent as written and the server's own message
+ * comes back, rather than being pre-empted by a local imitation of its rules.
+ */
+test("a procedure call is sent to the server rather than judged locally", async () => {
+	const { hydra, calls } = mockGraph(() => []);
+	const client = await connect(hydra);
+
+	await client.callTool({
+		name: TOOL_NAMES.GRAPH_QUERY,
+		arguments: { query: "CALL db.labels()" },
+	});
+
+	assert.equal(calls.length, 1, "the server is the authority on what it accepts");
+	assert.equal(calls[0]!.args.query, "CALL db.labels()", "sent verbatim");
 
 	await client.close();
 });

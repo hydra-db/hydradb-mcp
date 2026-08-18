@@ -1,191 +1,21 @@
 /**
- * Cypher analysis and result rendering for the BYOG (Bring Your Own Graph)
- * tools.
+ * Rendering and local limits for the BYOG (Bring Your Own Graph) tool.
  *
- * This file owns two things that have nothing to do with transport, so they can
- * be tested without a network:
+ * Deliberately contains NO Cypher analysis. An earlier version lexed the query
+ * to classify reads vs writes and to pre-reject constructs the server refuses,
+ * which meant a second, worse implementation of the server's own rules living
+ * in a client: it could only ever agree with the server or be wrong, and being
+ * wrong meant refusing a query HydraDB would have run.
  *
- *   - deciding whether a query WRITES, which backs the opt-in read-only mode;
- *   - turning the server's row objects back into something readable.
+ * The server is the authority on what Cypher is valid and permitted. It rejects
+ * unsupported constructs before executing anything — verified: a query mixing
+ * CREATE with a procedure call leaves the node count unchanged — and its
+ * messages are more specific than the ones this file used to produce.
+ *
+ * What is left is the work a client genuinely owns: turning the server's row
+ * objects into something readable, and the two limits that are cheaper to check
+ * here than to discover from a remote error.
  */
-
-/**
- * Clauses that mutate the graph.
- *
- * `ADD` is not here even though Neo4j's own `_is_write_query` lists it: it is
- * not a Cypher write clause, only part of `SET n:Label` / `ADD CONSTRAINT`,
- * both of which are already caught by a real member of this list. Including it
- * would reject `MATCH (n) WHERE n.tag = 'add' ...` for no reason.
- *
- * `CREATE INDEX` / `DROP INDEX` count as writes: they are schema changes, they
- * are billed against the 30s write budget, and a read-only caller should not be
- * issuing them.
- */
-const WRITE_CLAUSES = [
-	"CREATE",
-	"MERGE",
-	"SET",
-	"DELETE",
-	"DETACH",
-	"REMOVE",
-	"DROP",
-	"FOREACH",
-	"LOAD",
-] as const;
-
-/**
- * Everything that is not executable Cypher, blanked out.
- *
- * This is the whole reason the detector is not a substring scan. Neo4j's MCP
- * checks `any(keyword in query.upper() for keyword in [...])`, so
- *
- *     MATCH (p:Person) WHERE p.name = "CREATE something" RETURN p.name
- *
- * is classified as a write and refused by its read tool — a query that HydraDB
- * accepts and that mutates nothing. The same happens for a comment mentioning a
- * write, and for a property literally named `` `delete` ``.
- *
- * Replacing with spaces rather than deleting keeps every offset stable, so a
- * keyword sitting against a stripped region cannot be fused with its neighbour
- * into a different token.
- *
- * Handled: single-quoted and double-quoted strings (with backslash escapes),
- * backtick-quoted identifiers, `//` line comments and block comments.
- */
-export function stripNonCode(query: string): string {
-	let out = "";
-	let i = 0;
-
-	while (i < query.length) {
-		const ch = query[i];
-		const next = query[i + 1];
-
-		// Line comment — runs to the newline, which is preserved.
-		if (ch === "/" && next === "/") {
-			while (i < query.length && query[i] !== "\n") {
-				out += " ";
-				i++;
-			}
-			continue;
-		}
-
-		// Block comment — unterminated ones blank the rest, which is correct:
-		// the server will reject the query anyway, and everything after an
-		// unclosed opener is a comment as far as any reader is concerned.
-		if (ch === "/" && next === "*") {
-			out += "  ";
-			i += 2;
-			while (i < query.length && !(query[i] === "*" && query[i + 1] === "/")) {
-				out += query[i] === "\n" ? "\n" : " ";
-				i++;
-			}
-			if (i < query.length) {
-				out += "  ";
-				i += 2;
-			}
-			continue;
-		}
-
-		// Quoted region: string literal or backticked identifier.
-		if (ch === "'" || ch === '"' || ch === "`") {
-			const quote = ch;
-			out += " ";
-			i++;
-			while (i < query.length) {
-				// Backslash escape. Backticked identifiers escape by doubling
-				// rather than with backslashes, but consuming the pair here is
-				// still safe — a backslash inside one is an ordinary character
-				// and the character after it cannot be the closing backtick
-				// without the identifier being malformed anyway.
-				if (query[i] === "\\" && quote !== "`") {
-					out += i + 1 < query.length ? "  " : " ";
-					i += 2;
-					continue;
-				}
-				if (query[i] === quote) {
-					// Doubled quote is an escaped quote, not a terminator.
-					if (query[i + 1] === quote) {
-						out += "  ";
-						i += 2;
-						continue;
-					}
-					out += " ";
-					i++;
-					break;
-				}
-				out += query[i] === "\n" ? "\n" : " ";
-				i++;
-			}
-			continue;
-		}
-
-		out += ch;
-		i++;
-	}
-
-	return out;
-}
-
-/** The write clauses a query actually uses, in the order they appear. */
-export function writeClausesIn(query: string): string[] {
-	const code = stripNonCode(query).toUpperCase();
-	const found: string[] = [];
-	for (const clause of WRITE_CLAUSES) {
-		// `\b` on both sides so SET does not match `OFFSET`, and CREATE does not
-		// match a variable called `createdAt`.
-		if (new RegExp(`\\b${clause}\\b`).test(code)) found.push(clause);
-	}
-	return found;
-}
-
-/**
- * Whether this query mutates the graph.
- *
- * This is NOT used to route between tools — there is one Cypher tool, and it
- * runs whatever it is given. It backs only the opt-in `HYDRADB_GRAPH_READONLY`
- * mode, where the sole consequence of a wrong answer is a refused query.
- *
- * That asymmetry is deliberate. The detector is conservative in one direction:
- * it may call a read a write (cost: an operator-configured server declines a
- * query it could have run), never a write a read. Nothing else depends on it.
- */
-export function isWriteQuery(query: string): boolean {
-	return writeClausesIn(query).length > 0;
-}
-
-/**
- * Constructs HydraDB refuses BEFORE running anything, so the request fails with
- * a 400 and nothing executes.
- *
- * Caught locally so the caller gets the reason and the alternative in one step
- * instead of a remote validation error they have to interpret. Retrying either
- * of these unchanged fails identically, so a fast, specific local failure is
- * strictly better than a slow, generic remote one.
- */
-export function unsupportedConstruct(query: string): string | undefined {
-	const code = stripNonCode(query);
-
-	// `CALL { ... }` subqueries ARE supported; `CALL some.procedure(...)` is not.
-	// The distinction is the token after CALL, so look at that rather than at
-	// the bare keyword.
-	const call = /\bCALL\s*(\{)?/i.exec(code);
-	if (call && call[1] == null) {
-		return (
-			"HydraDB rejects procedure calls (`CALL db.*`, `CALL apoc.*`) before running " +
-			"them. `CALL { ... }` subqueries are supported."
-		);
-	}
-
-	if (/\bLOAD\s+CSV\b/i.test(code)) {
-		return (
-			"HydraDB rejects `LOAD CSV` — it does not load files or URLs server-side. " +
-			"Send the rows through `params` instead, e.g. " +
-			"`UNWIND $rows AS row MERGE (n:Thing {id: row.id}) SET n += row`."
-		);
-	}
-
-	return undefined;
-}
 
 /**
  * The documented request-body ceiling for `POST /byog/query`.

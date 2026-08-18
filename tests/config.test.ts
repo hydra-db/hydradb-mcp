@@ -31,7 +31,6 @@ test("canonical HYDRADB_* names are read as primary with no warning", () => {
 		// is enough to address a same-named graph without extra configuration.
 		graph: {
 			enabled: true,
-			readOnly: false,
 			database: "db",
 			collection: "default",
 		},

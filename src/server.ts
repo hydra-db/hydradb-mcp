@@ -10,13 +10,7 @@ import type { PageInfo } from "./adapters.js";
 import { resolveConfig, resolveGraphConfig } from "./config.js";
 import type { GraphConfig } from "./config.js";
 import { renderRecalledContext } from "./context.js";
-import {
-	COLLECTION_PATTERN,
-	MAX_BODY_BYTES,
-	renderRows,
-	unsupportedConstruct,
-	writeClausesIn,
-} from "./cypher.js";
+import { COLLECTION_PATTERN, MAX_BODY_BYTES, renderRows } from "./cypher.js";
 import { SERVER_INSTRUCTIONS, TOOL_DESCRIPTIONS } from "./descriptions.js";
 import { HydraDB } from "./hydra/index.js";
 import type { ContextKind, QueryKind } from "./hydra/index.js";
@@ -1203,15 +1197,12 @@ export function createHydraDBServer(
 	/**
 	 * The single Cypher entry point: reads and writes go through one tool.
 	 *
-	 * These were two tools, split the way Neo4j's MCP splits them so a host could
-	 * auto-approve reads and gate writes. That split only works if the
-	 * read/write classifier is exactly right on every query, and a classifier
-	 * over Cypher text is a heuristic — it cannot be. Rather than have a tool
-	 * whose contract ("this one never writes") rests on a heuristic, there is one
-	 * tool, annotated destructive, and the host gates the whole graph surface.
-	 *
-	 * The classifier survives for `HYDRADB_GRAPH_READONLY` only, where a wrong
-	 * answer refuses a query instead of permitting a write.
+	 * This deliberately does NOT inspect the query. An earlier version lexed it
+	 * to classify reads vs writes and to pre-reject constructs the server
+	 * refuses; both were a client reimplementing the server's rules, able only
+	 * to agree with it or to be wrong. The server rejects unsupported
+	 * constructs before executing anything and says so more precisely than we
+	 * did, so the query goes out as written.
 	 */
 	async function runGraphCypher(
 		args: {
@@ -1224,23 +1215,6 @@ export function createHydraDBServer(
 		signal?: AbortSignal,
 	): Promise<ToolResult> {
 		const scope = graphScope(args);
-		const clauses = writeClausesIn(args.query);
-		const writes = clauses.length > 0;
-
-		// Operator-configured read-only mode. Deliberately fail-safe: the only
-		// consequence of a misclassification here is a refused query, and the
-		// operator opted into that trade by setting the flag.
-		if (graphConfig.readOnly && writes) {
-			return errorResult(
-				`This server is in read-only mode (HYDRADB_GRAPH_READONLY) and this query ` +
-				`contains ${clauses.join(", ")}. Nothing was executed.`,
-			);
-		}
-
-		// Named locally so the caller gets the reason and the alternative together,
-		// rather than a remote validation error to interpret.
-		const unsupported = unsupportedConstruct(args.query);
-		if (unsupported) return errorResult(`${unsupported} Nothing was executed.`);
 
 		assertBodyFits({ ...scope, query: args.query, params: args.params });
 
@@ -1255,13 +1229,14 @@ export function createHydraDBServer(
 		// "no results" invites the caller to retry a write that already committed.
 		if (rows.length === 0) {
 			return structuredResult(
-				// A write with no RETURN legitimately yields zero rows. Reporting
-				// that as "no results" invites the caller to retry a write that
-				// already committed.
-				writes
-					? `Write completed against ${scope.database}/${scope.collection}. The query ` +
-						"returned no rows, which is expected when it has no RETURN clause."
-					: `No rows matched in ${scope.database}/${scope.collection}.`,
+				// Zero rows means one of two things and this does not guess which:
+				// a read that matched nothing, or a write with no RETURN clause.
+				// Naming both keeps a caller from re-running a write that already
+				// committed because the result "looked empty".
+				`The query ran against ${scope.database}/${scope.collection} and returned ` +
+				"0 rows. For a read that means nothing matched; for a write with no RETURN " +
+				"clause it is the expected result and the write has been applied — do not " +
+				"re-run it to check.",
 				{ database: scope.database, collection: scope.collection, rows: [], row_count: 0 },
 			);
 		}
@@ -1999,16 +1974,15 @@ export function createHydraDBServer(
 	// A separate product surface from the memory/knowledge tools above: property
 	// graphs the user models and owns, addressed in Cypher. Registered by
 	// default so the capability is discoverable — the feature exists today and
-	// no client surfaces it — and gated by two independent switches:
+	// no client surfaces it — and gated by one switch:
 	//
 	//   HYDRADB_MCP_GRAPH_TOOLS=0  withholds all three, for memory-only users
 	//                              who do not want the manifest cost.
-	//   HYDRADB_GRAPH_READONLY=1   withholds hydradb_graph_admin outright, and
-	//                              makes hydradb_graph_query decline mutating
-	//                              Cypher. The Cypher tool stays registered
-	//                              because it is also the only way to READ a
-	//                              graph — withholding it would remove the
-	//                              surface rather than restrict it.
+	//
+	// There is no read-only mode. It would have to classify Cypher client-side
+	// to decide what to refuse, which is a heuristic — offering it would invite
+	// operators to trust a guarantee it could not make. Withholding the tools
+	// outright is a real guarantee; that is the switch above.
 	if (graphConfig.enabled) {
 		register(
 			TOOL_NAMES.GRAPH_QUERY,
@@ -2034,15 +2008,13 @@ export function createHydraDBServer(
 			readOnly,
 		);
 
-		if (!graphConfig.readOnly) {
-			register(
-				TOOL_NAMES.GRAPH_ADMIN,
-				graphAdminSchema,
-				(args, extra) =>
-					runGraphAdmin(args as Parameters<typeof runGraphAdmin>[0], extra?.signal),
-				destructive,
-			);
-		}
+		register(
+			TOOL_NAMES.GRAPH_ADMIN,
+			graphAdminSchema,
+			(args, extra) =>
+				runGraphAdmin(args as Parameters<typeof runGraphAdmin>[0], extra?.signal),
+			destructive,
+		);
 	}
 
 	// --- Deprecated aliases ---

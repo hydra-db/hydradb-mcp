@@ -29,8 +29,6 @@ export interface HydraDBConfig {
 export interface GraphConfig {
 	/** Whether the graph tools are registered at all. */
 	enabled: boolean;
-	/** Refuse to register the mutating tools, mirroring Neo4j's read-only mode. */
-	readOnly: boolean;
 	/**
 	 * Default graph database. Falls back to HYDRADB_DATABASE — convenient when
 	 * one name is used for both, and harmless otherwise because the tools accept
@@ -44,11 +42,12 @@ export interface GraphConfig {
 const DEFAULT_GRAPH_COLLECTION = "default";
 
 /**
- * Env flags are read permissively in one direction only.
+ * Env flags accept the usual spellings, not just `1`.
  *
- * A user who writes `HYDRADB_GRAPH_READONLY=true` meaning "on" must not get
- * "off" because only `1` was accepted — the failure mode is a server that
- * accepts writes when its operator believed it would not.
+ * Someone writing `HYDRADB_MCP_GRAPH_TOOLS=false` means it, and silently
+ * ignoring that would register tools an operator believed they had withheld.
+ * An unrecognised value falls back rather than throwing, so a typo cannot stop
+ * the server starting.
  */
 function flag(raw: string | undefined, fallback: boolean): boolean {
 	if (raw == null || raw.trim() === "") return fallback;
@@ -156,7 +155,6 @@ export function resolveGraphConfig(
 ): GraphConfig {
 	return {
 		enabled: flag(env.HYDRADB_MCP_GRAPH_TOOLS, true),
-		readOnly: flag(env.HYDRADB_GRAPH_READONLY, false),
 		// Not `readEnv` — these are new names with no legacy spelling to alias,
 		// and inventing a deprecated one would be noise.
 		database: env.HYDRADB_GRAPH_DATABASE?.trim() || fallbackDatabase,

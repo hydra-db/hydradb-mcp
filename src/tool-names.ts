@@ -52,15 +52,6 @@ export const GRAPH_TOOL_NAMES = [
 	TOOL_NAMES.GRAPH_ADMIN,
 ] as const;
 
-/**
- * The graph tool withheld entirely in read-only mode.
- *
- * `hydradb_graph_query` is NOT in this list even though it can write: it is the
- * only way to read a graph, so withholding it would take the whole surface
- * away. In read-only mode it stays registered and declines mutating Cypher.
- */
-export const GRAPH_WRITE_TOOL_NAMES = [TOOL_NAMES.GRAPH_ADMIN] as const;
-
 export const DEPRECATED_TOOL_NAMES = [
 	TOOL_NAMES.SEARCH,
 	TOOL_NAMES.STORE,
