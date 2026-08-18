@@ -342,7 +342,12 @@ export function createHydraDBServer(hydraOverride?: HydraDB) {
 			metadataFilters: args.metadata_filters,
 			numRelatedChunks: args.num_related_chunks,
 			graphContext: args.graph_context ?? true,
-			alpha: 0.8,
+			// Host-owned default (CONTRACT §2 rule 5), but only where it means
+			// something: alpha balances dense against sparse retrieval in HYBRID
+			// mode, and an `operator` switches the query to text retrieval (see
+			// the wrapper), where there are no two lanes to weigh. Injecting it
+			// there would send a hybrid-only knob on a request that is not hybrid.
+			alpha: args.operator != null ? undefined : 0.8,
 			recencyBias: 0,
 		}, { signal });
 		// The renderer reads the SDK payload directly; there is no longer a

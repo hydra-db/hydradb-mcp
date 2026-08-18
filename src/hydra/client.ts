@@ -101,7 +101,16 @@ export interface HydraConfig {
 export interface QueryParams {
 	query: string;
 	kind?: QueryKind;
+	/**
+	 * How the terms in `query` are combined. Keyword semantics, so it is only
+	 * meaningful — and only accepted — under `queryBy: "text"`; see `query`.
+	 */
 	operator?: "or" | "and" | "phrase";
+	/**
+	 * Retrieval method. `hybrid` (what the API uses when this is omitted) runs
+	 * dense and sparse retrieval together; `text` is keyword matching only.
+	 */
+	queryBy?: "hybrid" | "text";
 	maxResults?: number;
 	mode?: "fast" | "thinking" | "auto";
 	graphContext?: boolean;
@@ -230,17 +239,45 @@ export class ContextResource extends Resource {
 		super(sdk, database, collection);
 	}
 
-	/** The single retrieval entry point (SDK `client.query`). */
-	query(
+	/**
+	 * The single retrieval entry point (SDK `client.query`).
+	 *
+	 * `async` so the operator/retrieval validation below surfaces as a rejection,
+	 * for the same reason `ingest` is async.
+	 */
+	async query(
 		params: QueryParams,
 		opts?: RequestOptions,
 	): Promise<SDK.SearchV2RetrievalResult> {
+		// `operator` is keyword syntax, and the API accepts it only when the
+		// request also asks for keyword retrieval. On hybrid it does not ignore
+		// the field, it refuses the whole call:
+		//   Hydra DB /query → 400: INVALID_INPUT: operator is only valid with query_by=text
+		// This wrapper forwarded `operator` and never sent `query_by`, so EVERY
+		// call that set it 400'd — the parameter could not succeed under any
+		// input. An operator therefore carries its retrieval method with it.
+		//
+		// A caller that states `queryBy` is never overridden: `hybrid` with an
+		// operator is a contradiction only they can resolve, so it is rejected
+		// here rather than sent to fail on the wire (the same stance the
+		// knowledge-ingest path takes toward params it cannot honour).
+		if (params.operator != null && params.queryBy === "hybrid") {
+			throw new Error(
+				`operator "${params.operator}" is only valid with queryBy "text" — ` +
+				`hybrid retrieval rejects the request outright. Drop operator to keep ` +
+				`hybrid retrieval, or pass queryBy "text" to match on the terms.`,
+			);
+		}
+		const queryBy =
+			params.queryBy ?? (params.operator != null ? "text" : undefined);
+
 		return this.call("/query", () =>
 			this.sdk.query({
 				...this.scope(params.collection),
 				query: params.query,
 				type: params.kind,
 				operator: params.operator,
+				queryBy,
 				maxResults: params.maxResults,
 				mode: params.mode,
 				graphContext: params.graphContext,

@@ -1986,6 +1986,44 @@ test("hydradb_query forwards operator to the wire", async () => {
 	}
 });
 
+// Shipped in 1.2.0: `operator` reached the wire without `query_by`, and the API
+// answers that combination with
+//   400: INVALID_INPUT: operator is only valid with query_by=text
+// so every call that set the parameter failed. The operator now carries the
+// retrieval method it requires.
+test("hydradb_query sends query_by=text whenever an operator is set", async () => {
+	for (const operator of ["or", "and", "phrase"] as const) {
+		const { hydra, calls } = mockHydra();
+		const client = await connect(hydra);
+		const result = await client.callTool({
+			name: "hydradb_query",
+			arguments: { query: "ECONNRESET on deploy", operator },
+		});
+
+		assert.notEqual(result.isError, true, `operator ${operator} must be usable`);
+		const args = calls.find((c) => c.method === "query")?.args;
+		assert.equal(args?.queryBy, "text", `operator ${operator} needs query_by=text`);
+		// alpha weighs dense against sparse retrieval in hybrid mode; there is no
+		// such balance to strike on a text query, so the host default is not
+		// injected there.
+		assert.equal(args?.alpha, undefined, "hybrid-only alpha must not ride along");
+		await client.close();
+	}
+});
+
+test("hydradb_query stays on hybrid retrieval when no operator is set", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+	await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
+
+	const args = calls.find((c) => c.method === "query")?.args;
+	// Omitted, not "hybrid": the API's own default is hybrid, and stating it
+	// would make this server the owner of a default it never chose.
+	assert.equal(args?.queryBy, undefined, "a plain query must not force text retrieval");
+	assert.equal(args?.alpha, 0.8, "the hybrid weighting default still applies");
+	await client.close();
+});
+
 test("hydradb_query accepts mode auto", async () => {
 	const { hydra, calls } = mockHydra();
 	const client = await connect(hydra);
