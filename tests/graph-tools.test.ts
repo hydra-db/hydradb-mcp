@@ -481,6 +481,47 @@ test("a genuinely empty result is still an empty result", async () => {
 	);
 });
 
+/**
+ * The container being an array is not enough: `renderRows` calls `Object.keys`
+ * on each row, which throws a bare TypeError on `null` and on a string. That
+ * surfaces inside a tool handler as an unactionable stack rather than "the
+ * response was not what we expected".
+ */
+test("a malformed row inside the array throws, naming the row", async () => {
+	for (const bad of [null, "a string", 5, ["nested"]]) {
+		await withFetch(
+			() => ({ body: { success: true, data: [{ ok: 1 }, bad] } }),
+			async (graph) => {
+				await assert.rejects(
+					() => graph.query({ database: "d", collection: "c", query: "MATCH (n) RETURN n" }),
+					(err: unknown) => {
+						assert.ok(err instanceof HydraWrapperError);
+						assert.match(err.message, /row 1 is not one/);
+						return true;
+					},
+					`row ${JSON.stringify(bad)} should be rejected`,
+				);
+			},
+		);
+	}
+});
+
+test("a non-string collection name throws rather than being handed back as scope", async () => {
+	await withFetch(
+		() => ({ body: { success: true, data: { collections: ["ok", 42] } } }),
+		async (graph) => {
+			await assert.rejects(
+				() => graph.listCollections({ database: "d" }),
+				(err: unknown) => {
+					assert.ok(err instanceof HydraWrapperError);
+					assert.match(err.message, /index 1 is not a string/);
+					return true;
+				},
+			);
+		},
+	);
+});
+
 test("a malformed collections payload throws rather than reading as none", async () => {
 	await withFetch(
 		() => ({ body: { success: true, data: { wrong: true } } }),

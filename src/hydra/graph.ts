@@ -127,6 +127,20 @@ export class GraphResource {
 		if (!Array.isArray(rows)) {
 			throw unexpectedShape("/byog/query", "an array of row objects", rows);
 		}
+		// Element-wise, not just the container. `renderRows` calls `Object.keys`
+		// on each row, which throws a bare TypeError on `null` and on a string —
+		// an unactionable crash inside a tool handler, where the caller sees a
+		// stack rather than "the response was not what we expected".
+		const bad = rows.findIndex(
+			(row) => row == null || typeof row !== "object" || Array.isArray(row),
+		);
+		if (bad !== -1) {
+			throw unexpectedShape(
+				"/byog/query",
+				`an array of row objects (row ${bad} is not one)`,
+				rows[bad],
+			);
+		}
 		return rows as GraphRow[];
 	}
 
@@ -157,6 +171,16 @@ export class GraphResource {
 				"/byog/collections",
 				"an object with a `collections` array",
 				res,
+			);
+		}
+		// A non-string element would be rendered as a collection name the caller
+		// could then pass back as scope, so it is reported rather than coerced.
+		const notAName = res.collections.findIndex((name) => typeof name !== "string");
+		if (notAName !== -1) {
+			throw unexpectedShape(
+				"/byog/collections",
+				`an array of collection names (index ${notAName} is not a string)`,
+				res.collections[notAName],
 			);
 		}
 		return res.collections as string[];
