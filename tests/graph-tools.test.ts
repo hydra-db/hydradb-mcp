@@ -407,6 +407,33 @@ test("drop_database distinguishes a partial drop from a full one", async () => {
 	await client.close();
 });
 
+/**
+ * A missing `deleted` used to be treated as `true`, claiming a full drop the
+ * server never confirmed. On an irreversible call that is the wrong direction
+ * to guess in.
+ */
+test("a drop the server did not confirm is reported as unconfirmed", async () => {
+	const { hydra } = mockGraph(() => [], {
+		dropDatabase: { deleted_collections: ["contacts"] },
+	});
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: TOOL_NAMES.GRAPH_ADMIN,
+		arguments: { action: "drop_database", database: "crm" },
+	});
+
+	const text = textOf(result);
+	assert.match(text, /did not report whether the database itself was removed/);
+	assert.doesNotMatch(text, /and everything in it/);
+	const structured = (result as { structuredContent: Record<string, unknown> })
+		.structuredContent;
+	assert.equal(structured.database_deleted, undefined, "must not assert an outcome");
+	assert.equal(structured.database_deleted_known, false);
+
+	await client.close();
+});
+
 test("a full drop reports the database as gone", async () => {
 	const { hydra } = mockGraph();
 	const client = await connect(hydra);

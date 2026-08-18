@@ -1334,22 +1334,42 @@ export function createHydraDBServer(
 			const dropped = res.deleted_collections ?? [];
 			const listed =
 				dropped.length > 0 ? ` Collections removed: ${dropped.join(", ")}.` : "";
-			// `deleted: false` is a real, different outcome — the database predates
-			// BYOG and only its graph collections went. Reporting it as a full drop
-			// would tell the user something is gone that is still there.
-			return structuredResult(
-				res.deleted === false
-					? `Dropped the graph collections in "${database}", but NOT the database itself — ` +
-						"it was created through the standard database API, so remove it there." +
-						listed
-					: `Dropped graph database "${database}" and everything in it.${listed}`,
-				{
-					action: args.action,
-					database,
-					database_deleted: res.deleted ?? true,
-					deleted_collections: dropped,
-				},
-			);
+			// Three outcomes, not two, and the third is "we were not told".
+			//
+			// `deleted: false` is a real, different result — the database predates
+			// BYOG, so only its graph collections went and the database itself
+			// remains. Reporting that as a full drop tells the user something is
+			// gone that is still there.
+			//
+			// A MISSING `deleted` used to fall into the same branch as `true` and
+			// claim a full drop. On a destructive, irreversible call that is the
+			// wrong direction to guess in: the server did not establish that
+			// outcome, so it is not asserted. Say what is known and how to check.
+			let text: string;
+			if (res.deleted === true) {
+				text = `Dropped graph database "${database}" and everything in it.${listed}`;
+			} else if (res.deleted === false) {
+				text =
+					`Dropped the graph collections in "${database}", but NOT the database itself — ` +
+					"it was created through the standard database API, so remove it there." +
+					listed;
+			} else {
+				text =
+					`Dropped the graph collections in "${database}".${listed} The server did not ` +
+					"report whether the database itself was removed, so that is unconfirmed — " +
+					"check with your database listing rather than assuming it is gone.";
+			}
+
+			return structuredResult(text, {
+				action: args.action,
+				database,
+				// Omitted rather than guessed when the server did not say, matching
+				// how the memory delete path reports an unknown count.
+				...(typeof res.deleted === "boolean"
+					? { database_deleted: res.deleted }
+					: { database_deleted_known: false }),
+				deleted_collections: dropped,
+			});
 		}
 
 		throw new Error(
