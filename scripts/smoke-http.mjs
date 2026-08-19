@@ -31,7 +31,20 @@ function fail(message) {
 if (!existsSync(ENTRY)) fail(`${ENTRY} does not exist — was the build run?`);
 
 const child = spawn("node", [ENTRY], {
-	env: { ...process.env, PORT: String(PORT), BIND_ADDRESS: "127.0.0.1" },
+	// Strip any tenant credentials from the child's environment. The
+	// unauthenticated-`/mcp` check asserts a 401, which only holds when the
+	// server has NO ambient account to fall back to — and this script is run by
+	// hand and in CI where `HYDRADB_API_KEY` may well be exported. Node omits env
+	// entries whose value is `undefined`, so this removes them for the child only.
+	env: {
+		...process.env,
+		HYDRADB_API_KEY: undefined,
+		HYDRA_DB_API_KEY: undefined,
+		HYDRADB_DATABASE: undefined,
+		HYDRA_DB_TENANT_ID: undefined,
+		PORT: String(PORT),
+		BIND_ADDRESS: "127.0.0.1",
+	},
 	stdio: ["ignore", "inherit", "inherit"],
 });
 
