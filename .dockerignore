@@ -1,0 +1,23 @@
+# Everything the image does not need. Keeps the build context small and stops
+# local secrets or build output from leaking into a layer.
+node_modules
+dist
+.git
+.github
+.opencode
+.claude
+.env
+.env.*
+!.env.example
+*.log
+npm-debug.log*
+coverage
+tests
+conformance
+scripts
+ignore
+*.md
+!README.md
+Dockerfile
+.dockerignore
+biome.json

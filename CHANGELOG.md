@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — remote HTTP transport (hosted server)
+
+The server can now run as a long-lived **HTTP endpoint** that many clients reach
+at one URL, alongside the existing stdio (`npx`) binary. This is what a hosted
+deployment such as `https://mcp.hydradb.com/mcp` runs, and what `npm run
+start:http` or the new Docker image runs locally — nothing to install per user.
+
+The tool surface is unchanged: the HTTP server builds the exact same server as
+stdio via `createHydraDBServer`. Only connection and auth are new.
+
+- **Per-request, multi-tenant credentials.** A hosted process has no single
+  ambient account, so each request selects its tenant with headers —
+  `Authorization: Bearer <api-key>` (or `X-HydraDB-Api-Key`) and
+  `X-HydraDB-Database`, with optional `X-HydraDB-Collection` and
+  `X-HydraDB-Graph-*`. A request that authenticates nobody is refused (`401`);
+  one that names no database is `400`. A single-tenant self-host may instead set
+  `HYDRADB_API_KEY`/`HYDRADB_DATABASE` in the environment and clients send no
+  credentials — the header path falls back to it.
+- **Safe-by-default network posture.** Binds loopback unless `BIND_ADDRESS` is
+  set; a `Host` allowlist (`ALLOWED_HOSTS`, loopback always) answers stray
+  authorities with `421`; CORS is closed until `ALLOWED_ORIGINS` lists an
+  origin. `Base URL`/timeout/retries stay operator-only env settings and are
+  never read from a request header.
+- New: `src/http.ts` (Express app + lifecycle), `src/http-config.ts`
+  (operator + per-request config resolution), `Dockerfile`, `.dockerignore`,
+  `npm run start:http` / `dev:http`, and a `hydradb-mcp-http` bin. Runtime deps
+  `express` and `cors` were added.
+
 ### Added — graph (BYOG) tools
 
 Hydra DB's **graph database** offering is now reachable from the MCP. Previously

@@ -2,6 +2,11 @@
 
 MCP (Model Context Protocol) server for [Hydra DB](https://hydradb.com), the state-of-the-art agentic memory. Provides tools for storing, recalling, and managing memories with knowledge-graph enriched context.
 
+Run it two ways, same tools either way:
+
+- **Local (stdio)** — the `npx @hydradb/mcp` binary each client spawns. No server to operate; credentials live in the client's config. This is the default and everything below the [Configuration](#configuration) section documents it.
+- **Remote (HTTP)** — one hosted process behind a URL like `https://mcp.hydradb.com/mcp` that many clients point at, with nothing to install. See [**Remote / hosted server**](#remote--hosted-server).
+
 ## Available Tools
 
 | Tool | What it does |
@@ -276,6 +281,110 @@ To partition data, set the `HYDRADB_COLLECTION` environment variable:
 }
 ```
 
+## Remote / hosted server
+
+Everything above spawns the server locally over stdio. The same server also runs
+as a long-lived **HTTP endpoint** that many clients reach at one URL — nothing to
+install or update per user. This is what powers a hosted deployment like
+`https://mcp.hydradb.com/mcp`, and what you run yourself with `npm run start:http`
+or the Docker image.
+
+The tool surface is identical; only how a client connects and authenticates
+changes.
+
+### Point a client at a URL
+
+MCP clients that support a remote (`streamable-http`) server take a URL and
+headers instead of a command:
+
+```jsonc
+{
+  "mcpServers": {
+    "hydradb": {
+      "url": "https://mcp.hydradb.com/mcp",
+      "headers": {
+        "Authorization": "Bearer YOUR_HYDRADB_API_KEY",
+        "X-HydraDB-Database": "your-database"
+      }
+    }
+  }
+}
+```
+
+Every request carries its own credentials, so one hosted process serves any
+number of independent users. The headers a request may send:
+
+| Header | Maps to | Required |
+| --- | --- | --- |
+| `Authorization: Bearer <key>` | Hydra DB API key (`X-HydraDB-Api-Key` also accepted) | Yes\* |
+| `X-HydraDB-Database` | Database (tenant scope) | Yes\* |
+| `X-HydraDB-Collection` | Collection (sub-tenant); defaults to `hydra-db-mcp` | No |
+| `X-HydraDB-Graph-Database` | Default graph database for the Cypher tools; defaults to the request's database | No |
+| `X-HydraDB-Graph-Collection` | Default graph collection; defaults to `default` | No |
+
+\* Unless the server was started with `HYDRADB_API_KEY` / `HYDRADB_DATABASE` in
+its environment (single-tenant self-host, below), in which case a request may
+omit them and fall back to the server's own credentials. A request that supplies
+neither a header nor a server-side default is refused: `401` with no key, `400`
+with a key but no database. `Base URL`, request timeout and retry count are
+**operator** settings read from the server's environment and are never taken
+from a request header.
+
+### Run the HTTP server
+
+**Node:**
+
+```bash
+npm ci && npm run build
+# Single-tenant: the server holds one account; clients send no credentials.
+HYDRADB_API_KEY=your-key HYDRADB_DATABASE=your-database npm run start:http
+# Multi-tenant: no account in the env; every client sends its own headers.
+BIND_ADDRESS=0.0.0.0 ALLOWED_HOSTS=mcp.hydradb.com npm run start:http
+```
+
+**Docker:**
+
+```bash
+docker build -t hydradb-mcp .
+# Single-tenant
+docker run -p 8080:8080 -e HYDRADB_API_KEY=your-key -e HYDRADB_DATABASE=your-database hydradb-mcp
+# Multi-tenant (clients authenticate per request)
+docker run -p 8080:8080 -e ALLOWED_HOSTS=mcp.hydradb.com hydradb-mcp
+```
+
+The endpoint is `POST /mcp`; `GET /health` is an unauthenticated liveness probe.
+The image binds `0.0.0.0` inside the container (the host controls exposure with
+`-p`) and runs as an unprivileged user.
+
+### Server environment variables
+
+These configure the HTTP process itself (the stdio server ignores them). All
+the `HYDRADB_*` variables from [Environment Variables](#environment-variables)
+also apply — as the single-tenant default and as operator settings.
+
+| Variable | Description | Default |
+| --- | --- | --- |
+| `PORT` | Port to listen on | `8080` |
+| `BIND_ADDRESS` | Interface to bind (`0.0.0.0` to accept off-host) | `127.0.0.1` |
+| `ALLOWED_HOSTS` | Extra `Host` headers to accept (comma-separated); loopback always allowed | *(loopback only)* |
+| `ALLOWED_ORIGINS` | CORS origins for browser clients (comma-separated; `*` allows any) | *(none)* |
+
+### Security
+
+The defaults are safe for local use and must be widened deliberately for a
+public deployment — see [SECURITY.md](SECURITY.md):
+
+- **Bind loopback by default.** `BIND_ADDRESS` stays `127.0.0.1` until you set
+  otherwise; `0.0.0.0` exposes the server on every interface and logs a warning.
+- **Host allowlist.** Requests whose `Host` is not loopback or in `ALLOWED_HOSTS`
+  get `421 Misdirected Request` — a DNS-rebinding defence. Add your public
+  hostname when binding publicly.
+- **CORS is closed by default.** No cross-origin browser request is accepted
+  until you list its origin in `ALLOWED_ORIGINS`. Non-browser clients (no
+  `Origin` header) are unaffected.
+- **Terminate TLS in front.** Run the server behind a reverse proxy / load
+  balancer that handles HTTPS; do not expose plain HTTP to the internet.
+
 ## How It Works
 
 The server talks to Hydra DB through the generated [`@hydradb/sdk`](https://www.npmjs.com/package/@hydradb/sdk)
@@ -301,6 +410,13 @@ For development with auto-reload:
 
 ```bash
 HYDRADB_API_KEY=your-key HYDRADB_DATABASE=your-database npm run dev
+```
+
+To run the HTTP transport locally (see [Remote / hosted server](#remote--hosted-server)):
+
+```bash
+HYDRADB_API_KEY=your-key HYDRADB_DATABASE=your-database npm run dev:http
+# then: curl localhost:8080/health
 ```
 
 ## Testing

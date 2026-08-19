@@ -6,7 +6,8 @@
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "hydradb-mcp": "dist/index.js"
+    "hydradb-mcp": "dist/index.js",
+    "hydradb-mcp-http": "dist/http.js"
   },
   "files": [
     "dist",
@@ -16,7 +17,9 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
+    "start:http": "node dist/http.js",
     "dev": "tsx src/index.ts",
+    "dev:http": "tsx src/http.ts",
     "check-types": "tsc --noEmit",
     "test": "npm run test:unit",
     "test:unit": "node scripts/assert-test-files.mjs && tsx --test tests/*.test.ts conformance/*.test.ts",
@@ -24,16 +27,21 @@
     "test:integration": "tsx --test tests/*.integration.spec.ts",
     "test:all": "npm run test:unit && npm run test:integration",
     "smoke": "node scripts/smoke-dist.mjs",
+    "smoke:http": "node scripts/smoke-http.mjs",
     "check-pack": "node scripts/assert-pack-contents.mjs",
     "lint": "biome lint src tests conformance scripts"
   },
   "dependencies": {
     "@hydradb/sdk": "2.1.2",
     "@modelcontextprotocol/sdk": "^1.21.1",
+    "cors": "^2.8.6",
+    "express": "^5.2.1",
     "zod": "^3.25.46"
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
     "@types/node": "^20",
     "tsx": "^4.19.4",
     "typescript": "^5.9.3"
