@@ -189,7 +189,9 @@ export function createHttpApp(config: HttpServerConfig): Express {
 	app.use(express.json({ limit: MAX_REQUEST_BODY }));
 
 	// --- The MCP endpoint ---
-	app.all("/mcp", async (req, res) => {
+	// Serves MCP at both the root `/` (e.g. https://mcp.hydradb.com) and `/mcp`
+	// so clients pointing at either URL connect seamlessly.
+	app.all(["/", "/mcp"], async (req, res) => {
 		// Who is this request for? On a hosted process the answer lives entirely
 		// in the request, so it is resolved here and a missing/incomplete answer
 		// is refused before any server is built.
@@ -396,7 +398,7 @@ function main(): void {
 		.listen(config.port, config.bindAddress, () => {
 			// Startup banners: on stderr so an operator sees where it bound
 			// regardless of HYDRADB_LOG_LEVEL.
-			banner(`listening on http://${config.bindAddress}:${config.port}/mcp`);
+			banner(`listening on http://${config.bindAddress}:${config.port}`);
 			banner(
 				`allowed origins: ${
 					config.allowedOrigins.length > 0

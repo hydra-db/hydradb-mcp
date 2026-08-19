@@ -5,7 +5,7 @@ MCP (Model Context Protocol) server for [Hydra DB](https://hydradb.com), the sta
 Run it two ways, same tools either way:
 
 - **Local (stdio)** — the `npx @hydradb/mcp` binary each client spawns. No server to operate; credentials live in the client's config. This is the default and everything below the [Configuration](#configuration) section documents it.
-- **Remote (HTTP)** — one hosted process behind a URL like `https://mcp.hydradb.com/mcp` that many clients point at, with nothing to install. See [**Remote / hosted server**](#remote--hosted-server).
+- **Remote (HTTP)** — one hosted process behind a URL like `https://mcp.hydradb.com` that many clients point at, with nothing to install. See [**Remote / hosted server**](#remote--hosted-server).
 
 ## Available Tools
 
@@ -286,7 +286,7 @@ To partition data, set the `HYDRADB_COLLECTION` environment variable:
 Everything above spawns the server locally over stdio. The same server also runs
 as a long-lived **HTTP endpoint** that many clients reach at one URL — nothing to
 install or update per user. This is what powers a hosted deployment like
-`https://mcp.hydradb.com/mcp`, and what you run yourself with `npm run start:http`
+`https://mcp.hydradb.com`, and what you run yourself with `npm run start:http`
 or the Docker image.
 
 The tool surface is identical; only how a client connects and authenticates
@@ -301,7 +301,7 @@ headers instead of a command:
 {
   "mcpServers": {
     "hydradb": {
-      "url": "https://mcp.hydradb.com/mcp",
+      "url": "https://mcp.hydradb.com",
       "headers": {
         "Authorization": "Bearer YOUR_HYDRADB_API_KEY",
         "X-HydraDB-Database": "your-database"
@@ -352,7 +352,7 @@ docker run -p 8080:8080 -e HYDRADB_API_KEY=your-key -e HYDRADB_DATABASE=your-dat
 docker run -p 8080:8080 -e ALLOWED_HOSTS=mcp.hydradb.com hydradb-mcp
 ```
 
-The endpoint is `POST /mcp`; `GET /health` is an unauthenticated liveness probe.
+The primary MCP endpoint is `/` (with `/mcp` supported as an alias); `GET /health` is an unauthenticated liveness probe.
 The image binds `0.0.0.0` inside the container (the host controls exposure with
 `-p`) and runs as an unprivileged user.
 
