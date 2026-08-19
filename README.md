@@ -317,8 +317,8 @@ number of independent users. The headers a request may send:
 | Header | Maps to | Required |
 | --- | --- | --- |
 | `Authorization: Bearer <key>` | Hydra DB API key (`X-HydraDB-Api-Key` also accepted) | Yes\* |
-| `X-HydraDB-Database` | Database (tenant scope) | Yes\* |
-| `X-HydraDB-Collection` | Collection (sub-tenant); defaults to `hydra-db-mcp` | No |
+| `X-HydraDB-Database` | Default database (tenant scope) | Yes\* |
+| `X-HydraDB-Collection` | Default collection (sub-tenant); defaults to `hydra-db-mcp` | No |
 | `X-HydraDB-Graph-Database` | Default graph database for the Cypher tools; defaults to the request's database | No |
 | `X-HydraDB-Graph-Collection` | Default graph collection; defaults to `default` | No |
 
@@ -326,7 +326,14 @@ number of independent users. The headers a request may send:
 its environment (single-tenant self-host, below), in which case a request may
 omit them and fall back to the server's own credentials. A request that supplies
 neither a header nor a server-side default is refused: `401` with no key, `400`
-with a key but no database. `Base URL`, request timeout and retry count are
+with a key but no database.
+
+Every tool additionally accepts optional `database` and `collection` parameters
+directly in its arguments (e.g. `hydradb_query` with `{"query": "...", "database": "tenant_b"}`),
+allowing multi-tenant agents to switch tenant scope per tool call while falling
+back to the session defaults when omitted.
+
+`Base URL`, request timeout and retry count are
 **operator** settings read from the server's environment and are never taken
 from a request header.
 

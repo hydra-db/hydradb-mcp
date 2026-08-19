@@ -149,6 +149,12 @@ const PARAM = {
 	delete_kind:
 		"Which context family the ID belongs to: 'memory' or 'knowledge' (default: 'memory')",
 	memory_id: "The ID of the memory to delete",
+	database:
+		"Database (tenant) to target for this request. Defaults to the server's configured " +
+		"database. Pass explicitly to switch database scope per request.",
+	collection:
+		"Collection (sub-tenant) to target for this request. Defaults to the server's configured " +
+		"collection (or 'hydra-db-mcp'). Pass explicitly to switch collection scope per request.",
 } as const;
 
 /** Parameter blurbs for the BYOG graph tools. */
@@ -312,6 +318,8 @@ export const TOOL_DESCRIPTIONS = {
 			source_ids: PARAM.query_source_ids,
 			metadata_filters: PARAM.metadata_filters,
 			num_related_chunks: PARAM.num_related_chunks,
+			database: PARAM.database,
+			collection: PARAM.collection,
 		},
 	},
 
@@ -338,6 +346,8 @@ export const TOOL_DESCRIPTIONS = {
 				"neither. Use this when the exchange itself is worth preserving; when only the " +
 				"conclusion matters, prefer `text` with the distilled fact.",
 			user_name: PARAM.user_name,
+			database: PARAM.database,
+			collection: PARAM.collection,
 		},
 	},
 
@@ -355,6 +365,8 @@ Memory rows come back as [id] content. Knowledge rows as [id] — title (type), 
 			source_ids: PARAM.source_ids,
 			page: PARAM.page,
 			page_size: PARAM.page_size,
+			database: PARAM.database,
+			collection: PARAM.collection,
 		},
 	},
 
@@ -367,6 +379,8 @@ Memory rows come back as [id] content. Knowledge rows as [id] — title (type), 
 			offset: PARAM.fetch_offset,
 			limit: PARAM.fetch_limit,
 			expiry_seconds: PARAM.expiry_seconds,
+			database: PARAM.database,
+			collection: PARAM.collection,
 		},
 	},
 
@@ -381,6 +395,8 @@ Take the id from hydradb_query or hydradb_list — never guess one. Confirm with
 			ids: PARAM.delete_ids,
 			id: PARAM.delete_id,
 			kind: PARAM.delete_kind,
+			database: PARAM.database,
+			collection: PARAM.collection,
 		},
 	},
 
@@ -395,6 +411,8 @@ Take the id from hydradb_query or hydradb_list — never guess one. Confirm with
 			"'still indexing', not 'the save failed'.",
 		params: {
 			ids: "The source IDs to check, as returned by hydradb_ingest.",
+			database: PARAM.database,
+			collection: PARAM.collection,
 		},
 	},
 
@@ -441,6 +459,8 @@ Take the id from hydradb_query or hydradb_list — never guess one. Confirm with
 			max_results: PARAM.max_results,
 			mode: PARAM.mode,
 			graph_context: PARAM.graph_context,
+			database: PARAM.database,
+			collection: PARAM.collection,
 		},
 	},
 
@@ -458,6 +478,8 @@ Take the id from hydradb_query or hydradb_list — never guess one. Confirm with
 			infer: PARAM.infer,
 			is_markdown: PARAM.is_markdown,
 			overwrite: PARAM.overwrite,
+			database: PARAM.database,
+			collection: PARAM.collection,
 		},
 	},
 
@@ -469,12 +491,18 @@ Take the id from hydradb_query or hydradb_list — never guess one. Confirm with
 			source_id:
 				"Source identifier to group all turns from the same session together",
 			user_name: PARAM.user_name,
+			database: PARAM.database,
+			collection: PARAM.collection,
 		},
 	},
 
 	[TOOL_NAMES.LIST_MEMORIES]: {
 		title: "List Memories (deprecated)",
 		description: deprecated(TOOL_NAMES.LIST_MEMORIES, LIST_MEMORIES_BODY),
+		params: {
+			database: PARAM.database,
+			collection: PARAM.collection,
+		},
 	},
 
 	[TOOL_NAMES.LIST_SOURCES]: {
@@ -482,6 +510,8 @@ Take the id from hydradb_query or hydradb_list — never guess one. Confirm with
 		description: deprecated(TOOL_NAMES.LIST_SOURCES, LIST_SOURCES_BODY),
 		params: {
 			source_ids: PARAM.source_ids,
+			database: PARAM.database,
+			collection: PARAM.collection,
 		},
 	},
 
@@ -493,6 +523,8 @@ Take the id from hydradb_query or hydradb_list — never guess one. Confirm with
 			mode: PARAM.fetch_mode,
 			offset: PARAM.fetch_offset,
 			limit: PARAM.fetch_limit,
+			database: PARAM.database,
+			collection: PARAM.collection,
 		},
 	},
 
@@ -504,6 +536,8 @@ Take the id from hydradb_query or hydradb_list — never guess one. Confirm with
 		),
 		params: {
 			memory_id: PARAM.memory_id,
+			database: PARAM.database,
+			collection: PARAM.collection,
 		},
 	},
 } as const;

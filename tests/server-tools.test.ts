@@ -2446,3 +2446,86 @@ test("malformed JSON from the API surfaces as an error, not a crash", async () =
 
 	await client.close();
 });
+
+test("tools accept per-request database and collection overrides", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	// 1. hydradb_query override
+	await client.callTool({
+		name: "hydradb_query",
+		arguments: { query: "search test", database: "custom_db", collection: "custom_col" },
+	});
+	const queryCall = calls.find((c) => c.method === "query");
+	assert.ok(queryCall, "query should have been called");
+	assert.equal(queryCall.args.database, "custom_db");
+	assert.equal(queryCall.args.collection, "custom_col");
+
+	// 2. hydradb_ingest (memory) override
+	await client.callTool({
+		name: "hydradb_ingest",
+		arguments: { text: "fact", kind: "memory", database: "custom_db_ingest", collection: "custom_col_ingest" },
+	});
+	const ingestCall = calls.find((c) => c.method === "ingest");
+	assert.ok(ingestCall, "ingest should have been called");
+	assert.equal(ingestCall.args.database, "custom_db_ingest");
+	assert.equal(ingestCall.args.collection, "custom_col_ingest");
+
+	// 3. hydradb_list override
+	await client.callTool({
+		name: "hydradb_list",
+		arguments: { kind: "memory", database: "custom_db_list", collection: "custom_col_list" },
+	});
+	const listCall = calls.find((c) => c.method === "list");
+	assert.ok(listCall, "list should have been called");
+	assert.equal(listCall.args.database, "custom_db_list");
+	assert.equal(listCall.args.collection, "custom_col_list");
+
+	// 4. hydradb_inspect override
+	await client.callTool({
+		name: "hydradb_inspect",
+		arguments: { id: "doc_123", database: "custom_db_inspect", collection: "custom_col_inspect" },
+	});
+	const inspectCall = calls.find((c) => c.method === "inspect");
+	assert.ok(inspectCall, "inspect should have been called");
+	assert.equal(inspectCall.args.database, "custom_db_inspect");
+	assert.equal(inspectCall.args.collection, "custom_col_inspect");
+
+	// 5. hydradb_status override
+	await client.callTool({
+		name: "hydradb_status",
+		arguments: { ids: ["doc_123"], database: "custom_db_status", collection: "custom_col_status" },
+	});
+	const statusCall = calls.find((c) => c.method === "status");
+	assert.ok(statusCall, "status should have been called");
+	assert.equal(statusCall.args.database, "custom_db_status");
+	assert.equal(statusCall.args.collection, "custom_col_status");
+
+	// 6. hydradb_delete override
+	await client.callTool({
+		name: "hydradb_delete",
+		arguments: { ids: ["doc_123"], kind: "memory", database: "custom_db_delete", collection: "custom_col_delete" },
+	});
+	const deleteCall = calls.find((c) => c.method === "delete");
+	assert.ok(deleteCall, "delete should have been called");
+	assert.equal(deleteCall.args.database, "custom_db_delete");
+	assert.equal(deleteCall.args.collection, "custom_col_delete");
+
+	await client.close();
+});
+
+test("tools fall back to default database and collection when omitted", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	await client.callTool({
+		name: "hydradb_query",
+		arguments: { query: "search test" },
+	});
+	const queryCall = calls.find((c) => c.method === "query");
+	assert.ok(queryCall, "query should have been called");
+	assert.equal(queryCall.args.database, "db_test");
+	assert.equal(queryCall.args.collection, "col_test");
+
+	await client.close();
+});
