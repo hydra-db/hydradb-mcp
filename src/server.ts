@@ -336,6 +336,8 @@ export function createHydraDBServer(
 		source_ids?: string[];
 		metadata_filters?: Record<string, unknown>;
 		num_related_chunks?: number;
+		database?: string;
+		collection?: string;
 	}, signal?: AbortSignal): Promise<ToolResult> {
 		// Host-owned default (CONTRACT §2 rule 5): search BOTH families. This tool
 		// used to pin `kind: "memory"`, which made every ingested knowledge source
@@ -355,6 +357,8 @@ export function createHydraDBServer(
 			metadataFilters: args.metadata_filters,
 			numRelatedChunks: args.num_related_chunks,
 			graphContext: args.graph_context ?? true,
+			database: args.database,
+			collection: args.collection,
 			// Host-owned default (CONTRACT §2 rule 5), but only where it means
 			// something: alpha balances dense against sparse retrieval in HYBRID
 			// mode, and an `operator` switches the query to text retrieval (see
@@ -498,6 +502,8 @@ export function createHydraDBServer(
 		overwrite?: boolean;
 		metadata?: Record<string, unknown>;
 		observation_date?: string;
+		database?: string;
+		collection?: string;
 	}, signal?: AbortSignal): Promise<ToolResult> {
 		const kind = args.kind ?? "memory";
 		logger.debug(`${TOOL_NAMES.INGEST}: "${args.text.slice(0, 50)}..." (kind=${kind})`);
@@ -524,6 +530,8 @@ export function createHydraDBServer(
 			text: args.text,
 			title: args.title ?? defaultTitle(args.text),
 			...memoryOnly,
+			database: args.database,
+			collection: args.collection,
 			// Default stays true. The SDK retries POSTs, so upsert is what keeps a
 			// retried ingest from duplicating — flipping this default would trade a
 			// silent overwrite for a silent duplicate.
@@ -560,6 +568,8 @@ export function createHydraDBServer(
 			title?: string;
 			isMarkdown?: boolean;
 			overwrite?: boolean;
+			database?: string;
+			collection?: string;
 		},
 		signal?: AbortSignal,
 	): Promise<ToolResult> {
@@ -577,6 +587,8 @@ export function createHydraDBServer(
 			isMarkdown: opts?.isMarkdown,
 			customInstructions: INGEST_INSTRUCTIONS,
 			upsert: opts?.overwrite ?? true,
+			database: opts?.database,
+			collection: opts?.collection,
 		}, { signal });
 		const res = toAddMemoryResponse(raw);
 
@@ -634,6 +646,8 @@ export function createHydraDBServer(
 		source_ids?: string[];
 		page?: number;
 		page_size?: number;
+		database?: string;
+		collection?: string;
 	} = {}, signal?: AbortSignal): Promise<ToolResult> {
 		logger.debug(TOOL_NAMES.LIST);
 
@@ -642,6 +656,8 @@ export function createHydraDBServer(
 			ids: args.source_ids,
 			page: args.page,
 			pageSize: args.page_size,
+			database: args.database,
+			collection: args.collection,
 		}, { signal });
 		const { memories, page } = toMemoryList(raw);
 
@@ -698,6 +714,8 @@ export function createHydraDBServer(
 		source_ids?: string[];
 		page?: number;
 		page_size?: number;
+		database?: string;
+		collection?: string;
 	}, signal?: AbortSignal): Promise<ToolResult> {
 		logger.debug(TOOL_NAMES.LIST);
 
@@ -706,6 +724,8 @@ export function createHydraDBServer(
 			ids: args.source_ids,
 			page: args.page,
 			pageSize: args.page_size,
+			database: args.database,
+			collection: args.collection,
 		}, { signal });
 		const { sources, page } = toSourceList(raw);
 
@@ -864,6 +884,8 @@ export function createHydraDBServer(
 			offset?: number;
 			limit?: number;
 			expiry_seconds?: number;
+			database?: string;
+			collection?: string;
 		};
 		// Reject a conflict rather than picking one. This server rejects `text`
 		// AND `turns` on ingest for the same reason: silently choosing between two
@@ -888,6 +910,8 @@ export function createHydraDBServer(
 			offset: a.offset,
 			limit: a.limit,
 			expiry_seconds: a.expiry_seconds,
+			database: a.database,
+			collection: a.collection,
 		};
 	}
 
@@ -897,6 +921,8 @@ export function createHydraDBServer(
 		offset?: number;
 		limit?: number;
 		expiry_seconds?: number;
+		database?: string;
+		collection?: string;
 	}, signal?: AbortSignal): Promise<ToolResult> {
 		logger.debug(`${TOOL_NAMES.INSPECT}: ${args.source_id}`);
 
@@ -904,6 +930,8 @@ export function createHydraDBServer(
 			id: args.source_id,
 			mode: args.mode ?? "content",
 			expirySeconds: args.expiry_seconds,
+			database: args.database,
+			collection: args.collection,
 		}, { signal });
 
 		// Soft failure: return a normal (non-error) text result, matching v1.
@@ -935,12 +963,16 @@ export function createHydraDBServer(
 	}
 
 	async function runStatus(
-		args: { ids: string[] },
+		args: { ids: string[]; database?: string; collection?: string },
 		signal?: AbortSignal,
 	): Promise<ToolResult> {
 		logger.debug(`${TOOL_NAMES.STATUS}: ${args.ids.join(", ")}`);
 
-		const res = await hydra.context.ingestionStatus({ ids: args.ids }, { signal });
+		const res = await hydra.context.ingestionStatus({
+			ids: args.ids,
+			database: args.database,
+			collection: args.collection,
+		}, { signal });
 		const statuses = res.statuses ?? [];
 
 		if (statuses.length === 0) {
@@ -1073,7 +1105,13 @@ export function createHydraDBServer(
 
 	/** Accept `ids` or the singular `id`, and say where a real id comes from. */
 	function toDeleteArgs(args: Record<string, unknown>) {
-		const a = args as { id?: string; ids?: string[]; kind?: "memory" | "knowledge" };
+		const a = args as {
+			id?: string;
+			ids?: string[];
+			kind?: "memory" | "knowledge";
+			database?: string;
+			collection?: string;
+		};
 		const ids = a.ids ?? (a.id != null ? [a.id] : []);
 		if (ids.length === 0) {
 			throw new Error(
@@ -1081,17 +1119,24 @@ export function createHydraDBServer(
 				`${TOOL_NAMES.QUERY} or ${TOOL_NAMES.LIST} — do not guess one.`,
 			);
 		}
-		return { ids, kind: a.kind };
+		return { ids, kind: a.kind, database: a.database, collection: a.collection };
 	}
 
 	async function runDelete(args: {
 		ids: string[];
 		kind?: "memory" | "knowledge";
+		database?: string;
+		collection?: string;
 	}, signal?: AbortSignal): Promise<ToolResult> {
 		const kind = args.kind ?? "memory";
 		logger.debug(`${TOOL_NAMES.DELETE}: ${kind} ${args.ids.join(", ")}`);
 
-		const res = await hydra.context.delete({ ids: args.ids, kind }, { signal });
+		const res = await hydra.context.delete({
+			ids: args.ids,
+			kind,
+			database: args.database,
+			collection: args.collection,
+		}, { signal });
 		// `userMemoryDeleted` is a COUNT on the v2 wire — a live delete returned
 		// `{"deletedCount":1,"userMemoryDeleted":1}` — and the SDK types it as a
 		// number. The v1 memory-delete handler returns a boolean for the same
@@ -1422,6 +1467,19 @@ export function createHydraDBServer(
 
 	// --- Input schemas ---
 
+	const scopeSchema = {
+		database: z
+			.string()
+			.min(1)
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.database),
+		collection: z
+			.string()
+			.min(1)
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.collection),
+	};
+
 	const querySchema = {
 		query: z.string().describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.query),
 		kind: z
@@ -1466,6 +1524,7 @@ export function createHydraDBServer(
 			.max(5)
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.num_related_chunks),
+		...scopeSchema,
 	};
 
 	const storeSchema = {
@@ -1495,6 +1554,7 @@ export function createHydraDBServer(
 			.boolean()
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.STORE].params.overwrite),
+		...scopeSchema,
 	};
 
 	const ingestMetadataSchema = {
@@ -1560,6 +1620,7 @@ export function createHydraDBServer(
 			.string()
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST_CONVERSATION].params.user_name),
+		...scopeSchema,
 	};
 
 	const listSchema = {
@@ -1591,6 +1652,7 @@ export function createHydraDBServer(
 			.max(100)
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.LIST].params.page_size),
+		...scopeSchema,
 	};
 
 	const listSourcesSchema = {
@@ -1598,6 +1660,11 @@ export function createHydraDBServer(
 			.array(z.string())
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.LIST_SOURCES].params.source_ids),
+		...scopeSchema,
+	};
+
+	const listMemoriesSchema = {
+		...scopeSchema,
 	};
 
 	const inspectSchema = {
@@ -1636,6 +1703,7 @@ export function createHydraDBServer(
 			.min(1)
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INSPECT].params.expiry_seconds),
+		...scopeSchema,
 	};
 
 	const deleteSchema = {
@@ -1652,6 +1720,7 @@ export function createHydraDBServer(
 			.enum(["memory", "knowledge"])
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.DELETE].params.kind),
+		...scopeSchema,
 	};
 
 	// Output schemas, declared only where the result is genuinely structured.
@@ -1696,12 +1765,14 @@ export function createHydraDBServer(
 			.array(z.string())
 			.min(1)
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.STATUS].params.ids),
+		...scopeSchema,
 	};
 
 	const deleteMemorySchema = {
 		memory_id: z
 			.string()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.DELETE_MEMORY].params.memory_id),
+		...scopeSchema,
 	};
 
 	// --- BYOG graph schemas ---
@@ -1709,10 +1780,12 @@ export function createHydraDBServer(
 	const graphScopeSchema = {
 		database: z
 			.string()
+			.min(1)
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.GRAPH_QUERY].params.database),
 		collection: z
 			.string()
+			.min(1)
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.GRAPH_QUERY].params.collection),
 	};
@@ -1830,6 +1903,8 @@ export function createHydraDBServer(
 			observation_date?: string;
 			turns?: ConversationTurn[];
 			user_name?: string;
+			database?: string;
+			collection?: string;
 		};
 		const hasTurns = a.turns != null && a.turns.length > 0;
 
@@ -1889,6 +1964,8 @@ export function createHydraDBServer(
 					title: a.title,
 					isMarkdown: a.is_markdown,
 					overwrite: a.overwrite,
+					database: a.database,
+					collection: a.collection,
 				},
 				extra?.signal,
 			);
@@ -1905,6 +1982,8 @@ export function createHydraDBServer(
 					overwrite: a.overwrite,
 					metadata: a.metadata,
 					observation_date: a.observation_date,
+					database: a.database,
+					collection: a.collection,
 				},
 				extra?.signal,
 			);
@@ -1927,6 +2006,8 @@ export function createHydraDBServer(
 				source_ids?: string[];
 				page?: number;
 				page_size?: number;
+				database?: string;
+				collection?: string;
 			};
 			// Compare as SETS. These are filters, so order carries no meaning —
 			// rejecting ["a","b"] against ["b","a"] refuses a request that asked
@@ -1954,12 +2035,24 @@ export function createHydraDBServer(
 			const ids = a.ids ?? a.source_ids;
 			if (a.kind === "knowledge") {
 				return runListSources(
-					{ source_ids: ids, page: a.page, page_size: a.page_size },
+					{
+						source_ids: ids,
+						page: a.page,
+						page_size: a.page_size,
+						database: a.database,
+						collection: a.collection,
+					},
 					extra?.signal,
 				);
 			}
 			return runListMemories(
-				{ source_ids: ids, page: a.page, page_size: a.page_size },
+				{
+					source_ids: ids,
+					page: a.page,
+					page_size: a.page_size,
+					database: a.database,
+					collection: a.collection,
+				},
 				extra?.signal,
 			);
 		},
@@ -2082,13 +2175,19 @@ export function createHydraDBServer(
 			turns: ConversationTurn[];
 			source_id: string;
 			user_name?: string;
+			database?: string;
+			collection?: string;
 		};
 		// The deprecated alias keeps its historical shape (user_name only; infer
 		// on, no title/markdown). The canonical hydradb_ingest forwards the rest.
 			return runIngestConversation(
 				a.turns,
 				a.source_id,
-				{ userName: a.user_name },
+				{
+					userName: a.user_name,
+					database: a.database,
+					collection: a.collection,
+				},
 				extra?.signal,
 			);
 		},
@@ -2097,8 +2196,12 @@ export function createHydraDBServer(
 
 	register(
 		TOOL_NAMES.LIST_MEMORIES,
-		{},
-		(_args, extra) => runListMemories({}, extra?.signal),
+		listMemoriesSchema,
+		(args, extra) =>
+			runListMemories(
+				args as { database?: string; collection?: string },
+				extra?.signal,
+			),
 		readOnly,
 	);
 
@@ -2106,7 +2209,14 @@ export function createHydraDBServer(
 		TOOL_NAMES.LIST_SOURCES,
 		listSourcesSchema,
 		(args, extra) =>
-			runListSources(args as { source_ids?: string[] }, extra?.signal),
+			runListSources(
+				args as {
+					source_ids?: string[];
+					database?: string;
+					collection?: string;
+				},
+				extra?.signal,
+			),
 		readOnly,
 	);
 
@@ -2121,8 +2231,20 @@ export function createHydraDBServer(
 		TOOL_NAMES.DELETE_MEMORY,
 		deleteMemorySchema,
 		(args, extra) => {
-			const { memory_id } = args as { memory_id: string };
-			return runDelete({ ids: [memory_id], kind: "memory" }, extra?.signal);
+			const a = args as {
+				memory_id: string;
+				database?: string;
+				collection?: string;
+			};
+			return runDelete(
+				{
+					ids: [a.memory_id],
+					kind: "memory",
+					database: a.database,
+					collection: a.collection,
+				},
+				extra?.signal,
+			);
 		},
 		destructive,
 	);

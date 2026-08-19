@@ -128,6 +128,8 @@ export interface QueryParams {
 	numRelatedChunks?: number;
 	/** Per-call collection override. */
 	collection?: string;
+	/** Per-call database override. */
+	database?: string;
 }
 
 export interface ConversationTurn {
@@ -165,6 +167,8 @@ export interface IngestParams {
 	/** Filename to attach when ingesting knowledge text as a document. */
 	filename?: string;
 	collection?: string;
+	/** Per-call database override. */
+	database?: string;
 }
 
 export interface ListParams {
@@ -173,6 +177,8 @@ export interface ListParams {
 	page?: number;
 	pageSize?: number;
 	collection?: string;
+	/** Per-call database override. */
+	database?: string;
 }
 
 export interface InspectParams {
@@ -180,11 +186,15 @@ export interface InspectParams {
 	mode?: string;
 	expirySeconds?: number;
 	collection?: string;
+	/** Per-call database override. */
+	database?: string;
 }
 
 export interface IngestionStatusParams {
 	ids: string | string[];
 	collection?: string;
+	/** Per-call database override. */
+	database?: string;
 }
 
 export interface RelationsParams {
@@ -193,12 +203,16 @@ export interface RelationsParams {
 	limit?: number;
 	cursor?: number;
 	collection?: string;
+	/** Per-call database override. */
+	database?: string;
 }
 
 export interface DeleteParams {
 	ids: string[];
 	kind: ContextKind;
 	collection?: string;
+	/** Per-call database override. */
+	database?: string;
 }
 
 export interface CreateDatabaseParams {
@@ -216,11 +230,12 @@ abstract class Resource {
 		private readonly collection?: string,
 	) {}
 
-	protected scope(override?: string): ScopeFields {
-		const collection = override ?? this.collection;
-		return collection != null
-			? { database: this.database, collection }
-			: { database: this.database };
+	protected scope(override?: string, dbOverride?: string): ScopeFields {
+		const database = dbOverride?.trim() || this.database;
+		const collection = override?.trim() || this.collection;
+		return collection != null && collection !== ""
+			? { database, collection }
+			: { database };
 	}
 
 	protected async call<T>(path: string, fn: () => Promise<unknown>): Promise<T> {
@@ -274,7 +289,7 @@ export class ContextResource extends Resource {
 
 		return this.call("/query", () =>
 			this.sdk.query({
-				...this.scope(params.collection),
+				...this.scope(params.collection, params.database),
 				query: params.query,
 				type: params.kind,
 				operator: params.operator,
@@ -303,7 +318,7 @@ export class ContextResource extends Resource {
 		opts?: RequestOptions,
 	): Promise<SDK.IngestionV2SourceUploadResponse> {
 		const request: SDK.IngestContextRequest = {
-			...this.scope(params.collection),
+			...this.scope(params.collection, params.database),
 			type: params.kind,
 		};
 		if (params.upsert != null) {
@@ -389,7 +404,7 @@ export class ContextResource extends Resource {
 	): Promise<SDK.ListV2SourceListResponse> {
 		return this.call("/context/list", () =>
 			this.sdk.context.list({
-				...this.scope(params.collection),
+				...this.scope(params.collection, params.database),
 				type: params.kind,
 				ids: params.ids,
 				page: params.page,
@@ -405,7 +420,7 @@ export class ContextResource extends Resource {
 	): Promise<SDK.FetchV2SourceFetchResponse> {
 		return this.call("/context/inspect", () =>
 			this.sdk.context.inspect({
-				...this.scope(params.collection),
+				...this.scope(params.collection, params.database),
 				id: params.id,
 				mode: params.mode,
 				expirySeconds: params.expirySeconds,
@@ -420,7 +435,7 @@ export class ContextResource extends Resource {
 	): Promise<SDK.IngestionV2BatchProcessingStatus> {
 		return this.call("/context/status", () =>
 			this.sdk.context.status({
-				...this.scope(params.collection),
+				...this.scope(params.collection, params.database),
 				ids: params.ids,
 			}, req(opts)),
 		);
@@ -432,7 +447,7 @@ export class ContextResource extends Resource {
 	): Promise<SDK.GraphGraphRelationsResponse> {
 		return this.call("/context/relations", () =>
 			this.sdk.context.relations({
-				...this.scope(params.collection),
+				...this.scope(params.collection, params.database),
 				id: params.id,
 				type: params.kind,
 				limit: params.limit,
@@ -448,7 +463,7 @@ export class ContextResource extends Resource {
 	): Promise<SDK.SourcesMemoryDeleteResponse> {
 		return this.call("/context", () =>
 			this.sdk.context.delete({
-				...this.scope(params.collection),
+				...this.scope(params.collection, params.database),
 				ids: params.ids,
 				type: params.kind,
 			}, req(opts)),
