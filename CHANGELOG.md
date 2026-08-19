@@ -7,16 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.2] - 2026-08-19
+
+### Added — per-call database and collection scope overrides
+
+Every context tool (`hydradb_query`, `hydradb_ingest`, `hydradb_list`,
+`hydradb_inspect`, `hydradb_delete`, `hydradb_status`, and deprecated aliases)
+now accepts optional `database` and `collection` arguments directly in its payload.
+This allows multi-tenant SaaS agents to dynamically switch tenant/collection scopes
+per request within a single persistent MCP session, while falling back to the session
+defaults when omitted.
+
 ### Added — remote HTTP transport (hosted server)
 
 The server can now run as a long-lived **HTTP endpoint** that many clients reach
-at one URL, alongside the existing stdio (`npx`) binary. This is what a hosted
-deployment such as `https://mcp.hydradb.com/mcp` runs, and what `npm run
-start:http` or the new Docker image runs locally — nothing to install per user.
+at one URL (`https://mcp.hydradb.com`), alongside the existing stdio (`npx`) binary.
+This is what a hosted deployment runs, and what `npm run start:http` or the new
+Docker image runs locally — nothing to install per user.
 
 The tool surface is unchanged: the HTTP server builds the exact same server as
 stdio via `createHydraDBServer`. Only connection and auth are new.
 
+- **Root endpoint and backward-compatible alias.** The server serves the MCP
+  Streamable HTTP transport directly on `/` and `/mcp`.
 - **Per-request, multi-tenant credentials.** A hosted process has no single
   ambient account, so each request selects its tenant with headers —
   `Authorization: Bearer <api-key>` (or `X-HydraDB-Api-Key`) and
