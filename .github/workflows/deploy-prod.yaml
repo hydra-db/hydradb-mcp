@@ -1,0 +1,73 @@
+name: Deploy Prod
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: hydradb-mcp-prod-release
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  INFRA_REPO: usecortex/hydradb-argocd       # same value hydradb-application uses
+  IMAGE_TAG: ${{ github.sha }}
+  ECR_REPOSITORY: prod/mcp
+  ARGOCD_SERVER: https://argocd.hydradb.com
+  ARGOCD_APP_NAME: hydradb-mcp
+  VALUES_FILE: infra/environments/prod/hydradb-mcp/values.yaml
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: aws-actions/configure-aws-credentials@v6.2.0
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          platforms: linux/amd64
+          tags: |
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
+          cache-from: type=gha,scope=hydradb-mcp
+          cache-to: type=gha,scope=hydradb-mcp,mode=max
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          repository: ${{ env.INFRA_REPO }}
+          token: ${{ secrets.INFRA_REPO_TOKEN }}
+          ref: main
+
+      - name: Bump image tag and push
+        run: |
+          set -euo pipefail
+          yq -i '.image.tag = strenv(IMAGE_TAG)' "$VALUES_FILE"
+          git config user.name "GitHub Actions Bot"; git config user.email "actions@github.com"
+          git diff --quiet || { git add "$VALUES_FILE"; git commit -m "deploy(hydradb-mcp): prod image ${IMAGE_TAG}"; git push origin main; }
+
+      - name: Sync ArgoCD
+        env:
+          ARGOCD_AUTH_TOKEN: ${{ secrets.ARGOCD_AUTH_TOKEN }}
+        run: |
+          curl -s "${ARGOCD_SERVER}/api/v1/applications/${ARGOCD_APP_NAME}?refresh=hard" -H "Authorization: Bearer $ARGOCD_AUTH_TOKEN" | jq -r '.status.sync.status'
