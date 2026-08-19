@@ -231,9 +231,9 @@ abstract class Resource {
 	) {}
 
 	protected scope(override?: string, dbOverride?: string): ScopeFields {
-		const database = dbOverride ?? this.database;
-		const collection = override ?? this.collection;
-		return collection != null
+		const database = dbOverride?.trim() || this.database;
+		const collection = override?.trim() || this.collection;
+		return collection != null && collection !== ""
 			? { database, collection }
 			: { database };
 	}

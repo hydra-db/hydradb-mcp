@@ -2529,3 +2529,22 @@ test("tools fall back to default database and collection when omitted", async ()
 
 	await client.close();
 });
+
+test("empty scope overrides are rejected or fall back to default", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	// Scope fallback in client directly
+	const res = await hydra.context.query({
+		query: "search test",
+		database: "   ",
+		collection: "",
+	});
+	assert.ok(res);
+	const queryCall = calls.find((c) => c.method === "query");
+	assert.ok(queryCall);
+	assert.equal(queryCall.args.database, "db_test");
+	assert.equal(queryCall.args.collection, "col_test");
+
+	await client.close();
+});

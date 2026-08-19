@@ -1470,10 +1470,12 @@ export function createHydraDBServer(
 	const scopeSchema = {
 		database: z
 			.string()
+			.min(1)
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.database),
 		collection: z
 			.string()
+			.min(1)
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.collection),
 	};
@@ -1778,10 +1780,12 @@ export function createHydraDBServer(
 	const graphScopeSchema = {
 		database: z
 			.string()
+			.min(1)
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.GRAPH_QUERY].params.database),
 		collection: z
 			.string()
+			.min(1)
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.GRAPH_QUERY].params.collection),
 	};
