@@ -89,6 +89,18 @@ test("the configured public host is accepted", async () => {
 	assert.equal(res.status, 200);
 });
 
+test("POST / without credentials is 401 with a WWW-Authenticate header", async () => {
+	const res = await request(
+		"POST",
+		"/",
+		{ host: `127.0.0.1:${port}`, "content-type": "application/json" },
+		JSON.stringify({ jsonrpc: "2.0", method: "tools/list", id: 1 }),
+	);
+	assert.equal(res.status, 401);
+	assert.match(String(res.headers["www-authenticate"]), /Bearer/);
+	assert.match(JSON.parse(res.body).error.message, /Authorization/);
+});
+
 test("POST /mcp without credentials is 401 with a WWW-Authenticate header", async () => {
 	const res = await request(
 		"POST",
@@ -99,6 +111,21 @@ test("POST /mcp without credentials is 401 with a WWW-Authenticate header", asyn
 	assert.equal(res.status, 401);
 	assert.match(String(res.headers["www-authenticate"]), /Bearer/);
 	assert.match(JSON.parse(res.body).error.message, /Authorization/);
+});
+
+test("POST / authenticated but with no database is 400", async () => {
+	const res = await request(
+		"POST",
+		"/",
+		{
+			host: `127.0.0.1:${port}`,
+			"content-type": "application/json",
+			authorization: "Bearer some-key",
+		},
+		JSON.stringify({ jsonrpc: "2.0", method: "tools/list", id: 1 }),
+	);
+	assert.equal(res.status, 400);
+	assert.match(JSON.parse(res.body).error.message, /X-HydraDB-Database/);
 });
 
 test("POST /mcp authenticated but with no database is 400", async () => {

@@ -74,8 +74,8 @@ async function waitForListening() {
 	fail("server never became reachable on /health");
 }
 
-async function post(headers, body) {
-	return fetch(`${BASE}/mcp`, {
+async function post(path, headers, body) {
+	return fetch(`${BASE}${path}`, {
 		method: "POST",
 		headers: { "Content-Type": "application/json", ...headers },
 		body: JSON.stringify(body),
@@ -92,12 +92,15 @@ try {
 	const health = await waitForListening();
 	if (health?.status !== "ok") fail(`/health returned ${JSON.stringify(health)}`);
 
-	// No credentials -> refused, not served against some ambient account.
-	const anon = await post({}, { jsonrpc: "2.0", id: 1, method: "tools/list" });
-	if (anon.status !== 401) fail(`unauthenticated /mcp returned ${anon.status}, expected 401`);
+	// No credentials -> refused on both `/` and `/mcp`.
+	const anonRoot = await post("/", {}, { jsonrpc: "2.0", id: 1, method: "tools/list" });
+	if (anonRoot.status !== 401) fail(`unauthenticated / returned ${anonRoot.status}, expected 401`);
 
-	// Handshake, then list tools — both answered without an outbound call.
-	const init = await post(MCP_HEADERS, {
+	const anonMcp = await post("/mcp", {}, { jsonrpc: "2.0", id: 1, method: "tools/list" });
+	if (anonMcp.status !== 401) fail(`unauthenticated /mcp returned ${anonMcp.status}, expected 401`);
+
+	// Handshake, then list tools — both answered without an outbound call on root `/`.
+	const init = await post("/", MCP_HEADERS, {
 		jsonrpc: "2.0",
 		id: 1,
 		method: "initialize",
@@ -109,7 +112,7 @@ try {
 	});
 	if (!init.ok) fail(`initialize returned HTTP ${init.status}`);
 
-	const listRes = await post(MCP_HEADERS, {
+	const listRes = await post("/", MCP_HEADERS, {
 		jsonrpc: "2.0",
 		id: 2,
 		method: "tools/list",
@@ -122,7 +125,7 @@ try {
 	}
 
 	console.error(
-		`[smoke-http] OK: ${ENTRY} listens on ${BASE}/mcp, refuses anonymous calls (401), ` +
+		`[smoke-http] OK: ${ENTRY} listens on ${BASE} (serving / and /mcp), refuses anonymous calls (401), ` +
 			`and advertises ${tools.length} tool(s): ${tools.map((t) => t.name).join(", ")}`,
 	);
 	stop(0);
