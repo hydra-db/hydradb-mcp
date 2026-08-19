@@ -35,6 +35,27 @@ This security policy covers the hydradb-mcp repository, including:
 - Third-party dependencies (report those to the respective maintainers, but let us know if a dependency vulnerability affects hydradb-mcp).
 - Issues that require physical access to a machine running the server.
 
+## Hardening the HTTP server
+
+The remote HTTP transport (`src/http.ts`, the Docker image) is safe for local
+use by default and must be widened deliberately before it is exposed publicly:
+
+- **Keep it behind TLS.** Terminate HTTPS at a reverse proxy or load balancer;
+  never expose plain HTTP to the internet. Credentials travel in the
+  `Authorization` header.
+- **Bind loopback until you mean otherwise.** `BIND_ADDRESS` defaults to
+  `127.0.0.1`. Setting `0.0.0.0` exposes the server on every interface and logs
+  a warning at startup.
+- **Set `ALLOWED_HOSTS` when binding publicly.** A request whose `Host` is not
+  loopback or in the allowlist is rejected with `421` — a DNS-rebinding defence.
+- **Keep CORS closed.** No cross-origin browser request is accepted until its
+  origin is listed in `ALLOWED_ORIGINS`. Avoid `*` on a server that holds or
+  accepts real credentials.
+- **Prefer per-request credentials for multi-tenant hosting.** Do not set
+  `HYDRADB_API_KEY` in the environment of a shared, publicly reachable process —
+  that key would back every anonymous request. Leave it unset so each caller
+  must authenticate with its own key.
+
 ## Supported Versions
 
 We provide security fixes for the latest release on the `main` branch. Older versions are not actively maintained.

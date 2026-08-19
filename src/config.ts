@@ -60,7 +60,7 @@ function flag(raw: string | undefined, fallback: boolean): boolean {
 export type EnvSource = Record<string, string | undefined>;
 export type WarnFn = (message: string) => void;
 
-const DEFAULT_COLLECTION = "hydra-db-mcp";
+export const DEFAULT_COLLECTION = "hydra-db-mcp";
 
 // Process-lifetime dedupe so each deprecated alias warns at most once.
 const warnedOnce = new Set<string>();
@@ -169,12 +169,12 @@ export function resolveGraphConfig(
  * the built-in default keeps it running, and the alternative (exit 1 on a
  * cosmetic env var) is worse than the misconfiguration.
  */
-function positiveInt(raw: string | undefined): number | undefined {
+export function positiveInt(raw: string | undefined): number | undefined {
 	const value = Number(raw);
 	return raw != null && Number.isInteger(value) && value > 0 ? value : undefined;
 }
 
-function nonNegativeInt(raw: string | undefined): number | undefined {
+export function nonNegativeInt(raw: string | undefined): number | undefined {
 	const value = Number(raw);
 	return raw != null && Number.isInteger(value) && value >= 0 ? value : undefined;
 }
