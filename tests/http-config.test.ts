@@ -7,6 +7,7 @@ import {
 	DEFAULT_PORT,
 	parseList,
 	parsePort,
+	parseTrustProxy,
 	resolveHttpServerConfig,
 	resolveRequestCredentials,
 } from "../src/http-config.js";
@@ -190,4 +191,58 @@ test("graph tools can be withheld by the operator regardless of caller", () => {
 	);
 	assert.ok(result.ok);
 	assert.equal(result.credentials.graph.enabled, false);
+});
+
+// --- Credentials resolve as a coupled identity, not field-by-field ---
+
+test("a caller's key never pairs with the operator's env database", () => {
+	// The caller authenticated with their OWN key but named no database. The env
+	// database is the operator's, so this is refused rather than run the caller's
+	// key against it — a 400, asking for the header they omitted.
+	const result = resolveRequestCredentials(
+		{ authorization: "Bearer caller-key" },
+		{ HYDRADB_API_KEY: "operator-key", HYDRADB_DATABASE: "operator-db" },
+	);
+	assert.ok(!result.ok);
+	assert.equal(result.status, 400);
+});
+
+test("a caller-authenticated request ignores the operator's graph env database", () => {
+	// HYDRADB_GRAPH_DATABASE is the operator's; a caller who sends their own key
+	// and database, but no graph header, gets THEIR database as the graph default.
+	const result = resolveRequestCredentials(
+		{ authorization: "Bearer caller-key", "x-hydradb-database": "caller-db" },
+		{ HYDRADB_GRAPH_DATABASE: "operator-graph" },
+	);
+	assert.ok(result.ok);
+	assert.equal(result.credentials.graph.database, "caller-db");
+});
+
+test("an unauthenticated (self-host) request does honour the graph env database", () => {
+	const result = resolveRequestCredentials(
+		{},
+		{
+			HYDRADB_API_KEY: "env-key",
+			HYDRADB_DATABASE: "env-db",
+			HYDRADB_GRAPH_DATABASE: "env-graph",
+		},
+	);
+	assert.ok(result.ok);
+	assert.equal(result.credentials.graph.database, "env-graph");
+});
+
+// --- trust proxy ---
+
+test("parseTrustProxy maps env spellings to Express's setting", () => {
+	assert.equal(parseTrustProxy(undefined), false);
+	assert.equal(parseTrustProxy(""), false);
+	assert.equal(parseTrustProxy("false"), false);
+	assert.equal(parseTrustProxy("true"), true);
+	assert.equal(parseTrustProxy("2"), 2);
+	assert.equal(parseTrustProxy("loopback"), "loopback");
+});
+
+test("resolveHttpServerConfig defaults trustProxy off", () => {
+	assert.equal(resolveHttpServerConfig({}).trustProxy, false);
+	assert.equal(resolveHttpServerConfig({ TRUST_PROXY: "1" }).trustProxy, 1);
 });

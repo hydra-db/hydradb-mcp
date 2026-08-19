@@ -368,6 +368,7 @@ also apply — as the single-tenant default and as operator settings.
 | `BIND_ADDRESS` | Interface to bind (`0.0.0.0` to accept off-host) | `127.0.0.1` |
 | `ALLOWED_HOSTS` | Extra `Host` headers to accept (comma-separated); loopback always allowed | *(loopback only)* |
 | `ALLOWED_ORIGINS` | CORS origins for browser clients (comma-separated; `*` allows any) | *(none)* |
+| `TRUST_PROXY` | Express `trust proxy` when behind a reverse proxy: a hop count, `true`, or a subnet preset (`loopback`) | *off* |
 
 ### Security
 

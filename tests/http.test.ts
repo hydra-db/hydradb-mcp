@@ -27,6 +27,7 @@ before(async () => {
 		bindAddress: "127.0.0.1",
 		allowedOrigins: ["https://app.hydradb.com"],
 		allowedHosts,
+		trustProxy: false,
 	});
 	await new Promise<void>((resolve) => {
 		server = app.listen(0, "127.0.0.1", resolve);
@@ -113,6 +114,24 @@ test("POST /mcp authenticated but with no database is 400", async () => {
 	);
 	assert.equal(res.status, 400);
 	assert.match(JSON.parse(res.body).error.message, /X-HydraDB-Database/);
+});
+
+test("a malformed JSON body is refused with a JSON-RPC 400, not HTML", async () => {
+	const res = await request(
+		"POST",
+		"/mcp",
+		{
+			host: `127.0.0.1:${port}`,
+			"content-type": "application/json",
+			authorization: "Bearer k",
+			"x-hydradb-database": "db",
+		},
+		"{not valid json",
+	);
+	assert.equal(res.status, 400);
+	const body = JSON.parse(res.body);
+	assert.equal(body.jsonrpc, "2.0");
+	assert.match(body.error.message, /not valid JSON/);
 });
 
 test("a disallowed CORS origin is refused with 403", async () => {

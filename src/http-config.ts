@@ -45,6 +45,13 @@ export interface HttpServerConfig {
 	allowedOrigins: string[];
 	/** Accepted `Host` headers, lowercased. Loopback + the configured port always. */
 	allowedHosts: Set<string>;
+	/**
+	 * Express's `trust proxy` setting. `false` (the default) trusts no
+	 * `X-Forwarded-*`, so a direct client cannot spoof its address in the logs;
+	 * a deployment behind a known proxy sets `TRUST_PROXY` to a hop count or a
+	 * subnet preset so the real client IP is recovered without trusting all hops.
+	 */
+	trustProxy: boolean | number | string;
 }
 
 export const DEFAULT_PORT = 8080;
@@ -96,6 +103,23 @@ export function buildAllowedHosts(port: number, extra: string[]): Set<string> {
 	);
 }
 
+/**
+ * Interpret `TRUST_PROXY` for Express's `trust proxy` setting.
+ *
+ * Absent → `false` (trust nothing, the safe default). `true`/`false` → boolean.
+ * An integer → that many hops. Anything else is passed through as an Express
+ * preset or subnet list (e.g. `loopback`, `10.0.0.0/8`), so an operator can name
+ * exactly their proxy without this needing to know the syntax.
+ */
+export function parseTrustProxy(raw: string | undefined): boolean | number | string {
+	const value = raw?.trim();
+	if (!value) return false;
+	if (value.toLowerCase() === "true") return true;
+	if (value.toLowerCase() === "false") return false;
+	if (/^\d+$/.test(value)) return Number(value);
+	return value;
+}
+
 export function resolveHttpServerConfig(env: EnvSource = process.env): HttpServerConfig {
 	const port = parsePort(env.PORT);
 	return {
@@ -103,6 +127,7 @@ export function resolveHttpServerConfig(env: EnvSource = process.env): HttpServe
 		bindAddress: env.BIND_ADDRESS?.trim() || DEFAULT_BIND_ADDRESS,
 		allowedOrigins: parseList(env.ALLOWED_ORIGINS),
 		allowedHosts: buildAllowedHosts(port, parseList(env.ALLOWED_HOSTS)),
+		trustProxy: parseTrustProxy(env.TRUST_PROXY),
 	};
 }
 
@@ -185,26 +210,39 @@ function bearerToken(authorization: string | undefined): string | undefined {
  * Turn one request's headers (falling back to the environment) into the tenant
  * credentials for that request.
  *
- * Precedence is header-then-env for the tenant selectors, so that:
- *   - a hosted, multi-tenant process sets no tenant env and REQUIRES the
- *     headers — a request that authenticates nobody is refused, not silently
- *     run against some ambient account; while
- *   - a single-tenant self-host sets the env once and needs no per-call header,
- *     exactly like the stdio server.
+ * The API key and the database resolve TOGETHER, not field-by-field, which is
+ * the security-relevant part:
+ *   - When the key comes from a request header, the request is
+ *     "caller-authenticated" and its database MUST also come from a header. The
+ *     env is NOT consulted for the database, so a caller who sends their own key
+ *     but omits `X-HydraDB-Database` is refused (400) rather than silently run
+ *     against the operator's env database. Likewise the graph scope defaults to
+ *     the request's own database, never the operator's `HYDRADB_GRAPH_DATABASE`.
+ *   - When there is no key header, the request is unauthenticated and falls back
+ *     entirely to the operator's env credentials — the single-tenant self-host
+ *     case, identical to the stdio server. A hosted, multi-tenant process sets
+ *     no tenant env, so such a request is refused (401).
  *
- * `baseUrl`/`timeoutSeconds`/`maxRetries` are read from the environment only —
- * they are the operator's, not the caller's (see {@link RequestCredentials}).
+ * Resolving field-by-field instead would let a caller's key pair with the
+ * operator's database (or graph namespace), mixing two identities into one
+ * request. `baseUrl`/`timeoutSeconds`/`maxRetries` are read from the environment
+ * only — they are the operator's, not the caller's (see {@link RequestCredentials}).
  */
 export function resolveRequestCredentials(
 	headers: RequestHeaders,
 	env: EnvSource = process.env,
 ): CredentialResolution {
-	const apiKey =
+	const headerKey =
 		bearerToken(headerValue(headers, HEADER_AUTHORIZATION)) ??
-		headerValue(headers, HEADER_API_KEY) ??
+		headerValue(headers, HEADER_API_KEY);
+	// Whether the CALLER authenticated this request with their own key decides
+	// whether the operator's env is allowed to supply the rest of the identity.
+	const callerAuthenticated = headerKey != null;
+
+	const apiKey =
 		// The env fallback reuses the exact same canonical/legacy alias rules as
 		// the stdio server, so a self-host configured for stdio needs no new vars.
-		readEnv(env, "HYDRADB_API_KEY", "HYDRA_DB_API_KEY", noopWarn);
+		headerKey ?? readEnv(env, "HYDRADB_API_KEY", "HYDRA_DB_API_KEY", noopWarn);
 	if (!apiKey) {
 		return {
 			ok: false,
@@ -215,9 +253,12 @@ export function resolveRequestCredentials(
 		};
 	}
 
-	const database =
-		headerValue(headers, HEADER_DATABASE) ??
-		readEnv(env, "HYDRADB_DATABASE", "HYDRA_DB_TENANT_ID", noopWarn);
+	const headerDatabase = headerValue(headers, HEADER_DATABASE);
+	// A caller-authenticated request takes its database ONLY from the header;
+	// the env database belongs to the operator's identity, not the caller's.
+	const database = callerAuthenticated
+		? headerDatabase
+		: (headerDatabase ?? readEnv(env, "HYDRADB_DATABASE", "HYDRA_DB_TENANT_ID", noopWarn));
 	if (!database) {
 		return {
 			ok: false,
@@ -228,6 +269,8 @@ export function resolveRequestCredentials(
 		};
 	}
 
+	// Collection is a partition WITHIN the resolved database, not a cross-tenant
+	// boundary, so an env default is safe for either mode.
 	const collection =
 		headerValue(headers, HEADER_COLLECTION) ??
 		readEnv(env, "HYDRADB_COLLECTION", "HYDRA_DB_SUB_TENANT_ID", noopWarn) ??
@@ -247,30 +290,38 @@ export function resolveRequestCredentials(
 			...(baseUrl != null ? { baseUrl } : {}),
 			...(timeoutSeconds != null ? { timeoutSeconds } : {}),
 			...(maxRetries != null ? { maxRetries } : {}),
-			graph: resolveRequestGraphConfig(headers, env, database),
+			graph: resolveRequestGraphConfig(headers, env, database, callerAuthenticated),
 		},
 	};
 }
 
 /**
  * Graph scope for one request: the operator's `enabled` flag, but the caller's
- * database and collection when they send them.
+ * database and collection.
  *
- * The graph database defaults to the request's own database (the same fallback
- * {@link resolveConfig} applies), so a caller that names only `X-HydraDB-Database`
- * gets a coherent graph scope without a second header. Header overrides let a
- * caller address a graph in a different namespace than their memory database —
- * which, because the two are genuinely separate stores, is a real need.
+ * The graph database defaults to the request's OWN database, so a caller that
+ * names only `X-HydraDB-Database` gets a coherent graph scope without a second
+ * header. The operator's `HYDRADB_GRAPH_DATABASE` is honoured as that default
+ * ONLY for an unauthenticated (env-credential) request — for a caller-
+ * authenticated one it would pin every tenant to the operator's single graph
+ * namespace, the mixing this resolver exists to prevent. Header overrides always
+ * win, letting a caller address a graph in a different namespace than their
+ * memory database — which, because the two are genuinely separate stores, is a
+ * real need.
  */
 function resolveRequestGraphConfig(
 	headers: RequestHeaders,
 	env: EnvSource,
 	database: string,
+	callerAuthenticated: boolean,
 ): GraphConfig {
+	// For a caller-authenticated request the fallback database is the request's
+	// own, so `resolveGraphConfig`'s env default is deliberately not consulted.
 	const base = resolveGraphConfig(env, database);
+	const defaultDatabase = callerAuthenticated ? database : base.database;
 	return {
 		enabled: base.enabled,
-		database: headerValue(headers, HEADER_GRAPH_DATABASE) ?? base.database,
+		database: headerValue(headers, HEADER_GRAPH_DATABASE) ?? defaultDatabase,
 		collection: headerValue(headers, HEADER_GRAPH_COLLECTION) ?? base.collection,
 	};
 }

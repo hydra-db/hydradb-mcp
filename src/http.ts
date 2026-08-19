@@ -53,6 +53,21 @@ import {
  */
 const MAX_REQUEST_BODY = "8mb";
 
+/**
+ * Startup banners and security warnings go straight to stderr, not through
+ * `logger`.
+ *
+ * `logger` is gated by `HYDRADB_LOG_LEVEL`, which defaults to ERROR, so a
+ * `logger.warn` about a public bind would be invisible in the exact default
+ * configuration where it matters most. These lines must surface regardless of
+ * level — the same reason the deprecated-alias warnings bypass the logger — so
+ * they use `console.error` (stderr) directly. Per-request and lifecycle logging
+ * still goes through `logger`.
+ */
+function banner(message: string): void {
+	console.error(`[hydradb-mcp] ${message}`);
+}
+
 /** JSON-RPC error codes used for transport-level failures (spec: -32000 range). */
 const JSONRPC_UNAUTHORIZED = -32001;
 const JSONRPC_BAD_REQUEST = -32602;
@@ -71,9 +86,11 @@ export function createHttpApp(config: HttpServerConfig): Express {
 	const allowsAllOrigins = allowedOrigins.includes("*");
 
 	const app = express();
-	// Trust the reverse proxy a hosted deployment sits behind, so `req.protocol`
-	// and the client IP reflect the original request rather than the proxy hop.
-	app.set("trust proxy", true);
+	// Off by default so a direct client cannot spoof `X-Forwarded-*`; a
+	// deployment behind a known proxy sets TRUST_PROXY to recover the real client
+	// IP without trusting every hop. Only logging and `req.protocol` read it — the
+	// Host allowlist, not a proxy header, is the DNS-rebinding defence.
+	app.set("trust proxy", config.trustProxy);
 	// The Host allowlist is the actual defence; the fingerprinting header is noise.
 	app.disable("x-powered-by");
 
@@ -235,9 +252,11 @@ export function createHttpApp(config: HttpServerConfig): Express {
 			});
 			// Do not close here: the `res.on("close")` handler above owns teardown,
 			// and the transport may still be mid-write. Only the transport writes the
-			// JSON-RPC body, so this responds solely when nothing has been sent yet;
-			// ending the response then triggers that one teardown.
-			if (!res.headersSent) {
+			// JSON-RPC body, so this responds solely when nothing has been sent yet
+			// AND the socket is still open — a client that aborted mid-request lands
+			// here too, and writing to its closed socket is pointless. Ending the
+			// response then triggers that one teardown.
+			if (!res.headersSent && !res.writableEnded) {
 				res
 					.status(500)
 					.json(jsonRpcError(JSONRPC_INTERNAL_ERROR, "Internal server error"));
@@ -252,14 +271,47 @@ export function createHttpApp(config: HttpServerConfig): Express {
 		res.json({ status: "ok", service: "hydradb-mcp" });
 	});
 
+	// `express.json` throws on a malformed body (`entity.parse.failed`) or one
+	// over the limit (`entity.too.large`). Registered after the routes so it
+	// catches those, it keeps every refusal on this server speaking JSON-RPC
+	// rather than letting Express answer with its default HTML error page. Any
+	// other error falls through to Express's default handler unchanged.
+	app.use(
+		(
+			err: Error & { type?: string; status?: number },
+			_req: express.Request,
+			res: express.Response,
+			next: express.NextFunction,
+		) => {
+			if (err.type === "entity.parse.failed") {
+				res
+					.status(400)
+					.json(jsonRpcError(JSONRPC_BAD_REQUEST, "Request body is not valid JSON"));
+				return;
+			}
+			if (err.type === "entity.too.large") {
+				res
+					.status(413)
+					.json(
+						jsonRpcError(
+							JSONRPC_BAD_REQUEST,
+							`Request body exceeds the ${MAX_REQUEST_BODY} limit`,
+						),
+					);
+				return;
+			}
+			next(err);
+		},
+	);
+
 	if (bindAddress === "0.0.0.0" || bindAddress === "::") {
-		logger.warn(
-			`BIND_ADDRESS=${bindAddress} exposes the server on all network interfaces — ` +
+		banner(
+			`WARNING: BIND_ADDRESS=${bindAddress} exposes the server on all network interfaces — ` +
 				"set ALLOWED_HOSTS/ALLOWED_ORIGINS and put it behind TLS. See SECURITY.md.",
 		);
 	}
 	if (allowsAllOrigins) {
-		logger.warn('ALLOWED_ORIGINS contains "*" — any website may call this server. See SECURITY.md.');
+		banner('WARNING: ALLOWED_ORIGINS contains "*" — any website may call this server. See SECURITY.md.');
 	}
 
 	return app;
@@ -324,14 +376,28 @@ function installLifecycle(httpServer: import("node:http").Server): void {
 
 function main(): void {
 	const config = resolveHttpServerConfig();
+
+	// A public bind WITH tenant credentials in the env is the one genuinely
+	// dangerous combination: every unauthenticated request would run under that
+	// account. It is legitimate for a single-tenant self-host, so this warns
+	// rather than refuses — but a multi-tenant operator must see it.
+	const publicBind = config.bindAddress === "0.0.0.0" || config.bindAddress === "::";
+	if (publicBind && (process.env.HYDRADB_API_KEY || process.env.HYDRA_DB_API_KEY)) {
+		banner(
+			"WARNING: HYDRADB_API_KEY is set while binding publicly — every request that " +
+				"sends no `Authorization` header will run under this account. Unset it for a " +
+				"multi-tenant deployment so each caller must authenticate. See SECURITY.md.",
+		);
+	}
+
 	const app = createHttpApp(config);
 
 	const httpServer = app
 		.listen(config.port, config.bindAddress, () => {
-			logger.info(
-				`Hydra DB MCP (HTTP) listening on http://${config.bindAddress}:${config.port}/mcp`,
-			);
-			logger.info(
+			// Startup banners: on stderr so an operator sees where it bound
+			// regardless of HYDRADB_LOG_LEVEL.
+			banner(`listening on http://${config.bindAddress}:${config.port}/mcp`);
+			banner(
 				`allowed origins: ${
 					config.allowedOrigins.length > 0
 						? config.allowedOrigins.join(", ")
