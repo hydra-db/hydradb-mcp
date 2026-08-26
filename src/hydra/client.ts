@@ -874,6 +874,14 @@ export class DatabasesResource extends Resource {
 				"/databases/collections",
 			);
 		}
+		// A caller who already cancelled is not waiting for the request to go
+		// out: reject a pre-aborted signal rather than send and then unwind.
+		if (opts?.signal?.aborted) {
+			throw translateError(
+				"/databases/collections",
+				opts.signal.reason ?? new Error("aborted"),
+			);
+		}
 		if (params.collection.trim() === "") {
 			throw new HydraWrapperError(
 				"Hydra DB /databases/collections → ERR: collection must not be empty",
