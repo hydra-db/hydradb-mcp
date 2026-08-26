@@ -1179,7 +1179,14 @@ export function createHydraDBServer(
 			subTenantIds?: string[];
 			sub_tenant_ids?: string[];
 		};
-		const collections = raw.collections ?? raw.subTenantIds ?? raw.sub_tenant_ids ?? [];
+		const listed =
+			raw.collections ?? raw.subTenantIds ?? raw.sub_tenant_ids;
+		if (!Array.isArray(listed) || listed.some((id) => typeof id !== "string")) {
+			throw new Error(
+				`${TOOL_NAMES.LIST_COLLECTIONS} received a malformed collections payload from the server.`,
+			);
+		}
+		const collections = listed;
 		if (collections.length === 0) {
 			return structuredResult(`No collections in ${database}.`, {
 				database,

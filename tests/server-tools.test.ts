@@ -2462,6 +2462,22 @@ test("hydradb_delete_collection schedules deletion", async () => {
 	await client.close();
 });
 
+test("hydradb_list_collections errors on a malformed payload", async () => {
+	const { hydra } = mockHydra();
+	hydra.databases.collections = async () => ({ collections: [1, 2] }) as never;
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_list_collections",
+		arguments: {},
+	});
+	assert.equal(result.isError, true);
+	const text = (result.content as { type: string; text: string }[])[0]!.text;
+	assert.match(text, /malformed/i);
+
+	await client.close();
+});
+
 }
 
 test("a transport failure with no status is still reported", async () => {

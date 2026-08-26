@@ -552,6 +552,9 @@ export class DatabasesResource extends Resource {
 		url.searchParams.set("collection", collection);
 
 		const controller = new AbortController();
+		if (opts?.signal?.aborted) {
+			throw translateError("/databases/collections", opts.signal.reason ?? new Error("aborted"));
+		}
 		const timer = setTimeout(() => controller.abort(), this.http.timeoutMs);
 		const onAbort = () => controller.abort();
 		opts?.signal?.addEventListener("abort", onAbort, { once: true });
