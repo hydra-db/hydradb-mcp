@@ -1168,6 +1168,60 @@ export function createHydraDBServer(
 		return deleteReport(kind, args.ids, res, removed, removedCount);
 	}
 
+	async function runListCollections(
+		args: { database?: string },
+		_signal?: AbortSignal,
+	): Promise<ToolResult> {
+		const database = args.database?.trim() || hydra.database;
+		const res = await hydra.databases.collections(database);
+		const raw = res as {
+			collections?: string[];
+			subTenantIds?: string[];
+			sub_tenant_ids?: string[];
+		};
+		const collections = raw.collections ?? raw.subTenantIds ?? raw.sub_tenant_ids ?? [];
+		if (collections.length === 0) {
+			return structuredResult(`No collections in ${database}.`, {
+				database,
+				collections: [],
+				count: 0,
+			});
+		}
+		return structuredResult(
+			`${collections.length} collection${collections.length === 1 ? "" : "s"} in ${database}:\n` +
+				collections.map((id) => `- ${id}`).join("\n"),
+			{ database, collections, count: collections.length },
+		);
+	}
+
+	async function runDeleteCollection(
+		args: { database?: string; collection?: string },
+		signal?: AbortSignal,
+	): Promise<ToolResult> {
+		const collection = args.collection?.trim() ?? "";
+		if (!collection) {
+			throw new Error(
+				`${TOOL_NAMES.DELETE_COLLECTION} requires \`collection\`. ` +
+					`Take it from ${TOOL_NAMES.LIST_COLLECTIONS} — do not guess one.`,
+			);
+		}
+		const database = args.database?.trim() || hydra.database;
+		const res = await hydra.databases.deleteCollection(
+			{ database, collection },
+			{ signal },
+		);
+		return structuredResult(
+			`Collection "${collection}" in ${database} scheduled for deletion. ` +
+				(res.message ?? "Background cleanup is in progress."),
+			{
+				database,
+				collection,
+				status: res.status ?? "deletion_scheduled",
+				deleted: true,
+			},
+		);
+	}
+
 	// --- BYOG graph handlers ---
 
 	/**
@@ -2080,6 +2134,49 @@ export function createHydraDBServer(
 		statusSchema,
 		(args, extra) => runStatus(args as Parameters<typeof runStatus>[0], extra?.signal),
 		readOnly,
+	);
+
+	register(
+		TOOL_NAMES.LIST_COLLECTIONS,
+		{
+			database: z
+				.string()
+				.min(1)
+				.optional()
+				.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.LIST_COLLECTIONS].params.database),
+		},
+		(args, extra) =>
+			runListCollections(args as Parameters<typeof runListCollections>[0], extra?.signal),
+		readOnly,
+		{
+			database: z.string(),
+			collections: z.array(z.string()),
+			count: z.number(),
+		},
+	);
+
+	register(
+		TOOL_NAMES.DELETE_COLLECTION,
+		{
+			collection: z
+				.string()
+				.min(1)
+				.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.DELETE_COLLECTION].params.collection),
+			database: z
+				.string()
+				.min(1)
+				.optional()
+				.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.DELETE_COLLECTION].params.database),
+		},
+		(args, extra) =>
+			runDeleteCollection(args as Parameters<typeof runDeleteCollection>[0], extra?.signal),
+		destructive,
+		{
+			database: z.string(),
+			collection: z.string(),
+			status: z.string(),
+			deleted: z.boolean(),
+		},
 	);
 
 	// --- BYOG graph tools (PRO-1681) ---

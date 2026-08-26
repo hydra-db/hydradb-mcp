@@ -125,6 +125,7 @@ current SDK method internally. Language casing: `snake_case` in Python, `camelCa
 | `databases.delete(database)` | `databases.delete(database=…)` | — |
 | `databases.list()` | `databases.list()` | returns ids only |
 | `databases.collections(database)` | `databases.collections(database=…)` | was "list sub-tenants" |
+| `databases.deleteCollection(database, collection)` | *(none — raw `DELETE /databases/collections`)* | not on the pinned SDK yet |
 | `databases.stats(database)` | `databases.stats(database=…)` | row counts |
 | `databases.readiness(database)` | `databases.status(database=…)` | **renamed away from `status`** |
 | `context.ingest(database, kind, …)` | `context.ingest(…)` | multipart; `kind` ∈ {memory, knowledge} |

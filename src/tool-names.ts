@@ -13,6 +13,8 @@ export const TOOL_NAMES = {
 	INSPECT: "hydradb_inspect",
 	DELETE: "hydradb_delete",
 	STATUS: "hydradb_status",
+	LIST_COLLECTIONS: "hydradb_list_collections",
+	DELETE_COLLECTION: "hydradb_delete_collection",
 
 	// BYOG graph tools (PRO-1681). A separate family with its own prefix: these
 	// address graph collections the user models and writes in Cypher, which are
@@ -43,6 +45,8 @@ export const CANONICAL_TOOL_NAMES = [
 	TOOL_NAMES.INSPECT,
 	TOOL_NAMES.DELETE,
 	TOOL_NAMES.STATUS,
+	TOOL_NAMES.LIST_COLLECTIONS,
+	TOOL_NAMES.DELETE_COLLECTION,
 ] as const;
 
 /** The BYOG graph family, registered together and gated together. */

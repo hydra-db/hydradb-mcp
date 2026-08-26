@@ -53,6 +53,9 @@ function mockHydra(responses: Responses = {}): {
 			relations: record("relations", {}),
 			status: record("status", {}),
 		},
+		databases: {
+			collections: record("collections", { collections: ["engineering", "sales"] }),
+		},
 	} as unknown as HydraDBClient;
 
 	const hydra = new HydraDB(
@@ -2401,8 +2404,64 @@ for (const status of [401, 403, 429, 500]) {
 			assert.match(text, new RegExp(String(status)), `${name} should carry the status`);
 		}
 
-		await client.close();
+	await client.close();
+});
+
+test("hydradb_list_collections lists collection ids", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_list_collections",
+		arguments: {},
 	});
+	assert.notEqual(result.isError, true);
+	const text = (result.content as { type: string; text: string }[])[0]!.text;
+	assert.match(text, /engineering/);
+	assert.match(text, /sales/);
+	const listed = calls.find((c) => c.method === "collections");
+	assert.ok(listed);
+	assert.equal(listed.args.database, "db_test");
+
+	await client.close();
+});
+
+test("hydradb_delete_collection requires a collection name", async () => {
+	const { hydra } = mockHydra();
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_delete_collection",
+		arguments: {},
+	});
+	assert.equal(result.isError, true);
+	const text = (result.content as { type: string; text: string }[])[0]!.text;
+	assert.match(text, /collection/i);
+
+	await client.close();
+});
+
+test("hydradb_delete_collection schedules deletion", async () => {
+	const { hydra } = mockHydra();
+	const calls: { database: string; collection: string }[] = [];
+	hydra.databases.deleteCollection = async (params) => {
+		calls.push(params);
+		return { database: params.database, collection: params.collection, status: "deletion_scheduled" };
+	};
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_delete_collection",
+		arguments: { collection: "engineering" },
+	});
+	assert.notEqual(result.isError, true);
+	const text = (result.content as { type: string; text: string }[])[0]!.text;
+	assert.match(text, /engineering/);
+	assert.deepEqual(calls, [{ database: "db_test", collection: "engineering" }]);
+
+	await client.close();
+});
+
 }
 
 test("a transport failure with no status is still reported", async () => {
