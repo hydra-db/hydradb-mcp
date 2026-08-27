@@ -296,9 +296,11 @@ export function resolveRequestCredentials(
 	const headerDatabase = identity ? identity.database : headerValue(headers, HEADER_DATABASE);
 	// A caller-authenticated request takes its database ONLY from the header;
 	// the env database belongs to the operator's identity, not the caller's.
+	// An unauthenticated request runs under the operator's identity and takes
+	// its database ONLY from the environment.
 	const database = callerAuthenticated
 		? headerDatabase
-		: (headerDatabase ?? readEnv(env, "HYDRADB_DATABASE", "HYDRA_DB_TENANT_ID", noopWarn));
+		: readEnv(env, "HYDRADB_DATABASE", "HYDRA_DB_TENANT_ID", noopWarn);
 	if (!database) {
 		return {
 			ok: false,
@@ -374,16 +376,21 @@ function resolveRequestGraphConfig(
 	const defaultDatabase = callerAuthenticated ? database : base.database;
 	return {
 		enabled: base.enabled,
-		database: headerValue(headers, HEADER_GRAPH_DATABASE) ?? defaultDatabase,
+		database: callerAuthenticated
+			? (headerValue(headers, HEADER_GRAPH_DATABASE) ?? defaultDatabase)
+			: defaultDatabase,
 		// For an OAuth connection the graph collection defaults to the one the
 		// user approved, NOT the operator's `HYDRADB_GRAPH_COLLECTION`. On a
 		// hosted process that environment value is one namespace shared by every
 		// tenant, so inheriting it would run one user's graph calls somewhere
 		// they never approved and everyone else can reach.
+		// For an unauthenticated request, client headers are ignored and the
+		// operator's graph collection is strictly enforced.
 		collection:
 			identity?.collection ??
-			headerValue(headers, HEADER_GRAPH_COLLECTION) ??
-			base.collection,
+			(callerAuthenticated
+				? (headerValue(headers, HEADER_GRAPH_COLLECTION) ?? base.collection)
+				: base.collection),
 	};
 }
 

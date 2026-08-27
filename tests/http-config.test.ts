@@ -231,6 +231,31 @@ test("an unauthenticated (self-host) request does honour the graph env database"
 	assert.equal(result.credentials.graph.database, "env-graph");
 });
 
+test("an unauthenticated request ignores client-supplied X-HydraDB-Database and enforces env database", () => {
+	const result = resolveRequestCredentials(
+		{ "x-hydradb-database": "spoofed-db" },
+		{
+			HYDRADB_API_KEY: "operator-key",
+			HYDRADB_DATABASE: "operator-db",
+		},
+	);
+	assert.ok(result.ok);
+	assert.equal(result.credentials.database, "operator-db");
+});
+
+test("an unauthenticated request ignores client-supplied X-HydraDB-Graph-Database and enforces env graph database", () => {
+	const result = resolveRequestCredentials(
+		{ "x-hydradb-graph-database": "spoofed-graph-db" },
+		{
+			HYDRADB_API_KEY: "operator-key",
+			HYDRADB_DATABASE: "operator-db",
+			HYDRADB_GRAPH_DATABASE: "operator-graph-db",
+		},
+	);
+	assert.ok(result.ok);
+	assert.equal(result.credentials.graph.database, "operator-graph-db");
+});
+
 // --- trust proxy ---
 
 test("parseTrustProxy maps env spellings to Express's setting", () => {
