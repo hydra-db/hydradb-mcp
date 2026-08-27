@@ -150,8 +150,10 @@ const PARAM = {
 		"Which context family the ID belongs to: 'memory' or 'knowledge' (default: 'memory')",
 	memory_id: "The ID of the memory to delete",
 	database:
-		"Database (tenant) to target for this request. Defaults to the server's configured " +
-		"database. Pass explicitly to switch database scope per request.",
+		"Database (tenant) to target for this request. Optional: defaults to the database " +
+		"this connection was configured with, or, when none was, to the account's only " +
+		"database (one is created if the account has none). If the account has several " +
+		"and none is configured, calls fail naming them; pass one of those names here.",
 	collection:
 		"Collection (sub-tenant) to target for this request. Defaults to the server's configured " +
 		"collection (or 'hydra-db-mcp'). Pass explicitly to switch collection scope per request.",
@@ -301,8 +303,16 @@ The two drops are IRREVERSIBLE and there is no trash. Confirm with the user befo
 
 There is no create-collection action: collections come into existence on their first write via ${TOOL_NAMES.GRAPH_QUERY}.`;
 
+const DATABASES_BODY = `List the databases this connection's account can address, with the one unscoped calls use marked as the default. Use it when a call fails asking you to choose a database, or when the user asks which databases exist. Pass a returned name as \`database\` on any other tool to target it.`;
+
 export const TOOL_DESCRIPTIONS = {
 	// --- Canonical tools (CONTRACT §3) ---
+
+	[TOOL_NAMES.DATABASES]: {
+		title: "List Hydra DB Databases",
+		description: DATABASES_BODY,
+		params: {},
+	},
 
 	[TOOL_NAMES.QUERY]: {
 		title: "Query Hydra DB",
@@ -574,4 +584,6 @@ Choose by the question, not the vocabulary: "what has the user told me about X" 
 
 Working against an unfamiliar collection, discover its structure by querying it — \`MATCH (n) UNWIND labels(n) AS l RETURN l, count(*) AS c ORDER BY l\` — rather than guessing labels, which yields empty results that look like missing data.
 
-All tools require HYDRADB_API_KEY and HYDRADB_DATABASE in the environment. The graph tools additionally read HYDRADB_GRAPH_DATABASE and HYDRADB_GRAPH_COLLECTION for their default scope, and can be disabled with HYDRADB_MCP_GRAPH_TOOLS=0.`;
+SCOPE
+
+Every tool takes an optional \`database\` and \`collection\`. Omitted, calls use the database this connection was set up with; if none was, the account's only database (created as "default" when the account has none). An account with several databases and no configured default answers with the list and asks you to choose: pass one of the names, or call ${TOOL_NAMES.DATABASES} to see them. The graph tools default to the same database unless HYDRADB_GRAPH_DATABASE / HYDRADB_GRAPH_COLLECTION say otherwise, and can be disabled with HYDRADB_MCP_GRAPH_TOOLS=0.`;

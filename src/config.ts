@@ -10,7 +10,12 @@
 
 export interface HydraDBConfig {
 	apiKey: string;
-	database: string;
+	/**
+	 * Absent when HYDRADB_DATABASE is unset. Not an error: the server then
+	 * resolves the account's default database on first use (one database → that
+	 * one; none → `default` is created; several → the call is asked to choose).
+	 */
+	database?: string;
 	collection: string;
 	baseUrl?: string;
 	timeoutSeconds?: number;
@@ -32,7 +37,8 @@ export interface GraphConfig {
 	/**
 	 * Default graph database. Falls back to HYDRADB_DATABASE — convenient when
 	 * one name is used for both, and harmless otherwise because the tools accept
-	 * `database` per call.
+	 * `database` per call. Empty when neither is set; the graph tools then fall
+	 * back to the memory client's resolved default at call time.
 	 */
 	database: string;
 	/** Default graph collection. */
@@ -112,12 +118,11 @@ export function resolveConfig(
 		);
 	}
 
-	const database = readEnv(env, "HYDRADB_DATABASE", "HYDRA_DB_TENANT_ID", warn);
-	if (!database) {
-		throw new Error(
-			"HYDRADB_DATABASE (or its deprecated alias HYDRA_DB_TENANT_ID) environment variable is required",
-		);
-	}
+	// Optional since 1.3.0. It used to be required, which made every setup a
+	// two-secret affair for an account that typically has exactly one database.
+	// Leaving it unset is now the common case; see HydraDBConfig.database.
+	const database =
+		readEnv(env, "HYDRADB_DATABASE", "HYDRA_DB_TENANT_ID", warn)?.trim() || undefined;
 
 	const collection =
 		readEnv(env, "HYDRADB_COLLECTION", "HYDRA_DB_SUB_TENANT_ID", warn) ??
@@ -132,12 +137,12 @@ export function resolveConfig(
 
 	return {
 		apiKey,
-		database,
+		...(database != null ? { database } : {}),
 		collection,
 		baseUrl,
 		...(timeoutSeconds != null ? { timeoutSeconds } : {}),
 		...(maxRetries != null ? { maxRetries } : {}),
-		graph: resolveGraphConfig(env, database),
+		graph: resolveGraphConfig(env, database ?? ""),
 	};
 }
 

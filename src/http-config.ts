@@ -165,7 +165,14 @@ export type RequestHeaders = Record<string, string | string[] | undefined>;
  */
 export interface RequestCredentials {
 	apiKey: string;
-	database: string;
+	/**
+	 * Absent when nothing named one. The client then resolves the account's
+	 * default on first use (one database → it; none → `default` is created;
+	 * several → the call is told to choose). Not a refusal any more: the old
+	 * 400 made the hosted server unusable from clients that can send only an
+	 * `Authorization` header, which is most of them.
+	 */
+	database?: string;
 	collection: string;
 	baseUrl?: string;
 	timeoutSeconds?: number;
@@ -174,12 +181,28 @@ export interface RequestCredentials {
 }
 
 /**
+ * Scope carried in the URL path rather than in headers.
+ *
+ * A connection link (`/c/<api-key>/<database>[/<collection>]`) is how a user
+ * who can paste exactly one thing into their client authenticates: Claude
+ * Desktop and claude.ai accept a URL and nothing else. `/<database>[/<collection>]`
+ * without a key scopes a header-authenticated request the same way. Anything
+ * here beats the equivalent header, because the URL is the more deliberate
+ * choice — it was minted for this exact client.
+ */
+export interface PathScope {
+	apiKey?: string;
+	database?: string;
+	collection?: string;
+}
+
+/**
  * Resolution is either credentials or the exact HTTP failure to return.
  *
  * The status and message are carried out rather than thrown so the caller can
  * answer with a JSON-RPC error body at the right code — 401 when nothing
- * authenticated the request, 400 when it authenticated but named no database —
- * instead of a generic 500 that tells the client nothing about what to fix.
+ * authenticated the request — instead of a generic 500 that tells the client
+ * nothing about what to fix.
  */
 export type CredentialResolution =
 	| { ok: true; credentials: RequestCredentials }
@@ -231,9 +254,11 @@ function bearerToken(authorization: string | undefined): string | undefined {
 export function resolveRequestCredentials(
 	headers: RequestHeaders,
 	env: EnvSource = process.env,
+	path: PathScope = {},
 ): CredentialResolution {
 	const headerKey =
-		bearerToken(headerValue(headers, HEADER_AUTHORIZATION)) ??
+		path.apiKey?.trim() ||
+		bearerToken(headerValue(headers, HEADER_AUTHORIZATION)) ||
 		headerValue(headers, HEADER_API_KEY);
 	// Whether the CALLER authenticated this request with their own key decides
 	// whether the operator's env is allowed to supply the rest of the identity.
@@ -253,27 +278,24 @@ export function resolveRequestCredentials(
 		};
 	}
 
-	const headerDatabase = headerValue(headers, HEADER_DATABASE);
-	// A caller-authenticated request takes its database ONLY from the header;
+	const namedDatabase =
+		path.database?.trim() || headerValue(headers, HEADER_DATABASE);
+	// A caller-authenticated request takes its database ONLY from the request;
 	// the env database belongs to the operator's identity, not the caller's.
+	// Naming none is fine: the client resolves the account's default on first
+	// use (see RequestCredentials.database).
 	const database = callerAuthenticated
-		? headerDatabase
-		: (headerDatabase ?? readEnv(env, "HYDRADB_DATABASE", "HYDRA_DB_TENANT_ID", noopWarn));
-	if (!database) {
-		return {
-			ok: false,
-			status: 400,
-			message:
-				"Missing Hydra DB database. Send the `X-HydraDB-Database` header naming " +
-				"the database (tenant) this request should run against.",
-		};
-	}
+		? namedDatabase
+		: (namedDatabase ??
+			readEnv(env, "HYDRADB_DATABASE", "HYDRA_DB_TENANT_ID", noopWarn) ??
+			undefined);
 
 	// Collection is a partition WITHIN the resolved database, not a cross-tenant
 	// boundary, so an env default is safe for either mode.
 	const collection =
-		headerValue(headers, HEADER_COLLECTION) ??
-		readEnv(env, "HYDRADB_COLLECTION", "HYDRA_DB_SUB_TENANT_ID", noopWarn) ??
+		path.collection?.trim() ||
+		headerValue(headers, HEADER_COLLECTION) ||
+		readEnv(env, "HYDRADB_COLLECTION", "HYDRA_DB_SUB_TENANT_ID", noopWarn) ||
 		DEFAULT_COLLECTION;
 
 	// Operator-owned transport knobs. Same env vars, same parsing as resolveConfig.
@@ -285,12 +307,12 @@ export function resolveRequestCredentials(
 		ok: true,
 		credentials: {
 			apiKey,
-			database,
+			...(database ? { database } : {}),
 			collection,
 			...(baseUrl != null ? { baseUrl } : {}),
 			...(timeoutSeconds != null ? { timeoutSeconds } : {}),
 			...(maxRetries != null ? { maxRetries } : {}),
-			graph: resolveRequestGraphConfig(headers, env, database, callerAuthenticated),
+			graph: resolveRequestGraphConfig(headers, env, database ?? "", callerAuthenticated),
 		},
 	};
 }
@@ -301,7 +323,8 @@ export function resolveRequestCredentials(
  *
  * The graph database defaults to the request's OWN database, so a caller that
  * names only `X-HydraDB-Database` gets a coherent graph scope without a second
- * header. The operator's `HYDRADB_GRAPH_DATABASE` is honoured as that default
+ * header. When the request named no database at all this is empty, and the
+ * graph tools fall back to the memory client's resolved default at call time. The operator's `HYDRADB_GRAPH_DATABASE` is honoured as that default
  * ONLY for an unauthenticated (env-credential) request — for a caller-
  * authenticated one it would pin every tenant to the operator's single graph
  * namespace, the mixing this resolver exists to prevent. Header overrides always

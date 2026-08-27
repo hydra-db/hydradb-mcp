@@ -12,7 +12,7 @@ import type { GraphConfig } from "./config.js";
 import { renderRecalledContext } from "./context.js";
 import { COLLECTION_PATTERN, MAX_BODY_BYTES, renderRows } from "./cypher.js";
 import { SERVER_INSTRUCTIONS, TOOL_DESCRIPTIONS } from "./descriptions.js";
-import { HydraDB } from "./hydra/index.js";
+import { DEFAULT_DATABASE_NAME, HydraDB } from "./hydra/index.js";
 import type { ContextKind, QueryKind } from "./hydra/index.js";
 import { logger } from "./logger.js";
 import { ALIAS_REPLACEMENTS, DEPRECATED_TOOL_NAMES, TOOL_NAMES } from "./tool-names.js";
@@ -309,7 +309,7 @@ export function createHydraDBServer(
 		const config = resolveConfig();
 		hydra = new HydraDB({
 			token: config.apiKey,
-			database: config.database,
+			...(config.database != null ? { database: config.database } : {}),
 			collection: config.collection,
 			...(config.baseUrl != null ? { baseUrl: config.baseUrl } : {}),
 			...(config.timeoutSeconds != null
@@ -319,7 +319,8 @@ export function createHydraDBServer(
 		});
 		graphConfig = { ...config.graph, ...graphOverride };
 		logger.info(
-			`Hydra DB connected (database=${config.database}, collection=${config.collection})`,
+			`Hydra DB connected (database=${config.database ?? "(resolved on first use)"}, ` +
+				`collection=${config.collection})`,
 		);
 	}
 
@@ -1168,6 +1169,42 @@ export function createHydraDBServer(
 		return deleteReport(kind, args.ids, res, removed, removedCount);
 	}
 
+	/**
+	 * Which databases this account can address, and which one is the default.
+	 *
+	 * The default is reported only when already known (configured, or resolved
+	 * by an earlier call): resolving it here just to label a row would create
+	 * a database as a side effect of a LISTING, which nobody asking "what do I
+	 * have" expects.
+	 */
+	async function runDatabases(): Promise<ToolResult> {
+		const listed = await hydra.databases.list();
+		const databases = (listed.databases ?? listed.tenantIds ?? []).filter(Boolean);
+		const failed = (listed.failedDatabases ?? listed.failedTenantIds ?? []).map(
+			(f) => ({ database: f.tenantId ?? f.database, error: f.error }),
+		);
+		const defaultDatabase = hydra.database.known;
+
+		if (databases.length === 0) {
+			return structuredResult(
+				"This account has no databases yet. The first unscoped call creates one named " +
+					`"${DEFAULT_DATABASE_NAME}" automatically, or pass \`database\` to name your own.`,
+				{ databases: [], count: 0, default: defaultDatabase ?? null, failed },
+			);
+		}
+		const lines = databases.map(
+			(d) => `  - ${d}${d === defaultDatabase ? "  (default for this connection)" : ""}`,
+		);
+		const hint =
+			defaultDatabase == null && databases.length > 1
+				? `\nNo default is configured and there are ${databases.length}: pass \`database\` on each call.`
+				: "";
+		return structuredResult(
+			`${databases.length} database(s):\n${lines.join("\n")}${hint}`,
+			{ databases, count: databases.length, default: defaultDatabase ?? null, failed },
+		);
+	}
+
 	// --- BYOG graph handlers ---
 
 	/**
@@ -1178,19 +1215,23 @@ export function createHydraDBServer(
 	 * validated here because the server's rule is a documented charset and
 	 * rejecting locally names it, where the remote failure is a bare 400.
 	 */
-	function graphScope(args: { database?: string; collection?: string }): {
+	/**
+	 * The graph database a call runs against: the call's own, else the
+	 * configured graph default, else the memory client's resolved default. The
+	 * last fallback is what lets a connection that named no database at all
+	 * (the common case since 1.3.0) still reach its graph.
+	 */
+	async function graphDatabase(override?: string): Promise<string> {
+		return override?.trim() || graphConfig.database || (await hydra.database.resolve());
+	}
+
+	async function graphScope(args: { database?: string; collection?: string }): Promise<{
 		database: string;
 		collection: string;
-	} {
-		const database = args.database?.trim() || graphConfig.database;
+	}> {
+		const database = await graphDatabase(args.database);
 		const collection = args.collection?.trim() || graphConfig.collection;
 
-		if (!database) {
-			throw new Error(
-				"No graph database configured. Set HYDRADB_GRAPH_DATABASE (or HYDRADB_DATABASE), " +
-				"or pass `database` on this call.",
-			);
-		}
 		if (!COLLECTION_PATTERN.test(collection)) {
 			throw new Error(
 				`Invalid graph collection name "${collection}". Collection names must match ` +
@@ -1259,7 +1300,7 @@ export function createHydraDBServer(
 		},
 		signal?: AbortSignal,
 	): Promise<ToolResult> {
-		const scope = graphScope(args);
+		const scope = await graphScope(args);
 
 		assertBodyFits({ ...scope, query: args.query, params: args.params });
 
@@ -1306,13 +1347,7 @@ export function createHydraDBServer(
 		args: { database?: string },
 		signal?: AbortSignal,
 	): Promise<ToolResult> {
-		const database = args.database?.trim() || graphConfig.database;
-		if (!database) {
-			throw new Error(
-				"No graph database configured. Set HYDRADB_GRAPH_DATABASE (or HYDRADB_DATABASE), " +
-				"or pass `database` on this call.",
-			);
-		}
+		const database = await graphDatabase(args.database);
 		logger.debug(`${TOOL_NAMES.GRAPH_COLLECTIONS}: ${database}`);
 
 		const collections = await hydra.graph.listCollections({ database }, { signal });
@@ -1336,13 +1371,7 @@ export function createHydraDBServer(
 		args: { action: string; database?: string; collection?: string },
 		signal?: AbortSignal,
 	): Promise<ToolResult> {
-		const database = args.database?.trim() || graphConfig.database;
-		if (!database) {
-			throw new Error(
-				"No graph database configured. Set HYDRADB_GRAPH_DATABASE (or HYDRADB_DATABASE), " +
-				"or pass `database` on this call.",
-			);
-		}
+		const database = await graphDatabase(args.database);
 		logger.debug(`${TOOL_NAMES.GRAPH_ADMIN}: ${args.action} ${database}`);
 
 		if (args.action === "create_database") {
@@ -2081,6 +2110,8 @@ export function createHydraDBServer(
 		(args, extra) => runStatus(args as Parameters<typeof runStatus>[0], extra?.signal),
 		readOnly,
 	);
+
+	register(TOOL_NAMES.DATABASES, {}, () => runDatabases(), readOnly);
 
 	// --- BYOG graph tools (PRO-1681) ---
 	//

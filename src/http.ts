@@ -31,6 +31,7 @@ import {
 	jsonRpcError,
 	parseList,
 	parsePort,
+	type PathScope,
 	resolveHttpServerConfig,
 	resolveRequestCredentials,
 } from "./http-config.js";
@@ -66,6 +67,39 @@ const MAX_REQUEST_BODY = "8mb";
  */
 function banner(message: string): void {
 	console.error(`[hydradb-mcp] ${message}`);
+}
+
+/**
+ * What a database or collection name in the URL may look like. The same rule
+ * the server applies to collection names; anything else is answered 404 before
+ * a client is built, so a stray path can neither reach Hydra DB nor be echoed.
+ */
+const SEGMENT_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+
+/**
+ * The shape of an API key in a connection link. Deliberately loose: it only
+ * has to keep obvious garbage (and path traversal) out, because the key is
+ * checked for real by Hydra DB on the first call.
+ */
+const KEY_PATTERN = /^[A-Za-z0-9._-]{8,512}$/;
+
+/**
+ * First path segments that are routes, not database names. `/health` and
+ * `/mcp` exist today; `c` is the connection-link prefix; `.well-known` is
+ * where a future OAuth metadata document lives. Reserving it now means a user
+ * cannot create a database whose URL later collides with it.
+ */
+const RESERVED_SEGMENTS = new Set(["mcp", "health", "c", ".well-known"]);
+
+/**
+ * A request path safe to log.
+ *
+ * A connection link carries the API key as a path segment, so any log line
+ * that prints `req.path` verbatim would print the secret. Every place this
+ * file logs a path goes through here.
+ */
+export function redactPath(path: string): string {
+	return path.replace(/(^|\/)c\/[^/]+/g, "$1c/[redacted]");
 }
 
 /** JSON-RPC error codes used for transport-level failures (spec: -32000 range). */
@@ -106,7 +140,7 @@ export function createHttpApp(config: HttpServerConfig): Express {
 		if (!host || !allowedHosts.has(host.toLowerCase())) {
 			logger.warn("rejected request with disallowed Host header", {
 				host,
-				path: req.path,
+				path: redactPath(req.path),
 			});
 			res
 				.status(421)
@@ -175,7 +209,7 @@ export function createHttpApp(config: HttpServerConfig): Express {
 			if (err instanceof CorsOriginNotAllowedError) {
 				logger.warn("rejected request with disallowed Origin", {
 					origin: err.origin,
-					path: req.path,
+					path: redactPath(req.path),
 				});
 				res
 					.status(403)
@@ -189,13 +223,36 @@ export function createHttpApp(config: HttpServerConfig): Express {
 	app.use(express.json({ limit: MAX_REQUEST_BODY }));
 
 	// --- The MCP endpoint ---
-	// Serves MCP at both the root `/` (e.g. https://mcp.hydradb.com) and `/mcp`
-	// so clients pointing at either URL connect seamlessly.
-	app.all(["/", "/mcp"], async (req, res) => {
+	//
+	// One handler, several URL shapes. All of these serve the same MCP server;
+	// they differ only in what the PATH contributes to the request's scope:
+	//
+	//   /                                  headers only (and `/mcp`, an alias)
+	//   /<database>[/<collection>]         header-authenticated, path-scoped
+	//   /c/<api-key>[/<database>[/<collection>]]
+	//                                      a CONNECTION LINK: everything in the
+	//                                      URL, no headers at all
+	//
+	// The connection link is the shape a user pastes into a client that can
+	// send a URL and nothing else (Claude Desktop, claude.ai). Every `/mcp/...`
+	// spelling of the above is accepted too, so a client that appends `/mcp`
+	// by convention still lands. `/health` is registered BEFORE the
+	// `/<database>` routes so it is never read as a database name, and the
+	// reserved first segments are refused inside the handler for the same
+	// reason.
+	const serveMcp = async (
+		req: express.Request,
+		res: express.Response,
+		scope: PathScope,
+	) => {
+		// A link is a credential: nothing that carries it may be cached by a
+		// proxy, and no response body ever repeats it.
+		res.setHeader("Cache-Control", "no-store");
+
 		// Who is this request for? On a hosted process the answer lives entirely
 		// in the request, so it is resolved here and a missing/incomplete answer
 		// is refused before any server is built.
-		const resolution = resolveRequestCredentials(req.headers, process.env);
+		const resolution = resolveRequestCredentials(req.headers, process.env, scope);
 		if (!resolution.ok) {
 			// 401 gets a WWW-Authenticate header so a spec-compliant client knows
 			// how to authenticate rather than just seeing a bare refusal.
@@ -219,7 +276,7 @@ export function createHttpApp(config: HttpServerConfig): Express {
 		try {
 			const hydra = new HydraDB({
 				token: creds.apiKey,
-				database: creds.database,
+				...(creds.database != null ? { database: creds.database } : {}),
 				collection: creds.collection,
 				...(creds.baseUrl != null ? { baseUrl: creds.baseUrl } : {}),
 				...(creds.timeoutSeconds != null
@@ -264,7 +321,39 @@ export function createHttpApp(config: HttpServerConfig): Express {
 					.json(jsonRpcError(JSONRPC_INTERNAL_ERROR, "Internal server error"));
 			}
 		}
-	});
+	};
+
+	/**
+	 * A 404 that names nothing. The default Express one echoes the path, which
+	 * for a mistyped connection link would print the key back to whoever (or
+	 * whatever proxy) is looking.
+	 */
+	const notFound = (res: express.Response) => {
+		res.setHeader("Cache-Control", "no-store");
+		res.status(404).json(jsonRpcError(JSONRPC_BAD_REQUEST, "Not found"));
+	};
+
+	/** Validate path scope segments; `null` means the URL is not a route. */
+	const pathScope = (params: Record<string, string | undefined>): PathScope | null => {
+		const { key, database, collection } = params;
+		if (key != null && !KEY_PATTERN.test(key)) return null;
+		if (database != null) {
+			if (RESERVED_SEGMENTS.has(database.toLowerCase())) return null;
+			if (!SEGMENT_PATTERN.test(database)) return null;
+		}
+		if (collection != null && !SEGMENT_PATTERN.test(collection)) return null;
+		return {
+			...(key != null ? { apiKey: key } : {}),
+			...(database != null ? { database } : {}),
+			...(collection != null ? { collection } : {}),
+		};
+	};
+
+	const scoped = (req: express.Request, res: express.Response) => {
+		const scope = pathScope(req.params as Record<string, string | undefined>);
+		if (scope == null) return notFound(res);
+		return serveMcp(req, res, scope);
+	};
 
 	// A liveness probe for load balancers and container orchestrators. It says
 	// nothing about Hydra DB reachability on purpose — credentials are per
@@ -272,6 +361,28 @@ export function createHttpApp(config: HttpServerConfig): Express {
 	app.get("/health", (_req, res) => {
 		res.json({ status: "ok", service: "hydradb-mcp" });
 	});
+
+	app.all(["/", "/mcp"], (req, res) => serveMcp(req, res, {}));
+	app.all(
+		[
+			"/c/:key",
+			"/c/:key/:database",
+			"/c/:key/:database/:collection",
+			"/mcp/c/:key",
+			"/mcp/c/:key/:database",
+			"/mcp/c/:key/:database/:collection",
+		],
+		scoped,
+	);
+	// The `/mcp/...` spellings go first: matched the other way round,
+	// `/mcp/my-db` would bind `database="mcp"` and be refused as reserved.
+	app.all(
+		["/mcp/:database", "/mcp/:database/:collection", "/:database", "/:database/:collection"],
+		scoped,
+	);
+
+	// Anything else: a JSON-RPC 404 rather than Express's HTML page.
+	app.use((_req, res) => notFound(res));
 
 	// `express.json` throws on a malformed body (`entity.parse.failed`) or one
 	// over the limit (`entity.too.large`). Registered after the routes so it

@@ -13,6 +13,9 @@ export const TOOL_NAMES = {
 	INSPECT: "hydradb_inspect",
 	DELETE: "hydradb_delete",
 	STATUS: "hydradb_status",
+	// Discovery (1.3.0): which databases this account can address. Exists so an
+	// agent told "choose a database" can find the choices without leaving MCP.
+	DATABASES: "hydradb_databases",
 
 	// BYOG graph tools (PRO-1681). A separate family with its own prefix: these
 	// address graph collections the user models and writes in Cypher, which are
@@ -43,6 +46,7 @@ export const CANONICAL_TOOL_NAMES = [
 	TOOL_NAMES.INSPECT,
 	TOOL_NAMES.DELETE,
 	TOOL_NAMES.STATUS,
+	TOOL_NAMES.DATABASES,
 ] as const;
 
 /** The BYOG graph family, registered together and gated together. */

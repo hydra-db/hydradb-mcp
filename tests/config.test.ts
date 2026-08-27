@@ -121,15 +121,28 @@ test("HYDRADB_LOG_LEVEL is canonical; the HYDRA_DB_ spelling warns but still wor
 	);
 });
 
-test("missing required config throws naming the canonical variable", () => {
+test("missing API key throws naming the canonical variable", () => {
 	const { warn } = collect();
 	assert.throws(
 		() => resolveConfig({ HYDRADB_DATABASE: "db" }, warn),
 		/HYDRADB_API_KEY/,
 	);
-	assert.throws(
-		() => resolveConfig({ HYDRADB_API_KEY: "key" }, warn),
-		/HYDRADB_DATABASE/,
+});
+
+test("HYDRADB_DATABASE is optional: absent means resolved on first use", () => {
+	// 1.3.0: the database used to be required at boot. It is now resolved from
+	// the account on the first call that needs it, so a key alone is a complete
+	// configuration. The graph default is empty rather than invented, and the
+	// graph tools fall back to the same resolved database at call time.
+	const { warn } = collect();
+	const config = resolveConfig({ HYDRADB_API_KEY: "key" }, warn);
+	assert.equal(config.apiKey, "key");
+	assert.equal(config.database, undefined);
+	assert.equal(config.graph.database, "");
+	// A blank value is the same as an absent one, not an empty database name.
+	assert.equal(
+		resolveConfig({ HYDRADB_API_KEY: "key", HYDRADB_DATABASE: "  " }, warn).database,
+		undefined,
 	);
 });
 

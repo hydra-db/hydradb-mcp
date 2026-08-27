@@ -2,10 +2,30 @@
 
 MCP (Model Context Protocol) server for [Hydra DB](https://hydradb.com), the state-of-the-art agentic memory. Provides tools for storing, recalling, and managing memories with knowledge-graph enriched context.
 
+## Quick start: paste one link
+
+The fastest way in is a **connection link** from the dashboard: **Settings → MCP → Connect**. Pick the client, pick a database, and you get one URL:
+
+```
+https://mcp.hydradb.com/c/YOUR_API_KEY/your-database
+```
+
+Paste it wherever your client takes a remote MCP URL. Nothing else to configure: no headers, no environment variables, no JSON to hand-edit.
+
+| Client | Where the link goes |
+| --- | --- |
+| Claude Desktop, claude.ai | Settings → Connectors → Add custom connector → paste → Add |
+| Claude Code | `claude mcp add --transport http hydradb "<link>"` |
+| Cursor, VS Code | one-click install button on the dashboard, or `{ "mcpServers": { "hydradb": { "url": "<link>" } } }` |
+| Codex CLI | `codex mcp add hydradb --url "<link>"` |
+| OpenCode, Windsurf, others | the JSON block the dashboard shows for that client |
+
+The link **is** your API key: anyone holding it can use that database. Treat it like a password, keep one link per client, and rotate or revoke it from the dashboard when in doubt (revoking the key kills the link).
+
 Run it two ways, same tools either way:
 
-- **Local (stdio)** — the `npx @hydradb/mcp` binary each client spawns. No server to operate; credentials live in the client's config. This is the default and everything below the [Configuration](#configuration) section documents it.
-- **Remote (HTTP)** — one hosted process behind a URL like `https://mcp.hydradb.com` that many clients point at, with nothing to install. See [**Remote / hosted server**](#remote--hosted-server).
+- **Remote (HTTP)** — one hosted process behind `https://mcp.hydradb.com` that many clients point at, with nothing to install. The connection link above, or headers. See [**Remote / hosted server**](#remote--hosted-server).
+- **Local (stdio)** — the `npx @hydradb/mcp` binary each client spawns. No server to operate; credentials live in the client's config. Everything below the [Configuration](#configuration) section documents it.
 
 ## Available Tools
 
@@ -174,14 +194,14 @@ Checks whether ingested sources have finished indexing.
 ### Get Your Credentials
 
 1. Get your Hydra DB API Key from [Hydra DB](https://app.hydradb.com)
-2. Get your database name from the Hydra DB dashboard
+2. Optionally, note the database you want to use. If you name none, the server uses your account's only database, creates one called `default` when you have none, and, when you have several, asks the agent to pick one (`hydradb_databases` lists them).
 
 ### Environment Variables
 
 | Variable             | Description                          | Default                   |
 | -------------------- | ------------------------------------ | ------------------------- |
 | `HYDRADB_API_KEY`    | Your Hydra DB API key                | *Required*                |
-| `HYDRADB_DATABASE`   | Your Hydra DB database (tenant scope) | *Required*                |
+| `HYDRADB_DATABASE`   | Your Hydra DB database (tenant scope). Optional since 1.3.0: unset, the account's default is resolved on first use (see above) | *resolved*          |
 | `HYDRADB_COLLECTION` | Collection (sub-tenant) for partitioning | `hydra-db-mcp`        |
 | `HYDRADB_BASE_URL`   | Base URL override                    | `https://api.hydradb.com` |
 | `HYDRADB_LOG_LEVEL`  | Log level: DEBUG, INFO, WARN, ERROR  | `ERROR`                   |
@@ -294,8 +314,17 @@ changes.
 
 ### Point a client at a URL
 
-MCP clients that support a remote (`streamable-http`) server take a URL and
-headers instead of a command:
+The URL itself can carry the whole configuration. All of these are served:
+
+| URL | What it means |
+| --- | --- |
+| `https://mcp.hydradb.com` (or `/mcp`) | credentials in headers, database resolved or from a header |
+| `https://mcp.hydradb.com/<database>[/<collection>]` | credentials in headers, scope in the path |
+| `https://mcp.hydradb.com/c/<api-key>[/<database>[/<collection>]]` | a **connection link**: everything in the URL, no headers at all |
+
+The connection link is what the dashboard's **Settings → MCP** page mints, and the shape to use with clients that accept a URL and nothing else (Claude Desktop, claude.ai). Path segments beat the equivalent headers. Database and collection names must match `[A-Za-z0-9][A-Za-z0-9_-]{0,63}`; `mcp`, `health`, `c` and `.well-known` are reserved.
+
+MCP clients that support headers can instead send credentials the classic way:
 
 ```jsonc
 {
@@ -317,16 +346,17 @@ number of independent users. The headers a request may send:
 | Header | Maps to | Required |
 | --- | --- | --- |
 | `Authorization: Bearer <key>` | Hydra DB API key (`X-HydraDB-Api-Key` also accepted) | Yes\* |
-| `X-HydraDB-Database` | Default database (tenant scope) | Yes\* |
+| `X-HydraDB-Database` | Default database (tenant scope). Optional since 1.3.0: omitted, the account's default is resolved on first use | No |
 | `X-HydraDB-Collection` | Default collection (sub-tenant); defaults to `hydra-db-mcp` | No |
 | `X-HydraDB-Graph-Database` | Default graph database for the Cypher tools; defaults to the request's database | No |
 | `X-HydraDB-Graph-Collection` | Default graph collection; defaults to `default` | No |
 
-\* Unless the server was started with `HYDRADB_API_KEY` / `HYDRADB_DATABASE` in
-its environment (single-tenant self-host, below), in which case a request may
-omit them and fall back to the server's own credentials. A request that supplies
-neither a header nor a server-side default is refused: `401` with no key, `400`
-with a key but no database.
+\* Unless the server was started with `HYDRADB_API_KEY` in its environment
+(single-tenant self-host, below), in which case a request may omit it and fall
+back to the server's own credentials. A request that supplies no key and has no
+server-side default is refused with `401`. A request that authenticates with its
+own key never inherits the server's `HYDRADB_DATABASE`: its database comes from
+the request, or is resolved from its own account.
 
 Every tool additionally accepts optional `database` and `collection` parameters
 directly in its arguments (e.g. `hydradb_query` with `{"query": "...", "database": "tenant_b"}`),

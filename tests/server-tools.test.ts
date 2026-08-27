@@ -6,7 +6,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { HydraDBError } from "@hydradb/sdk";
 import type { HydraDBClient } from "@hydradb/sdk";
 
-import { HydraDB } from "../src/hydra/index.js";
+import { __resetDefaultDatabaseCache, HydraDB } from "../src/hydra/index.js";
 import {
 	__resetAliasWarnings,
 	__resetShutdown,
@@ -2547,4 +2547,60 @@ test("empty scope overrides are rejected or fall back to default", async () => {
 	assert.equal(queryCall.args.collection, "col_test");
 
 	await client.close();
+});
+
+// --- hydradb_databases and the optional database (1.3.0) ---
+
+function databasesHydra(names: string[], configured?: string) {
+	const sdk = {
+		databases: {
+			list: () => Promise.resolve({ data: { databases: names }, success: true }),
+		},
+		query: (args: Record<string, unknown>) =>
+			Promise.resolve({ data: { chunks: [], scopedTo: args.database }, success: true }),
+	} as unknown as HydraDBClient;
+	return new HydraDB({ token: "t", ...(configured ? { database: configured } : {}) }, sdk);
+}
+
+test("hydradb_databases lists databases and marks the configured default", async () => {
+	const client = await connect(databasesHydra(["work", "personal"], "work"));
+	const result = await client.callTool({ name: "hydradb_databases", arguments: {} });
+	const text = (result.content as { text: string }[])[0].text;
+	assert.match(text, /2 database\(s\)/);
+	assert.match(text, /work {2}\(default for this connection\)/);
+	assert.match(text, /personal/);
+	assert.deepEqual(result.structuredContent, {
+		databases: ["work", "personal"],
+		count: 2,
+		default: "work",
+		failed: [],
+	});
+});
+
+test("hydradb_databases on an empty account explains the automatic default", async () => {
+	const client = await connect(databasesHydra([]));
+	const result = await client.callTool({ name: "hydradb_databases", arguments: {} });
+	const text = (result.content as { text: string }[])[0].text;
+	assert.match(text, /no databases yet/);
+	assert.match(text, /"default"/);
+});
+
+test("an unscoped call on an ambiguous account fails naming the choices", async () => {
+	__resetDefaultDatabaseCache();
+	const client = await connect(databasesHydra(["work", "personal"]));
+	const result = await client.callTool({
+		name: "hydradb_query",
+		arguments: { query: "anything" },
+	});
+	assert.equal(result.isError, true);
+	const text = (result.content as { text: string }[])[0].text;
+	assert.match(text, /"work", "personal"/);
+	assert.match(text, /Pass `database`/);
+
+	// The same call with a database named goes through.
+	const ok = await client.callTool({
+		name: "hydradb_query",
+		arguments: { query: "anything", database: "personal" },
+	});
+	assert.notEqual(ok.isError, true);
 });
