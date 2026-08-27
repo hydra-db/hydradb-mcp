@@ -477,3 +477,54 @@ test("the resolved default is memoised per account across client instances", asy
 	assert.deepEqual(third.calls, ["list", "query:other"]);
 	__resetDefaultDatabaseCache();
 });
+
+test("a lost create race resolves to the same default instead of failing", async () => {
+	__resetDefaultDatabaseCache();
+	// Two unscoped clients hit a zero-database account at once. The second
+	// create loses with a 409, which means the database exists — the goal.
+	const calls: string[] = [];
+	const sdk = {
+		query(args: Record<string, unknown>) {
+			calls.push(`query:${args.database}`);
+			return Promise.resolve({ data: { chunks: [] }, success: true });
+		},
+		databases: {
+			list() {
+				calls.push("list");
+				return Promise.resolve({ data: { databases: [] }, success: true });
+			},
+			create() {
+				calls.push("create");
+				return Promise.reject(
+					new HydraDBError({ statusCode: 409, body: { code: "CONFLICT" } }),
+				);
+			},
+			status() {
+				return Promise.resolve({ data: { infra: { readyForIngestion: true } }, success: true });
+			},
+		},
+	} as unknown as HydraDBClient;
+
+	const hydra = new HydraDB({ token: "race-token" }, sdk);
+	await hydra.context.query({ query: "hi" });
+	assert.equal(hydra.database.known, DEFAULT_DATABASE_NAME);
+	assert.deepEqual(calls, ["list", "create", `query:${DEFAULT_DATABASE_NAME}`]);
+	__resetDefaultDatabaseCache();
+});
+
+test("a non-conflict create failure still propagates", async () => {
+	__resetDefaultDatabaseCache();
+	const sdk = {
+		query: () => Promise.resolve({ data: { chunks: [] }, success: true }),
+		databases: {
+			list: () => Promise.resolve({ data: { databases: [] }, success: true }),
+			create: () =>
+				Promise.reject(new HydraDBError({ statusCode: 403, body: { code: "FORBIDDEN" } })),
+		},
+	} as unknown as HydraDBClient;
+	await assert.rejects(
+		() => new HydraDB({ token: "forbidden-token" }, sdk).context.query({ query: "hi" }),
+		/403/,
+	);
+	__resetDefaultDatabaseCache();
+});

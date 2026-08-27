@@ -20,7 +20,7 @@ import { HydraDBClient } from "@hydradb/sdk";
 import type { HydraDB as SDK } from "@hydradb/sdk";
 
 import { unwrap } from "./envelope.js";
-import { translateError } from "./errors.js";
+import { HydraWrapperError, translateError } from "./errors.js";
 import { GraphResource } from "./graph.js";
 
 export type ContextKind = "memory" | "knowledge";
@@ -332,7 +332,17 @@ export async function resolveDefaultDatabase(
 	if (names.length === 1) {
 		database = names[0];
 	} else if (names.length === 0) {
-		await databases.create({ database: DEFAULT_DATABASE_NAME });
+		// Two unscoped requests can reach a zero-database account at once (the
+		// hosted server builds a client per request, so neither sees the other's
+		// in-flight work). Both list nothing, both create, and one loses with a
+		// 409. Losing that race means the database now exists, which is exactly
+		// the goal, so a conflict is success — anything else is a real failure
+		// and still propagates.
+		try {
+			await databases.create({ database: DEFAULT_DATABASE_NAME });
+		} catch (err) {
+			if (!(err instanceof HydraWrapperError) || err.status !== 409) throw err;
+		}
 		database = DEFAULT_DATABASE_NAME;
 		const deadline = now() + CREATE_READY_TIMEOUT_MS;
 		while (now() < deadline) {
