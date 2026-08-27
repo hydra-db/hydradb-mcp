@@ -256,6 +256,19 @@ test("an unauthenticated request ignores client-supplied X-HydraDB-Graph-Databas
 	assert.equal(result.credentials.graph.database, "operator-graph-db");
 });
 
+test("an unauthenticated request ignores client-supplied X-HydraDB-Graph-Collection and enforces env graph collection", () => {
+	const result = resolveRequestCredentials(
+		{ "x-hydradb-graph-collection": "spoofed-graph-col" },
+		{
+			HYDRADB_API_KEY: "operator-key",
+			HYDRADB_DATABASE: "operator-db",
+			HYDRADB_GRAPH_COLLECTION: "operator-graph-col",
+		},
+	);
+	assert.ok(result.ok);
+	assert.equal(result.credentials.graph.collection, "operator-graph-col");
+});
+
 // --- trust proxy ---
 
 test("parseTrustProxy maps env spellings to Express's setting", () => {
