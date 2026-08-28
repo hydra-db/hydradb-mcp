@@ -403,7 +403,7 @@ With three extra variables the hosted server also speaks the MCP authorization f
 | `HYDRADB_MCP_PUBLIC_URL` | This server's public URL as clients see it, e.g. `https://mcp.hydradb.com`. Tokens minted for any other audience are refused |
 | `HYDRADB_OAUTH_INTROSPECTION_SECRET` | Shared secret the issuer's `/api/oauth/introspect` endpoint expects; must match the dashboard's `MCP_INTROSPECTION_SECRET` |
 
-All three are required together; with any missing, OAuth stays off and the server behaves exactly as before. OAuth is additive: API keys in headers, connection links and the single-tenant env fallback keep working on the same URL.
+All three are required together; with any missing, OAuth stays off and the server behaves exactly as before. Token introspection answers are memoised for up to 30 seconds, so a disconnect from the dashboard takes effect within that window. OAuth is additive: API keys in headers, connection links and the single-tenant env fallback keep working on the same URL.
 
 ### Server environment variables
 

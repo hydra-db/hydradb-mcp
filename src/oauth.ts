@@ -160,10 +160,13 @@ export function isAccessToken(bearer: string | undefined): bearer is string {
  * Introspection answers are memoised per token so the hosted server, which
  * builds a client per request, does not ask the dashboard on every tool call.
  * Only successes are cached, for the shorter of the token's own expiry and
- * this ceiling: a revocation takes effect within a minute, which is the
- * tradeoff between "disconnect is instant" and "every call is two hops".
+ * this ceiling. The ceiling IS the revocation lag: measured end to end, a
+ * disconnect or a refresh-token reuse detection reaches this server exactly
+ * one ceiling later. Thirty seconds keeps an agent's burst of tool calls at
+ * one hop while keeping that lag short enough that a revoked token cannot do
+ * much with it.
  */
-const INTROSPECTION_CACHE_TTL_MS = 60_000;
+const INTROSPECTION_CACHE_TTL_MS = 30_000;
 const INTROSPECTION_CACHE_MAX = 5_000;
 const INTROSPECTION_TIMEOUT_MS = 5_000;
 

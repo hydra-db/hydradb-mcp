@@ -170,7 +170,7 @@ test("inactive, expired and key-less answers are invalid_token; transport failur
 	assert.ok(!e.ok && e.reason === "unavailable");
 });
 
-test("successful introspections are memoised for a minute, bounded by the token's own expiry", async () => {
+test("successful introspections are memoised briefly, bounded by the token's own expiry", async () => {
 	__resetIntrospectionCache();
 	let now = NOW;
 	const { fetchFn, calls } = fakeFetch(() => ({ status: 200, body: active({ exp: Math.floor(NOW / 1000) + 30 }) }));
@@ -178,7 +178,7 @@ test("successful introspections are memoised for a minute, bounded by the token'
 	await introspect(cfg, "hmat_memo");
 	await introspect(cfg, "hmat_memo");
 	assert.equal(calls.length, 1);
-	// The token expires in 30s, before the 60s cache ceiling: the memo dies with it.
+	// The token expires in 30s, at the cache ceiling: the memo dies with it.
 	now = NOW + 31_000;
 	const late = await introspect(cfg, "hmat_memo");
 	assert.equal(calls.length, 2);
