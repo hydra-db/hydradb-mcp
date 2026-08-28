@@ -363,7 +363,22 @@ The primary MCP endpoint is `/` (with `/mcp` supported as an alias); `GET /healt
 The image binds `0.0.0.0` inside the container (the host controls exposure with
 `-p`) and runs as an unprivileged user.
 
+### Sign in with HydraDB (OAuth)
+
+With three extra variables the hosted server also speaks the MCP authorization flow: a client that arrives with no credentials gets a `401` pointing at `/.well-known/oauth-protected-resource`, discovers the HydraDB dashboard as its authorization server, opens the browser, and the user signs in and picks a database. No key is ever pasted into a client.
+
+| Variable | Description |
+| --- | --- |
+| `HYDRADB_OAUTH_ISSUER` | The authorization server, e.g. `https://app.hydradb.com`. Must match its `NEXTAUTH_URL` exactly |
+| `HYDRADB_MCP_PUBLIC_URL` | This server's public URL as clients see it, e.g. `https://mcp.hydradb.com`. Tokens minted for any other audience are refused |
+| `HYDRADB_OAUTH_INTROSPECTION_SECRET` | Shared secret the issuer's `/api/oauth/introspect` expects; must equal the dashboard's `MCP_INTROSPECTION_SECRET` |
+
+All three are required together. With any of them missing, OAuth stays off and the server behaves exactly as before: no new routes, no new headers. Token introspection answers are memoised for up to 30 seconds, so disconnecting an app from the dashboard takes effect within that window.
+
+OAuth is purely additive. API keys in `Authorization` / `X-HydraDB-Api-Key` headers, the `X-HydraDB-Database` header and the single-tenant environment fallback all keep working unchanged on the same URL.
+
 ### Server environment variables
+
 
 These configure the HTTP process itself (the stdio server ignores them). All
 the `HYDRADB_*` variables from [Environment Variables](#environment-variables)
