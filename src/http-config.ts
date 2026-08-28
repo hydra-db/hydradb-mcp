@@ -178,6 +178,8 @@ export interface RequestCredentials {
 	collection: string;
 	/** Databases a per-call override may name; absent means any. */
 	allowedDatabases?: string[];
+	/** Collections a per-call override may name; absent means any. */
+	allowedCollections?: string[];
 	baseUrl?: string;
 	timeoutSeconds?: number;
 	maxRetries?: number;
@@ -255,6 +257,8 @@ export interface ResolvedIdentity {
 	collection?: string;
 	/** See IntrospectedToken.allowedDatabases. */
 	allowedDatabases?: string[];
+	/** See IntrospectedToken.allowedCollections. */
+	allowedCollections?: string[];
 }
 
 export function resolveRequestCredentials(
@@ -324,6 +328,9 @@ export function resolveRequestCredentials(
 			database,
 			collection,
 			...(identity?.allowedDatabases ? { allowedDatabases: identity.allowedDatabases } : {}),
+			...(identity?.allowedCollections
+				? { allowedCollections: identity.allowedCollections }
+				: {}),
 			...(baseUrl != null ? { baseUrl } : {}),
 			...(timeoutSeconds != null ? { timeoutSeconds } : {}),
 			...(maxRetries != null ? { maxRetries } : {}),

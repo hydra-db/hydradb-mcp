@@ -12,7 +12,7 @@ import type { GraphConfig } from "./config.js";
 import { renderRecalledContext } from "./context.js";
 import { COLLECTION_PATTERN, MAX_BODY_BYTES, renderRows } from "./cypher.js";
 import { SERVER_INSTRUCTIONS, TOOL_DESCRIPTIONS } from "./descriptions.js";
-import { assertDatabaseAllowed, HydraDB } from "./hydra/index.js";
+import { assertCollectionAllowed, assertDatabaseAllowed, HydraDB } from "./hydra/index.js";
 import type { ContextKind, QueryKind } from "./hydra/index.js";
 import { logger } from "./logger.js";
 import { ALIAS_REPLACEMENTS, DEPRECATED_TOOL_NAMES, TOOL_NAMES } from "./tool-names.js";
@@ -1234,12 +1234,25 @@ export function createHydraDBServer(
 		return database;
 	}
 
+	/**
+	 * The graph collection a call runs against, checked the same way the
+	 * database is. `drop_collection` makes an unchecked override destructive,
+	 * so confinement covers both axes or it covers nothing.
+	 */
+	function graphCollection(override?: string): string {
+		const collection = override?.trim() || graphConfig.collection;
+		if (collection && collection !== hydra.collection) {
+			assertCollectionAllowed(collection, hydra.allowedCollections);
+		}
+		return collection;
+	}
+
 	function graphScope(args: { database?: string; collection?: string }): {
 		database: string;
 		collection: string;
 	} {
 		const database = graphDatabase(args.database);
-		const collection = args.collection?.trim() || graphConfig.collection;
+		const collection = graphCollection(args.collection);
 
 		if (!database) {
 			throw new Error(
@@ -1417,6 +1430,13 @@ export function createHydraDBServer(
 					`${TOOL_NAMES.GRAPH_ADMIN} action "drop_collection" requires \`collection\` — ` +
 					"the name of the graph to drop. Nothing was deleted.",
 				);
+			}
+			// This action takes its collection directly rather than through
+			// graphCollection(), because there is no default to fall back to, so
+			// the confinement check has to be stated here as well. It is the one
+			// place an unchecked collection would be irreversible.
+			if (collection !== hydra.collection) {
+				assertCollectionAllowed(collection, hydra.allowedCollections);
 			}
 			await hydra.graph.dropCollection({ database, collection }, { signal });
 			// The endpoint is idempotent and does not report whether anything was

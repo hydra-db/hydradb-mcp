@@ -360,12 +360,12 @@ test("operator with an explicit hybrid retrieval is rejected, not sent", async (
 
 // --- Database confinement ---
 
-import { assertDatabaseAllowed, DatabaseNotAllowedError } from "../src/hydra/index.js";
+import { assertDatabaseAllowed, ScopeNotAllowedError } from "../src/hydra/index.js";
 
 test("assertDatabaseAllowed: undefined allows anything, a list allows only its members", () => {
 	assert.doesNotThrow(() => assertDatabaseAllowed("anything", undefined));
 	assert.doesNotThrow(() => assertDatabaseAllowed("a", ["a", "b"]));
-	assert.throws(() => assertDatabaseAllowed("c", ["a", "b"]), DatabaseNotAllowedError);
+	assert.throws(() => assertDatabaseAllowed("c", ["a", "b"]), ScopeNotAllowedError);
 });
 
 test("a confined client refuses a per-call override and never reaches the SDK", async () => {
@@ -387,8 +387,8 @@ test("a confined client refuses a per-call override and never reaches the SDK", 
 	await assert.rejects(
 		() => hydra.context.query({ query: "hi", database: "work" }),
 		(e: unknown) => {
-			assert.ok(e instanceof DatabaseNotAllowedError);
-			assert.equal(e.database, "work");
+			assert.ok(e instanceof ScopeNotAllowedError);
+			assert.equal(e.requested, "work");
 			assert.deepEqual(e.allowed, ["personal"]);
 			return true;
 		},

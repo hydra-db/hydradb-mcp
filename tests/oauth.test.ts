@@ -378,7 +378,7 @@ test("a confined connection refuses a per-call database outside its list, before
 	assert.equal(res.status, 200, res.body);
 	const body = JSON.parse(res.body);
 	assert.equal(body.result.isError, true);
-	assert.match(body.result.content[0].text, /confined to "personal"/);
+	assert.match(body.result.content[0].text, /confined to database "personal"/);
 	assert.match(body.result.content[0].text, /cannot use database "work"/);
 	assert.match(body.result.content[0].text, /reconnect/);
 });
@@ -445,7 +445,7 @@ test("request headers cannot re-scope an OAuth identity after consent", async ()
 	);
 	const g = JSON.parse(graph.body);
 	assert.equal(g.result.isError, true);
-	assert.match(g.result.content[0].text, /confined to "personal"/);
+	assert.match(g.result.content[0].text, /confined to database "personal"/);
 });
 
 test("hydradb_databases is registered for OAuth connections only", async () => {
@@ -523,7 +523,7 @@ test("a confined connection cannot reach another database through the graph tool
 	assert.equal(res.status, 200, res.body);
 	const body = JSON.parse(res.body);
 	assert.equal(body.result.isError, true);
-	assert.match(body.result.content[0].text, /confined to "personal"/);
+	assert.match(body.result.content[0].text, /confined to database "personal"/);
 });
 
 test("graph_admin cannot drop a database outside a confined connection's list", async () => {
@@ -546,4 +546,105 @@ test("graph_admin cannot drop a database outside a confined connection's list", 
 	const body = JSON.parse(res.body);
 	assert.equal(body.result.isError, true);
 	assert.match(body.result.content[0].text, /cannot use database "work"/);
+});
+
+// --- A confined grant confines the collection too ---
+
+test("introspection carries the confined collection alongside the database", async () => {
+	__resetIntrospectionCache();
+	const { fetchFn } = fakeFetch(() => ({
+		status: 200,
+		body: active({ databases: ["personal"], collections: ["personal-col"] }),
+	}));
+	const r = await introspect({ ...CONFIG, fetchFn, now: () => NOW }, "hmat_bothaxes");
+	assert.ok(r.ok);
+	assert.deepEqual(r.token.allowedDatabases, ["personal"]);
+	assert.deepEqual(r.token.allowedCollections, ["personal-col"]);
+});
+
+const confined = () =>
+	active({
+		database: "personal",
+		collection: "personal-col",
+		databases: ["personal"],
+		collections: ["personal-col"],
+	});
+
+async function callConfined(token: string, name: string, args: Record<string, unknown>) {
+	__resetIntrospectionCache();
+	introspectAnswer = () => ({ status: 200, body: confined() });
+	const res = await request(
+		"POST",
+		"/",
+		{ host: `127.0.0.1:${port}`, ...JSON_HEADERS, authorization: `Bearer ${token}` },
+		JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }),
+	);
+	assert.equal(res.status, 200, res.body);
+	return JSON.parse(res.body).result;
+}
+
+test("a confined connection refuses a per-call collection on the context tools", async () => {
+	const r = await callConfined("hmat_c1", "hydradb_list", { kind: "memory", collection: "someone-else" });
+	assert.equal(r.isError, true);
+	assert.match(r.content[0].text, /confined to collection "personal-col"/);
+	assert.match(r.content[0].text, /cannot use collection "someone-else"/);
+});
+
+test("a confined connection refuses a per-call collection on graph reads and writes", async () => {
+	const r = await callConfined("hmat_c2", "hydradb_graph_query", {
+		query: "MATCH (n) RETURN n",
+		collection: "someone-else",
+	});
+	assert.equal(r.isError, true);
+	assert.match(r.content[0].text, /cannot use collection "someone-else"/);
+});
+
+test("graph_admin cannot drop a collection outside a confined connection's list", async () => {
+	// The irreversible one: an unchecked collection here deletes a graph the
+	// consent screen never showed.
+	const r = await callConfined("hmat_c3", "hydradb_graph_admin", {
+		action: "drop_collection",
+		collection: "someone-else",
+	});
+	assert.equal(r.isError, true);
+	assert.match(r.content[0].text, /cannot use collection "someone-else"/);
+});
+
+/**
+ * These two assert that a call got PAST the confinement guard. They cannot
+ * assert success: the fake key means the request then fails at the network,
+ * which is an error of a completely different kind. So they check the guard
+ * specifically, by its message.
+ */
+const CONFINEMENT = /This connection is confined to/;
+
+test("a confined connection passes the guard inside its own scope", async () => {
+	const ok = await callConfined("hmat_c4", "hydradb_list", {
+		kind: "memory",
+		database: "personal",
+		collection: "personal-col",
+	});
+	assert.doesNotMatch(ok.content[0].text, CONFINEMENT);
+});
+
+test("an unconfined OAuth connection keeps per-call scope overrides", async () => {
+	// The default choice is "allowed when asked": both axes stay free, which is
+	// the documented per-call scoping the product already shipped.
+	__resetIntrospectionCache();
+	introspectAnswer = () => ({ status: 200, body: active({ databases: null, collections: null }) });
+	const res = await request(
+		"POST",
+		"/",
+		{ host: `127.0.0.1:${port}`, ...JSON_HEADERS, authorization: "Bearer hmat_open" },
+		JSON.stringify({
+			jsonrpc: "2.0",
+			id: 1,
+			method: "tools/call",
+			params: {
+				name: "hydradb_list",
+				arguments: { kind: "memory", database: "anything", collection: "anything" },
+			},
+		}),
+	);
+	assert.doesNotMatch(JSON.parse(res.body).result.content[0].text, CONFINEMENT);
 });

@@ -56,6 +56,13 @@ export interface IntrospectedToken {
 	 * org-wide and the key never leaves this process.
 	 */
 	allowedDatabases?: string[];
+	/**
+	 * Collections a per-call `collection` argument may name, on the same terms.
+	 * Confinement has to cover both or it means nothing: a caller pinned to one
+	 * database could still step sideways into a collection the consent screen
+	 * never showed and, through `drop_collection`, delete it.
+	 */
+	allowedCollections?: string[];
 	userId?: string;
 	clientId?: string;
 	clientName?: string;
@@ -263,12 +270,16 @@ export async function introspect(
 		return { ok: false, reason: "invalid_token" };
 	}
 
-	const allowed = Array.isArray(body.databases)
-		? body.databases.filter((d): d is string => typeof d === "string" && d.length > 0)
-		: undefined;
+	const stringList = (v: unknown): string[] | undefined =>
+		Array.isArray(v)
+			? v.filter((d): d is string => typeof d === "string" && d.length > 0)
+			: undefined;
+	const allowed = stringList(body.databases);
+	const allowedCols = stringList(body.collections);
 	const resolved: IntrospectedToken = {
 		apiKey,
 		...(allowed ? { allowedDatabases: allowed } : {}),
+		...(allowedCols ? { allowedCollections: allowedCols } : {}),
 		database: typeof body.database === "string" && body.database ? body.database : undefined,
 		collection:
 			typeof body.collection === "string" && body.collection ? body.collection : undefined,

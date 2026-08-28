@@ -91,6 +91,8 @@ export interface HydraConfig {
 	 * default `database` is always allowed.
 	 */
 	allowedDatabases?: string[];
+	/** Collections a per-call `collection` override may name. Absent means any. */
+	allowedCollections?: string[];
 	/** Optional base URL override; defaults to the SDK's environment. */
 	baseUrl?: string;
 	/**
@@ -237,19 +239,23 @@ type ScopeFields = { database: string; collection?: string };
  * allowed database or tell the user to reconnect with wider access, rather
  * than retrying blindly.
  */
-export class DatabaseNotAllowedError extends Error {
+export class ScopeNotAllowedError extends Error {
 	constructor(
-		readonly database: string,
+		readonly kind: "database" | "collection",
+		readonly requested: string,
 		readonly allowed: readonly string[],
 	) {
 		super(
-			`This connection is confined to ${allowed.map((d) => `"${d}"`).join(", ")} and ` +
-				`cannot use database "${database}". The user chose this when approving the ` +
-				"connection; to use another database they must reconnect and allow it.",
+			`This connection is confined to ${kind} ${allowed.map((d) => `"${d}"`).join(", ")} ` +
+				`and cannot use ${kind} "${requested}". The user chose this when approving the ` +
+				`connection; to use another ${kind} they must reconnect and allow it.`,
 		);
-		this.name = "DatabaseNotAllowedError";
+		this.name = "ScopeNotAllowedError";
 	}
 }
+
+/** Kept for the name callers already import; the database case of the above. */
+export const DatabaseNotAllowedError = ScopeNotAllowedError;
 
 /** Throws unless `database` is one the connection may use. */
 export function assertDatabaseAllowed(
@@ -257,7 +263,24 @@ export function assertDatabaseAllowed(
 	allowed: readonly string[] | undefined,
 ): void {
 	if (allowed && !allowed.includes(database)) {
-		throw new DatabaseNotAllowedError(database, allowed);
+		throw new ScopeNotAllowedError("database", database, allowed);
+	}
+}
+
+/**
+ * Throws unless `collection` is one the connection may use.
+ *
+ * Separate from the database check because confinement has to cover both:
+ * a caller pinned to one database can otherwise step sideways into a
+ * collection the consent screen never showed, and `drop_collection` makes
+ * that destructive.
+ */
+export function assertCollectionAllowed(
+	collection: string,
+	allowed: readonly string[] | undefined,
+): void {
+	if (allowed && !allowed.includes(collection)) {
+		throw new ScopeNotAllowedError("collection", collection, allowed);
 	}
 }
 
@@ -267,14 +290,18 @@ abstract class Resource {
 		private readonly database: string,
 		private readonly collection?: string,
 		private readonly allowedDatabases?: readonly string[],
+		private readonly allowedCollections?: readonly string[],
 	) {}
 
 	protected scope(override?: string, dbOverride?: string): ScopeFields {
 		const database = dbOverride?.trim() || this.database;
-		// Enforced HERE, on the one path every per-call database takes, so no
-		// tool can forget to check. The configured default is always allowed.
+		// Enforced HERE, on the one path every per-call scope takes, so no tool
+		// can forget to check. The configured defaults are always allowed.
 		if (database !== this.database) assertDatabaseAllowed(database, this.allowedDatabases);
 		const collection = override?.trim() || this.collection;
+		if (collection && collection !== this.collection) {
+			assertCollectionAllowed(collection, this.allowedCollections);
+		}
 		return collection != null && collection !== ""
 			? { database, collection }
 			: { database };
@@ -286,7 +313,7 @@ abstract class Resource {
 		} catch (err) {
 			// A refused database is a decision the user made, not a transport
 			// failure from `path`; it keeps its own type and message.
-			if (err instanceof DatabaseNotAllowedError) throw err;
+			if (err instanceof ScopeNotAllowedError) throw err;
 			throw translateError(path, err);
 		}
 	}
@@ -301,8 +328,9 @@ export class ContextResource extends Resource {
 		database: string,
 		collection?: string,
 		allowedDatabases?: readonly string[],
+		allowedCollections?: readonly string[],
 	) {
-		super(sdk, database, collection, allowedDatabases);
+		super(sdk, database, collection, allowedDatabases, allowedCollections);
 	}
 
 	/**
@@ -530,8 +558,9 @@ export class DatabasesResource extends Resource {
 		database: string,
 		collection?: string,
 		allowedDatabases?: readonly string[],
+		allowedCollections?: readonly string[],
 	) {
-		super(sdk, database, collection, allowedDatabases);
+		super(sdk, database, collection, allowedDatabases, allowedCollections);
 	}
 
 	create(
@@ -586,6 +615,10 @@ export class HydraDB {
 	readonly database: string;
 	/** Databases a per-call override may name; undefined means any. */
 	readonly allowedDatabases?: readonly string[];
+	/** Collections a per-call override may name; undefined means any. */
+	readonly allowedCollections?: readonly string[];
+	/** The default collection every unscoped call uses. */
+	readonly collection?: string;
 	/**
 	 * BYOG graph operations. Not backed by the SDK — see ./graph.ts for why —
 	 * but exposed here so callers reach every HydraDB surface through one object.
@@ -609,18 +642,22 @@ export class HydraDB {
 				logging: { logger: STDERR_LOGGER },
 			});
 		this.database = config.database;
+		this.collection = config.collection;
 		this.allowedDatabases = config.allowedDatabases;
+		this.allowedCollections = config.allowedCollections;
 		this.context = new ContextResource(
 			client,
 			config.database,
 			config.collection,
 			config.allowedDatabases,
+			config.allowedCollections,
 		);
 		this.databases = new DatabasesResource(
 			client,
 			config.database,
 			config.collection,
 			config.allowedDatabases,
+			config.allowedCollections,
 		);
 		this.graph = new GraphResource({
 			token: config.token,
