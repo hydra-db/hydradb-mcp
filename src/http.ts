@@ -37,6 +37,14 @@ import {
 } from "./http-config.js";
 import { logger } from "./logger.js";
 import {
+	introspect,
+	isAccessToken,
+	metadataUrl,
+	type OAuthConfig,
+	protectedResourceMetadata,
+	wwwAuthenticate,
+} from "./oauth.js";
+import {
 	awaitInFlight,
 	beginShutdown,
 	createHydraDBServer,
@@ -102,6 +110,14 @@ export function redactPath(path: string): string {
 	return path.replace(/(^|\/)c\/[^/]+/g, "$1c/[redacted]");
 }
 
+/** The bearer value from an `Authorization` header, scheme-insensitive. */
+function bearerFromHeader(value: string | string[] | undefined): string | undefined {
+	const raw = Array.isArray(value) ? value[0] : value;
+	if (!raw) return undefined;
+	const match = /^\s*Bearer\s+(.+)$/i.exec(raw);
+	return (match ? match[1] : raw).trim() || undefined;
+}
+
 /** JSON-RPC error codes used for transport-level failures (spec: -32000 range). */
 const JSONRPC_UNAUTHORIZED = -32001;
 const JSONRPC_BAD_REQUEST = -32602;
@@ -118,6 +134,10 @@ const JSONRPC_MISDIRECTED = -32000;
 export function createHttpApp(config: HttpServerConfig): Express {
 	const { bindAddress, allowedOrigins, allowedHosts } = config;
 	const allowsAllOrigins = allowedOrigins.includes("*");
+	// OAuth is a per-deployment capability, not a per-request one, so it is
+	// resolved once here. `null` means every OAuth surface below is absent and
+	// the server is byte-for-byte the pre-OAuth server.
+	const oauth: OAuthConfig | null = config.oauth ?? null;
 
 	const app = express();
 	// Off by default so a direct client cannot spoof `X-Forwarded-*`; a
@@ -249,15 +269,65 @@ export function createHttpApp(config: HttpServerConfig): Express {
 		// proxy, and no response body ever repeats it.
 		res.setHeader("Cache-Control", "no-store");
 
+		// An OAuth access token arrives in the same `Authorization: Bearer` slot
+		// an API key does. It is told apart by prefix and exchanged, via the
+		// issuer, for the API key and scope the user approved. From here on it
+		// is indistinguishable from a caller who sent that key in a link: the
+		// resolved values are handed to the SAME resolver as path scope, which
+		// already knows that a caller's own credentials never mix with the
+		// operator's environment.
+		let effectiveScope = scope;
+		const bearer = bearerFromHeader(req.headers.authorization);
+		if (oauth && isAccessToken(bearer)) {
+			const result = await introspect(oauth, bearer);
+			if (!result.ok) {
+				if (result.reason === "unavailable") {
+					logger.error("token introspection unavailable", { detail: result.detail });
+					res
+						.status(503)
+						.json(jsonRpcError(JSONRPC_INTERNAL_ERROR, "Authorization service unavailable"));
+					return;
+				}
+				res.setHeader(
+					"WWW-Authenticate",
+					wwwAuthenticate(
+						oauth,
+						"invalid_token",
+						result.reason === "wrong_audience"
+							? "token was not issued for this server"
+							: "token is invalid, expired or revoked",
+					),
+				);
+				res
+					.status(401)
+					.json(jsonRpcError(JSONRPC_UNAUTHORIZED, "Invalid or expired access token"));
+				return;
+			}
+			const t = result.token;
+			effectiveScope = {
+				apiKey: t.apiKey,
+				// The token's own scope is the user's Approve-time choice; a path
+				// segment on the URL is the more specific instruction and wins,
+				// exactly as it does over a header.
+				...(t.database != null ? { database: t.database } : {}),
+				...(t.collection != null ? { collection: t.collection } : {}),
+				...scope,
+			};
+		}
+
 		// Who is this request for? On a hosted process the answer lives entirely
 		// in the request, so it is resolved here and a missing/incomplete answer
 		// is refused before any server is built.
-		const resolution = resolveRequestCredentials(req.headers, process.env, scope);
+		const resolution = resolveRequestCredentials(req.headers, process.env, effectiveScope);
 		if (!resolution.ok) {
 			// 401 gets a WWW-Authenticate header so a spec-compliant client knows
-			// how to authenticate rather than just seeing a bare refusal.
+			// how to authenticate rather than just seeing a bare refusal. With
+			// OAuth configured that header is the whole discovery entry point.
 			if (resolution.status === 401) {
-				res.setHeader("WWW-Authenticate", 'Bearer realm="Hydra DB MCP"');
+				res.setHeader(
+					"WWW-Authenticate",
+					oauth ? wwwAuthenticate(oauth) : 'Bearer realm="Hydra DB MCP"',
+				);
 			}
 			res
 				.status(resolution.status)
@@ -361,6 +431,24 @@ export function createHttpApp(config: HttpServerConfig): Express {
 	app.get("/health", (_req, res) => {
 		res.json({ status: "ok", service: "hydradb-mcp" });
 	});
+
+	// --- OAuth Protected Resource Metadata (RFC 9728) ---
+	//
+	// The one document a client needs to go from "401" to "open the browser at
+	// the right place". Served at the root form and the `/mcp` path form, since
+	// clients try the path-inserted URL first when the MCP endpoint has a path.
+	// Registered before the `/:database` routes so `.well-known` is a route, not
+	// a database name (it is also on the reserved list for the same reason).
+	if (oauth) {
+		app.get(
+			["/.well-known/oauth-protected-resource", "/.well-known/oauth-protected-resource/mcp"],
+			(_req, res) => {
+				res.setHeader("Cache-Control", "public, max-age=300");
+				res.setHeader("Access-Control-Allow-Origin", "*");
+				res.json(protectedResourceMetadata(oauth));
+			},
+		);
+	}
 
 	app.all(["/", "/mcp"], (req, res) => serveMcp(req, res, {}));
 	app.all(
@@ -504,6 +592,13 @@ function main(): void {
 	}
 
 	const app = createHttpApp(config);
+
+	if (config.oauth) {
+		banner(
+			`OAuth enabled: issuer ${config.oauth.issuer}, resource ${config.oauth.resource} ` +
+				`(metadata at ${metadataUrl(config.oauth)})`,
+		);
+	}
 
 	const httpServer = app
 		.listen(config.port, config.bindAddress, () => {

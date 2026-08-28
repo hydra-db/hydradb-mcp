@@ -21,6 +21,8 @@
  * env, expose the port, done) working unchanged.
  */
 
+import type { OAuthConfig } from "./oauth.js";
+import { resolveOAuthConfig } from "./oauth.js";
 import {
 	DEFAULT_COLLECTION,
 	type EnvSource,
@@ -52,6 +54,12 @@ export interface HttpServerConfig {
 	 * subnet preset so the real client IP is recovered without trusting all hops.
 	 */
 	trustProxy: boolean | number | string;
+	/**
+	 * OAuth resource-server settings, or absent when OAuth is off. Resolved
+	 * from the environment by {@link resolveHttpServerConfig}; tests pass it
+	 * directly.
+	 */
+	oauth?: OAuthConfig | null;
 }
 
 export const DEFAULT_PORT = 8080;
@@ -128,6 +136,7 @@ export function resolveHttpServerConfig(env: EnvSource = process.env): HttpServe
 		allowedOrigins: parseList(env.ALLOWED_ORIGINS),
 		allowedHosts: buildAllowedHosts(port, parseList(env.ALLOWED_HOSTS)),
 		trustProxy: parseTrustProxy(env.TRUST_PROXY),
+		oauth: resolveOAuthConfig(env),
 	};
 }
 
