@@ -21,6 +21,8 @@
  * env, expose the port, done) working unchanged.
  */
 
+import type { OAuthConfig } from "./oauth.js";
+import { resolveOAuthConfig } from "./oauth.js";
 import {
 	DEFAULT_COLLECTION,
 	type EnvSource,
@@ -52,6 +54,12 @@ export interface HttpServerConfig {
 	 * subnet preset so the real client IP is recovered without trusting all hops.
 	 */
 	trustProxy: boolean | number | string;
+	/**
+	 * OAuth resource-server settings, or absent when OAuth is off. Resolved
+	 * from the environment by {@link resolveHttpServerConfig}; tests pass it
+	 * directly.
+	 */
+	oauth?: OAuthConfig | null;
 }
 
 export const DEFAULT_PORT = 8080;
@@ -128,6 +136,7 @@ export function resolveHttpServerConfig(env: EnvSource = process.env): HttpServe
 		allowedOrigins: parseList(env.ALLOWED_ORIGINS),
 		allowedHosts: buildAllowedHosts(port, parseList(env.ALLOWED_HOSTS)),
 		trustProxy: parseTrustProxy(env.TRUST_PROXY),
+		oauth: resolveOAuthConfig(env),
 	};
 }
 
@@ -167,6 +176,10 @@ export interface RequestCredentials {
 	apiKey: string;
 	database: string;
 	collection: string;
+	/** Databases a per-call override may name; absent means any. */
+	allowedDatabases?: string[];
+	/** Collections a per-call override may name; absent means any. */
+	allowedCollections?: string[];
 	baseUrl?: string;
 	timeoutSeconds?: number;
 	maxRetries?: number;
@@ -228,11 +241,33 @@ function bearerToken(authorization: string | undefined): string | undefined {
  * request. `baseUrl`/`timeoutSeconds`/`maxRetries` are read from the environment
  * only — they are the operator's, not the caller's (see {@link RequestCredentials}).
  */
+/**
+ * An identity established BEFORE the headers are read: what an OAuth access
+ * token was found to stand for.
+ *
+ * It is passed in rather than resolved here because obtaining it is an
+ * asynchronous call to the authorization server, and this resolver is
+ * deliberately synchronous and pure. When present it replaces the header
+ * credentials entirely: the user approved this exact scope on the consent
+ * screen, and nothing in the request may widen it.
+ */
+export interface ResolvedIdentity {
+	apiKey: string;
+	database?: string;
+	collection?: string;
+	/** See IntrospectedToken.allowedDatabases. */
+	allowedDatabases?: string[];
+	/** See IntrospectedToken.allowedCollections. */
+	allowedCollections?: string[];
+}
+
 export function resolveRequestCredentials(
 	headers: RequestHeaders,
 	env: EnvSource = process.env,
+	identity?: ResolvedIdentity,
 ): CredentialResolution {
 	const headerKey =
+		identity?.apiKey ??
 		bearerToken(headerValue(headers, HEADER_AUTHORIZATION)) ??
 		headerValue(headers, HEADER_API_KEY);
 	// Whether the CALLER authenticated this request with their own key decides
@@ -253,7 +288,12 @@ export function resolveRequestCredentials(
 		};
 	}
 
-	const headerDatabase = headerValue(headers, HEADER_DATABASE);
+	// An OAuth identity is what the user approved on the consent screen. No
+	// request header may alter it: the client holding the token could otherwise
+	// re-scope the connection after consent by adding a header. Per-call tool
+	// arguments remain the sanctioned way to name another database, and those
+	// are checked against the grant's allowed list.
+	const headerDatabase = identity ? identity.database : headerValue(headers, HEADER_DATABASE);
 	// A caller-authenticated request takes its database ONLY from the header;
 	// the env database belongs to the operator's identity, not the caller's.
 	const database = callerAuthenticated
@@ -272,7 +312,7 @@ export function resolveRequestCredentials(
 	// Collection is a partition WITHIN the resolved database, not a cross-tenant
 	// boundary, so an env default is safe for either mode.
 	const collection =
-		headerValue(headers, HEADER_COLLECTION) ??
+		(identity ? identity.collection : headerValue(headers, HEADER_COLLECTION)) ??
 		readEnv(env, "HYDRADB_COLLECTION", "HYDRA_DB_SUB_TENANT_ID", noopWarn) ??
 		DEFAULT_COLLECTION;
 
@@ -287,10 +327,22 @@ export function resolveRequestCredentials(
 			apiKey,
 			database,
 			collection,
+			...(identity?.allowedDatabases ? { allowedDatabases: identity.allowedDatabases } : {}),
+			...(identity?.allowedCollections
+				? { allowedCollections: identity.allowedCollections }
+				: {}),
 			...(baseUrl != null ? { baseUrl } : {}),
 			...(timeoutSeconds != null ? { timeoutSeconds } : {}),
 			...(maxRetries != null ? { maxRetries } : {}),
-			graph: resolveRequestGraphConfig(headers, env, database, callerAuthenticated),
+			graph: resolveRequestGraphConfig(
+				// Same rule for the graph namespace: an OAuth connection's graph scope
+				// derives from the approved database, never from a header.
+				identity ? {} : headers,
+				env,
+				database,
+				callerAuthenticated,
+				identity,
+			),
 		},
 	};
 }
@@ -314,6 +366,7 @@ function resolveRequestGraphConfig(
 	env: EnvSource,
 	database: string,
 	callerAuthenticated: boolean,
+	identity?: ResolvedIdentity,
 ): GraphConfig {
 	// For a caller-authenticated request the fallback database is the request's
 	// own, so `resolveGraphConfig`'s env default is deliberately not consulted.
@@ -322,7 +375,15 @@ function resolveRequestGraphConfig(
 	return {
 		enabled: base.enabled,
 		database: headerValue(headers, HEADER_GRAPH_DATABASE) ?? defaultDatabase,
-		collection: headerValue(headers, HEADER_GRAPH_COLLECTION) ?? base.collection,
+		// For an OAuth connection the graph collection defaults to the one the
+		// user approved, NOT the operator's `HYDRADB_GRAPH_COLLECTION`. On a
+		// hosted process that environment value is one namespace shared by every
+		// tenant, so inheriting it would run one user's graph calls somewhere
+		// they never approved and everyone else can reach.
+		collection:
+			identity?.collection ??
+			headerValue(headers, HEADER_GRAPH_COLLECTION) ??
+			base.collection,
 	};
 }
 

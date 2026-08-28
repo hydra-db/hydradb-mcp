@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-08-28
+
+### Added — OAuth resource server ("Sign in with HydraDB")
+
+The hosted server can now take part in the MCP authorization flow (PRO-1790).
+Given `HYDRADB_OAUTH_ISSUER`, `HYDRADB_MCP_PUBLIC_URL` and
+`HYDRADB_OAUTH_INTROSPECTION_SECRET`, it serves an RFC 9728 Protected Resource
+Metadata document at `/.well-known/oauth-protected-resource`, points every
+`401` at it through `WWW-Authenticate`, and accepts `hmat_` access tokens
+issued by the HydraDB dashboard, exchanging each (memoised, bounded by the
+token's own expiry) for the API key and database the user approved on the
+consent screen. Tokens minted for another audience are refused; an unreachable
+issuer answers `503` rather than a `401` blaming the caller.
+
+Entirely additive. With the three variables unset the server registers no new
+routes and sends no new headers, and every existing path — API keys in
+`Authorization` or `X-HydraDB-Api-Key`, the `X-HydraDB-Database` and collection
+and graph headers, and the single-tenant environment fallback — behaves exactly
+as before whether OAuth is configured or not.
+
 ## [1.2.2] - 2026-08-19
 
 ### Added — per-call database and collection scope overrides

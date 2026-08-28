@@ -85,6 +85,14 @@ export interface HydraConfig {
 	database: string;
 	/** Collection scope (canonical name for the sub-tenant). */
 	collection?: string;
+	/**
+	 * Databases a per-call `database` override may name. Absent means any.
+	 * Set from an OAuth grant the user confined to specific databases; the
+	 * default `database` is always allowed.
+	 */
+	allowedDatabases?: string[];
+	/** Collections a per-call `collection` override may name. Absent means any. */
+	allowedCollections?: string[];
 	/** Optional base URL override; defaults to the SDK's environment. */
 	baseUrl?: string;
 	/**
@@ -223,16 +231,77 @@ export interface CreateDatabaseParams {
 
 type ScopeFields = { database: string; collection?: string };
 
+/**
+ * A per-call `database` named one the connection is not allowed to touch.
+ *
+ * Written for the agent that reads it as a tool error: it names what IS
+ * allowed and where the choice was made, so the agent can either use an
+ * allowed database or tell the user to reconnect with wider access, rather
+ * than retrying blindly.
+ */
+export class ScopeNotAllowedError extends Error {
+	constructor(
+		readonly kind: "database" | "collection",
+		readonly requested: string,
+		readonly allowed: readonly string[],
+	) {
+		super(
+			`This connection is confined to ${kind} ${allowed.map((d) => `"${d}"`).join(", ")} ` +
+				`and cannot use ${kind} "${requested}". The user chose this when approving the ` +
+				`connection; to use another ${kind} they must reconnect and allow it.`,
+		);
+		this.name = "ScopeNotAllowedError";
+	}
+}
+
+/** Kept for the name callers already import; the database case of the above. */
+export const DatabaseNotAllowedError = ScopeNotAllowedError;
+
+/** Throws unless `database` is one the connection may use. */
+export function assertDatabaseAllowed(
+	database: string,
+	allowed: readonly string[] | undefined,
+): void {
+	if (allowed && !allowed.includes(database)) {
+		throw new ScopeNotAllowedError("database", database, allowed);
+	}
+}
+
+/**
+ * Throws unless `collection` is one the connection may use.
+ *
+ * Separate from the database check because confinement has to cover both:
+ * a caller pinned to one database can otherwise step sideways into a
+ * collection the consent screen never showed, and `drop_collection` makes
+ * that destructive.
+ */
+export function assertCollectionAllowed(
+	collection: string,
+	allowed: readonly string[] | undefined,
+): void {
+	if (allowed && !allowed.includes(collection)) {
+		throw new ScopeNotAllowedError("collection", collection, allowed);
+	}
+}
+
 abstract class Resource {
 	protected constructor(
 		protected readonly sdk: HydraDBClient,
 		private readonly database: string,
 		private readonly collection?: string,
+		private readonly allowedDatabases?: readonly string[],
+		private readonly allowedCollections?: readonly string[],
 	) {}
 
 	protected scope(override?: string, dbOverride?: string): ScopeFields {
 		const database = dbOverride?.trim() || this.database;
+		// Enforced HERE, on the one path every per-call scope takes, so no tool
+		// can forget to check. The configured defaults are always allowed.
+		if (database !== this.database) assertDatabaseAllowed(database, this.allowedDatabases);
 		const collection = override?.trim() || this.collection;
+		if (collection && collection !== this.collection) {
+			assertCollectionAllowed(collection, this.allowedCollections);
+		}
 		return collection != null && collection !== ""
 			? { database, collection }
 			: { database };
@@ -242,6 +311,9 @@ abstract class Resource {
 		try {
 			return unwrap<T>(await fn());
 		} catch (err) {
+			// A refused database is a decision the user made, not a transport
+			// failure from `path`; it keeps its own type and message.
+			if (err instanceof ScopeNotAllowedError) throw err;
 			throw translateError(path, err);
 		}
 	}
@@ -251,8 +323,14 @@ export class ContextResource extends Resource {
 	// The base constructor is `protected`, so this one is what makes the class
 	// instantiable from outside the file. Removing it fails with TS2674.
 	// biome-ignore lint/complexity/noUselessConstructor: widens visibility
-	constructor(sdk: HydraDBClient, database: string, collection?: string) {
-		super(sdk, database, collection);
+	constructor(
+		sdk: HydraDBClient,
+		database: string,
+		collection?: string,
+		allowedDatabases?: readonly string[],
+		allowedCollections?: readonly string[],
+	) {
+		super(sdk, database, collection, allowedDatabases, allowedCollections);
 	}
 
 	/**
@@ -475,8 +553,14 @@ export class DatabasesResource extends Resource {
 	// The base constructor is `protected`, so this one is what makes the class
 	// instantiable from outside the file. Removing it fails with TS2674.
 	// biome-ignore lint/complexity/noUselessConstructor: widens visibility
-	constructor(sdk: HydraDBClient, database: string, collection?: string) {
-		super(sdk, database, collection);
+	constructor(
+		sdk: HydraDBClient,
+		database: string,
+		collection?: string,
+		allowedDatabases?: readonly string[],
+		allowedCollections?: readonly string[],
+	) {
+		super(sdk, database, collection, allowedDatabases, allowedCollections);
 	}
 
 	create(
@@ -527,6 +611,14 @@ export class DatabasesResource extends Resource {
 export class HydraDB {
 	readonly context: ContextResource;
 	readonly databases: DatabasesResource;
+	/** The default database every unscoped call uses. */
+	readonly database: string;
+	/** Databases a per-call override may name; undefined means any. */
+	readonly allowedDatabases?: readonly string[];
+	/** Collections a per-call override may name; undefined means any. */
+	readonly allowedCollections?: readonly string[];
+	/** The default collection every unscoped call uses. */
+	readonly collection?: string;
 	/**
 	 * BYOG graph operations. Not backed by the SDK — see ./graph.ts for why —
 	 * but exposed here so callers reach every HydraDB surface through one object.
@@ -549,11 +641,23 @@ export class HydraDB {
 				// overridden — level and silencing keep the SDK's own defaults.
 				logging: { logger: STDERR_LOGGER },
 			});
-		this.context = new ContextResource(client, config.database, config.collection);
+		this.database = config.database;
+		this.collection = config.collection;
+		this.allowedDatabases = config.allowedDatabases;
+		this.allowedCollections = config.allowedCollections;
+		this.context = new ContextResource(
+			client,
+			config.database,
+			config.collection,
+			config.allowedDatabases,
+			config.allowedCollections,
+		);
 		this.databases = new DatabasesResource(
 			client,
 			config.database,
 			config.collection,
+			config.allowedDatabases,
+			config.allowedCollections,
 		);
 		this.graph = new GraphResource({
 			token: config.token,
