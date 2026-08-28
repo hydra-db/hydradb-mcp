@@ -37,3 +37,13 @@ export type {
 } from "./graph.js";
 export { HydraWrapperError, responseError, translateError } from "./errors.js";
 export { unwrap } from "./envelope.js";
+
+// Default-database resolution (1.3.0): exported so the rule is testable and so
+// embedders can apply it outside the server.
+export {
+	__resetDefaultDatabaseCache,
+	AmbiguousDatabaseError,
+	DEFAULT_DATABASE_NAME,
+	DefaultDatabase,
+	resolveDefaultDatabase,
+} from "./client.js";

@@ -15,11 +15,12 @@
  */
 
 import { Buffer } from "node:buffer";
+import { createHash } from "node:crypto";
 import { HydraDBClient } from "@hydradb/sdk";
 import type { HydraDB as SDK } from "@hydradb/sdk";
 
 import { unwrap } from "./envelope.js";
-import { translateError } from "./errors.js";
+import { HydraWrapperError, translateError } from "./errors.js";
 import { GraphResource } from "./graph.js";
 
 export type ContextKind = "memory" | "knowledge";
@@ -81,8 +82,15 @@ function req(opts?: RequestOptions): { abortSignal?: AbortSignal } | undefined {
 export interface HydraConfig {
 	/** Bearer token (the HydraDB API key). */
 	token: string;
-	/** Database scope (canonical name for the tenant). */
-	database: string;
+	/**
+	 * Database scope (canonical name for the tenant).
+	 *
+	 * Optional: when absent, the default database is RESOLVED on first use from
+	 * the account the token belongs to (see {@link resolveDefaultDatabase}). A
+	 * caller that has exactly one database never has to name it; one with none
+	 * gets `default` created; one with several is asked to choose.
+	 */
+	database?: string;
 	/** Collection scope (canonical name for the sub-tenant). */
 	collection?: string;
 	/** Optional base URL override; defaults to the SDK's environment. */
@@ -223,15 +231,190 @@ export interface CreateDatabaseParams {
 
 type ScopeFields = { database: string; collection?: string };
 
+/** The name given to the database created for an account that has none. */
+export const DEFAULT_DATABASE_NAME = "default";
+
+/**
+ * The account has more than one database and the caller named none.
+ *
+ * Guessing here would write one tenant's memories into another's, which is
+ * strictly worse than one retry, so the choice is handed back with the options
+ * spelled out. The message is written for the agent reading a tool error: it
+ * says exactly what to pass.
+ */
+export class AmbiguousDatabaseError extends Error {
+	constructor(readonly databases: string[]) {
+		super(
+			`This account has ${databases.length} databases and no default is configured: ` +
+				`${databases.map((d) => `"${d}"`).join(", ")}. Pass \`database\` on the call ` +
+				"(or put it in the connection URL / HYDRADB_DATABASE) to choose one.",
+		);
+		this.name = "AmbiguousDatabaseError";
+	}
+}
+
+/**
+ * How long to wait for a freshly created database to become ready before
+ * handing its name back anyway. Provisioning is asynchronous on the server;
+ * the first ingest into a database that is still provisioning fails with a
+ * clear server-side message, so giving up here is safe, just slower.
+ */
+const CREATE_READY_TIMEOUT_MS = 30_000;
+const CREATE_READY_POLL_MS = 2_000;
+
+/**
+ * Process-wide memo of resolved defaults, keyed by an opaque per-account key.
+ *
+ * The hosted HTTP server builds a fresh client per request, so without this a
+ * caller that never names a database would pay a `databases.list()` round trip
+ * on EVERY tool call. Only successes are cached: an ambiguous account keeps
+ * being told to choose, and a transient failure is retried next call. Bounded
+ * so a flood of distinct keys cannot grow it without limit.
+ */
+const DEFAULT_DATABASE_TTL_MS = 5 * 60_000;
+const DEFAULT_DATABASE_CACHE_MAX = 1_000;
+const defaultDatabaseCache = new Map<string, { database: string; expires: number }>();
+
+/** Test-only: forget every memoised default database. */
+export function __resetDefaultDatabaseCache(): void {
+	defaultDatabaseCache.clear();
+}
+
+function cachedDefault(key: string | undefined): string | undefined {
+	if (key == null) return undefined;
+	const hit = defaultDatabaseCache.get(key);
+	if (!hit) return undefined;
+	if (hit.expires <= Date.now()) {
+		defaultDatabaseCache.delete(key);
+		return undefined;
+	}
+	return hit.database;
+}
+
+function rememberDefault(key: string | undefined, database: string): void {
+	if (key == null) return;
+	if (defaultDatabaseCache.size >= DEFAULT_DATABASE_CACHE_MAX) {
+		// Map iterates in insertion order, so the first key is the oldest.
+		const oldest = defaultDatabaseCache.keys().next().value;
+		if (oldest != null) defaultDatabaseCache.delete(oldest);
+	}
+	defaultDatabaseCache.set(key, {
+		database,
+		expires: Date.now() + DEFAULT_DATABASE_TTL_MS,
+	});
+}
+
+/**
+ * Decide which database an unscoped call runs against.
+ *
+ *   - exactly one database → that one;
+ *   - none → create {@link DEFAULT_DATABASE_NAME} and wait (bounded) for it;
+ *   - several → {@link AmbiguousDatabaseError}, never a guess.
+ *
+ * Exported so the rule is testable on its own and reusable by anything else
+ * that needs "the obvious database for this account" (the dashboard's connect
+ * flow applies the same rule).
+ */
+export async function resolveDefaultDatabase(
+	databases: DatabasesResource,
+	cacheKey?: string,
+	now: () => number = Date.now,
+): Promise<string> {
+	const cached = cachedDefault(cacheKey);
+	if (cached != null) return cached;
+
+	const listed = await databases.list();
+	const names = (listed.databases ?? listed.tenantIds ?? [])
+		.map((d) => d?.trim())
+		.filter((d): d is string => !!d);
+
+	let database: string;
+	if (names.length === 1) {
+		database = names[0];
+	} else if (names.length === 0) {
+		// Two unscoped requests can reach a zero-database account at once (the
+		// hosted server builds a client per request, so neither sees the other's
+		// in-flight work). Both list nothing, both create, and one loses with a
+		// 409. Losing that race means the database now exists, which is exactly
+		// the goal, so a conflict is success — anything else is a real failure
+		// and still propagates.
+		try {
+			await databases.create({ database: DEFAULT_DATABASE_NAME });
+		} catch (err) {
+			if (!(err instanceof HydraWrapperError) || err.status !== 409) throw err;
+		}
+		database = DEFAULT_DATABASE_NAME;
+		const deadline = now() + CREATE_READY_TIMEOUT_MS;
+		while (now() < deadline) {
+			try {
+				const status = await databases.readiness(database);
+				if (status.infra?.readyForIngestion) break;
+			} catch {
+				// Still provisioning, or the status endpoint is briefly behind the
+				// create. Either way the answer is "not yet"; keep waiting.
+			}
+			await new Promise((r) => setTimeout(r, CREATE_READY_POLL_MS));
+		}
+	} else {
+		throw new AmbiguousDatabaseError(names);
+	}
+
+	rememberDefault(cacheKey, database);
+	return database;
+}
+
+/**
+ * The default database for one client: fixed when configured, otherwise
+ * resolved once, lazily, on the first call that needs it.
+ *
+ * Lazy on purpose. Resolving at construction would put a network round trip
+ * (and a possible failure) into server start-up, where an MCP host reports it
+ * as "failed to connect" with no detail; resolving on first use surfaces the
+ * same failure as a tool error the agent can read and act on.
+ */
+export class DefaultDatabase {
+	private pending?: Promise<string>;
+	private resolved?: string;
+
+	constructor(
+		private readonly fixed: string | undefined,
+		private readonly resolver: () => Promise<string>,
+	) {}
+
+	/** The database if it is already known, without triggering resolution. */
+	get known(): string | undefined {
+		return this.fixed ?? this.resolved;
+	}
+
+	resolve(): Promise<string> {
+		if (this.fixed != null) return Promise.resolve(this.fixed);
+		if (this.resolved != null) return Promise.resolve(this.resolved);
+		if (!this.pending) {
+			this.pending = this.resolver().then(
+				(database) => {
+					this.resolved = database;
+					return database;
+				},
+				(err) => {
+					// A failed attempt must not poison every later call.
+					this.pending = undefined;
+					throw err;
+				},
+			);
+		}
+		return this.pending;
+	}
+}
+
 abstract class Resource {
 	protected constructor(
 		protected readonly sdk: HydraDBClient,
-		private readonly database: string,
+		private readonly database: DefaultDatabase,
 		private readonly collection?: string,
 	) {}
 
-	protected scope(override?: string, dbOverride?: string): ScopeFields {
-		const database = dbOverride?.trim() || this.database;
+	protected async scope(override?: string, dbOverride?: string): Promise<ScopeFields> {
+		const database = dbOverride?.trim() || (await this.database.resolve());
 		const collection = override?.trim() || this.collection;
 		return collection != null && collection !== ""
 			? { database, collection }
@@ -242,6 +425,11 @@ abstract class Resource {
 		try {
 			return unwrap<T>(await fn());
 		} catch (err) {
+			// Scope resolution runs inside `fn` (it is awaited while building the
+			// request), so its one deliberate failure would otherwise be dressed up
+			// as a transport error from `path`. It is a decision for the caller,
+			// not a failure of the call, and keeps its own type and message.
+			if (err instanceof AmbiguousDatabaseError) throw err;
 			throw translateError(path, err);
 		}
 	}
@@ -251,7 +439,7 @@ export class ContextResource extends Resource {
 	// The base constructor is `protected`, so this one is what makes the class
 	// instantiable from outside the file. Removing it fails with TS2674.
 	// biome-ignore lint/complexity/noUselessConstructor: widens visibility
-	constructor(sdk: HydraDBClient, database: string, collection?: string) {
+	constructor(sdk: HydraDBClient, database: DefaultDatabase, collection?: string) {
 		super(sdk, database, collection);
 	}
 
@@ -287,9 +475,9 @@ export class ContextResource extends Resource {
 		const queryBy =
 			params.queryBy ?? (params.operator != null ? "text" : undefined);
 
-		return this.call("/query", () =>
+		return this.call("/query", async () =>
 			this.sdk.query({
-				...this.scope(params.collection, params.database),
+				...(await this.scope(params.collection, params.database)),
 				query: params.query,
 				type: params.kind,
 				operator: params.operator,
@@ -318,7 +506,7 @@ export class ContextResource extends Resource {
 		opts?: RequestOptions,
 	): Promise<SDK.IngestionV2SourceUploadResponse> {
 		const request: SDK.IngestContextRequest = {
-			...this.scope(params.collection, params.database),
+			...(await this.scope(params.collection, params.database)),
 			type: params.kind,
 		};
 		if (params.upsert != null) {
@@ -398,13 +586,13 @@ export class ContextResource extends Resource {
 	}
 
 	/** List memories or knowledge sources (SDK `context.list`). */
-	list(
+	async list(
 		params: ListParams = {},
 		opts?: RequestOptions,
 	): Promise<SDK.ListV2SourceListResponse> {
-		return this.call("/context/list", () =>
+		return this.call("/context/list", async () =>
 			this.sdk.context.list({
-				...this.scope(params.collection, params.database),
+				...(await this.scope(params.collection, params.database)),
 				type: params.kind,
 				ids: params.ids,
 				page: params.page,
@@ -414,13 +602,13 @@ export class ContextResource extends Resource {
 	}
 
 	/** Fetch a source's content (SDK `context.inspect`; was "fetch content"). */
-	inspect(
+	async inspect(
 		params: InspectParams,
 		opts?: RequestOptions,
 	): Promise<SDK.FetchV2SourceFetchResponse> {
-		return this.call("/context/inspect", () =>
+		return this.call("/context/inspect", async () =>
 			this.sdk.context.inspect({
-				...this.scope(params.collection, params.database),
+				...(await this.scope(params.collection, params.database)),
 				id: params.id,
 				mode: params.mode,
 				expirySeconds: params.expirySeconds,
@@ -429,25 +617,25 @@ export class ContextResource extends Resource {
 	}
 
 	/** Per-source indexing progress (SDK `context.status`). */
-	ingestionStatus(
+	async ingestionStatus(
 		params: IngestionStatusParams,
 		opts?: RequestOptions,
 	): Promise<SDK.IngestionV2BatchProcessingStatus> {
-		return this.call("/context/status", () =>
+		return this.call("/context/status", async () =>
 			this.sdk.context.status({
-				...this.scope(params.collection, params.database),
+				...(await this.scope(params.collection, params.database)),
 				ids: params.ids,
 			}, req(opts)),
 		);
 	}
 
 	/** Knowledge-graph relations (SDK `context.relations`). */
-	relations(
+	async relations(
 		params: RelationsParams = {},
 	): Promise<SDK.GraphGraphRelationsResponse> {
-		return this.call("/context/relations", () =>
+		return this.call("/context/relations", async () =>
 			this.sdk.context.relations({
-				...this.scope(params.collection, params.database),
+				...(await this.scope(params.collection, params.database)),
 				id: params.id,
 				type: params.kind,
 				limit: params.limit,
@@ -457,13 +645,13 @@ export class ContextResource extends Resource {
 	}
 
 	/** Delete memories or knowledge sources (SDK `context.delete`). */
-	delete(
+	async delete(
 		params: DeleteParams,
 		opts?: RequestOptions,
 	): Promise<SDK.SourcesMemoryDeleteResponse> {
-		return this.call("/context", () =>
+		return this.call("/context", async () =>
 			this.sdk.context.delete({
-				...this.scope(params.collection, params.database),
+				...(await this.scope(params.collection, params.database)),
 				ids: params.ids,
 				type: params.kind,
 			}, req(opts)),
@@ -475,7 +663,7 @@ export class DatabasesResource extends Resource {
 	// The base constructor is `protected`, so this one is what makes the class
 	// instantiable from outside the file. Removing it fails with TS2674.
 	// biome-ignore lint/complexity/noUselessConstructor: widens visibility
-	constructor(sdk: HydraDBClient, database: string, collection?: string) {
+	constructor(sdk: HydraDBClient, database: DefaultDatabase, collection?: string) {
 		super(sdk, database, collection);
 	}
 
@@ -528,6 +716,11 @@ export class HydraDB {
 	readonly context: ContextResource;
 	readonly databases: DatabasesResource;
 	/**
+	 * The database unscoped calls run against. Configured, or resolved on first
+	 * use from the account (see {@link resolveDefaultDatabase}).
+	 */
+	readonly database: DefaultDatabase;
+	/**
 	 * BYOG graph operations. Not backed by the SDK — see ./graph.ts for why —
 	 * but exposed here so callers reach every HydraDB surface through one object.
 	 */
@@ -549,10 +742,23 @@ export class HydraDB {
 				// overridden — level and silencing keep the SDK's own defaults.
 				logging: { logger: STDERR_LOGGER },
 			});
-		this.context = new ContextResource(client, config.database, config.collection);
+		const database = config.database?.trim() || undefined;
+		// The memo key must not be the token itself: the cache is process-wide
+		// and its keys show up in heap dumps. A hash is enough to tell accounts
+		// apart and useless to anyone who reads it.
+		const cacheKey =
+			database == null
+				? createHash("sha256")
+						.update(`${config.baseUrl ?? ""}\n${config.token}`)
+						.digest("hex")
+				: undefined;
+		this.database = new DefaultDatabase(database, () =>
+			resolveDefaultDatabase(this.databases, cacheKey),
+		);
+		this.context = new ContextResource(client, this.database, config.collection);
 		this.databases = new DatabasesResource(
 			client,
-			config.database,
+			this.database,
 			config.collection,
 		);
 		this.graph = new GraphResource({

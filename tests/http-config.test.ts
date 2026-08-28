@@ -134,11 +134,17 @@ test("a missing key is a 401 (single-tenant self-host is the env-fallback case)"
 	assert.equal(selfHost.credentials.database, "env-db");
 });
 
-test("an authenticated request with no database is a 400, not a 401", () => {
+test("an authenticated request with no database resolves, with the database left open", () => {
+	// This used to be a 400 asking for X-HydraDB-Database. Clients that can send
+	// only an Authorization header (Claude Desktop, claude.ai) could therefore
+	// never use the hosted server. The database is now optional and resolved
+	// from the account on first use.
 	const result = resolveRequestCredentials({ authorization: "Bearer k" }, {});
-	assert.ok(!result.ok);
-	assert.equal(result.status, 400);
-	assert.match(result.message, /X-HydraDB-Database/);
+	assert.ok(result.ok);
+	assert.equal(result.credentials.apiKey, "k");
+	assert.equal(result.credentials.database, undefined);
+	assert.equal(result.credentials.collection, "hydra-db-mcp");
+	assert.equal(result.credentials.graph.database, "");
 });
 
 test("baseUrl/timeout/retries are operator env only, never from headers", () => {
@@ -197,14 +203,17 @@ test("graph tools can be withheld by the operator regardless of caller", () => {
 
 test("a caller's key never pairs with the operator's env database", () => {
 	// The caller authenticated with their OWN key but named no database. The env
-	// database is the operator's, so this is refused rather than run the caller's
-	// key against it — a 400, asking for the header they omitted.
+	// database is the operator's, so it is NOT consulted: the caller's database
+	// is left to be resolved from the caller's own account, never borrowed.
 	const result = resolveRequestCredentials(
 		{ authorization: "Bearer caller-key" },
 		{ HYDRADB_API_KEY: "operator-key", HYDRADB_DATABASE: "operator-db" },
 	);
-	assert.ok(!result.ok);
-	assert.equal(result.status, 400);
+	assert.ok(result.ok);
+	assert.equal(result.credentials.apiKey, "caller-key");
+	assert.equal(result.credentials.database, undefined);
+	// Same for the graph namespace: the operator's default is not inherited.
+	assert.equal(result.credentials.graph.database, "");
 });
 
 test("a caller-authenticated request ignores the operator's graph env database", () => {
@@ -245,4 +254,62 @@ test("parseTrustProxy maps env spellings to Express's setting", () => {
 test("resolveHttpServerConfig defaults trustProxy off", () => {
 	assert.equal(resolveHttpServerConfig({}).trustProxy, false);
 	assert.equal(resolveHttpServerConfig({ TRUST_PROXY: "1" }).trustProxy, 1);
+});
+
+// --- Path scope (connection links, 1.3.0) ---
+
+test("a connection link authenticates and scopes with no headers at all", () => {
+	const result = resolveRequestCredentials(
+		{},
+		{ HYDRADB_API_KEY: "operator-key", HYDRADB_DATABASE: "operator-db" },
+		{ apiKey: "sk_live_abc.secret", database: "my-db", collection: "my-col" },
+	);
+	assert.ok(result.ok);
+	assert.equal(result.credentials.apiKey, "sk_live_abc.secret");
+	assert.equal(result.credentials.database, "my-db");
+	assert.equal(result.credentials.collection, "my-col");
+	// The link's key counts as caller authentication, so the graph scope follows
+	// the link's database, not the operator's.
+	assert.equal(result.credentials.graph.database, "my-db");
+});
+
+test("a link with only a key leaves the database to be resolved", () => {
+	const result = resolveRequestCredentials({}, {}, { apiKey: "sk_live_abc.secret" });
+	assert.ok(result.ok);
+	assert.equal(result.credentials.database, undefined);
+	assert.equal(result.credentials.collection, "hydra-db-mcp");
+});
+
+test("path scope beats the equivalent header, header beats env", () => {
+	const result = resolveRequestCredentials(
+		{
+			authorization: "Bearer header-key",
+			"x-hydradb-database": "header-db",
+			"x-hydradb-collection": "header-col",
+		},
+		{ HYDRADB_COLLECTION: "env-col" },
+		{ apiKey: "path-key", database: "path-db" },
+	);
+	assert.ok(result.ok);
+	assert.equal(result.credentials.apiKey, "path-key");
+	assert.equal(result.credentials.database, "path-db");
+	// No collection in the path, so the header's wins over the env's.
+	assert.equal(result.credentials.collection, "header-col");
+});
+
+test("a path database scopes a header-authenticated request", () => {
+	const result = resolveRequestCredentials(
+		{ authorization: "Bearer k" },
+		{},
+		{ database: "path-db" },
+	);
+	assert.ok(result.ok);
+	assert.equal(result.credentials.apiKey, "k");
+	assert.equal(result.credentials.database, "path-db");
+});
+
+test("a path database alone, with no key anywhere, is still a 401", () => {
+	const result = resolveRequestCredentials({}, {}, { database: "path-db" });
+	assert.ok(!result.ok);
+	assert.equal(result.status, 401);
 });

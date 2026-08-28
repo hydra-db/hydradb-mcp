@@ -3,7 +3,7 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { after, before, test } from "node:test";
 
-import { createHttpApp } from "../src/http.js";
+import { createHttpApp, redactPath } from "../src/http.js";
 import { buildAllowedHosts } from "../src/http-config.js";
 
 /**
@@ -113,35 +113,7 @@ test("POST /mcp without credentials is 401 with a WWW-Authenticate header", asyn
 	assert.match(JSON.parse(res.body).error.message, /Authorization/);
 });
 
-test("POST / authenticated but with no database is 400", async () => {
-	const res = await request(
-		"POST",
-		"/",
-		{
-			host: `127.0.0.1:${port}`,
-			"content-type": "application/json",
-			authorization: "Bearer some-key",
-		},
-		JSON.stringify({ jsonrpc: "2.0", method: "tools/list", id: 1 }),
-	);
-	assert.equal(res.status, 400);
-	assert.match(JSON.parse(res.body).error.message, /X-HydraDB-Database/);
-});
 
-test("POST /mcp authenticated but with no database is 400", async () => {
-	const res = await request(
-		"POST",
-		"/mcp",
-		{
-			host: `127.0.0.1:${port}`,
-			"content-type": "application/json",
-			authorization: "Bearer some-key",
-		},
-		JSON.stringify({ jsonrpc: "2.0", method: "tools/list", id: 1 }),
-	);
-	assert.equal(res.status, 400);
-	assert.match(JSON.parse(res.body).error.message, /X-HydraDB-Database/);
-});
 
 test("a malformed JSON body is refused with a JSON-RPC 400, not HTML", async () => {
 	const res = await request(
@@ -193,4 +165,107 @@ test("a CORS preflight (OPTIONS) for an allowed origin succeeds", async () => {
 		String(res.headers["access-control-allow-headers"]).toLowerCase(),
 		/x-hydradb-database/,
 	);
+});
+
+/**
+ * A `tools/list` is answered by the server itself, with no outbound call, so
+ * it proves a URL shape reaches a working MCP server without needing a real
+ * key. The database (when the URL names none) is resolved lazily, on the
+ * first tool CALL, so listing tools never touches the network either.
+ */
+async function listTools(path: string, headers: Record<string, string> = {}) {
+	return request(
+		"POST",
+		path,
+		{
+			host: `127.0.0.1:${port}`,
+			"content-type": "application/json",
+			accept: "application/json, text/event-stream",
+			...headers,
+		},
+		JSON.stringify({ jsonrpc: "2.0", method: "tools/list", id: 1 }),
+	);
+}
+
+function toolNames(res: Res): string[] {
+	const body = JSON.parse(res.body);
+	assert.equal(body.error, undefined, res.body);
+	return body.result.tools.map((t: { name: string }) => t.name);
+}
+
+test("POST / authenticated with no database is served (database resolved lazily)", async () => {
+	// This was a 400 asking for X-HydraDB-Database, which clients that can send
+	// only an Authorization header could never satisfy.
+	const res = await listTools("/", { authorization: "Bearer some-key" });
+	assert.equal(res.status, 200, res.body);
+	assert.ok(toolNames(res).includes("hydradb_query"));
+	assert.equal(res.headers["cache-control"], "no-store");
+});
+
+test("POST /mcp authenticated with no database is served", async () => {
+	const res = await listTools("/mcp", { authorization: "Bearer some-key" });
+	assert.equal(res.status, 200, res.body);
+	assert.ok(toolNames(res).includes("hydradb_databases"));
+});
+
+// --- Connection links and path scope (1.3.0) ---
+
+const LINK_KEY = "sk_live_abcDEF123.superSecretValue_-x";
+
+test("a connection link /c/<key>/<db>/<col> is served with no headers", async () => {
+	const res = await listTools(`/c/${LINK_KEY}/my-db/my-col`);
+	assert.equal(res.status, 200, res.body);
+	assert.ok(toolNames(res).includes("hydradb_query"));
+	assert.equal(res.headers["cache-control"], "no-store");
+});
+
+test("a connection link with only a key, and the /mcp/c spelling, are served", async () => {
+	for (const path of [`/c/${LINK_KEY}`, `/mcp/c/${LINK_KEY}`, `/mcp/c/${LINK_KEY}/my-db`]) {
+		const res = await listTools(path);
+		assert.equal(res.status, 200, `${path}: ${res.body}`);
+	}
+});
+
+test("a header-authenticated request can be scoped by path", async () => {
+	for (const path of ["/my-db", "/my-db/my-col", "/mcp/my-db", "/mcp/my-db/my-col"]) {
+		const res = await listTools(path, { authorization: "Bearer some-key" });
+		assert.equal(res.status, 200, `${path}: ${res.body}`);
+	}
+});
+
+test("a path-scoped request with no key anywhere is still 401", async () => {
+	const res = await listTools("/my-db");
+	assert.equal(res.status, 401);
+});
+
+test("reserved and malformed path segments are a JSON 404 that echoes nothing", async () => {
+	for (const path of [
+		"/c",
+		"/health/x",
+		`/c/${LINK_KEY}/bad$name`,
+		`/c/${LINK_KEY}/ok/bad%20name`,
+		"/.well-known/oauth-protected-resource",
+		"/c/short",
+		"/-leading-hyphen",
+	]) {
+		const res = await listTools(path, { authorization: "Bearer some-key" });
+		assert.equal(res.status, 404, path);
+		const body = JSON.parse(res.body);
+		assert.equal(body.error.message, "Not found");
+		assert.ok(!res.body.includes(LINK_KEY), `key echoed for ${path}`);
+		assert.ok(!res.body.includes("bad"), `path echoed for ${path}`);
+	}
+});
+
+test("GET /health is not mistaken for a database name", async () => {
+	const res = await request("GET", "/health", { host: `127.0.0.1:${port}` });
+	assert.equal(res.status, 200);
+	assert.deepEqual(JSON.parse(res.body), { status: "ok", service: "hydradb-mcp" });
+});
+
+test("redactPath hides the key in a connection link", () => {
+	assert.equal(redactPath(`/c/${LINK_KEY}/my-db`), "/c/[redacted]/my-db");
+	assert.equal(redactPath(`/mcp/c/${LINK_KEY}`), "/mcp/c/[redacted]");
+	assert.equal(redactPath("/my-db/col"), "/my-db/col");
+	assert.equal(redactPath("/"), "/");
 });

@@ -357,3 +357,174 @@ test("operator with an explicit hybrid retrieval is rejected, not sent", async (
 	);
 	assert.equal(calls.length, 0, "a request that cannot succeed must not reach the wire");
 });
+
+// --- Default database resolution (1.3.0) ---
+
+import {
+	__resetDefaultDatabaseCache,
+	AmbiguousDatabaseError,
+	DEFAULT_DATABASE_NAME,
+} from "../src/hydra/index.js";
+
+/** An SDK whose `databases` surface answers from canned lists and records writes. */
+function databasesSdk(names: string[]) {
+	const calls: string[] = [];
+	const sdk = {
+		query(args: Record<string, unknown>) {
+			calls.push(`query:${args.database}`);
+			return Promise.resolve({ data: { chunks: [] }, success: true });
+		},
+		databases: {
+			list() {
+				calls.push("list");
+				return Promise.resolve({ data: { databases: names }, success: true });
+			},
+			create(args: { database: string }) {
+				calls.push(`create:${args.database}`);
+				// The server provisions asynchronously; from now on it lists.
+				names.push(args.database);
+				return Promise.resolve({ data: { status: "creating" }, success: true });
+			},
+			status(args: { database: string }) {
+				calls.push(`status:${args.database}`);
+				return Promise.resolve({
+					data: { infra: { readyForIngestion: true } },
+					success: true,
+				});
+			},
+		},
+	} as unknown as HydraDBClient;
+	return { sdk, calls };
+}
+
+test("a configured database is used as-is and never resolved", async () => {
+	__resetDefaultDatabaseCache();
+	const { sdk, calls } = databasesSdk(["a", "b"]);
+	const hydra = new HydraDB({ token: "t", database: "fixed" }, sdk);
+	assert.equal(hydra.database.known, "fixed");
+	await hydra.context.query({ query: "hi" });
+	assert.deepEqual(calls, ["query:fixed"]);
+});
+
+test("an account with exactly one database resolves to it, once, on first use", async () => {
+	__resetDefaultDatabaseCache();
+	const { sdk, calls } = databasesSdk(["only-one"]);
+	const hydra = new HydraDB({ token: "t1" }, sdk);
+	// Construction is free: nothing has been resolved yet.
+	assert.equal(hydra.database.known, undefined);
+	assert.deepEqual(calls, []);
+
+	await hydra.context.query({ query: "hi" });
+	await hydra.context.query({ query: "again" });
+	assert.equal(hydra.database.known, "only-one");
+	// One list, then every call scoped to it.
+	assert.deepEqual(calls, ["list", "query:only-one", "query:only-one"]);
+});
+
+test("an account with no database gets one created and waits for readiness", async () => {
+	__resetDefaultDatabaseCache();
+	const { sdk, calls } = databasesSdk([]);
+	const hydra = new HydraDB({ token: "t2" }, sdk);
+	await hydra.context.query({ query: "hi" });
+	assert.equal(hydra.database.known, DEFAULT_DATABASE_NAME);
+	assert.deepEqual(calls, [
+		"list",
+		`create:${DEFAULT_DATABASE_NAME}`,
+		`status:${DEFAULT_DATABASE_NAME}`,
+		`query:${DEFAULT_DATABASE_NAME}`,
+	]);
+});
+
+test("an account with several databases is asked to choose, never guessed for", async () => {
+	__resetDefaultDatabaseCache();
+	const { sdk, calls } = databasesSdk(["work", "personal"]);
+	const hydra = new HydraDB({ token: "t3" }, sdk);
+	await assert.rejects(
+		() => hydra.context.query({ query: "hi" }),
+		(e: unknown) => {
+			assert.ok(e instanceof AmbiguousDatabaseError);
+			assert.deepEqual(e.databases, ["work", "personal"]);
+			assert.match(e.message, /"work", "personal"/);
+			assert.match(e.message, /Pass `database`/);
+			return true;
+		},
+	);
+	// Nothing was written and no query went out.
+	assert.deepEqual(calls, ["list"]);
+	// A per-call database sidesteps the question entirely.
+	await hydra.context.query({ query: "hi", database: "work" });
+	assert.deepEqual(calls, ["list", "query:work"]);
+	// The failure did not poison the resolver: it asks again next time.
+	await assert.rejects(() => hydra.context.query({ query: "hi" }), AmbiguousDatabaseError);
+	assert.deepEqual(calls, ["list", "query:work", "list"]);
+});
+
+test("the resolved default is memoised per account across client instances", async () => {
+	__resetDefaultDatabaseCache();
+	const first = databasesSdk(["memo"]);
+	await new HydraDB({ token: "same-token" }, first.sdk).context.query({ query: "a" });
+	assert.deepEqual(first.calls, ["list", "query:memo"]);
+
+	// A second client for the SAME token (what the hosted server builds per
+	// request) skips the list.
+	const second = databasesSdk(["memo"]);
+	await new HydraDB({ token: "same-token" }, second.sdk).context.query({ query: "b" });
+	assert.deepEqual(second.calls, ["query:memo"]);
+
+	// A different token is a different account and resolves on its own.
+	const third = databasesSdk(["other"]);
+	await new HydraDB({ token: "other-token" }, third.sdk).context.query({ query: "c" });
+	assert.deepEqual(third.calls, ["list", "query:other"]);
+	__resetDefaultDatabaseCache();
+});
+
+test("a lost create race resolves to the same default instead of failing", async () => {
+	__resetDefaultDatabaseCache();
+	// Two unscoped clients hit a zero-database account at once. The second
+	// create loses with a 409, which means the database exists — the goal.
+	const calls: string[] = [];
+	const sdk = {
+		query(args: Record<string, unknown>) {
+			calls.push(`query:${args.database}`);
+			return Promise.resolve({ data: { chunks: [] }, success: true });
+		},
+		databases: {
+			list() {
+				calls.push("list");
+				return Promise.resolve({ data: { databases: [] }, success: true });
+			},
+			create() {
+				calls.push("create");
+				return Promise.reject(
+					new HydraDBError({ statusCode: 409, body: { code: "CONFLICT" } }),
+				);
+			},
+			status() {
+				return Promise.resolve({ data: { infra: { readyForIngestion: true } }, success: true });
+			},
+		},
+	} as unknown as HydraDBClient;
+
+	const hydra = new HydraDB({ token: "race-token" }, sdk);
+	await hydra.context.query({ query: "hi" });
+	assert.equal(hydra.database.known, DEFAULT_DATABASE_NAME);
+	assert.deepEqual(calls, ["list", "create", `query:${DEFAULT_DATABASE_NAME}`]);
+	__resetDefaultDatabaseCache();
+});
+
+test("a non-conflict create failure still propagates", async () => {
+	__resetDefaultDatabaseCache();
+	const sdk = {
+		query: () => Promise.resolve({ data: { chunks: [] }, success: true }),
+		databases: {
+			list: () => Promise.resolve({ data: { databases: [] }, success: true }),
+			create: () =>
+				Promise.reject(new HydraDBError({ statusCode: 403, body: { code: "FORBIDDEN" } })),
+		},
+	} as unknown as HydraDBClient;
+	await assert.rejects(
+		() => new HydraDB({ token: "forbidden-token" }, sdk).context.query({ query: "hi" }),
+		/403/,
+	);
+	__resetDefaultDatabaseCache();
+});
