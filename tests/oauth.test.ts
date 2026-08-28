@@ -222,7 +222,9 @@ function request(method: string, path: string, headers: Record<string, string> =
 	return new Promise<{ status: number; headers: http.IncomingHttpHeaders; body: string }>((resolve, reject) => {
 		const req = http.request({ host: "127.0.0.1", port, method, path, headers }, (res) => {
 			let data = "";
-			res.on("data", (c) => (data += c));
+			res.on("data", (c) => {
+				data += c;
+			});
 			res.on("end", () => resolve({ status: res.statusCode ?? 0, headers: res.headers, body: data }));
 		});
 		req.on("error", reject);
