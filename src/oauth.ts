@@ -48,6 +48,14 @@ export interface IntrospectedToken {
 	apiKey: string;
 	database?: string;
 	collection?: string;
+	/**
+	 * Databases a per-call `database` argument may name. Absent means any (the
+	 * user chose to let the app switch when asked); present means the user
+	 * confined the app to exactly these on the consent screen, and this server
+	 * is where that promise is kept, because the API key behind the token is
+	 * org-wide and the key never leaves this process.
+	 */
+	allowedDatabases?: string[];
 	userId?: string;
 	clientId?: string;
 	clientName?: string;
@@ -255,8 +263,12 @@ export async function introspect(
 		return { ok: false, reason: "invalid_token" };
 	}
 
+	const allowed = Array.isArray(body.databases)
+		? body.databases.filter((d): d is string => typeof d === "string" && d.length > 0)
+		: undefined;
 	const resolved: IntrospectedToken = {
 		apiKey,
+		...(allowed ? { allowedDatabases: allowed } : {}),
 		database: typeof body.database === "string" && body.database ? body.database : undefined,
 		collection:
 			typeof body.collection === "string" && body.collection ? body.collection : undefined,

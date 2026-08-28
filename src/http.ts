@@ -269,6 +269,7 @@ export function createHttpApp(config: HttpServerConfig): Express {
 				apiKey: t.apiKey,
 				...(t.database != null ? { database: t.database } : {}),
 				...(t.collection != null ? { collection: t.collection } : {}),
+				...(t.allowedDatabases ? { allowedDatabases: t.allowedDatabases } : {}),
 			};
 			// A token is a credential; nothing carrying one may be cached.
 			res.setHeader("Cache-Control", "no-store");
@@ -307,6 +308,7 @@ export function createHttpApp(config: HttpServerConfig): Express {
 				token: creds.apiKey,
 				database: creds.database,
 				collection: creds.collection,
+				...(creds.allowedDatabases ? { allowedDatabases: creds.allowedDatabases } : {}),
 				...(creds.baseUrl != null ? { baseUrl: creds.baseUrl } : {}),
 				...(creds.timeoutSeconds != null
 					? { timeoutSeconds: creds.timeoutSeconds }

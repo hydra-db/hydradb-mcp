@@ -12,7 +12,7 @@ import type { GraphConfig } from "./config.js";
 import { renderRecalledContext } from "./context.js";
 import { COLLECTION_PATTERN, MAX_BODY_BYTES, renderRows } from "./cypher.js";
 import { SERVER_INSTRUCTIONS, TOOL_DESCRIPTIONS } from "./descriptions.js";
-import { HydraDB } from "./hydra/index.js";
+import { assertDatabaseAllowed, HydraDB } from "./hydra/index.js";
 import type { ContextKind, QueryKind } from "./hydra/index.js";
 import { logger } from "./logger.js";
 import { ALIAS_REPLACEMENTS, DEPRECATED_TOOL_NAMES, TOOL_NAMES } from "./tool-names.js";
@@ -1168,6 +1168,39 @@ export function createHydraDBServer(
 		return deleteReport(kind, args.ids, res, removed, removedCount);
 	}
 
+	/**
+	 * Which databases this connection can address, and which is the default.
+	 *
+	 * A confined connection answers from its allowed list without a network
+	 * call: the list IS the answer, and asking the API would only show
+	 * databases the connection is not permitted to use.
+	 */
+	async function runDatabases(): Promise<ToolResult> {
+		const defaultDatabase = hydra.database;
+		let databases: string[];
+		let confined = false;
+		if (hydra.allowedDatabases) {
+			databases = [...hydra.allowedDatabases];
+			confined = true;
+		} else {
+			const listed = await hydra.databases.list();
+			databases = (listed.databases ?? listed.tenantIds ?? []).filter(Boolean);
+		}
+		if (!databases.includes(defaultDatabase)) databases.unshift(defaultDatabase);
+
+		const lines = databases.map(
+			(d) => `  - ${d}${d === defaultDatabase ? "  (default for this connection)" : ""}`,
+		);
+		const note = confined
+			? "\nThis connection is confined to the database(s) above; any other name is refused. " +
+				"The user chose this when approving the connection."
+			: "\nPass `database` on any tool to work in another one.";
+		return structuredResult(
+			`${databases.length} database(s):\n${lines.join("\n")}${note}`,
+			{ databases, default: defaultDatabase, confined },
+		);
+	}
+
 	// --- BYOG graph handlers ---
 
 	/**
@@ -1178,11 +1211,24 @@ export function createHydraDBServer(
 	 * validated here because the server's rule is a documented charset and
 	 * rejecting locally names it, where the remote failure is a bare 400.
 	 */
+	/**
+	 * The graph database a call runs against, checked against the connection's
+	 * allowed set. The graph client does not go through the context client's
+	 * scope(), so the same rule is applied here for every graph tool.
+	 */
+	function graphDatabase(override?: string): string {
+		const database = override?.trim() || graphConfig.database;
+		if (database && database !== hydra.database) {
+			assertDatabaseAllowed(database, hydra.allowedDatabases);
+		}
+		return database;
+	}
+
 	function graphScope(args: { database?: string; collection?: string }): {
 		database: string;
 		collection: string;
 	} {
-		const database = args.database?.trim() || graphConfig.database;
+		const database = graphDatabase(args.database);
 		const collection = args.collection?.trim() || graphConfig.collection;
 
 		if (!database) {
@@ -1306,7 +1352,7 @@ export function createHydraDBServer(
 		args: { database?: string },
 		signal?: AbortSignal,
 	): Promise<ToolResult> {
-		const database = args.database?.trim() || graphConfig.database;
+		const database = graphDatabase(args.database);
 		if (!database) {
 			throw new Error(
 				"No graph database configured. Set HYDRADB_GRAPH_DATABASE (or HYDRADB_DATABASE), " +
@@ -1336,7 +1382,7 @@ export function createHydraDBServer(
 		args: { action: string; database?: string; collection?: string },
 		signal?: AbortSignal,
 	): Promise<ToolResult> {
-		const database = args.database?.trim() || graphConfig.database;
+		const database = graphDatabase(args.database);
 		if (!database) {
 			throw new Error(
 				"No graph database configured. Set HYDRADB_GRAPH_DATABASE (or HYDRADB_DATABASE), " +
@@ -2081,6 +2127,8 @@ export function createHydraDBServer(
 		(args, extra) => runStatus(args as Parameters<typeof runStatus>[0], extra?.signal),
 		readOnly,
 	);
+
+	register(TOOL_NAMES.DATABASES, {}, () => runDatabases(), readOnly);
 
 	// --- BYOG graph tools (PRO-1681) ---
 	//

@@ -36,4 +36,5 @@ export type {
 	GraphRow,
 } from "./graph.js";
 export { HydraWrapperError, responseError, translateError } from "./errors.js";
+export { assertDatabaseAllowed, DatabaseNotAllowedError } from "./client.js";
 export { unwrap } from "./envelope.js";

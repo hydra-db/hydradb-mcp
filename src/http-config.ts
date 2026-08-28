@@ -176,6 +176,8 @@ export interface RequestCredentials {
 	apiKey: string;
 	database: string;
 	collection: string;
+	/** Databases a per-call override may name; absent means any. */
+	allowedDatabases?: string[];
 	baseUrl?: string;
 	timeoutSeconds?: number;
 	maxRetries?: number;
@@ -251,6 +253,8 @@ export interface ResolvedIdentity {
 	apiKey: string;
 	database?: string;
 	collection?: string;
+	/** See IntrospectedToken.allowedDatabases. */
+	allowedDatabases?: string[];
 }
 
 export function resolveRequestCredentials(
@@ -315,6 +319,7 @@ export function resolveRequestCredentials(
 			apiKey,
 			database,
 			collection,
+			...(identity?.allowedDatabases ? { allowedDatabases: identity.allowedDatabases } : {}),
 			...(baseUrl != null ? { baseUrl } : {}),
 			...(timeoutSeconds != null ? { timeoutSeconds } : {}),
 			...(maxRetries != null ? { maxRetries } : {}),

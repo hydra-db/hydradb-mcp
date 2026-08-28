@@ -338,3 +338,55 @@ test("an OAuth token supplies the database, so no header is needed", async () =>
 	);
 	assert.equal(res.status, 200, res.body);
 });
+
+// --- Database confinement (the consent screen's "Other databases: not allowed") ---
+
+test("introspection carries the confined database list when the issuer sends one", async () => {
+	__resetIntrospectionCache();
+	const { fetchFn } = fakeFetch(() => ({ status: 200, body: active({ databases: ["personal"] }) }));
+	const r = await introspect({ ...CONFIG, fetchFn, now: () => NOW }, "hmat_confined");
+	assert.ok(r.ok);
+	assert.deepEqual(r.token.allowedDatabases, ["personal"]);
+	// null (or absent) means unrestricted.
+	const { fetchFn: f2 } = fakeFetch(() => ({ status: 200, body: active({ databases: null }) }));
+	const r2 = await introspect({ ...CONFIG, fetchFn: f2, now: () => NOW }, "hmat_open");
+	assert.ok(r2.ok);
+	assert.equal(r2.token.allowedDatabases, undefined);
+});
+
+test("a confined connection refuses a per-call database outside its list, before any network call", async () => {
+	__resetIntrospectionCache();
+	introspectAnswer = () => ({ status: 200, body: active({ database: "personal", databases: ["personal"] }) });
+	const res = await request(
+		"POST",
+		"/",
+		{ host: `127.0.0.1:${port}`, ...JSON_HEADERS, authorization: "Bearer hmat_confined2" },
+		JSON.stringify({
+			jsonrpc: "2.0",
+			id: 1,
+			method: "tools/call",
+			params: { name: "hydradb_list", arguments: { kind: "memory", database: "work" } },
+		}),
+	);
+	assert.equal(res.status, 200, res.body);
+	const body = JSON.parse(res.body);
+	assert.equal(body.result.isError, true);
+	assert.match(body.result.content[0].text, /confined to "personal"/);
+	assert.match(body.result.content[0].text, /cannot use database "work"/);
+	assert.match(body.result.content[0].text, /reconnect/);
+});
+
+test("hydradb_databases on a confined connection answers from the list, marking the default", async () => {
+	__resetIntrospectionCache();
+	introspectAnswer = () => ({ status: 200, body: active({ database: "personal", databases: ["personal"] }) });
+	const res = await request(
+		"POST",
+		"/",
+		{ host: `127.0.0.1:${port}`, ...JSON_HEADERS, authorization: "Bearer hmat_confined3" },
+		JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "hydradb_databases", arguments: {} } }),
+	);
+	const body = JSON.parse(res.body);
+	assert.equal(body.result.isError, undefined, res.body);
+	assert.deepEqual(body.result.structuredContent, { databases: ["personal"], default: "personal", confined: true });
+	assert.match(body.result.content[0].text, /confined/);
+});
