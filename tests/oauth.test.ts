@@ -648,3 +648,48 @@ test("an unconfined OAuth connection keeps per-call scope overrides", async () =
 	);
 	assert.doesNotMatch(JSON.parse(res.body).result.content[0].text, CONFINEMENT);
 });
+
+test("a collection-confined connection cannot drop a whole database", async () => {
+	// drop_database removes every collection in the database, so it cannot be
+	// done within a collection confinement at all: the broadest destructive
+	// action must not be the way around the narrowest grant.
+	const r = await callConfined("hmat_c5", "hydradb_graph_admin", {
+		action: "drop_database",
+		database: "personal",
+	});
+	assert.equal(r.isError, true);
+	assert.match(r.content[0].text, /confined to collection "personal-col"/);
+	assert.match(r.content[0].text, /removes every collection/);
+	assert.match(r.content[0].text, /Nothing was deleted/);
+});
+
+test("a database-only confinement still permits drop_database inside its list", async () => {
+	// Confined to databases but not collections: drop_database is in scope for
+	// an allowed database, and still refused for any other.
+	__resetIntrospectionCache();
+	introspectAnswer = () => ({
+		status: 200,
+		body: active({ database: "personal", databases: ["personal"], collections: null }),
+	});
+	const call = async (db: string) => {
+		const res = await request(
+			"POST",
+			"/",
+			{ host: `127.0.0.1:${port}`, ...JSON_HEADERS, authorization: "Bearer hmat_dbonly" },
+			JSON.stringify({
+				jsonrpc: "2.0",
+				id: 1,
+				method: "tools/call",
+				params: { name: "hydradb_graph_admin", arguments: { action: "drop_database", database: db } },
+			}),
+		);
+		return JSON.parse(res.body).result;
+	};
+	const refused = await call("work");
+	assert.equal(refused.isError, true);
+	assert.match(refused.content[0].text, /cannot use database "work"/);
+	// The allowed one gets past the guard (and then fails at the network, which
+	// is a different kind of error entirely).
+	const allowed = await call("personal");
+	assert.doesNotMatch(allowed.content[0].text, /This connection is confined to/);
+});

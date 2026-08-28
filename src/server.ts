@@ -1451,6 +1451,23 @@ export function createHydraDBServer(
 		}
 
 		if (args.action === "drop_database") {
+			// This deletes EVERY graph collection in the database, so on a
+			// collection-confined connection it cannot be performed within the
+			// confinement: even an allowed database holds collections the user
+			// never approved. The per-collection checks elsewhere cannot catch
+			// this one, because the call names no collection at all. Refuse the
+			// action outright rather than let the broadest destructive operation
+			// be the way around the narrowest grant.
+			if (hydra.allowedCollections) {
+				throw new Error(
+					`This connection is confined to collection ${hydra.allowedCollections
+						.map((c) => `"${c}"`)
+						.join(", ")}, and "drop_database" removes every collection in ` +
+						`"${database}", including ones it was not granted. Nothing was deleted. ` +
+						'Use "drop_collection" for a collection this connection may use, or ' +
+						"reconnect with wider access.",
+				);
+			}
 			const res = await hydra.graph.dropDatabase(database, { signal });
 			const dropped = res.deleted_collections ?? [];
 			const listed =
