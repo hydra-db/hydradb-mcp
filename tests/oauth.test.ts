@@ -4,7 +4,7 @@ import type { AddressInfo } from "node:net";
 import { after, before, test } from "node:test";
 
 import { createHttpApp } from "../src/http.js";
-import { buildAllowedHosts } from "../src/http-config.js";
+import { buildAllowedHosts, resolveRequestCredentials } from "../src/http-config.js";
 import {
 	__resetIntrospectionCache,
 	introspect,
@@ -461,4 +461,89 @@ test("hydradb_databases is registered for OAuth connections only", async () => {
 	);
 	// An API-key connection's tool list is exactly what it was before OAuth existed.
 	assert.ok(!toolNames(viaKey).includes("hydradb_databases"));
+});
+
+// --- The graph surface must not be a way around consent ---
+
+test("graph headers are powerless against an OAuth identity, and defaults come from consent", () => {
+	// The graph tools reach a different namespace than the context tools, so
+	// they need the same protection stated separately: a token holder must not
+	// be able to point graph reads, writes or drops somewhere the consent
+	// screen never showed.
+	const withToken = resolveRequestCredentials(
+		{
+			"x-hydradb-graph-database": "attacker-graph",
+			"x-hydradb-graph-collection": "attacker-collection",
+			"x-hydradb-database": "attacker-db",
+			"x-hydradb-collection": "attacker-col",
+		},
+		{ HYDRADB_GRAPH_COLLECTION: "operator-shared-namespace" },
+		{ apiKey: "sk_live_x.y", database: "approved-db", collection: "approved-col" },
+	);
+	assert.ok(withToken.ok);
+	assert.equal(withToken.credentials.database, "approved-db");
+	assert.equal(withToken.credentials.collection, "approved-col");
+	assert.equal(withToken.credentials.graph.database, "approved-db");
+	// Not the operator's HYDRADB_GRAPH_COLLECTION, which on a hosted process is
+	// one namespace shared by every tenant.
+	assert.equal(withToken.credentials.graph.collection, "approved-col");
+
+	// Without a token, the header path is exactly as it always was.
+	const withHeaders = resolveRequestCredentials(
+		{
+			authorization: "Bearer sk_live_x.y",
+			"x-hydradb-database": "db",
+			"x-hydradb-graph-database": "gdb",
+			"x-hydradb-graph-collection": "gcol",
+		},
+		{},
+	);
+	assert.ok(withHeaders.ok);
+	assert.equal(withHeaders.credentials.graph.database, "gdb");
+	assert.equal(withHeaders.credentials.graph.collection, "gcol");
+});
+
+test("a confined connection cannot reach another database through the graph tools", async () => {
+	__resetIntrospectionCache();
+	introspectAnswer = () => ({
+		status: 200,
+		body: active({ database: "personal", collection: "personal-col", databases: ["personal"] }),
+	});
+	const res = await request(
+		"POST",
+		"/",
+		{ host: `127.0.0.1:${port}`, ...JSON_HEADERS, authorization: "Bearer hmat_graphconfined" },
+		JSON.stringify({
+			jsonrpc: "2.0",
+			id: 1,
+			method: "tools/call",
+			params: { name: "hydradb_graph_collections", arguments: { database: "work" } },
+		}),
+	);
+	assert.equal(res.status, 200, res.body);
+	const body = JSON.parse(res.body);
+	assert.equal(body.result.isError, true);
+	assert.match(body.result.content[0].text, /confined to "personal"/);
+});
+
+test("graph_admin cannot drop a database outside a confined connection's list", async () => {
+	__resetIntrospectionCache();
+	introspectAnswer = () => ({
+		status: 200,
+		body: active({ database: "personal", collection: "personal-col", databases: ["personal"] }),
+	});
+	const res = await request(
+		"POST",
+		"/",
+		{ host: `127.0.0.1:${port}`, ...JSON_HEADERS, authorization: "Bearer hmat_dropguard" },
+		JSON.stringify({
+			jsonrpc: "2.0",
+			id: 1,
+			method: "tools/call",
+			params: { name: "hydradb_graph_admin", arguments: { action: "drop_database", database: "work" } },
+		}),
+	);
+	const body = JSON.parse(res.body);
+	assert.equal(body.result.isError, true);
+	assert.match(body.result.content[0].text, /cannot use database "work"/);
 });

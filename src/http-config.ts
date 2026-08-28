@@ -334,6 +334,7 @@ export function resolveRequestCredentials(
 				env,
 				database,
 				callerAuthenticated,
+				identity,
 			),
 		},
 	};
@@ -358,6 +359,7 @@ function resolveRequestGraphConfig(
 	env: EnvSource,
 	database: string,
 	callerAuthenticated: boolean,
+	identity?: ResolvedIdentity,
 ): GraphConfig {
 	// For a caller-authenticated request the fallback database is the request's
 	// own, so `resolveGraphConfig`'s env default is deliberately not consulted.
@@ -366,7 +368,15 @@ function resolveRequestGraphConfig(
 	return {
 		enabled: base.enabled,
 		database: headerValue(headers, HEADER_GRAPH_DATABASE) ?? defaultDatabase,
-		collection: headerValue(headers, HEADER_GRAPH_COLLECTION) ?? base.collection,
+		// For an OAuth connection the graph collection defaults to the one the
+		// user approved, NOT the operator's `HYDRADB_GRAPH_COLLECTION`. On a
+		// hosted process that environment value is one namespace shared by every
+		// tenant, so inheriting it would run one user's graph calls somewhere
+		// they never approved and everyone else can reach.
+		collection:
+			identity?.collection ??
+			headerValue(headers, HEADER_GRAPH_COLLECTION) ??
+			base.collection,
 	};
 }
 
