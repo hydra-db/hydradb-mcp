@@ -282,6 +282,15 @@ export function __resetAliasWarnings() {
 	warnedAliases.clear();
 }
 
+export interface ServerOptions {
+	/**
+	 * Register the OAuth-connection tools (currently `hydradb_databases`).
+	 * Set by the HTTP transport when the request authenticated with an OAuth
+	 * token; never for API keys, so their tool list is unchanged.
+	 */
+	oauthTools?: boolean;
+}
+
 export function createHydraDBServer(
 	hydraOverride?: HydraDB,
 	/**
@@ -289,6 +298,7 @@ export function createHydraDBServer(
 	 * config is read from the environment exactly as the rest of the config is.
 	 */
 	graphOverride?: Partial<GraphConfig>,
+	options: ServerOptions = {},
 ) {
 	const server = new McpServer(
 		{
@@ -2128,7 +2138,12 @@ export function createHydraDBServer(
 		readOnly,
 	);
 
-	register(TOOL_NAMES.DATABASES, {}, () => runDatabases(), readOnly);
+	// Only an OAuth connection carries a user's database decision, and only
+	// there does an agent need a way to see it. Registering this for API-key
+	// connections too would change their tool list, which must stay identical.
+	if (options.oauthTools) {
+		register(TOOL_NAMES.DATABASES, {}, () => runDatabases(), readOnly);
+	}
 
 	// --- BYOG graph tools (PRO-1681) ---
 	//

@@ -168,7 +168,11 @@ export function createHttpApp(config: HttpServerConfig): Express {
 			},
 			// The client reads the session id and negotiated protocol version off
 			// the response; without exposing them a browser cannot complete a session.
-			exposedHeaders: ["Mcp-Session-Id", "Mcp-Protocol-Version"],
+			// WWW-Authenticate is the OAuth discovery entry point: a browser-based
+			// client (claude.ai) that cannot read it off the 401 never learns where
+			// to log in, so the whole flow silently fails for exactly the clients
+			// OAuth exists for.
+			exposedHeaders: ["Mcp-Session-Id", "Mcp-Protocol-Version", "WWW-Authenticate"],
 			allowedHeaders: [
 				"Content-Type",
 				"Authorization",
@@ -315,7 +319,7 @@ export function createHttpApp(config: HttpServerConfig): Express {
 					: {}),
 				...(creds.maxRetries != null ? { maxRetries: creds.maxRetries } : {}),
 			});
-			const server = createHydraDBServer(hydra, creds.graph);
+			const server = createHydraDBServer(hydra, creds.graph, { oauthTools: identity != null });
 
 			// Stateless: this pair serves exactly this request and is discarded when
 			// the response closes. Tearing them down on `close` — which fires for a

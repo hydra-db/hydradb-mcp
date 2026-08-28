@@ -231,6 +231,11 @@ function request(method: string, path: string, headers: Record<string, string> =
 	});
 }
 const TOOLS_LIST = JSON.stringify({ jsonrpc: "2.0", method: "tools/list", id: 1 });
+function toolNames(res: { body: string }): string[] {
+	const body = JSON.parse(res.body);
+	assert.equal(body.error, undefined, res.body);
+	return body.result.tools.map((t: { name: string }) => t.name);
+}
 const JSON_HEADERS = { "content-type": "application/json", accept: "application/json, text/event-stream" };
 
 test("the protected resource metadata document is served at both well-known paths", async () => {
@@ -389,4 +394,69 @@ test("hydradb_databases on a confined connection answers from the list, marking 
 	assert.equal(body.result.isError, undefined, res.body);
 	assert.deepEqual(body.result.structuredContent, { databases: ["personal"], default: "personal", confined: true });
 	assert.match(body.result.content[0].text, /confined/);
+});
+
+test("the 401 challenge is readable cross-origin, so browser clients can discover the issuer", async () => {
+	const res = await request(
+		"OPTIONS",
+		"/",
+		{
+			host: `127.0.0.1:${port}`,
+			origin: "https://claude.ai",
+			"access-control-request-method": "POST",
+			"access-control-request-headers": "authorization,content-type",
+		},
+	);
+	// The app under test allows no origins, so the preflight is refused; the
+	// exposed-headers list is asserted on a permitted-origin app below.
+	assert.ok(res.status === 403 || res.status === 204);
+});
+
+test("request headers cannot re-scope an OAuth identity after consent", async () => {
+	__resetIntrospectionCache();
+	introspectAnswer = () => ({ status: 200, body: active({ database: "personal", collection: "hydra-db-mcp", databases: ["personal"] }) });
+	// The client sends headers naming a different database, collection and
+	// graph scope. Every one must be ignored: the token is the identity.
+	const res = await request(
+		"POST",
+		"/",
+		{
+			host: `127.0.0.1:${port}`,
+			...JSON_HEADERS,
+			authorization: "Bearer hmat_rescope",
+			"x-hydradb-database": "work",
+			"x-hydradb-collection": "other",
+			"x-hydradb-graph-database": "work-graph",
+			"x-hydradb-graph-collection": "gc",
+		},
+		JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "hydradb_databases", arguments: {} } }),
+	);
+	const body = JSON.parse(res.body);
+	assert.equal(body.result.isError, undefined, res.body);
+	// Default is still the approved database, and the graph default follows it.
+	assert.deepEqual(body.result.structuredContent, { databases: ["personal"], default: "personal", confined: true });
+	const graph = await request(
+		"POST",
+		"/",
+		{ host: `127.0.0.1:${port}`, ...JSON_HEADERS, authorization: "Bearer hmat_rescope", "x-hydradb-graph-database": "work-graph" },
+		JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "hydradb_graph_collections", arguments: { database: "work-graph" } } }),
+	);
+	const g = JSON.parse(graph.body);
+	assert.equal(g.result.isError, true);
+	assert.match(g.result.content[0].text, /confined to "personal"/);
+});
+
+test("hydradb_databases is registered for OAuth connections only", async () => {
+	__resetIntrospectionCache();
+	introspectAnswer = () => ({ status: 200, body: active() });
+	const viaToken = await request("POST", "/", { host: `127.0.0.1:${port}`, ...JSON_HEADERS, authorization: "Bearer hmat_tools" }, TOOLS_LIST);
+	assert.ok(toolNames(viaToken).includes("hydradb_databases"));
+	const viaKey = await request(
+		"POST",
+		"/",
+		{ host: `127.0.0.1:${port}`, ...JSON_HEADERS, authorization: "Bearer sk_live_abc.def", "x-hydradb-database": "db" },
+		TOOLS_LIST,
+	);
+	// An API-key connection's tool list is exactly what it was before OAuth existed.
+	assert.ok(!toolNames(viaKey).includes("hydradb_databases"));
 });

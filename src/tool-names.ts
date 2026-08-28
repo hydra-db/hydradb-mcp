@@ -47,8 +47,15 @@ export const CANONICAL_TOOL_NAMES = [
 	TOOL_NAMES.INSPECT,
 	TOOL_NAMES.DELETE,
 	TOOL_NAMES.STATUS,
-	TOOL_NAMES.DATABASES,
 ] as const;
+
+/**
+ * Registered only for connections established through OAuth, where the user
+ * may have confined the app to specific databases and the agent needs to see
+ * that. Kept off the canonical list on purpose: an API-key connection's tool
+ * surface must not change at all when OAuth ships.
+ */
+export const OAUTH_TOOL_NAMES = [TOOL_NAMES.DATABASES] as const;
 
 /** The BYOG graph family, registered together and gated together. */
 export const GRAPH_TOOL_NAMES = [

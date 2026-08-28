@@ -284,6 +284,11 @@ export function resolveRequestCredentials(
 		};
 	}
 
+	// An OAuth identity is what the user approved on the consent screen. No
+	// request header may alter it: the client holding the token could otherwise
+	// re-scope the connection after consent by adding a header. Per-call tool
+	// arguments remain the sanctioned way to name another database, and those
+	// are checked against the grant's allowed list.
 	const headerDatabase = identity ? identity.database : headerValue(headers, HEADER_DATABASE);
 	// A caller-authenticated request takes its database ONLY from the header;
 	// the env database belongs to the operator's identity, not the caller's.
@@ -303,8 +308,7 @@ export function resolveRequestCredentials(
 	// Collection is a partition WITHIN the resolved database, not a cross-tenant
 	// boundary, so an env default is safe for either mode.
 	const collection =
-		identity?.collection ??
-		headerValue(headers, HEADER_COLLECTION) ??
+		(identity ? identity.collection : headerValue(headers, HEADER_COLLECTION)) ??
 		readEnv(env, "HYDRADB_COLLECTION", "HYDRA_DB_SUB_TENANT_ID", noopWarn) ??
 		DEFAULT_COLLECTION;
 
@@ -323,7 +327,14 @@ export function resolveRequestCredentials(
 			...(baseUrl != null ? { baseUrl } : {}),
 			...(timeoutSeconds != null ? { timeoutSeconds } : {}),
 			...(maxRetries != null ? { maxRetries } : {}),
-			graph: resolveRequestGraphConfig(headers, env, database, callerAuthenticated),
+			graph: resolveRequestGraphConfig(
+				// Same rule for the graph namespace: an OAuth connection's graph scope
+				// derives from the approved database, never from a header.
+				identity ? {} : headers,
+				env,
+				database,
+				callerAuthenticated,
+			),
 		},
 	};
 }
