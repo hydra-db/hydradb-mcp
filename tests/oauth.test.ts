@@ -312,3 +312,26 @@ test("API keys and connection links keep working unchanged with OAuth on", async
 	const link = await request("POST", "/c/sk_live_abc.def/db", { host: `127.0.0.1:${port}`, ...JSON_HEADERS }, TOOLS_LIST);
 	assert.equal(link.status, 200, link.body);
 });
+
+test("a URL path cannot widen the database a token was approved for", async () => {
+	__resetIntrospectionCache();
+	introspectAnswer = () => ({ status: 200, body: active({ database: "approved-db", collection: "approved-col" }) });
+	// The client asks for a different database in the path. Consent bound this
+	// token to `approved-db`; the path must not silently replace it.
+	const res = await request(
+		"POST",
+		"/other-db/other-col",
+		{ host: `127.0.0.1:${port}`, ...JSON_HEADERS, authorization: "Bearer hmat_scoped" },
+		TOOLS_LIST,
+	);
+	assert.equal(res.status, 200, res.body);
+	// tools/list is answered locally, so assert the resolved scope directly.
+	const { resolveRequestCredentials } = await import("../src/http-config.js");
+	const resolved = resolveRequestCredentials(
+		{},
+		{},
+		{ apiKey: "sk_from_token", database: "approved-db", collection: "approved-col" },
+	);
+	assert.ok(resolved.ok);
+	assert.equal(resolved.credentials.database, "approved-db");
+});

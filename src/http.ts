@@ -305,13 +305,16 @@ export function createHttpApp(config: HttpServerConfig): Express {
 			}
 			const t = result.token;
 			effectiveScope = {
+				// Path scope first, so the TOKEN wins every field it carries. The
+				// database and collection on a token are what the user saw and
+				// approved on the consent screen; letting a URL segment replace
+				// them would let a client quietly widen its own authorization
+				// after the fact, which is the one thing consent has to prevent.
+				// A path may still scope a field the token left unbound.
+				...scope,
 				apiKey: t.apiKey,
-				// The token's own scope is the user's Approve-time choice; a path
-				// segment on the URL is the more specific instruction and wins,
-				// exactly as it does over a header.
 				...(t.database != null ? { database: t.database } : {}),
 				...(t.collection != null ? { collection: t.collection } : {}),
-				...scope,
 			};
 		}
 
