@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-09-01
+
 ### Added — `recency_bias`, `query_apps` and multi-collection scope on `hydradb_query`
 
 Three retrieval controls the API accepts were unreachable through the MCP.
