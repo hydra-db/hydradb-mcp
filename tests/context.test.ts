@@ -970,3 +970,47 @@ test("compact rendering never collapses bodies into a pointer", () => {
 	assert.doesNotMatch(out, /same text as Chunk/);
 	assert.match(out, new RegExp(shared.slice(0, 50)), "the second body is rendered");
 });
+
+test("a rendered source carries its last-updated date, not just its title", () => {
+	const out = buildRecalledContext({
+		chunks: [
+			{
+				chunkUuid: "c1",
+				id: "doc1",
+				chunkContent: "Enrollment closes on the 14th.",
+				sourceTitle: "Enrollment Policy",
+				sourceLastUpdatedTime: "2026-08-17T09:31:00Z",
+			},
+		],
+	} as never);
+
+	// Both halves of a citation. Title alone cannot separate this version of the
+	// policy from last year's, and both match the same query.
+	assert.match(out, /Source: Enrollment Policy {2}\(updated 2026-08-17\)/);
+	assert.doesNotMatch(out, /T09:31/, "the time of day is not part of a citation");
+});
+
+test("a dated source with no title is still attributed", () => {
+	const out = buildRecalledContext({
+		chunks: [
+			{
+				chunkUuid: "c1",
+				id: "doc1",
+				chunkContent: "body",
+				sourceLastUpdatedTime: "2026-08-17T09:31:00Z",
+			},
+		],
+	} as never);
+
+	// The date is the only provenance this chunk has; dropping the line because
+	// the title is missing would discard it.
+	assert.match(out, /Source: \(untitled\) {2}\(updated 2026-08-17\)/);
+});
+
+test("a source with neither title nor date renders no Source line", () => {
+	const out = buildRecalledContext({
+		chunks: [{ chunkUuid: "c1", id: "doc1", chunkContent: "body" }],
+	} as never);
+
+	assert.doesNotMatch(out, /Source:/);
+});

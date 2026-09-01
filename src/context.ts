@@ -351,8 +351,16 @@ function render(
 		const meta = chunk.additionalMetadata ?? {};
 		const title =
 			chunk.sourceTitle || (meta as Record<string, string>).title;
-		if (title) {
-			lines.push(`Source: ${title}`);
+		// The date rides on the Source line because a citation needs both halves.
+		// Title alone cannot distinguish this quarter's version of a document from
+		// last year's, and the two routinely both match: a caller asked to cite
+		// its sources could name them but never say how current they were, and had
+		// no way to tell a superseded source from the one that replaced it. The
+		// server sends a full timestamp; the date part is what a reader cites.
+		const updated = (chunk.sourceLastUpdatedTime ?? "").slice(0, 10);
+		if (title || updated) {
+			const dated = updated ? `  (updated ${updated})` : "";
+			lines.push(`Source: ${title || "(untitled)"}${dated}`);
 		}
 
 		const bodyText = extractChunkText(chunk.chunkContent);

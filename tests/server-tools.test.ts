@@ -2548,3 +2548,59 @@ test("empty scope overrides are rejected or fall back to default", async () => {
 
 	await client.close();
 });
+
+test("query forwards recency_bias, and still defaults it to 0", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
+	assert.equal(
+		calls.find((c) => c.method === "query")?.args.recencyBias,
+		0,
+		"the host default must not change for callers that do not set it",
+	);
+
+	calls.length = 0;
+	await client.callTool({
+		name: "hydradb_query",
+		arguments: { query: "q", recency_bias: 0.9 },
+	});
+	assert.equal(
+		calls.find((c) => c.method === "query")?.args.recencyBias,
+		0.9,
+		"a caller asking for current state must be able to raise it",
+	);
+
+	await client.close();
+});
+
+test("query forwards query_apps for connector-aware retrieval", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	await client.callTool({
+		name: "hydradb_query",
+		arguments: { query: "q", query_apps: true },
+	});
+
+	assert.equal(calls.find((c) => c.method === "query")?.args.queryApps, true);
+	await client.close();
+});
+
+test("query forwards a multi-collection scope instead of the singular one", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	await client.callTool({
+		name: "hydradb_query",
+		arguments: { query: "q", collections: ["policies", "handbook"] },
+	});
+
+	const args = calls.find((c) => c.method === "query")?.args;
+	assert.deepEqual(args?.collections, ["policies", "handbook"]);
+	// The server refuses both selectors at once, so the configured default
+	// collection must not ride along beside the one the caller named.
+	assert.equal(args?.collection, undefined);
+
+	await client.close();
+});
