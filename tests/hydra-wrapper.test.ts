@@ -436,7 +436,7 @@ function wrapperFor(seen: Record<string, unknown>) {
 }
 
 test("query carries acl principals to the SDK", async () => {
-	const seen: Record<string, any> = {};
+	const seen: Record<string, { acl?: string[] }> = {};
 	await wrapperFor(seen).context.query({
 		query: "roadmap",
 		acl: ["alice@corp.com", "group:google:eng@corp.com"],
@@ -445,7 +445,7 @@ test("query carries acl principals to the SDK", async () => {
 });
 
 test("list, inspect and relations each carry acl principals", async () => {
-	const seen: Record<string, any> = {};
+	const seen: Record<string, { acl?: string[] }> = {};
 	const hydra = wrapperFor(seen);
 	await hydra.context.list({ acl: ["bob@corp.com"] });
 	await hydra.context.inspect({ id: "s1", acl: ["carol@corp.com"] });
@@ -459,7 +459,7 @@ test("an omitted acl stays undefined rather than becoming an empty list", async 
 	// The API treats `acl: []` the same as an absent acl, so [] is not a way to
 	// ask for "nobody". Sending nothing keeps the request faithful to what the
 	// caller actually said rather than relying on that equivalence.
-	const seen: Record<string, any> = {};
+	const seen: Record<string, { acl?: string[] }> = {};
 	const hydra = wrapperFor(seen);
 	await hydra.context.query({ query: "roadmap" });
 	await hydra.context.list({});
