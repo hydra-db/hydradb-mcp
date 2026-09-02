@@ -925,6 +925,95 @@ export function createHydraDBServer(
 		};
 	}
 
+	async function runSubgraph(
+		args: {
+			id?: string;
+			kind?: "memory" | "knowledge";
+			depth?: number;
+			max_sources?: number;
+			database?: string;
+			collection?: string;
+		},
+		signal?: AbortSignal,
+	): Promise<ToolResult> {
+		const id = args.id?.trim();
+		if (!id) {
+			throw new Error(
+				`${TOOL_NAMES.SUBGRAPH} requires \`id\` — the value shown as [id: …] in ` +
+					`${TOOL_NAMES.QUERY} results or in [brackets] in ${TOOL_NAMES.LIST} output.`,
+			);
+		}
+		logger.debug(`${TOOL_NAMES.SUBGRAPH}: ${id}`);
+
+		const res = await hydra.context.subgraph(
+			{
+				id,
+				kind: args.kind,
+				depth: args.depth,
+				maxSources: args.max_sources,
+				database: args.database,
+				collection: args.collection,
+			},
+			{ signal },
+		);
+
+		// Soft failure, like inspect: the server's own message, flagged.
+		if (!res.success) {
+			return errorResult(`Could not read the subgraph of ${id}: ${res.message || "unknown error"}`);
+		}
+
+		const members = res.sources ?? [];
+		if (members.length === 0) {
+			return structuredResult(
+				`No item with id ${id} was found in this collection, so there is no subgraph to show. ` +
+					`Ids come from ${TOOL_NAMES.QUERY} or ${TOOL_NAMES.LIST}; check the collection as well as the id.`,
+				{ seed_id: id, members: [], member_count: 0, truncated: false },
+			);
+		}
+
+		const hops = res.max_depth_reached ?? 0;
+		const lines: string[] = [
+			members.length === 1
+				? `${id} stands alone: nothing in the graph links to it yet.`
+				: `${members.length} items connected to ${id} through ${hops} hop${hops === 1 ? "" : "s"}` +
+					(res.is_truncated ? ` (clipped at max_sources — the subgraph continues)` : "") +
+					":",
+			"",
+		];
+		for (const m of [...members].sort((a, b) => a.depth - b.depth)) {
+			const title = m.title?.trim() || m.app_external_id || "(untitled)";
+			const via =
+				m.depth === 0
+					? "the item you started from"
+					: [m.discovered_via, m.discovered_relation].filter(Boolean).join(" · ") || "connected";
+			const kind = [m.app_provider, m.app_kind].filter(Boolean).join(" ");
+			lines.push(`- [id: ${m.source_id}] ${title}${kind ? ` (${kind})` : ""} — depth ${m.depth}, via ${via}`);
+		}
+		lines.push(
+			"",
+			`${(res.relations ?? []).length} relation(s) among them; ` +
+				`${(res.auxiliary_relations ?? []).length} structural link(s) around them` +
+				(res.auxiliary_truncated ? " (structural links clipped)" : "") +
+				`. Pass any [id: …] to ${TOOL_NAMES.INSPECT} for its full content.`,
+		);
+
+		return structuredResult(lines.join("\n"), {
+			seed_id: res.seed_source_id || id,
+			member_count: members.length,
+			max_depth_reached: hops,
+			truncated: Boolean(res.is_truncated),
+			members: members.map((m) => ({
+				id: m.source_id,
+				title: m.title ?? null,
+				depth: m.depth,
+				discovered_via: m.discovered_via ?? null,
+				discovered_relation: m.discovered_relation ?? null,
+				app_provider: m.app_provider ?? null,
+				app_kind: m.app_kind ?? null,
+			})),
+		});
+	}
+
 	async function runInspect(args: {
 		source_id: string;
 		mode?: "content" | "url" | "both";
@@ -1760,6 +1849,29 @@ export function createHydraDBServer(
 		...scopeSchema,
 	};
 
+	const subgraphSchema = {
+		id: z.string().min(1).describe(TOOL_DESCRIPTIONS[TOOL_NAMES.SUBGRAPH].params.id),
+		kind: z
+			.enum(["memory", "knowledge"])
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.SUBGRAPH].params.kind),
+		depth: z
+			.number()
+			.int()
+			.min(1)
+			.max(10)
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.SUBGRAPH].params.depth),
+		max_sources: z
+			.number()
+			.int()
+			.min(1)
+			.max(1000)
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.SUBGRAPH].params.max_sources),
+		...scopeSchema,
+	};
+
 	const inspectSchema = {
 		// CONTRACT §1 says a source's identifier field is `id`, but this surface
 		// spelled one concept three ways across tools meant to chain: inspect took
@@ -2157,6 +2269,13 @@ export function createHydraDBServer(
 		TOOL_NAMES.INSPECT,
 		inspectSchema,
 		(args, extra) => runInspect(toInspectArgs(args), extra?.signal),
+		readOnly,
+	);
+
+	register(
+		TOOL_NAMES.SUBGRAPH,
+		subgraphSchema,
+		(args, extra) => runSubgraph(args as Parameters<typeof runSubgraph>[0], extra?.signal),
 		readOnly,
 	);
 

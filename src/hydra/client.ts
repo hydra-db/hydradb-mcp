@@ -19,7 +19,8 @@ import { HydraDBClient } from "@hydradb/sdk";
 import type { HydraDB as SDK } from "@hydradb/sdk";
 
 import { unwrap } from "./envelope.js";
-import { translateError } from "./errors.js";
+import { newRawTransport, type RawTransport, sendRaw } from "./transport.js";
+import { HydraWrapperError, translateError } from "./errors.js";
 import { GraphResource } from "./graph.js";
 
 export type ContextKind = "memory" | "knowledge";
@@ -105,6 +106,8 @@ export interface HydraConfig {
 	timeoutSeconds?: number;
 	/** Retries per call. The SDK defaults to 2; set explicitly so it is a choice. */
 	maxRetries?: number;
+	/** Test seam for the hand-rolled HTTP path; production never sets it. */
+	fetchFn?: typeof fetch;
 }
 
 export interface QueryParams {
@@ -205,6 +208,46 @@ export interface IngestionStatusParams {
 	database?: string;
 }
 
+/** One member of a connected subgraph (wire shape, unchanged from the API). */
+export interface SubgraphMember {
+	source_id: string;
+	title?: string;
+	app_kind?: string;
+	app_provider?: string;
+	app_external_id?: string;
+	thread_id?: string;
+	/** Hops from the seed; 0 is the seed itself. */
+	depth: number;
+	hydration?: string;
+	discovered_via?: string;
+	discovered_relation?: string;
+}
+
+export interface SubgraphResult {
+	seed_source_id: string;
+	sources: SubgraphMember[];
+	relations: unknown[];
+	auxiliary_relations: unknown[];
+	auxiliary_truncated: boolean;
+	is_truncated: boolean;
+	max_depth_reached: number;
+	success: boolean;
+	message: string;
+}
+
+export interface SubgraphParams {
+	/** The item whose connected subgraph to return. */
+	id: string;
+	kind?: ContextKind;
+	/** Max traversal depth in hops (server default 5). */
+	depth?: number;
+	/** Max members returned (server default 200). */
+	maxSources?: number;
+	collection?: string;
+	/** Per-call database override. */
+	database?: string;
+}
+
 export interface RelationsParams {
 	id?: string;
 	kind?: ContextKind;
@@ -291,6 +334,12 @@ abstract class Resource {
 		private readonly collection?: string,
 		private readonly allowedDatabases?: readonly string[],
 		private readonly allowedCollections?: readonly string[],
+		/**
+		 * The hand-rolled HTTP path, for the endpoints the SDK does not expose
+		 * (CONTRACT §2 rule 7). Optional only so tests that inject a fake SDK and
+		 * never touch such an endpoint need not build one.
+		 */
+		protected readonly raw?: RawTransport,
 	) {}
 
 	protected scope(override?: string, dbOverride?: string): ScopeFields {
@@ -329,8 +378,9 @@ export class ContextResource extends Resource {
 		collection?: string,
 		allowedDatabases?: readonly string[],
 		allowedCollections?: readonly string[],
+		raw?: RawTransport,
 	) {
-		super(sdk, database, collection, allowedDatabases, allowedCollections);
+		super(sdk, database, collection, allowedDatabases, allowedCollections, raw);
 	}
 
 	/**
@@ -519,6 +569,35 @@ export class ContextResource extends Resource {
 		);
 	}
 
+	/**
+	 * The connected subgraph of one item (`GET /context/{id}/subgraph`): every
+	 * item reachable from it through item-level relations — explicit links, a
+	 * shared thread, parent/child — plus the relations among the members and
+	 * the structural graph around them.
+	 *
+	 * No SDK resource for this yet, so it takes the raw path (CONTRACT §2 rule
+	 * 7): same header, same envelope unwrap, same error type as everything else
+	 * here. When the SDK grows `context.subgraph`, only this method changes.
+	 */
+	async subgraph(params: SubgraphParams, opts?: RequestOptions): Promise<SubgraphResult> {
+		// `async` for the same reason `query` and `ingest` are: the scope check
+		// below throws, and a caller awaiting this must see a rejection, not a
+		// synchronous exception from the call site.
+		if (!this.raw) {
+			throw new HydraWrapperError(
+				"Hydra DB /context/{id}/subgraph → ERR: no HTTP transport configured",
+				"/context/{id}/subgraph",
+			);
+		}
+		const id = params.id.trim();
+		const query = new URLSearchParams(this.scope(params.collection, params.database));
+		if (params.kind) query.set("type", params.kind);
+		if (params.depth != null) query.set("depth", String(params.depth));
+		if (params.maxSources != null) query.set("max_sources", String(params.maxSources));
+		const path = `/context/${encodeURIComponent(id)}/subgraph?${query.toString()}`;
+		return sendRaw<SubgraphResult>(this.raw, path, "GET", undefined, opts);
+	}
+
 	/** Knowledge-graph relations (SDK `context.relations`). */
 	relations(
 		params: RelationsParams = {},
@@ -645,12 +724,17 @@ export class HydraDB {
 		this.collection = config.collection;
 		this.allowedDatabases = config.allowedDatabases;
 		this.allowedCollections = config.allowedCollections;
+		const raw = newRawTransport(config, {
+			timeoutSeconds: DEFAULT_TIMEOUT_SECONDS,
+			maxRetries: DEFAULT_MAX_RETRIES,
+		});
 		this.context = new ContextResource(
 			client,
 			config.database,
 			config.collection,
 			config.allowedDatabases,
 			config.allowedCollections,
+			raw,
 		);
 		this.databases = new DatabasesResource(
 			client,

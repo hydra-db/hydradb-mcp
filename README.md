@@ -17,9 +17,10 @@ Run it two ways, same tools either way:
 | `hydradb_inspect` | Fetch one source's full content by id |
 | `hydradb_delete` | Remove one or more items by id, irreversibly |
 | `hydradb_status` | Check whether an ingested source has finished indexing |
+| `hydradb_subgraph` | Everything connected to one item — its thread, replies, parents, children, links |
 
-Ids flow between these: `hydradb_query` and `hydradb_list` emit them;
-`hydradb_inspect`, `hydradb_delete` and `hydradb_status` accept them.
+Ids flow between these: `hydradb_query`, `hydradb_list` and `hydradb_subgraph` emit them;
+`hydradb_inspect`, `hydradb_delete`, `hydradb_status` and `hydradb_subgraph` accept them.
 
 ### Graph tools (Cypher)
 
@@ -148,6 +149,27 @@ Fetches one source's full content by id.
 
 Long sources come back in slices, and binary sources are never inlined — you get
 their type and size, and `mode: "url"` returns a download link.
+
+### **hydradb_subgraph**
+
+Returns the connected subgraph of one item: every item reachable from it through
+item-level links — explicit relations declared at ingest, a shared thread,
+parent/child hierarchy — traversed breadth-first. Use it when one result is not
+enough and you need what surrounds it: the rest of a Slack thread, the replies
+under a ticket, the documents a page links to.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `id` | string | Yes | The item to start from, from `hydradb_query` or `hydradb_list` |
+| `kind` | string | No | `knowledge` (default) or `memory` — the two graphs are separate |
+| `depth` | number | No | Hops to traverse (default 5, max 10) |
+| `max_sources` | number | No | Cap on members returned (default 200) |
+| `database`, `collection` | string | No | Scope overrides |
+
+Each member carries its id, title, depth from the start item and how it was
+reached; `structuredContent` has the same as parsed data. `is_truncated` means
+`max_sources` clipped the traversal. Chunk-level entity relations are not
+included — those come from `hydradb_query`.
 
 ### **hydradb_delete**
 

@@ -2548,3 +2548,99 @@ test("empty scope overrides are rejected or fall back to default", async () => {
 
 	await client.close();
 });
+
+// ── hydradb_subgraph (PRO-1848) ─────────────────────────────────────────
+
+async function subgraphText(
+	result: unknown,
+	args: Record<string, unknown>,
+): Promise<{ text: string; structured: Record<string, unknown> | undefined; isError: boolean | undefined; calls: unknown[] }> {
+	const { hydra } = mockHydra();
+	const calls: unknown[] = [];
+	// The wrapper method takes the raw HTTP path, not the SDK, so it is stubbed
+	// on the resource rather than through the SDK mock.
+	(hydra.context as unknown as { subgraph: unknown }).subgraph = async (p: unknown) => {
+		calls.push(p);
+		return result;
+	};
+	const client = await connect(hydra);
+	const res = await client.callTool({ name: "hydradb_subgraph", arguments: args });
+	await client.close();
+	return {
+		text: (res.content as { text: string }[])[0]?.text ?? "",
+		structured: res.structuredContent as Record<string, unknown> | undefined,
+		isError: res.isError as boolean | undefined,
+		calls,
+	};
+}
+
+const subgraphOf = (members: Record<string, unknown>[], over: Record<string, unknown> = {}) => ({
+	seed_source_id: "thread-root",
+	sources: members,
+	relations: [{}, {}],
+	auxiliary_relations: [{}, {}, {}],
+	auxiliary_truncated: false,
+	is_truncated: false,
+	max_depth_reached: 1,
+	success: true,
+	message: "ok",
+	...over,
+});
+
+test("hydradb_subgraph lists members by depth with ids the other tools accept", async () => {
+	const { text, structured, isError, calls } = await subgraphText(
+		subgraphOf([
+			{ source_id: "reply-2", title: "re: budget", depth: 1, discovered_via: "thread", discovered_relation: "same_thread", app_provider: "slack" },
+			{ source_id: "thread-root", title: "Q3 budget", depth: 0 },
+		]),
+		{ id: "thread-root", depth: 3, kind: "knowledge" },
+	);
+	assert.notEqual(isError, true);
+	assert.match(text, /2 items connected to thread-root through 1 hop\b/);
+	// Depth order, seed first, each with a composable id.
+	const rootAt = text.indexOf("[id: thread-root]");
+	const replyAt = text.indexOf("[id: reply-2]");
+	assert.ok(rootAt >= 0 && replyAt > rootAt, "seed listed before its reply");
+	assert.match(text, /reply-2\] re: budget \(slack\) — depth 1, via thread · same_thread/);
+	assert.match(text, /hydradb_inspect/);
+	assert.equal(structured?.member_count, 2);
+	assert.equal(structured?.truncated, false);
+	assert.deepEqual((structured?.members as { id: string }[]).map((m) => m.id), ["reply-2", "thread-root"]);
+	// Args reach the wrapper under the wrapper's names.
+	assert.deepEqual(calls[0], { id: "thread-root", kind: "knowledge", depth: 3, maxSources: undefined, database: undefined, collection: undefined });
+});
+
+test("hydradb_subgraph says when max_sources clipped the traversal", async () => {
+	const { text, structured } = await subgraphText(
+		subgraphOf([{ source_id: "a", depth: 0 }, { source_id: "b", depth: 1 }], { is_truncated: true, max_depth_reached: 3 }),
+		{ id: "a" },
+	);
+	assert.match(text, /clipped at max_sources/);
+	assert.match(text, /3 hops/);
+	assert.equal(structured?.truncated, true);
+});
+
+test("hydradb_subgraph distinguishes 'stands alone' from 'not found'", async () => {
+	const alone = await subgraphText(subgraphOf([{ source_id: "solo", depth: 0 }], { max_depth_reached: 0 }), { id: "solo" });
+	assert.match(alone.text, /stands alone/);
+	assert.notEqual(alone.isError, true);
+
+	const missing = await subgraphText(subgraphOf([]), { id: "nope" });
+	assert.match(missing.text, /No item with id nope/);
+	assert.equal(missing.structured?.member_count, 0);
+	assert.notEqual(missing.isError, true, "an unknown id is an answer, not a failure");
+});
+
+test("hydradb_subgraph flags a server-reported failure", async () => {
+	const { text, isError } = await subgraphText(subgraphOf([], { success: false, message: "graph unavailable" }), { id: "x" });
+	assert.equal(isError, true);
+	assert.match(text, /graph unavailable/);
+});
+
+test("hydradb_subgraph requires an id", async () => {
+	const { hydra } = mockHydra();
+	const client = await connect(hydra);
+	const res = await client.callTool({ name: "hydradb_subgraph", arguments: {} });
+	assert.equal(res.isError, true);
+	await client.close();
+});
