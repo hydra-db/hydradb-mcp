@@ -900,6 +900,7 @@ export function createHydraDBServer(
 			offset?: number;
 			limit?: number;
 			expiry_seconds?: number;
+			acl?: string[];
 			database?: string;
 			collection?: string;
 		};
@@ -926,6 +927,7 @@ export function createHydraDBServer(
 			offset: a.offset,
 			limit: a.limit,
 			expiry_seconds: a.expiry_seconds,
+			acl: a.acl,
 			database: a.database,
 			collection: a.collection,
 		};
@@ -1769,10 +1771,18 @@ export function createHydraDBServer(
 			.array(z.string())
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.LIST_SOURCES].params.source_ids),
+		acl: z
+			.array(z.string())
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.LIST].params.acl),
 		...scopeSchema,
 	};
 
 	const listMemoriesSchema = {
+		acl: z
+			.array(z.string())
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.LIST].params.acl),
 		...scopeSchema,
 	};
 
@@ -2119,6 +2129,7 @@ export function createHydraDBServer(
 				source_ids?: string[];
 				page?: number;
 				page_size?: number;
+				acl?: string[];
 				database?: string;
 				collection?: string;
 			};
@@ -2152,6 +2163,7 @@ export function createHydraDBServer(
 						source_ids: ids,
 						page: a.page,
 						page_size: a.page_size,
+						acl: a.acl,
 						database: a.database,
 						collection: a.collection,
 					},
@@ -2163,6 +2175,7 @@ export function createHydraDBServer(
 					source_ids: ids,
 					page: a.page,
 					page_size: a.page_size,
+					acl: a.acl,
 					database: a.database,
 					collection: a.collection,
 				},
@@ -2319,7 +2332,7 @@ export function createHydraDBServer(
 		listMemoriesSchema,
 		(args, extra) =>
 			runListMemories(
-				args as { database?: string; collection?: string },
+				args as { acl?: string[]; database?: string; collection?: string },
 				extra?.signal,
 			),
 		readOnly,
@@ -2332,6 +2345,7 @@ export function createHydraDBServer(
 			runListSources(
 				args as {
 					source_ids?: string[];
+					acl?: string[];
 					database?: string;
 					collection?: string;
 				},

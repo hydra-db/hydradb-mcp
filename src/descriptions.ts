@@ -11,7 +11,7 @@ import { ALIAS_REPLACEMENTS, TOOL_NAMES } from "./tool-names.js";
 
 // Shared parameter blurbs, reused across canonical tools and their aliases.
 const PARAM = {
-	acl: "Principals to answer as, for permission-aware search (RBAC). Each entry is an email, a `domain:<host>`, or a `group:<provider>:<id>`; results are limited to documents whose access list admits at least one of them. Omit it to search everything this API key can reach — that is NOT the same as passing an empty list, which admits nobody and returns nothing. Pass the principals of the end user you are answering for; a principal the deployment does not recognise matches only public and unrestricted documents, never a restricted one. This scopes results, it does not authenticate anyone: whoever holds the key can name any principal.",
+	acl: "Principals to answer as, for permission-aware search (RBAC). Each entry is an email, a `domain:<host>`, or a `group:<provider>:<id>`; results are limited to documents whose access list admits at least one of them. Omit it to search everything this API key can reach. An EMPTY list is treated exactly like omitting it, so it is not a way to ask for \"nobody\" — to restrict, name real principals. Pass the principals of the end user you are answering for; a principal the deployment does not recognise fails closed, matching only documents that carry no access list of their own. This scopes results, it does not authenticate anyone: whoever holds the key can name any principal.",
 	query:
 		"What you want to know, as a natural-language question or topic — this is semantic " +
 		"search, so a full question beats keywords. Search for the CONCEPT, not the words " +

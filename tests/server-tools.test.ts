@@ -2548,3 +2548,123 @@ test("empty scope overrides are rejected or fall back to default", async () => {
 
 	await client.close();
 });
+
+// ── PRO-1684: acl must survive TOOL DISPATCH, not just the wrapper ───────────
+// The first cut of this feature added `acl` to the schemas and to the wrapper,
+// and passed its wrapper-level tests, while the list and inspect dispatch paths
+// silently dropped the field: they rebuild an explicit argument object from a
+// whitelist, so a parameter that is not named there is discarded. The tool then
+// ADVERTISED acl and answered unscoped, which is the worst possible shape for a
+// permission feature. These tests drive the real tool surface end to end so that
+// gap cannot reopen.
+
+test("hydradb_query forwards acl principals through dispatch", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	await client.callTool({
+		name: "hydradb_query",
+		arguments: { query: "roadmap", acl: ["alice@corp.com", "group:google:eng@corp.com"] },
+	});
+
+	const call = calls.find((c) => c.method === "query");
+	assert.ok(call, "wrapper should have called query");
+	assert.deepEqual(call.args.acl, ["alice@corp.com", "group:google:eng@corp.com"]);
+	await client.close();
+});
+
+test("hydradb_list forwards acl principals through dispatch, both kinds", async () => {
+	for (const kind of ["memory", "knowledge"] as const) {
+		const { hydra, calls } = mockHydra();
+		const client = await connect(hydra);
+
+		await client.callTool({
+			name: "hydradb_list",
+			arguments: { kind, acl: ["bob@corp.com"] },
+		});
+
+		const call = calls.find((c) => c.method === "list");
+		assert.ok(call, `wrapper should have called list for ${kind}`);
+		assert.deepEqual(call.args.acl, ["bob@corp.com"], `acl dropped on kind=${kind}`);
+		await client.close();
+	}
+});
+
+test("hydradb_inspect forwards acl principals through dispatch", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	await client.callTool({
+		name: "hydradb_inspect",
+		arguments: { id: "s1", acl: ["carol@corp.com"] },
+	});
+
+	const call = calls.find((c) => c.method === "inspect");
+	assert.ok(call, "wrapper should have called inspect");
+	assert.deepEqual(call.args.acl, ["carol@corp.com"]);
+	await client.close();
+});
+
+test("omitting acl sends no acl field rather than an empty list", async () => {
+	// Wire hygiene, not semantics: the API treats `acl: []` exactly like an
+	// absent acl (verified against staging — both returned 134 sources where an
+	// unknown principal returned 130), so [] is NOT a way to ask for "nobody".
+	// We still send nothing rather than [] so the request says what the caller
+	// said, instead of leaning on that equivalence holding forever.
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	await client.callTool({ name: "hydradb_query", arguments: { query: "roadmap" } });
+	await client.callTool({ name: "hydradb_list", arguments: { kind: "knowledge" } });
+	await client.callTool({ name: "hydradb_inspect", arguments: { id: "s1" } });
+
+	for (const method of ["query", "list", "inspect"]) {
+		const call = calls.find((c) => c.method === method);
+		assert.ok(call, `wrapper should have called ${method}`);
+		assert.equal(call.args.acl, undefined, `${method} must omit acl entirely`);
+	}
+	await client.close();
+});
+
+test("every tool that advertises acl actually forwards it", async () => {
+	// Guards the general failure: a schema that accepts a permission parameter
+	// the dispatch then ignores. Derived from the advertised schema, so a new
+	// acl-bearing tool is covered without editing this test.
+	const { hydra } = mockHydra();
+	const client = await connect(hydra);
+	const { tools } = await client.listTools();
+
+	const advertising = tools
+		.filter((t) => (t.inputSchema?.properties as Record<string, unknown> | undefined)?.acl != null)
+		.map((t) => t.name);
+
+	assert.ok(
+		advertising.includes("hydradb_query")
+			&& advertising.includes("hydradb_list")
+			&& advertising.includes("hydradb_inspect"),
+		`expected the three canonical reads to advertise acl, got: ${advertising.join(", ")}`,
+	);
+
+	const args: Record<string, Record<string, unknown>> = {
+		hydradb_query: { query: "q" },
+		hydradb_list: { kind: "knowledge" },
+		hydradb_inspect: { id: "s1" },
+	};
+	const method: Record<string, string> = {
+		hydradb_query: "query",
+		hydradb_list: "list",
+		hydradb_inspect: "inspect",
+	};
+
+	for (const name of advertising) {
+		if (args[name] == null) continue;
+		const fresh = mockHydra();
+		const c = await connect(fresh.hydra);
+		await c.callTool({ name, arguments: { ...args[name], acl: ["dan@corp.com"] } });
+		const call = fresh.calls.find((x) => x.method === method[name]);
+		assert.ok(call, `${name} should have reached the wrapper`);
+		assert.deepEqual(call.args.acl, ["dan@corp.com"], `${name} advertises acl but drops it`);
+		await c.close();
+	}
+	await client.close();
+});

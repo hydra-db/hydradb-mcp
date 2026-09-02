@@ -137,10 +137,14 @@ export interface QueryParams {
 	 * `domain:<host>`, or a `group:<provider>:<id>`. Results are restricted to
 	 * documents whose access list admits at least one of them.
 	 *
-	 * Omitted means NO ACL scoping — every document this key can reach. That is
-	 * deliberately different from an empty array, which is a real value meaning
-	 * "admits nobody". A principal the deployment does not know fails CLOSED: it
-	 * matches public and unrestricted documents only, never a restricted one.
+	 * Omitted means NO ACL scoping — every document this key can reach. An empty
+	 * array is treated the SAME as omitted by the API (verified against staging:
+	 * `acl: []` and no `acl` both returned 134 sources where an unknown
+	 * principal returned 130), so it is not a way to ask for "nobody"; the
+	 * design doc's rule is that absent and `[]` alike mean unrestricted.
+	 *
+	 * A principal the deployment does not know fails CLOSED: it matches only
+	 * documents carrying no access list of their own, never a restricted one.
 	 */
 	acl?: string[];
 	/** Adjacent chunks pulled in alongside each match, for surrounding context. */
@@ -200,10 +204,12 @@ export interface ListParams {
 	 * `domain:<host>`, or a `group:<provider>:<id>`. Results are restricted to
 	 * documents whose access list admits at least one of them.
 	 *
-	 * Omitted means NO ACL scoping — every document this key can reach. That is
-	 * deliberately different from an empty array, which is a real value meaning
-	 * "admits nobody". A principal the deployment does not know fails CLOSED: it
-	 * matches public and unrestricted documents only, never a restricted one.
+	 * Omitted means NO ACL scoping — every document this key can reach. An empty
+	 * array is treated the SAME as omitted by the API, so it is not a way to ask
+	 * for "nobody" (design doc: absent and `[]` alike mean unrestricted).
+	 *
+	 * A principal the deployment does not know fails CLOSED: it matches only
+	 * documents carrying no access list of their own, never a restricted one.
 	 */
 	acl?: string[];
 	collection?: string;
@@ -220,10 +226,12 @@ export interface InspectParams {
 	 * `domain:<host>`, or a `group:<provider>:<id>`. Results are restricted to
 	 * documents whose access list admits at least one of them.
 	 *
-	 * Omitted means NO ACL scoping — every document this key can reach. That is
-	 * deliberately different from an empty array, which is a real value meaning
-	 * "admits nobody". A principal the deployment does not know fails CLOSED: it
-	 * matches public and unrestricted documents only, never a restricted one.
+	 * Omitted means NO ACL scoping — every document this key can reach. An empty
+	 * array is treated the SAME as omitted by the API, so it is not a way to ask
+	 * for "nobody" (design doc: absent and `[]` alike mean unrestricted).
+	 *
+	 * A principal the deployment does not know fails CLOSED: it matches only
+	 * documents carrying no access list of their own, never a restricted one.
 	 */
 	acl?: string[];
 	collection?: string;
@@ -248,10 +256,12 @@ export interface RelationsParams {
 	 * `domain:<host>`, or a `group:<provider>:<id>`. Results are restricted to
 	 * documents whose access list admits at least one of them.
 	 *
-	 * Omitted means NO ACL scoping — every document this key can reach. That is
-	 * deliberately different from an empty array, which is a real value meaning
-	 * "admits nobody". A principal the deployment does not know fails CLOSED: it
-	 * matches public and unrestricted documents only, never a restricted one.
+	 * Omitted means NO ACL scoping — every document this key can reach. An empty
+	 * array is treated the SAME as omitted by the API, so it is not a way to ask
+	 * for "nobody" (design doc: absent and `[]` alike mean unrestricted).
+	 *
+	 * A principal the deployment does not know fails CLOSED: it matches only
+	 * documents carrying no access list of their own, never a restricted one.
 	 */
 	acl?: string[];
 	collection?: string;

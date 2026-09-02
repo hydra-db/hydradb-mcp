@@ -456,8 +456,9 @@ test("list, inspect and relations each carry acl principals", async () => {
 });
 
 test("an omitted acl stays undefined rather than becoming an empty list", async () => {
-	// [] is a real value meaning "admits nobody". Sending it for a caller who
-	// simply said nothing would return zero results and look like data loss.
+	// The API treats `acl: []` the same as an absent acl, so [] is not a way to
+	// ask for "nobody". Sending nothing keeps the request faithful to what the
+	// caller actually said rather than relying on that equivalence.
 	const seen: Record<string, any> = {};
 	const hydra = wrapperFor(seen);
 	await hydra.context.query({ query: "roadmap" });
