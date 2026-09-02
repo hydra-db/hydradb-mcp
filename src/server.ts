@@ -12,7 +12,7 @@ import type { GraphConfig } from "./config.js";
 import { renderRecalledContext } from "./context.js";
 import { COLLECTION_PATTERN, MAX_BODY_BYTES, renderRows } from "./cypher.js";
 import { SERVER_INSTRUCTIONS, TOOL_DESCRIPTIONS } from "./descriptions.js";
-import { HydraDB } from "./hydra/index.js";
+import { assertCollectionAllowed, assertDatabaseAllowed, HydraDB } from "./hydra/index.js";
 import type { ContextKind, QueryKind } from "./hydra/index.js";
 import { logger } from "./logger.js";
 import { ALIAS_REPLACEMENTS, DEPRECATED_TOOL_NAMES, TOOL_NAMES } from "./tool-names.js";
@@ -282,6 +282,15 @@ export function __resetAliasWarnings() {
 	warnedAliases.clear();
 }
 
+export interface ServerOptions {
+	/**
+	 * Register the OAuth-connection tools (currently `hydradb_databases`).
+	 * Set by the HTTP transport when the request authenticated with an OAuth
+	 * token; never for API keys, so their tool list is unchanged.
+	 */
+	oauthTools?: boolean;
+}
+
 export function createHydraDBServer(
 	hydraOverride?: HydraDB,
 	/**
@@ -289,6 +298,7 @@ export function createHydraDBServer(
 	 * config is read from the environment exactly as the rest of the config is.
 	 */
 	graphOverride?: Partial<GraphConfig>,
+	options: ServerOptions = {},
 ) {
 	const server = new McpServer(
 		{
@@ -1168,11 +1178,26 @@ export function createHydraDBServer(
 		return deleteReport(kind, args.ids, res, removed, removedCount);
 	}
 
+	/**
+	 * Resolve a per-call `database` override for the collection tools.
+	 *
+	 * `databases.collections` does not run through `Resource.scope()`, so the
+	 * confinement an OAuth user approved has to be asserted here; without it
+	 * these tools would be the one surface that can name a database the
+	 * connection was refused.
+	 */
+	function resolveDatabaseArg(database?: string): string {
+		const requested = database?.trim();
+		if (!requested || requested === hydra.database) return hydra.database;
+		assertDatabaseAllowed(requested, hydra.allowedDatabases);
+		return requested;
+	}
+
 	async function runListCollections(
 		args: { database?: string },
 		_signal?: AbortSignal,
 	): Promise<ToolResult> {
-		const database = args.database?.trim() || hydra.database;
+		const database = resolveDatabaseArg(args.database);
 		const res = await hydra.databases.collections(database);
 		const raw = res as {
 			collections?: string[];
@@ -1212,7 +1237,7 @@ export function createHydraDBServer(
 					`Take it from ${TOOL_NAMES.LIST_COLLECTIONS} — do not guess one.`,
 			);
 		}
-		const database = args.database?.trim() || hydra.database;
+		const database = resolveDatabaseArg(args.database);
 		const res = await hydra.databases.deleteCollection(
 			{ database, collection },
 			{ signal },
@@ -1229,6 +1254,39 @@ export function createHydraDBServer(
 		);
 	}
 
+	/**
+	 * Which databases this connection can address, and which is the default.
+	 *
+	 * A confined connection answers from its allowed list without a network
+	 * call: the list IS the answer, and asking the API would only show
+	 * databases the connection is not permitted to use.
+	 */
+	async function runDatabases(): Promise<ToolResult> {
+		const defaultDatabase = hydra.database;
+		let databases: string[];
+		let confined = false;
+		if (hydra.allowedDatabases) {
+			databases = [...hydra.allowedDatabases];
+			confined = true;
+		} else {
+			const listed = await hydra.databases.list();
+			databases = (listed.databases ?? listed.tenantIds ?? []).filter(Boolean);
+		}
+		if (!databases.includes(defaultDatabase)) databases.unshift(defaultDatabase);
+
+		const lines = databases.map(
+			(d) => `  - ${d}${d === defaultDatabase ? "  (default for this connection)" : ""}`,
+		);
+		const note = confined
+			? "\nThis connection is confined to the database(s) above; any other name is refused. " +
+				"The user chose this when approving the connection."
+			: "\nPass `database` on any tool to work in another one.";
+		return structuredResult(
+			`${databases.length} database(s):\n${lines.join("\n")}${note}`,
+			{ databases, default: defaultDatabase, confined },
+		);
+	}
+
 	// --- BYOG graph handlers ---
 
 	/**
@@ -1239,12 +1297,38 @@ export function createHydraDBServer(
 	 * validated here because the server's rule is a documented charset and
 	 * rejecting locally names it, where the remote failure is a bare 400.
 	 */
+	/**
+	 * The graph database a call runs against, checked against the connection's
+	 * allowed set. The graph client does not go through the context client's
+	 * scope(), so the same rule is applied here for every graph tool.
+	 */
+	function graphDatabase(override?: string): string {
+		const database = override?.trim() || graphConfig.database;
+		if (database && database !== hydra.database) {
+			assertDatabaseAllowed(database, hydra.allowedDatabases);
+		}
+		return database;
+	}
+
+	/**
+	 * The graph collection a call runs against, checked the same way the
+	 * database is. `drop_collection` makes an unchecked override destructive,
+	 * so confinement covers both axes or it covers nothing.
+	 */
+	function graphCollection(override?: string): string {
+		const collection = override?.trim() || graphConfig.collection;
+		if (collection && collection !== hydra.collection) {
+			assertCollectionAllowed(collection, hydra.allowedCollections);
+		}
+		return collection;
+	}
+
 	function graphScope(args: { database?: string; collection?: string }): {
 		database: string;
 		collection: string;
 	} {
-		const database = args.database?.trim() || graphConfig.database;
-		const collection = args.collection?.trim() || graphConfig.collection;
+		const database = graphDatabase(args.database);
+		const collection = graphCollection(args.collection);
 
 		if (!database) {
 			throw new Error(
@@ -1367,7 +1451,7 @@ export function createHydraDBServer(
 		args: { database?: string },
 		signal?: AbortSignal,
 	): Promise<ToolResult> {
-		const database = args.database?.trim() || graphConfig.database;
+		const database = graphDatabase(args.database);
 		if (!database) {
 			throw new Error(
 				"No graph database configured. Set HYDRADB_GRAPH_DATABASE (or HYDRADB_DATABASE), " +
@@ -1397,7 +1481,7 @@ export function createHydraDBServer(
 		args: { action: string; database?: string; collection?: string },
 		signal?: AbortSignal,
 	): Promise<ToolResult> {
-		const database = args.database?.trim() || graphConfig.database;
+		const database = graphDatabase(args.database);
 		if (!database) {
 			throw new Error(
 				"No graph database configured. Set HYDRADB_GRAPH_DATABASE (or HYDRADB_DATABASE), " +
@@ -1423,6 +1507,13 @@ export function createHydraDBServer(
 					"the name of the graph to drop. Nothing was deleted.",
 				);
 			}
+			// This action takes its collection directly rather than through
+			// graphCollection(), because there is no default to fall back to, so
+			// the confinement check has to be stated here as well. It is the one
+			// place an unchecked collection would be irreversible.
+			if (collection !== hydra.collection) {
+				assertCollectionAllowed(collection, hydra.allowedCollections);
+			}
 			await hydra.graph.dropCollection({ database, collection }, { signal });
 			// The endpoint is idempotent and does not report whether anything was
 			// there, so this states what was requested rather than claiming a
@@ -1436,6 +1527,23 @@ export function createHydraDBServer(
 		}
 
 		if (args.action === "drop_database") {
+			// This deletes EVERY graph collection in the database, so on a
+			// collection-confined connection it cannot be performed within the
+			// confinement: even an allowed database holds collections the user
+			// never approved. The per-collection checks elsewhere cannot catch
+			// this one, because the call names no collection at all. Refuse the
+			// action outright rather than let the broadest destructive operation
+			// be the way around the narrowest grant.
+			if (hydra.allowedCollections) {
+				throw new Error(
+					`This connection is confined to collection ${hydra.allowedCollections
+						.map((c) => `"${c}"`)
+						.join(", ")}, and "drop_database" removes every collection in ` +
+						`"${database}", including ones it was not granted. Nothing was deleted. ` +
+						'Use "drop_collection" for a collection this connection may use, or ' +
+						"reconnect with wider access.",
+				);
+			}
 			const res = await hydra.graph.dropDatabase(database, { signal });
 			const dropped = res.deleted_collections ?? [];
 			const listed =
@@ -2185,6 +2293,13 @@ export function createHydraDBServer(
 			deleted: z.boolean(),
 		},
 	);
+
+	// Only an OAuth connection carries a user's database decision, and only
+	// there does an agent need a way to see it. Registering this for API-key
+	// connections too would change their tool list, which must stay identical.
+	if (options.oauthTools) {
+		register(TOOL_NAMES.DATABASES, {}, () => runDatabases(), readOnly);
+	}
 
 	// --- BYOG graph tools (PRO-1681) ---
 	//

@@ -357,3 +357,54 @@ test("operator with an explicit hybrid retrieval is rejected, not sent", async (
 	);
 	assert.equal(calls.length, 0, "a request that cannot succeed must not reach the wire");
 });
+
+// --- Database confinement ---
+
+import { assertDatabaseAllowed, ScopeNotAllowedError } from "../src/hydra/index.js";
+
+test("assertDatabaseAllowed: undefined allows anything, a list allows only its members", () => {
+	assert.doesNotThrow(() => assertDatabaseAllowed("anything", undefined));
+	assert.doesNotThrow(() => assertDatabaseAllowed("a", ["a", "b"]));
+	assert.throws(() => assertDatabaseAllowed("c", ["a", "b"]), ScopeNotAllowedError);
+});
+
+test("a confined client refuses a per-call override and never reaches the SDK", async () => {
+	const calls: string[] = [];
+	const sdk = {
+		query(args: Record<string, unknown>) {
+			calls.push(`query:${args.database}`);
+			return Promise.resolve({ data: { chunks: [] }, success: true });
+		},
+	} as unknown as HydraDBClient;
+	const hydra = new HydraDB(
+		{ token: "t", database: "personal", allowedDatabases: ["personal"] },
+		sdk,
+	);
+	// The default is always fine, with or without naming it.
+	await hydra.context.query({ query: "hi" });
+	await hydra.context.query({ query: "hi", database: "personal" });
+	// Anything else is refused before the call is built.
+	await assert.rejects(
+		() => hydra.context.query({ query: "hi", database: "work" }),
+		(e: unknown) => {
+			assert.ok(e instanceof ScopeNotAllowedError);
+			assert.equal(e.requested, "work");
+			assert.deepEqual(e.allowed, ["personal"]);
+			return true;
+		},
+	);
+	assert.deepEqual(calls, ["query:personal", "query:personal"]);
+});
+
+test("an unconfined client passes any per-call database through", async () => {
+	const calls: string[] = [];
+	const sdk = {
+		query(args: Record<string, unknown>) {
+			calls.push(`query:${args.database}`);
+			return Promise.resolve({ data: { chunks: [] }, success: true });
+		},
+	} as unknown as HydraDBClient;
+	const hydra = new HydraDB({ token: "t", database: "personal" }, sdk);
+	await hydra.context.query({ query: "hi", database: "work" });
+	assert.deepEqual(calls, ["query:work"]);
+});

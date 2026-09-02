@@ -150,8 +150,10 @@ const PARAM = {
 		"Which context family the ID belongs to: 'memory' or 'knowledge' (default: 'memory')",
 	memory_id: "The ID of the memory to delete",
 	database:
-		"Database (tenant) to target for this request. Defaults to the server's configured " +
-		"database. Pass explicitly to switch database scope per request.",
+		"Database (tenant) to target for this request. Defaults to the database this " +
+		"connection was set up with. Pass explicitly to work in another of the user's " +
+		"databases; hydradb_databases lists them. A connection the user confined to one " +
+		"database refuses any other name.",
 	collection:
 		"Collection (sub-tenant) to target for this request. Defaults to the server's configured " +
 		"collection (or 'hydra-db-mcp'). Pass explicitly to switch collection scope per request.",
@@ -301,8 +303,16 @@ The two drops are IRREVERSIBLE and there is no trash. Confirm with the user befo
 
 There is no create-collection action: collections come into existence on their first write via ${TOOL_NAMES.GRAPH_QUERY}.`;
 
+const DATABASES_BODY = `List the databases this connection can address, with the default marked. Use it before passing \`database\` to another tool, when the user asks which databases exist, or when a call was refused for naming a database this connection is confined to. If the list has one entry, that is the only database this connection may use.`;
+
 export const TOOL_DESCRIPTIONS = {
 	// --- Canonical tools (CONTRACT §3) ---
+
+	[TOOL_NAMES.DATABASES]: {
+		title: "List Hydra DB Databases",
+		description: DATABASES_BODY,
+		params: {},
+	},
 
 	[TOOL_NAMES.QUERY]: {
 		title: "Query Hydra DB",
@@ -585,6 +595,7 @@ THE TOOLS
 - ${TOOL_NAMES.STATUS} — whether an ingested source has finished indexing. Ingestion is asynchronous, so a query issued straight after a save can legitimately return nothing.
 - ${TOOL_NAMES.LIST_COLLECTIONS} — the collection (sub-tenant) names inside a database.
 - ${TOOL_NAMES.DELETE_COLLECTION} — irreversible removal of one collection and everything in it. Confirm first. Take the name from ${TOOL_NAMES.LIST_COLLECTIONS}.
+- ${TOOL_NAMES.DATABASES} — which databases this connection can address, with the default marked. Every tool takes an optional \`database\`; call this before naming one, or when a call was refused because the user confined this connection to a single database.
 
 Ids flow between these: ${TOOL_NAMES.QUERY} and ${TOOL_NAMES.LIST} emit them, ${TOOL_NAMES.INSPECT}, ${TOOL_NAMES.DELETE} and ${TOOL_NAMES.STATUS} accept them. Never invent one.
 
