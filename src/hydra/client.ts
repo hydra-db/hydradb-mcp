@@ -19,7 +19,7 @@ import { HydraDBClient } from "@hydradb/sdk";
 import type { HydraDB as SDK } from "@hydradb/sdk";
 
 import { unwrap } from "./envelope.js";
-import { translateError } from "./errors.js";
+import { responseError, translateError } from "./errors.js";
 import { GraphResource } from "./graph.js";
 
 export type ContextKind = "memory" | "knowledge";
@@ -227,6 +227,11 @@ export interface CreateDatabaseParams {
 	database: string;
 	databaseMetadataSchema?: SDK.TenantsCustomPropertyDefinition[];
 	embeddingsDimension?: number;
+}
+
+export interface DeleteCollectionParams {
+	database: string;
+	collection: string;
 }
 
 type ScopeFields = { database: string; collection?: string };
@@ -552,11 +557,15 @@ export class ContextResource extends Resource {
 export class DatabasesResource extends Resource {
 	// The base constructor is `protected`, so this one is what makes the class
 	// instantiable from outside the file. Removing it fails with TS2674.
-	// biome-ignore lint/complexity/noUselessConstructor: widens visibility
 	constructor(
 		sdk: HydraDBClient,
 		database: string,
-		collection?: string,
+		collection: string | undefined,
+		private readonly http: {
+			token: string;
+			baseUrl: string;
+			timeoutMs: number;
+		},
 		allowedDatabases?: readonly string[],
 		allowedCollections?: readonly string[],
 	) {
@@ -600,6 +609,72 @@ export class DatabasesResource extends Resource {
 		return this.call("/databases/status", () =>
 			this.sdk.databases.status({ database }),
 		);
+	}
+
+	/**
+	 * Permanently delete one collection and all of its data
+	 * (`DELETE /databases/collections`). Not yet on the pinned SDK, so this
+	 * is a hand-rolled path matching GraphResource.
+	 */
+	async deleteCollection(
+		params: DeleteCollectionParams,
+		opts?: RequestOptions,
+	): Promise<{
+		database?: string;
+		collection?: string;
+		status?: string;
+		message?: string;
+	}> {
+		// Resolved through scope() rather than taken raw, so a hand-rolled path
+		// cannot become the one place an OAuth connection's database/collection
+		// confinement is not enforced. Deleting is the worst surface to leak.
+		const { database, collection } = this.scope(
+			params.collection.trim(),
+			params.database.trim(),
+		);
+		if (!collection) {
+			throw new Error("deleteCollection requires a collection; it has no safe default.");
+		}
+		const url = new URL(`${this.http.baseUrl}/databases/collections`);
+		url.searchParams.set("database", database);
+		url.searchParams.set("collection", collection);
+
+		const controller = new AbortController();
+		if (opts?.signal?.aborted) {
+			throw translateError("/databases/collections", opts.signal.reason ?? new Error("aborted"));
+		}
+		const timer = setTimeout(() => controller.abort(), this.http.timeoutMs);
+		const onAbort = () => controller.abort();
+		opts?.signal?.addEventListener("abort", onAbort, { once: true });
+
+		try {
+			const response = await fetch(url, {
+				method: "DELETE",
+				headers: {
+					Authorization: `Bearer ${this.http.token}`,
+					Accept: "application/json",
+					"API-Version": "2",
+				},
+				signal: controller.signal,
+			});
+			const text = await response.text();
+			let parsed: unknown;
+			try {
+				parsed = text === "" ? null : JSON.parse(text);
+			} catch {
+				parsed = text;
+			}
+			if (!response.ok) {
+				throw responseError("/databases/collections", response.status, parsed);
+			}
+			return unwrap(parsed);
+		} catch (err) {
+			if (err instanceof Error && err.name === "HydraWrapperError") throw err;
+			throw translateError("/databases/collections", err);
+		} finally {
+			clearTimeout(timer);
+			opts?.signal?.removeEventListener("abort", onAbort);
+		}
 	}
 }
 
@@ -656,6 +731,11 @@ export class HydraDB {
 			client,
 			config.database,
 			config.collection,
+			{
+				token: config.token,
+				baseUrl: config.baseUrl ?? "https://api.hydradb.com",
+				timeoutMs: (config.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS) * 1000,
+			},
 			config.allowedDatabases,
 			config.allowedCollections,
 		);

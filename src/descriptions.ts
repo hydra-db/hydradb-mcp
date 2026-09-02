@@ -410,6 +410,30 @@ Take the id from hydradb_query or hydradb_list — never guess one. Confirm with
 		},
 	},
 
+	[TOOL_NAMES.LIST_COLLECTIONS]: {
+		title: "List collections",
+		description:
+			"List collection (sub-tenant) IDs inside a database. Collections are created " +
+			"implicitly when data is ingested under a new collection name. Use this before " +
+			`${TOOL_NAMES.DELETE_COLLECTION} so you delete a name that actually exists.`,
+		params: {
+			database: PARAM.database,
+		},
+	},
+
+	[TOOL_NAMES.DELETE_COLLECTION]: {
+		title: "Delete a collection",
+		description: `Permanently remove one collection and every memory, knowledge source, and graph node inside it. The parent database is left intact. This cannot be undone; there is no trash.
+
+Confirm with the user before deleting a collection they did not name. Take the collection name from ${TOOL_NAMES.LIST_COLLECTIONS} — do not guess one.`,
+		params: {
+			collection:
+				"The collection (sub-tenant) to delete. Required. Take it from " +
+				`${TOOL_NAMES.LIST_COLLECTIONS}.`,
+			database: PARAM.database,
+		},
+	},
+
 	[TOOL_NAMES.STATUS]: {
 		title: "Check Hydra DB Indexing Status",
 		description:
@@ -569,6 +593,8 @@ THE TOOLS
 - ${TOOL_NAMES.INSPECT} — the complete original content of one source you already have an id for.
 - ${TOOL_NAMES.DELETE} — irreversible removal of one item by id.
 - ${TOOL_NAMES.STATUS} — whether an ingested source has finished indexing. Ingestion is asynchronous, so a query issued straight after a save can legitimately return nothing.
+- ${TOOL_NAMES.LIST_COLLECTIONS} — the collection (sub-tenant) names inside a database.
+- ${TOOL_NAMES.DELETE_COLLECTION} — irreversible removal of one collection and everything in it. Confirm first. Take the name from ${TOOL_NAMES.LIST_COLLECTIONS}.
 - ${TOOL_NAMES.DATABASES} — which databases this connection can address, with the default marked. Every tool takes an optional \`database\`; call this before naming one, or when a call was refused because the user confined this connection to a single database.
 
 Ids flow between these: ${TOOL_NAMES.QUERY} and ${TOOL_NAMES.LIST} emit them, ${TOOL_NAMES.INSPECT}, ${TOOL_NAMES.DELETE} and ${TOOL_NAMES.STATUS} accept them. Never invent one.

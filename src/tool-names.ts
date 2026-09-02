@@ -13,6 +13,8 @@ export const TOOL_NAMES = {
 	INSPECT: "hydradb_inspect",
 	DELETE: "hydradb_delete",
 	STATUS: "hydradb_status",
+	LIST_COLLECTIONS: "hydradb_list_collections",
+	DELETE_COLLECTION: "hydradb_delete_collection",
 	// Discovery: which databases this connection can address. Exists so an
 	// agent working across several databases can find their names without
 	// asking the user, and so a confined connection can see its own limits.
@@ -47,6 +49,8 @@ export const CANONICAL_TOOL_NAMES = [
 	TOOL_NAMES.INSPECT,
 	TOOL_NAMES.DELETE,
 	TOOL_NAMES.STATUS,
+	TOOL_NAMES.LIST_COLLECTIONS,
+	TOOL_NAMES.DELETE_COLLECTION,
 ] as const;
 
 /**
