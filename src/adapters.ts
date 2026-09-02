@@ -23,7 +23,7 @@ import type { AddMemoryResponse, MemoryResultItem } from "./types.js";
  * the item that succeeded.
  */
 function toMemoryResultItem(
-	item: SDK.IngestionV2SourceUploadResultItem,
+	item: SDK.IngestionV2IngestResultItem,
 ): MemoryResultItem {
 	return {
 		source_id: item.id ?? "",
@@ -38,7 +38,7 @@ function toMemoryResultItem(
 }
 
 export function toAddMemoryResponse(
-	data: SDK.IngestionV2SourceUploadResponse,
+	data: SDK.IngestionV2IngestResponse,
 ): AddMemoryResponse {
 	return {
 		success: data.success ?? false,
@@ -123,7 +123,7 @@ function toPageInfo(
 }
 
 /** SDK list result → memory rows. Field names vary across v2 records, so read defensively. */
-export function toMemoryList(data: SDK.ListV2SourceListResponse): MemoryList {
+export function toMemoryList(data: SDK.ListV2ListResponse): MemoryList {
 	// Memory listings surface at top-level `user_memories` — not under an
 	// `.inner` wrapper, and not under `sources` (that is the knowledge shape).
 	const d = data as unknown as Record<string, unknown>;
@@ -154,7 +154,7 @@ export interface SourceList {
 }
 
 /** SDK list result → knowledge source rows + total. */
-export function toSourceList(data: SDK.ListV2SourceListResponse): SourceList {
+export function toSourceList(data: SDK.ListV2ListResponse): SourceList {
 	// Knowledge listings surface at top-level `sources`, not under `.inner`.
 	const d = data as unknown as Record<string, unknown>;
 	const container =

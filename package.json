@@ -32,7 +32,7 @@
     "lint": "biome lint src tests conformance scripts"
   },
   "dependencies": {
-    "@hydradb/sdk": "2.1.2",
+    "@hydradb/sdk": "2.1.4",
     "@modelcontextprotocol/sdk": "^1.21.1",
     "cors": "^2.8.6",
     "express": "^5.2.1",
