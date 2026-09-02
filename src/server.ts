@@ -936,8 +936,12 @@ export function createHydraDBServer(
 		},
 		signal?: AbortSignal,
 	): Promise<ToolResult> {
-		const id = args.id?.trim();
-		if (!id) {
+		// Blank is rejected; anything else is forwarded byte for byte. The
+		// server treats an item id as opaque (ingest stores a caller's
+		// source_id verbatim), so trimming here could ask about a different
+		// item. Same rule as the CLI's `hydradb subgraph`.
+		const id = args.id ?? "";
+		if (id.trim() === "") {
 			throw new Error(
 				`${TOOL_NAMES.SUBGRAPH} requires \`id\` — the value shown as [id: …] in ` +
 					`${TOOL_NAMES.QUERY} results or in [brackets] in ${TOOL_NAMES.LIST} output.`,
@@ -967,16 +971,31 @@ export function createHydraDBServer(
 			return structuredResult(
 				`No item with id ${id} was found in this collection, so there is no subgraph to show. ` +
 					`Ids come from ${TOOL_NAMES.QUERY} or ${TOOL_NAMES.LIST}; check the collection as well as the id.`,
-				{ seed_id: id, members: [], member_count: 0, truncated: false },
+				// Same keys as a populated result: a client reading
+				// structuredContent should not have to branch on which shape it got.
+				{
+					seed_id: id,
+					member_count: 0,
+					max_depth_reached: 0,
+					truncated: false,
+					relations: [],
+					structural_link_count: 0,
+					structural_truncated: false,
+					members: [],
+				},
 			);
 		}
 
 		const hops = res.max_depth_reached ?? 0;
+		// Sorted once, then used for both the prose and structuredContent: a
+		// machine client that renders the members must not get a different
+		// order from the one a reader sees.
+		const ordered = [...members].sort((a, b) => a.depth - b.depth);
 		const lines: string[] = [
-			members.length === 1
+			members.length === 1 && !res.is_truncated
 				? `${id} stands alone: nothing in the graph links to it yet.`
-				: `${members.length} items connected to ${id} through ${hops} hop${hops === 1 ? "" : "s"}` +
-					(res.is_truncated ? ` (clipped at max_sources — the subgraph continues)` : "") +
+				: `${members.length} item${members.length === 1 ? "" : "s"} connected to ${id} through ${hops} hop${hops === 1 ? "" : "s"}` +
+					(res.is_truncated ? ` (clipped at max_sources; the subgraph continues)` : "") +
 					":",
 			"",
 		];
@@ -986,7 +1005,7 @@ export function createHydraDBServer(
 		// is shortened in the prose because it appears in full on its own line
 		// and in structuredContent; the relation is what a reader scans for.
 		const shortId = (id: string) => (id.length > 14 ? `${id.slice(0, 12)}…` : id);
-		for (const m of [...members].sort((a, b) => a.depth - b.depth)) {
+		for (const m of ordered) {
 			const title = m.title?.trim() || m.app_external_id || "(untitled)";
 			const reached =
 				m.depth === 0
@@ -1003,12 +1022,27 @@ export function createHydraDBServer(
 				`. Pass any [id: …] to ${TOOL_NAMES.INSPECT} for its full content.`,
 		);
 
+		// The edges make it a graph rather than a list, so structuredContent
+		// carries them too, compacted to what a client can act on: both
+		// endpoints are Source nodes, so entity_id is the member's id. The
+		// structural links are about entities and comments, not members, so
+		// they stay a count plus their own clipped flag, exactly as the prose
+		// reports them.
+		const edges = (res.relations ?? []).map((r) => ({
+			from: r.source?.entity_id ?? null,
+			to: r.target?.entity_id ?? null,
+			type: r.relations?.[0]?.canonical_predicate ?? null,
+		}));
+
 		return structuredResult(lines.join("\n"), {
 			seed_id: res.seed_source_id || id,
 			member_count: members.length,
 			max_depth_reached: hops,
 			truncated: Boolean(res.is_truncated),
-			members: members.map((m) => ({
+			relations: edges,
+			structural_link_count: (res.auxiliary_relations ?? []).length,
+			structural_truncated: Boolean(res.auxiliary_truncated),
+			members: ordered.map((m) => ({
 				id: m.source_id,
 				title: m.title ?? null,
 				depth: m.depth,

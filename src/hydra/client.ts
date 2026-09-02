@@ -223,10 +223,21 @@ export interface SubgraphMember {
 	discovered_relation?: string;
 }
 
+/**
+ * One edge of the subgraph. `source` and `target` are Source nodes, so their
+ * `entity_id` is the member's item id; `relations[0].canonical_predicate` is
+ * the edge type (`relates_to`, `same_thread`, `child_of`, ...).
+ */
+export interface SubgraphRelation {
+	source?: { entity_id?: string; name?: string };
+	target?: { entity_id?: string; name?: string };
+	relations?: { canonical_predicate?: string }[];
+}
+
 export interface SubgraphResult {
 	seed_source_id: string;
 	sources: SubgraphMember[];
-	relations: unknown[];
+	relations: SubgraphRelation[];
 	auxiliary_relations: unknown[];
 	auxiliary_truncated: boolean;
 	is_truncated: boolean;
@@ -589,12 +600,21 @@ export class ContextResource extends Resource {
 				"/context/{id}/subgraph",
 			);
 		}
-		const id = params.id.trim();
+		// Blank is the one id the wrapper rejects locally: it would build
+		// "/context//subgraph" and fail as a remote routing error instead of a
+		// legible one. Everything else goes out byte for byte — ingest stores a
+		// source_id verbatim, so trimming here could address a different item.
+		if (params.id.trim() === "") {
+			throw new HydraWrapperError(
+				"Hydra DB /context/{id}/subgraph → ERR: id must not be empty",
+				"/context/{id}/subgraph",
+			);
+		}
 		const query = new URLSearchParams(this.scope(params.collection, params.database));
 		if (params.kind) query.set("type", params.kind);
 		if (params.depth != null) query.set("depth", String(params.depth));
 		if (params.maxSources != null) query.set("max_sources", String(params.maxSources));
-		const path = `/context/${encodeURIComponent(id)}/subgraph?${query.toString()}`;
+		const path = `/context/${encodeURIComponent(params.id)}/subgraph?${query.toString()}`;
 		return sendRaw<SubgraphResult>(this.raw, path, "GET", undefined, opts);
 	}
 

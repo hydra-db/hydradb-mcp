@@ -2577,7 +2577,10 @@ async function subgraphText(
 const subgraphOf = (members: Record<string, unknown>[], over: Record<string, unknown> = {}) => ({
 	seed_source_id: "thread-root",
 	sources: members,
-	relations: [{}, {}],
+	relations: [
+		{ source: { entity_id: "thread-root" }, target: { entity_id: "reply-2" }, relations: [{ canonical_predicate: "same_thread" }] },
+		{ source: { entity_id: "reply-2" }, target: { entity_id: "doc-9" }, relations: [{ canonical_predicate: "relates_to" }] },
+	],
 	auxiliary_relations: [{}, {}, {}],
 	auxiliary_truncated: false,
 	is_truncated: false,
@@ -2607,7 +2610,17 @@ test("hydradb_subgraph lists members by depth with ids the other tools accept", 
 	assert.match(text, /hydradb_inspect/);
 	assert.equal(structured?.member_count, 2);
 	assert.equal(structured?.truncated, false);
-	assert.deepEqual((structured?.members as { id: string }[]).map((m) => m.id), ["reply-2", "thread-root"]);
+	// structuredContent is ordered the same way the prose is: a client rendering
+	// the members must not see a different order from the reader.
+	assert.deepEqual((structured?.members as { id: string }[]).map((m) => m.id), ["thread-root", "reply-2"]);
+	// The edges come through, so a client can rebuild the graph rather than
+	// only the member list; the structural links stay a count plus their flag.
+	assert.deepEqual(structured?.relations, [
+		{ from: "thread-root", to: "reply-2", type: "same_thread" },
+		{ from: "reply-2", to: "doc-9", type: "relates_to" },
+	]);
+	assert.equal(structured?.structural_link_count, 3);
+	assert.equal(structured?.structural_truncated, false);
 	// Args reach the wrapper under the wrapper's names.
 	assert.deepEqual(calls[0], { id: "thread-root", kind: "knowledge", depth: 3, maxSources: undefined, database: undefined, collection: undefined });
 });
@@ -2631,6 +2644,36 @@ test("hydradb_subgraph distinguishes 'stands alone' from 'not found'", async () 
 	assert.match(missing.text, /No item with id nope/);
 	assert.equal(missing.structured?.member_count, 0);
 	assert.notEqual(missing.isError, true, "an unknown id is an answer, not a failure");
+});
+
+// One member plus is_truncated means the traversal was cut at max_sources, not
+// that the item is isolated. Reporting it as isolated is a wrong answer, not a
+// terse one.
+test("hydradb_subgraph does not call a clipped result 'stands alone'", async () => {
+	const { text, structured } = await subgraphText(
+		subgraphOf([{ source_id: "solo", depth: 0 }], { is_truncated: true, max_depth_reached: 0 }),
+		{ id: "solo", max_sources: 1 },
+	);
+	assert.doesNotMatch(text, /stands alone/);
+	assert.match(text, /clipped at max_sources/);
+	assert.equal(structured?.truncated, true);
+});
+
+test("hydradb_subgraph reports clipped structural links", async () => {
+	const { text, structured } = await subgraphText(
+		subgraphOf([{ source_id: "a", depth: 0 }, { source_id: "b", depth: 1 }], { auxiliary_truncated: true }),
+		{ id: "a" },
+	);
+	assert.match(text, /structural links clipped/);
+	assert.equal(structured?.structural_truncated, true);
+});
+
+// An empty result carries the same keys as a populated one, so a client never
+// has to branch on which shape it got.
+test("hydradb_subgraph returns one structured shape whether or not it found anything", async () => {
+	const found = await subgraphText(subgraphOf([{ source_id: "a", depth: 0 }, { source_id: "b", depth: 1 }]), { id: "a" });
+	const missing = await subgraphText(subgraphOf([]), { id: "nope" });
+	assert.deepEqual(Object.keys(missing.structured ?? {}).sort(), Object.keys(found.structured ?? {}).sort());
 });
 
 test("hydradb_subgraph flags a server-reported failure", async () => {

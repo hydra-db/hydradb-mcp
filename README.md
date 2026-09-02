@@ -163,16 +163,19 @@ under a ticket, the documents a page links to.
 | `id` | string | Yes | The item to start from, from `hydradb_query` or `hydradb_list` |
 | `kind` | string | No | `knowledge` (default) or `memory` — the two graphs are separate |
 | `depth` | number | No | Hops to traverse (default 5, max 10) |
-| `max_sources` | number | No | Cap on members returned (default 200) |
+| `max_sources` | number | No | Cap on members returned (default 200, max 1000) |
 | `database`, `collection` | string | No | Scope overrides |
 
 Each member carries its id, title, depth from the start item and how it was
 reached — `discovered_relation` is the mechanism (`same_thread`, `parent`,
 `child`, or a `relates_to` type such as `reply_to`) and `discovered_via` the id
 of the member it was reached from, so the list is also a tree.
-`structuredContent` has the same as parsed data. `is_truncated` means
-`max_sources` clipped the traversal. Chunk-level entity relations are not
-included — those come from `hydradb_query`.
+`structuredContent` carries those same members, in the same order, plus
+`relations`: the edges among them as `{from, to, type}`, so a client can rebuild
+the graph and not just the list. `truncated` means `max_sources` clipped the
+traversal; `structural_link_count` and `structural_truncated` report the
+structural graph (entities, comments, attachments, actors) around the members.
+Chunk-level entity relations are not included; those come from `hydradb_query`.
 
 ### **hydradb_delete**
 

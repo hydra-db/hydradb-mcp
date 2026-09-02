@@ -479,6 +479,35 @@ test("context.subgraph translates a failure into the wrapper's own error", async
 	);
 });
 
+// The server treats an item id as opaque: ingest stores a caller's source_id
+// verbatim, so " s1" and "s1" are two different items and a wrapper that
+// trimmed would quietly ask about the other one.
+test("context.subgraph sends the id verbatim, and rejects only a blank one", async () => {
+	const { fetchFn, calls } = fakeRawFetch(() => ({
+		status: 200,
+		body: { data: { seed_source_id: " s1 ", sources: [], relations: [], auxiliary_relations: [], is_truncated: false, auxiliary_truncated: false, max_depth_reached: 0, success: true, message: "ok" }, success: true },
+	}));
+	const hydra = new HydraDB(
+		{ token: "tok", database: "db_test", baseUrl: "https://h.test", fetchFn },
+		{} as unknown as HydraDBClient,
+	);
+
+	await hydra.context.subgraph({ id: " s1 " });
+	assert.equal(new URL(calls[0]!.url).pathname, "/context/%20s1%20/subgraph");
+
+	// Blank is the one id rejected locally: it would build "/context//subgraph"
+	// and come back as an opaque routing failure.
+	await assert.rejects(
+		() => hydra.context.subgraph({ id: "   " }),
+		(e: unknown) => {
+			assert.ok(e instanceof HydraWrapperError);
+			assert.match(e.message, /id must not be empty/);
+			return true;
+		},
+	);
+	assert.equal(calls.length, 1, "the blank id never reached the network");
+});
+
 test("context.subgraph refuses a database the connection is confined away from", async () => {
 	const { fetchFn, calls } = fakeRawFetch(() => ({ status: 200, body: { data: {}, success: true } }));
 	const hydra = new HydraDB(
