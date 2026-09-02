@@ -167,7 +167,10 @@ under a ticket, the documents a page links to.
 | `database`, `collection` | string | No | Scope overrides |
 
 Each member carries its id, title, depth from the start item and how it was
-reached; `structuredContent` has the same as parsed data. `is_truncated` means
+reached — `discovered_relation` is the mechanism (`same_thread`, `parent`,
+`child`, or a `relates_to` type such as `reply_to`) and `discovered_via` the id
+of the member it was reached from, so the list is also a tree.
+`structuredContent` has the same as parsed data. `is_truncated` means
 `max_sources` clipped the traversal. Chunk-level entity relations are not
 included — those come from `hydradb_query`.
 

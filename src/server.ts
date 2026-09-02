@@ -980,14 +980,20 @@ export function createHydraDBServer(
 					":",
 			"",
 		];
+		// discovered_relation is the MECHANISM (same_thread, parent, child, or a
+		// relates_to type); discovered_via is the member this one was reached
+		// FROM — another member's id, so the list is also a tree. The parent id
+		// is shortened in the prose because it appears in full on its own line
+		// and in structuredContent; the relation is what a reader scans for.
+		const shortId = (id: string) => (id.length > 14 ? `${id.slice(0, 12)}…` : id);
 		for (const m of [...members].sort((a, b) => a.depth - b.depth)) {
 			const title = m.title?.trim() || m.app_external_id || "(untitled)";
-			const via =
+			const reached =
 				m.depth === 0
 					? "the item you started from"
-					: [m.discovered_via, m.discovered_relation].filter(Boolean).join(" · ") || "connected";
+					: `${m.discovered_relation || "linked"}${m.discovered_via ? ` from ${shortId(m.discovered_via)}` : ""}`;
 			const kind = [m.app_provider, m.app_kind].filter(Boolean).join(" ");
-			lines.push(`- [id: ${m.source_id}] ${title}${kind ? ` (${kind})` : ""} — depth ${m.depth}, via ${via}`);
+			lines.push(`- [id: ${m.source_id}] ${title}${kind ? ` (${kind})` : ""} — depth ${m.depth}, ${reached}`);
 		}
 		lines.push(
 			"",

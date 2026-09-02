@@ -2590,7 +2590,8 @@ const subgraphOf = (members: Record<string, unknown>[], over: Record<string, unk
 test("hydradb_subgraph lists members by depth with ids the other tools accept", async () => {
 	const { text, structured, isError, calls } = await subgraphText(
 		subgraphOf([
-			{ source_id: "reply-2", title: "re: budget", depth: 1, discovered_via: "thread", discovered_relation: "same_thread", app_provider: "slack" },
+			// discovered_via is the member this one was reached FROM, not a mechanism.
+			{ source_id: "reply-2", title: "re: budget", depth: 1, discovered_via: "thread-root", discovered_relation: "same_thread", app_provider: "slack" },
 			{ source_id: "thread-root", title: "Q3 budget", depth: 0 },
 		]),
 		{ id: "thread-root", depth: 3, kind: "knowledge" },
@@ -2601,7 +2602,8 @@ test("hydradb_subgraph lists members by depth with ids the other tools accept", 
 	const rootAt = text.indexOf("[id: thread-root]");
 	const replyAt = text.indexOf("[id: reply-2]");
 	assert.ok(rootAt >= 0 && replyAt > rootAt, "seed listed before its reply");
-	assert.match(text, /reply-2\] re: budget \(slack\) — depth 1, via thread · same_thread/);
+	assert.match(text, /reply-2\] re: budget \(slack\) — depth 1, same_thread from thread-root/);
+	assert.match(text, /thread-root\] Q3 budget — depth 0, the item you started from/);
 	assert.match(text, /hydradb_inspect/);
 	assert.equal(structured?.member_count, 2);
 	assert.equal(structured?.truncated, false);

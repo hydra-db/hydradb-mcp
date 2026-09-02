@@ -254,7 +254,7 @@ const LIST_SOURCES_BODY =
 
 const SUBGRAPH_BODY = `Return the connected subgraph of ONE stored item: every item reachable from it through item-level links — explicit relations declared at ingest, the thread it belongs to, and parent/child hierarchy — traversed breadth-first up to \`depth\` hops. Use it after hydradb_query or hydradb_list when a single result is not enough and you need what surrounds it: the rest of a Slack thread, the replies under a ticket, the documents a page links to.
 
-Each member carries its id, title, depth from the start item (0 is the item itself) and how it was reached. Pass any member's id to hydradb_inspect for its full content. The response also lists the relations among the members and the structural graph around them — the entities, comments, attachments and people attached to each — but NOT the chunk-level entity relations hydradb_query returns; those are a different read.
+Each member carries its id, title, depth from the start item (0 is the item itself) and how it was reached: the mechanism (\`same_thread\`, \`parent\`, \`child\`, or a \`relates_to\` type such as \`reply_to\`) and the id of the member it was reached from, so the list is also a tree. Pass any member's id to hydradb_inspect for its full content. The response also lists the relations among the members and the structural graph around them — the entities, comments, attachments and people attached to each — but NOT the chunk-level entity relations hydradb_query returns; those are a different read.
 
 An id nothing links to returns just that item. An unknown id returns an empty result, not an error. \`is_truncated\` means \`max_sources\` clipped the traversal; \`max_depth_reached\` says how far it got.
 
