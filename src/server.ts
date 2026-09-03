@@ -346,9 +346,12 @@ export function createHydraDBServer(
 		source_ids?: string[];
 		metadata_filters?: Record<string, unknown>;
 		num_related_chunks?: number;
+		recency_bias?: number;
+		query_apps?: boolean;
 		acl?: string[];
 		database?: string;
 		collection?: string;
+		collections?: string[];
 	}, signal?: AbortSignal): Promise<ToolResult> {
 		// Host-owned default (CONTRACT §2 rule 5): search BOTH families. This tool
 		// used to pin `kind: "memory"`, which made every ingested knowledge source
@@ -369,15 +372,22 @@ export function createHydraDBServer(
 			acl: args.acl,
 			numRelatedChunks: args.num_related_chunks,
 			graphContext: args.graph_context ?? true,
+			queryApps: args.query_apps,
 			database: args.database,
 			collection: args.collection,
+			collections: args.collections,
 			// Host-owned default (CONTRACT §2 rule 5), but only where it means
 			// something: alpha balances dense against sparse retrieval in HYBRID
 			// mode, and an `operator` switches the query to text retrieval (see
 			// the wrapper), where there are no two lanes to weigh. Injecting it
 			// there would send a hybrid-only knob on a request that is not hybrid.
 			alpha: args.operator != null ? undefined : 0.8,
-			recencyBias: 0,
+			// Host-owned default (CONTRACT §2 rule 5), and 0 is also what the API
+			// applies when the field is omitted — so the default ranking is
+			// unchanged. It stops being a constant here because "what is the
+			// current state of X" is a different question from "what matches X",
+			// and only a caller that can raise this can ask the first one.
+			recencyBias: args.recency_bias ?? 0,
 		}, { signal });
 		// The renderer reads the SDK payload directly; there is no longer a
 		// snake_case mirror to convert into.
@@ -1758,6 +1768,21 @@ export function createHydraDBServer(
 			.max(5)
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.num_related_chunks),
+		recency_bias: z
+			.number()
+			.min(0)
+			.max(1)
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.recency_bias),
+		query_apps: z
+			.boolean()
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.query_apps),
+		collections: z
+			.array(z.string().min(1))
+			.min(1)
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.collections),
 		acl: z
 			.array(z.string())
 			.optional()

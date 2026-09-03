@@ -409,6 +409,90 @@ test("an unconfined client passes any per-call database through", async () => {
 	assert.deepEqual(calls, ["query:work"]);
 });
 
+test("collections and collection cannot be sent together", async () => {
+	const calls: string[] = [];
+	const sdk = {
+		query(args: Record<string, unknown>) {
+			calls.push(`query:${JSON.stringify(args.collections ?? args.collection)}`);
+			return Promise.resolve({ data: { chunks: [] }, success: true });
+		},
+	} as unknown as HydraDBClient;
+	const hydra = new HydraDB({ token: "t", database: "db" }, sdk);
+
+	// Hydra DB refuses a request carrying both selectors, so this must fail here
+	// rather than travel to the wire to fail there.
+	await assert.rejects(
+		() =>
+			hydra.context.query({
+				query: "hi",
+				collection: "a",
+				collections: ["b", "c"],
+			}),
+		/not\s+both/,
+	);
+	await assert.rejects(
+		() => hydra.context.query({ query: "hi", collections: [] }),
+		/at least one collection/,
+	);
+	assert.deepEqual(calls, [], "neither call should reach the SDK");
+});
+
+test("a confined client enforces confinement on every named collection", async () => {
+	const calls: string[] = [];
+	const sdk = {
+		query(args: Record<string, unknown>) {
+			calls.push(`query:${JSON.stringify(args.collections)}`);
+			return Promise.resolve({ data: { chunks: [] }, success: true });
+		},
+	} as unknown as HydraDBClient;
+	const hydra = new HydraDB(
+		{
+			token: "t",
+			database: "db",
+			collection: "allowed_a",
+			allowedCollections: ["allowed_a", "allowed_b"],
+		},
+		sdk,
+	);
+
+	await hydra.context.query({ query: "hi", collections: ["allowed_a", "allowed_b"] });
+
+	// A multi-scope selector must not be a way around the confinement that the
+	// singular selector enforces.
+	await assert.rejects(
+		() => hydra.context.query({ query: "hi", collections: ["allowed_a", "secret"] }),
+		(e: unknown) => {
+			assert.ok(e instanceof ScopeNotAllowedError);
+			assert.equal(e.requested, "secret");
+			return true;
+		},
+	);
+	assert.deepEqual(calls, ['query:["allowed_a","allowed_b"]']);
+});
+
+test("a weighted collections object is scoped and forwarded as given", async () => {
+	const calls: unknown[] = [];
+	const sdk = {
+		query(args: Record<string, unknown>) {
+			calls.push(args.collections);
+			return Promise.resolve({ data: { chunks: [] }, success: true });
+		},
+	} as unknown as HydraDBClient;
+	const hydra = new HydraDB(
+		{ token: "t", database: "db", allowedCollections: ["a", "b"] },
+		sdk,
+	);
+
+	await hydra.context.query({ query: "hi", collections: { a: 2, b: 1 } });
+	assert.deepEqual(calls, [{ a: 2, b: 1 }]);
+
+	// The weights are keyed by collection name, so confinement reads the keys.
+	await assert.rejects(
+		() => hydra.context.query({ query: "hi", collections: { a: 2, secret: 1 } }),
+		ScopeNotAllowedError,
+	);
+});
+
 // ── context.subgraph (PRO-1848): the raw path, behind the same surface ─────
 
 function fakeRawFetch(

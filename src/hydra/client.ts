@@ -152,8 +152,20 @@ export interface QueryParams {
 	acl?: string[];
 	/** Adjacent chunks pulled in alongside each match, for surrounding context. */
 	numRelatedChunks?: number;
+	/**
+	 * App-aware knowledge retrieval: exact IDs and actors, thread reconstruction,
+	 * and parent/child expansion over connector-ingested sources. Applies to
+	 * knowledge hybrid queries; the server ignores it elsewhere.
+	 */
+	queryApps?: boolean;
 	/** Per-call collection override. */
 	collection?: string;
+	/**
+	 * Multi-collection scope: a list for equal weighting, or a {collection:
+	 * weight} object to rank some higher than others. Mutually exclusive with
+	 * `collection` — see the guard in `query`.
+	 */
+	collections?: SDK.SearchQueryRequestCollections;
 	/** Per-call database override. */
 	database?: string;
 }
@@ -348,6 +360,11 @@ export interface CreateDatabaseParams {
 
 type ScopeFields = { database: string; collection?: string };
 
+type MultiScopeFields = {
+	database: string;
+	collections: SDK.SearchQueryRequestCollections;
+};
+
 /**
  * A per-call `database` named one the connection is not allowed to touch.
  *
@@ -430,6 +447,43 @@ abstract class Resource {
 			: { database };
 	}
 
+	/**
+	 * Scope for a query that names SEVERAL collections.
+	 *
+	 * Deliberately does NOT fall back to the configured default collection. The
+	 * server folds the singular `collection` into the deprecated `sub_tenant_id`
+	 * and refuses any request that carries it alongside a multi-scope selector,
+	 * so injecting the default here would turn every `collections` call on a
+	 * scoped connection into a 400. Naming the collections IS the scope.
+	 *
+	 * Confinement is enforced on the same path as `scope`: every named
+	 * collection is checked, so a multi-scope selector cannot reach past what an
+	 * OAuth connection was confined to.
+	 */
+	protected multiScope(
+		collections: SDK.SearchQueryRequestCollections,
+		dbOverride?: string,
+	): MultiScopeFields {
+		const database = dbOverride?.trim() || this.database;
+		if (database !== this.database) assertDatabaseAllowed(database, this.allowedDatabases);
+
+		const names = Array.isArray(collections)
+			? collections
+			: Object.keys(collections);
+		if (names.length === 0) {
+			throw new Error(
+				"collections was empty — pass at least one collection name, or omit " +
+				"collections to search the connection's default scope.",
+			);
+		}
+		for (const name of names) {
+			if (name !== this.collection) {
+				assertCollectionAllowed(name, this.allowedCollections);
+			}
+		}
+		return { database, collections };
+	}
+
 	protected async call<T>(path: string, fn: () => Promise<unknown>): Promise<T> {
 		try {
 			return unwrap<T>(await fn());
@@ -489,9 +543,25 @@ export class ContextResource extends Resource {
 		const queryBy =
 			params.queryBy ?? (params.operator != null ? "text" : undefined);
 
+		// One scope selector per request. The server rejects a multi-scope
+		// selector sent alongside the singular one it folds `collection` into, so
+		// a caller that sets both has stated two different scopes and only they
+		// can say which they meant — the same stance taken on operator/queryBy
+		// above, rather than silently dropping one.
+		if (params.collections != null && params.collection != null) {
+			throw new Error(
+				"pass either collection (one scope) or collections (several) — not " +
+				"both. Hydra DB refuses a request carrying both selectors.",
+			);
+		}
+		const scope =
+			params.collections != null
+				? this.multiScope(params.collections, params.database)
+				: this.scope(params.collection, params.database);
+
 		return this.call("/query", () =>
 			this.sdk.query({
-				...this.scope(params.collection, params.database),
+				...scope,
 				query: params.query,
 				type: params.kind,
 				operator: params.operator,
@@ -501,6 +571,7 @@ export class ContextResource extends Resource {
 				graphContext: params.graphContext,
 				alpha: params.alpha,
 				recencyBias: params.recencyBias,
+				queryApps: params.queryApps,
 				ids: params.ids,
 				metadataFilters: params.metadataFilters,
 				numRelatedChunks: params.numRelatedChunks,

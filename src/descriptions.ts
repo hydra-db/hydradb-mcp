@@ -44,6 +44,26 @@ const PARAM = {
 		"Adjacent chunks to attach to each match for surrounding context (default: 0). " +
 		"Each one multiplies the response size, so use 1-2 only when snippets are " +
 		"arriving mid-sentence; prefer hydradb_inspect when you want a whole source.",
+	recency_bias:
+		"How much to favour recently-updated sources when ranking, 0 to 1 " +
+		"(default: 0, no recency preference). Raise it for 'where does this stand " +
+		"now' questions, where an older source can answer the words of the query " +
+		"perfectly and still be superseded — 0.8-0.9 puts the current version on " +
+		"top. Leave it at 0 when the age of a source says nothing about whether it " +
+		"is the right one. This re-RANKS; it never excludes older sources, so " +
+		"check the dates in the results rather than assuming the top hit is current.",
+	query_apps:
+		"Search connector-ingested sources with app awareness (default: false). " +
+		"Turn it on for Slack, Jira, Confluence, Drive and similar: it matches " +
+		"exact IDs and actors, reconstructs threads, and pulls in parent/child " +
+		"pages that plain text matching misses — a Jira comment is unhelpful " +
+		"without its issue, and a Slack reply without its thread. Adds a little " +
+		"latency, so leave it off for corpora you uploaded directly.",
+	collections:
+		"Search SEVERAL collections at once, as a list of names. Use it when the " +
+		"answer could live in more than one and you do not know which — otherwise " +
+		"prefer a single `collection`, which is both faster and more precise. " +
+		"Pass either this or `collection`, never both.",
 	operator:
 		"Switches this query to KEYWORD retrieval (query_by=text) and says how to " +
 		"combine the terms: 'or' matches any, 'and' requires all, 'phrase' matches the " +
@@ -348,8 +368,11 @@ export const TOOL_DESCRIPTIONS = {
 			source_ids: PARAM.query_source_ids,
 			metadata_filters: PARAM.metadata_filters,
 			num_related_chunks: PARAM.num_related_chunks,
+			recency_bias: PARAM.recency_bias,
+			query_apps: PARAM.query_apps,
 			database: PARAM.database,
 			collection: PARAM.collection,
+			collections: PARAM.collections,
 		},
 	},
 
