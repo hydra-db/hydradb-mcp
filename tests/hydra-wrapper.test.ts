@@ -409,6 +409,136 @@ test("an unconfined client passes any per-call database through", async () => {
 	assert.deepEqual(calls, ["query:work"]);
 });
 
+// ── context.subgraph (PRO-1848): the raw path, behind the same surface ─────
+
+function fakeRawFetch(
+	handler: (url: string, init?: RequestInit) => { status: number; body: unknown },
+) {
+	const calls: { url: string; init?: RequestInit }[] = [];
+	const fetchFn = (async (url: string | URL, init?: RequestInit) => {
+		calls.push({ url: String(url), init });
+		const { status, body } = handler(String(url), init);
+		return new Response(JSON.stringify(body), {
+			status,
+			headers: { "content-type": "application/json" },
+		});
+	}) as unknown as typeof fetch;
+	return { fetchFn, calls };
+}
+
+test("context.subgraph hits GET /context/{id}/subgraph with the scope and API-Version", async () => {
+	const { fetchFn, calls } = fakeRawFetch(() => ({
+		status: 200,
+		body: {
+			data: { seed_source_id: "s 1", sources: [{ source_id: "s 1", depth: 0 }], relations: [], auxiliary_relations: [], is_truncated: false, auxiliary_truncated: false, max_depth_reached: 0, success: true, message: "ok" },
+			success: true,
+			meta: {},
+		},
+	}));
+	const hydra = new HydraDB(
+		{ token: "tok", database: "db_test", collection: "col_test", baseUrl: "https://h.test/", fetchFn },
+		{} as unknown as HydraDBClient,
+	);
+
+	const res = await hydra.context.subgraph({ id: "s 1", depth: 2, maxSources: 50, kind: "memory" });
+
+	assert.equal(res.seed_source_id, "s 1", "envelope unwrapped to .data");
+	assert.equal(calls.length, 1);
+	const url = new URL(calls[0]!.url);
+	// The id is a path segment, so it is escaped; a trailing slash on the base
+	// must not produce "//context".
+	assert.equal(url.pathname, "/context/s%201/subgraph");
+	assert.equal(url.searchParams.get("database"), "db_test");
+	assert.equal(url.searchParams.get("collection"), "col_test");
+	assert.equal(url.searchParams.get("type"), "memory");
+	assert.equal(url.searchParams.get("depth"), "2");
+	assert.equal(url.searchParams.get("max_sources"), "50");
+	const headers = calls[0]!.init?.headers as Record<string, string>;
+	assert.equal(headers["API-Version"], "2", "CONTRACT §2 rule 6");
+	assert.equal(headers.Authorization, "Bearer tok");
+	assert.equal(calls[0]!.init?.method, "GET");
+});
+
+test("context.subgraph translates a failure into the wrapper's own error", async () => {
+	const { fetchFn } = fakeRawFetch(() => ({
+		status: 400,
+		body: { success: false, error: { code: "INVALID_INPUT", message: "depth must be a positive integer" } },
+	}));
+	const hydra = new HydraDB(
+		{ token: "tok", database: "db_test", baseUrl: "https://h.test", fetchFn },
+		{} as unknown as HydraDBClient,
+	);
+	await assert.rejects(
+		() => hydra.context.subgraph({ id: "x", depth: 99 }),
+		(e: unknown) => {
+			assert.ok(e instanceof HydraWrapperError, "same error type as an SDK failure");
+			assert.equal(e.status, 400);
+			assert.match(e.message, /depth must be a positive integer/);
+			return true;
+		},
+	);
+});
+
+// The server treats an item id as opaque: ingest stores a caller's source_id
+// verbatim, so " s1" and "s1" are two different items and a wrapper that
+// trimmed would quietly ask about the other one.
+test("context.subgraph sends the id verbatim, and rejects only a blank one", async () => {
+	const { fetchFn, calls } = fakeRawFetch(() => ({
+		status: 200,
+		body: { data: { seed_source_id: " s1 ", sources: [], relations: [], auxiliary_relations: [], is_truncated: false, auxiliary_truncated: false, max_depth_reached: 0, success: true, message: "ok" }, success: true },
+	}));
+	const hydra = new HydraDB(
+		{ token: "tok", database: "db_test", baseUrl: "https://h.test", fetchFn },
+		{} as unknown as HydraDBClient,
+	);
+
+	await hydra.context.subgraph({ id: " s1 " });
+	assert.equal(new URL(calls[0]!.url).pathname, "/context/%20s1%20/subgraph");
+
+	// Blank is the one id rejected locally: it would build "/context//subgraph"
+	// and come back as an opaque routing failure.
+	await assert.rejects(
+		() => hydra.context.subgraph({ id: "   " }),
+		(e: unknown) => {
+			assert.ok(e instanceof HydraWrapperError);
+			assert.match(e.message, /id must not be empty/);
+			return true;
+		},
+	);
+	assert.equal(calls.length, 1, "the blank id never reached the network");
+});
+
+test("context.subgraph refuses a database the connection is confined away from", async () => {
+	const { fetchFn, calls } = fakeRawFetch(() => ({ status: 200, body: { data: {}, success: true } }));
+	const hydra = new HydraDB(
+		{ token: "tok", database: "db_test", allowedDatabases: ["db_test"], baseUrl: "https://h.test", fetchFn },
+		{} as unknown as HydraDBClient,
+	);
+	await assert.rejects(() => hydra.context.subgraph({ id: "x", database: "other" }));
+	assert.equal(calls.length, 0, "a refused scope never reaches the network");
+});
+
+// PRO-1684: the subgraph read is ACL-scoped server-side, so the wrapper must
+// carry the principals to the wire as repeated acl params. An omitted acl
+// sends nothing.
+test("context.subgraph carries acl principals to the wire", async () => {
+	const { fetchFn, calls } = fakeRawFetch(() => ({
+		status: 200,
+		body: { data: { seed_source_id: "s1", sources: [], relations: [], auxiliary_relations: [], is_truncated: false, auxiliary_truncated: false, max_depth_reached: 0, success: true, message: "ok" }, success: true },
+	}));
+	const hydra = new HydraDB(
+		{ token: "tok", database: "db_test", baseUrl: "https://h.test", fetchFn },
+		{} as unknown as HydraDBClient,
+	);
+
+	await hydra.context.subgraph({ id: "s1", acl: ["alice@corp.com", "group:google:eng@corp.com"] });
+	const url = new URL(calls[0]!.url);
+	assert.deepEqual(url.searchParams.getAll("acl"), ["alice@corp.com", "group:google:eng@corp.com"]);
+
+	await hydra.context.subgraph({ id: "s1" });
+	assert.equal(new URL(calls[1]!.url).searchParams.has("acl"), false, "omitted acl sends no acl field");
+});
+
 // ── PRO-1684: permission-aware search ────────────────────────────────────────
 // The caller declares the principals to answer as, and the wrapper must carry
 // them to the wire on every read the API scopes by ACL.

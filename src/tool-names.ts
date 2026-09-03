@@ -13,6 +13,11 @@ export const TOOL_NAMES = {
 	INSPECT: "hydradb_inspect",
 	DELETE: "hydradb_delete",
 	STATUS: "hydradb_status",
+	// The connected subgraph of one item (PRO-1848): what it links to, what
+	// shares its thread, what it is a parent or child of. A read over the
+	// memory/knowledge corpora, so it belongs to this family and not to the
+	// BYOG graph tools below, which address a different store.
+	SUBGRAPH: "hydradb_subgraph",
 	// Discovery: which databases this connection can address. Exists so an
 	// agent working across several databases can find their names without
 	// asking the user, and so a confined connection can see its own limits.
@@ -47,6 +52,7 @@ export const CANONICAL_TOOL_NAMES = [
 	TOOL_NAMES.INSPECT,
 	TOOL_NAMES.DELETE,
 	TOOL_NAMES.STATUS,
+	TOOL_NAMES.SUBGRAPH,
 ] as const;
 
 /**
