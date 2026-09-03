@@ -517,3 +517,82 @@ test("context.subgraph refuses a database the connection is confined away from",
 	await assert.rejects(() => hydra.context.subgraph({ id: "x", database: "other" }));
 	assert.equal(calls.length, 0, "a refused scope never reaches the network");
 });
+
+// PRO-1684: the subgraph read is ACL-scoped server-side, so the wrapper must
+// carry the principals to the wire as repeated acl params. An omitted acl
+// sends nothing.
+test("context.subgraph carries acl principals to the wire", async () => {
+	const { fetchFn, calls } = fakeRawFetch(() => ({
+		status: 200,
+		body: { data: { seed_source_id: "s1", sources: [], relations: [], auxiliary_relations: [], is_truncated: false, auxiliary_truncated: false, max_depth_reached: 0, success: true, message: "ok" }, success: true },
+	}));
+	const hydra = new HydraDB(
+		{ token: "tok", database: "db_test", baseUrl: "https://h.test", fetchFn },
+		{} as unknown as HydraDBClient,
+	);
+
+	await hydra.context.subgraph({ id: "s1", acl: ["alice@corp.com", "group:google:eng@corp.com"] });
+	const url = new URL(calls[0]!.url);
+	assert.deepEqual(url.searchParams.getAll("acl"), ["alice@corp.com", "group:google:eng@corp.com"]);
+
+	await hydra.context.subgraph({ id: "s1" });
+	assert.equal(new URL(calls[1]!.url).searchParams.has("acl"), false, "omitted acl sends no acl field");
+});
+
+// ── PRO-1684: permission-aware search ────────────────────────────────────────
+// The caller declares the principals to answer as, and the wrapper must carry
+// them to the wire on every read the API scopes by ACL.
+
+function captureSdk(seen: Record<string, unknown>) {
+	const grab = (key: string) => (req: unknown) => {
+		seen[key] = req;
+		return Promise.resolve({});
+	};
+	return {
+		query: grab("query"),
+		context: {
+			list: grab("list"),
+			inspect: grab("inspect"),
+			relations: grab("relations"),
+		},
+	} as unknown as HydraDBClient;
+}
+
+function wrapperFor(seen: Record<string, unknown>) {
+	return new HydraDB(
+		{ token: "t", database: "db_test", collection: "col_test" },
+		captureSdk(seen),
+	);
+}
+
+test("query carries acl principals to the SDK", async () => {
+	const seen: Record<string, { acl?: string[] }> = {};
+	await wrapperFor(seen).context.query({
+		query: "roadmap",
+		acl: ["alice@corp.com", "group:google:eng@corp.com"],
+	});
+	assert.deepEqual(seen.query.acl, ["alice@corp.com", "group:google:eng@corp.com"]);
+});
+
+test("list, inspect and relations each carry acl principals", async () => {
+	const seen: Record<string, { acl?: string[] }> = {};
+	const hydra = wrapperFor(seen);
+	await hydra.context.list({ acl: ["bob@corp.com"] });
+	await hydra.context.inspect({ id: "s1", acl: ["carol@corp.com"] });
+	await hydra.context.relations({ id: "s1", acl: ["dan@corp.com"] });
+	assert.deepEqual(seen.list.acl, ["bob@corp.com"]);
+	assert.deepEqual(seen.inspect.acl, ["carol@corp.com"]);
+	assert.deepEqual(seen.relations.acl, ["dan@corp.com"]);
+});
+
+test("an omitted acl stays undefined rather than becoming an empty list", async () => {
+	// The API treats `acl: []` the same as an absent acl, so [] is not a way to
+	// ask for "nobody". Sending nothing keeps the request faithful to what the
+	// caller actually said rather than relying on that equivalence.
+	const seen: Record<string, { acl?: string[] }> = {};
+	const hydra = wrapperFor(seen);
+	await hydra.context.query({ query: "roadmap" });
+	await hydra.context.list({});
+	assert.equal(seen.query.acl, undefined);
+	assert.equal(seen.list.acl, undefined);
+});
