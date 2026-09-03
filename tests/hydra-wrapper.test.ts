@@ -503,3 +503,70 @@ test("layout() reads GET /databases details once and falls back to split", async
 	const broken = new HydraDB({ token: "t", database: "a", baseUrl: "https://api.test", fetch: failing.fetch }, {} as HydraDBClient);
 	assert.equal(await broken.databases.layout("a"), "split");
 });
+
+// The pinned SDK's REQUEST serializers reject `type: "unified"` before anything
+// is sent, so every read and delete that names that kind is built by hand and
+// its result is parsed with the SDK's own response serializer: callers get the
+// same camelCase object either way.
+test("unified query, list and delete bypass the SDK request serializers and return SDK-shaped results", async () => {
+	const answers: Record<string, unknown> = {
+		"/query": { chunks: [{ chunk_uuid: "c1", id: "s1", chunk_content: "body", relevancy_score: 0.9 }], sources: [] },
+		"/context/list": { sources: [{ id: "s1", title: "T" }], total: 1 },
+		"/context": { success: true, deleted_count: 2, user_memory_deleted: 2, results: [] },
+	};
+	const calls: { url: string; init: RequestInit }[] = [];
+	const fetchImpl = ((url: string | URL | Request, init?: RequestInit) => {
+		const path = new URL(String(url)).pathname;
+		calls.push({ url: String(url), init: init ?? {} });
+		return Promise.resolve(
+			new Response(JSON.stringify({ success: true, data: answers[path] }), { status: 200, headers: { "content-type": "application/json" } }),
+		);
+	}) as typeof fetch;
+	const sdk = {
+		query() { throw new Error("SDK query must not be used for unified"); },
+		context: {
+			list() { throw new Error("SDK list must not be used for unified"); },
+			delete() { throw new Error("SDK delete must not be used for unified"); },
+		},
+	} as unknown as HydraDBClient;
+	const hydra = new HydraDB({ token: "t", database: "db_u", collection: "c1", baseUrl: "https://api.test", fetch: fetchImpl }, sdk);
+
+	const q = await hydra.context.query({ query: "acme", kind: "unified", maxResults: 5, operator: "and" });
+	assert.equal(q.chunks?.[0]?.chunkContent, "body", "query result is parsed to the SDK's camelCase");
+	assert.equal(q.chunks?.[0]?.relevancyScore, 0.9);
+	assert.deepEqual(JSON.parse(String(calls[0]!.init.body)), {
+		database: "db_u", collection: "c1", query: "acme", type: "unified", operator: "and", query_by: "text", max_results: 5,
+	});
+
+	const l = await hydra.context.list({ kind: "unified", page: 2, pageSize: 10 });
+	assert.equal((l as unknown as { sources: { id: string }[] }).sources[0]?.id, "s1");
+	assert.deepEqual(JSON.parse(String(calls[1]!.init.body)), { database: "db_u", collection: "c1", type: "unified", page: 2, page_size: 10 });
+
+	const d = await hydra.context.delete({ ids: ["a", "b"], kind: "unified" });
+	assert.equal(d.deletedCount, 2, "delete result is parsed to the SDK's camelCase");
+	assert.equal(calls[2]!.init.method, "DELETE");
+	assert.deepEqual(JSON.parse(String(calls[2]!.init.body)), { database: "db_u", collection: "c1", ids: ["a", "b"], type: "unified" });
+});
+
+test("the raw transport retries 5xx and network failures, never a 4xx", async () => {
+	let attempts = 0;
+	const flaky = ((url: string | URL | Request) => {
+		attempts += 1;
+		if (attempts < 3) return Promise.resolve(new Response("upstream", { status: 503 }));
+		return Promise.resolve(
+			new Response(JSON.stringify({ success: true, data: { databases: ["a"], details: [{ database: "a", type: "unified" }] } }), { status: 200 }),
+		);
+	}) as typeof fetch;
+	const hydra = new HydraDB({ token: "t", database: "a", baseUrl: "https://api.test", fetch: flaky, maxRetries: 2 }, {} as HydraDBClient);
+	assert.equal(await hydra.databases.layout("a"), "unified");
+	assert.equal(attempts, 3);
+
+	let rejected = 0;
+	const refusing = (() => {
+		rejected += 1;
+		return Promise.resolve(new Response(JSON.stringify({ success: false, error: { message: "no" } }), { status: 400 }));
+	}) as typeof fetch;
+	const strict = new HydraDB({ token: "t", database: "a", baseUrl: "https://api.test", fetch: refusing, maxRetries: 2 }, {} as HydraDBClient);
+	await assert.rejects(() => strict.databases.create({ database: "x", type: "unified" }));
+	assert.equal(rejected, 1, "a 4xx is final");
+});

@@ -14,6 +14,7 @@ import { COLLECTION_PATTERN, MAX_BODY_BYTES, renderRows } from "./cypher.js";
 import { SERVER_INSTRUCTIONS, TOOL_DESCRIPTIONS } from "./descriptions.js";
 import { assertCollectionAllowed, assertDatabaseAllowed, HydraDB } from "./hydra/index.js";
 import type { ContextKind, QueryKind } from "./hydra/index.js";
+import { HydraWrapperError } from "./hydra/index.js";
 import { logger } from "./logger.js";
 import { ALIAS_REPLACEMENTS, DEPRECATED_TOOL_NAMES, TOOL_NAMES } from "./tool-names.js";
 import type { MemoryResultItem } from "./types.js";
@@ -342,9 +343,42 @@ export function createHydraDBServer(
 	 * on a split database (every one created before) nothing changes. One
 	 * memoised `GET /databases` probe answers for the whole process.
 	 */
-	async function isUnifiedDatabase(database?: string): Promise<boolean> {
+	async function isUnifiedDatabase(database?: string, signal?: AbortSignal): Promise<boolean> {
 		const target = database?.trim() || hydra.database;
-		return (await hydra.databases.layout(target)) === "unified";
+		return (await hydra.databases.layout(target, signal)) === "unified";
+	}
+
+	/**
+	 * The server names the rule when a split kind reaches a unified database:
+	 * `type 'memory' is not valid on a unified database`. When the kind was a
+	 * host-owned DEFAULT (not the caller's choice) and the layout probe could
+	 * not tell (it failed, or the database is not in the list it saw), that
+	 * refusal is the missing answer: retry once as `unified` rather than fail
+	 * a valid request over a transient probe. An explicit kind is never
+	 * rewritten.
+	 */
+	function refusedForUnified(err: unknown): boolean {
+		return (
+			err instanceof HydraWrapperError &&
+			err.status === 400 &&
+			/unified database/i.test(err.message)
+		);
+	}
+
+	async function withUnifiedFallback<K extends string, T>(
+		defaulted: boolean,
+		kind: K,
+		run: (kind: K | "unified") => Promise<T>,
+	): Promise<T> {
+		try {
+			return await run(kind);
+		} catch (err) {
+			if (defaulted && kind !== "unified" && refusedForUnified(err)) {
+				logger.warn("kind was defaulted but the database is unified; retrying as unified");
+				return run("unified");
+			}
+			throw err;
+		}
 	}
 
 	async function runQuery(args: {
@@ -366,13 +400,13 @@ export function createHydraDBServer(
 		// unreachable from the MCP — `hydradb_list`/`hydradb_inspect` could browse
 		// knowledge but nothing could search it.
 		const kind: QueryKind =
-			args.kind ?? ((await isUnifiedDatabase(args.database)) ? "unified" : "all");
+			args.kind ?? ((await isUnifiedDatabase(args.database, signal)) ? "unified" : "all");
 		logger.debug(`${TOOL_NAMES.QUERY}: "${args.query}" (kind=${kind})`);
 
 		const maxResults = args.max_results ?? 10;
-		const raw = await hydra.context.query({
+		const raw = await withUnifiedFallback(args.kind == null, kind, (kindToSend) => hydra.context.query({
 			query: args.query,
-			kind,
+			kind: kindToSend,
 			maxResults,
 			mode: args.mode ?? "thinking",
 			operator: args.operator,
@@ -389,7 +423,7 @@ export function createHydraDBServer(
 			// there would send a hybrid-only knob on a request that is not hybrid.
 			alpha: args.operator != null ? undefined : 0.8,
 			recencyBias: 0,
-		}, { signal });
+		}, { signal }));
 		// The renderer reads the SDK payload directly; there is no longer a
 		// snake_case mirror to convert into.
 		const res = raw;
@@ -529,7 +563,7 @@ export function createHydraDBServer(
 		collection?: string;
 	}, signal?: AbortSignal): Promise<ToolResult> {
 		const kind: ContextKind =
-			args.kind ?? ((await isUnifiedDatabase(args.database)) ? "unified" : "memory");
+			args.kind ?? ((await isUnifiedDatabase(args.database, signal)) ? "unified" : "memory");
 		logger.debug(`${TOOL_NAMES.INGEST}: "${args.text.slice(0, 50)}..." (kind=${kind})`);
 
 		// The memory item shape has no counterpart on the knowledge path, which
@@ -549,8 +583,8 @@ export function createHydraDBServer(
 					}
 				: {};
 
-		const raw = await hydra.context.ingest({
-			kind,
+		const raw = await withUnifiedFallback(args.kind == null, kind, (kindToSend) => hydra.context.ingest({
+			kind: kindToSend,
 			text: args.text,
 			title: args.title ?? defaultTitle(args.text),
 			...memoryOnly,
@@ -560,7 +594,7 @@ export function createHydraDBServer(
 			// retried ingest from duplicating — flipping this default would trade a
 			// silent overwrite for a silent duplicate.
 			upsert: args.overwrite ?? true,
-		}, { signal });
+		}, { signal }));
 		const res = toAddMemoryResponse(raw);
 
 		// Was an 80-char echo of the text the caller had just sent — zero
@@ -1156,15 +1190,15 @@ export function createHydraDBServer(
 		collection?: string;
 	}, signal?: AbortSignal): Promise<ToolResult> {
 		const kind: ContextKind =
-			args.kind ?? ((await isUnifiedDatabase(args.database)) ? "unified" : "memory");
+			args.kind ?? ((await isUnifiedDatabase(args.database, signal)) ? "unified" : "memory");
 		logger.debug(`${TOOL_NAMES.DELETE}: ${kind} ${args.ids.join(", ")}`);
 
-		const res = await hydra.context.delete({
+		const res = await withUnifiedFallback(args.kind == null, kind, (kindToSend) => hydra.context.delete({
 			ids: args.ids,
-			kind,
+			kind: kindToSend,
 			database: args.database,
 			collection: args.collection,
-		}, { signal });
+		}, { signal }));
 		// `userMemoryDeleted` is a COUNT on the v2 wire — a live delete returned
 		// `{"deletedCount":1,"userMemoryDeleted":1}` — and the SDK types it as a
 		// number. The v1 memory-delete handler returns a boolean for the same
