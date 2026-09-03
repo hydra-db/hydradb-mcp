@@ -19,7 +19,8 @@ import { HydraDBClient } from "@hydradb/sdk";
 import type { HydraDB as SDK } from "@hydradb/sdk";
 
 import { unwrap } from "./envelope.js";
-import { translateError } from "./errors.js";
+import { newRawTransport, type RawTransport, sendRaw } from "./transport.js";
+import { HydraWrapperError, translateError } from "./errors.js";
 import { GraphResource } from "./graph.js";
 
 export type ContextKind = "memory" | "knowledge";
@@ -105,6 +106,8 @@ export interface HydraConfig {
 	timeoutSeconds?: number;
 	/** Retries per call. The SDK defaults to 2; set explicitly so it is a choice. */
 	maxRetries?: number;
+	/** Test seam for the hand-rolled HTTP path; production never sets it. */
+	fetchFn?: typeof fetch;
 }
 
 export interface QueryParams {
@@ -132,6 +135,21 @@ export interface QueryParams {
 	ids?: string[];
 	/** Exact-match filters over stored metadata. No ranges, no partial matches. */
 	metadataFilters?: Record<string, unknown>;
+	/**
+	 * Principals to answer as (PRO-1684 document ACLs): an email, a
+	 * `domain:<host>`, or a `group:<provider>:<id>`. Results are restricted to
+	 * documents whose access list admits at least one of them.
+	 *
+	 * Omitted means NO ACL scoping — every document this key can reach. An empty
+	 * array is treated the SAME as omitted by the API (verified against staging:
+	 * `acl: []` and no `acl` both returned 134 sources where an unknown
+	 * principal returned 130), so it is not a way to ask for "nobody"; the
+	 * design doc's rule is that absent and `[]` alike mean unrestricted.
+	 *
+	 * A principal the deployment does not know fails CLOSED: it matches only
+	 * documents carrying no access list of their own, never a restricted one.
+	 */
+	acl?: string[];
 	/** Adjacent chunks pulled in alongside each match, for surrounding context. */
 	numRelatedChunks?: number;
 	/**
@@ -196,6 +214,19 @@ export interface ListParams {
 	ids?: string[];
 	page?: number;
 	pageSize?: number;
+	/**
+	 * Principals to answer as (PRO-1684 document ACLs): an email, a
+	 * `domain:<host>`, or a `group:<provider>:<id>`. Results are restricted to
+	 * documents whose access list admits at least one of them.
+	 *
+	 * Omitted means NO ACL scoping — every document this key can reach. An empty
+	 * array is treated the SAME as omitted by the API, so it is not a way to ask
+	 * for "nobody" (design doc: absent and `[]` alike mean unrestricted).
+	 *
+	 * A principal the deployment does not know fails CLOSED: it matches only
+	 * documents carrying no access list of their own, never a restricted one.
+	 */
+	acl?: string[];
 	collection?: string;
 	/** Per-call database override. */
 	database?: string;
@@ -205,6 +236,19 @@ export interface InspectParams {
 	id: string;
 	mode?: string;
 	expirySeconds?: number;
+	/**
+	 * Principals to answer as (PRO-1684 document ACLs): an email, a
+	 * `domain:<host>`, or a `group:<provider>:<id>`. Results are restricted to
+	 * documents whose access list admits at least one of them.
+	 *
+	 * Omitted means NO ACL scoping — every document this key can reach. An empty
+	 * array is treated the SAME as omitted by the API, so it is not a way to ask
+	 * for "nobody" (design doc: absent and `[]` alike mean unrestricted).
+	 *
+	 * A principal the deployment does not know fails CLOSED: it matches only
+	 * documents carrying no access list of their own, never a restricted one.
+	 */
+	acl?: string[];
 	collection?: string;
 	/** Per-call database override. */
 	database?: string;
@@ -217,11 +261,84 @@ export interface IngestionStatusParams {
 	database?: string;
 }
 
+/** One member of a connected subgraph (wire shape, unchanged from the API). */
+export interface SubgraphMember {
+	source_id: string;
+	title?: string;
+	app_kind?: string;
+	app_provider?: string;
+	app_external_id?: string;
+	thread_id?: string;
+	/** Hops from the seed; 0 is the seed itself. */
+	depth: number;
+	hydration?: string;
+	discovered_via?: string;
+	discovered_relation?: string;
+}
+
+/**
+ * One edge of the subgraph. `source` and `target` are Source nodes, so their
+ * `entity_id` is the member's item id; `relations[0].canonical_predicate` is
+ * the edge type (`relates_to`, `same_thread`, `child_of`, ...).
+ */
+export interface SubgraphRelation {
+	source?: { entity_id?: string; name?: string };
+	target?: { entity_id?: string; name?: string };
+	relations?: { canonical_predicate?: string }[];
+}
+
+export interface SubgraphResult {
+	seed_source_id: string;
+	sources: SubgraphMember[];
+	relations: SubgraphRelation[];
+	auxiliary_relations: unknown[];
+	auxiliary_truncated: boolean;
+	is_truncated: boolean;
+	max_depth_reached: number;
+	success: boolean;
+	message: string;
+}
+
+export interface SubgraphParams {
+	/** The item whose connected subgraph to return. */
+	id: string;
+	kind?: ContextKind;
+	/** Max traversal depth in hops (server default 5). */
+	depth?: number;
+	/** Max members returned (server default 200). */
+	maxSources?: number;
+	/**
+	 * Principals to answer as (PRO-1684 document ACLs): an email, a
+	 * `domain:<host>`, or a `group:<provider>:<id>`. The subgraph contains
+	 * only items those principals may see, filtered at every hop.
+	 *
+	 * Omitted means NO ACL scoping. An empty array is treated the SAME as
+	 * omitted by the API, so it is not a way to ask for "nobody".
+	 */
+	acl?: string[];
+	collection?: string;
+	/** Per-call database override. */
+	database?: string;
+}
+
 export interface RelationsParams {
 	id?: string;
 	kind?: ContextKind;
 	limit?: number;
 	cursor?: number;
+	/**
+	 * Principals to answer as (PRO-1684 document ACLs): an email, a
+	 * `domain:<host>`, or a `group:<provider>:<id>`. Results are restricted to
+	 * documents whose access list admits at least one of them.
+	 *
+	 * Omitted means NO ACL scoping — every document this key can reach. An empty
+	 * array is treated the SAME as omitted by the API, so it is not a way to ask
+	 * for "nobody" (design doc: absent and `[]` alike mean unrestricted).
+	 *
+	 * A principal the deployment does not know fails CLOSED: it matches only
+	 * documents carrying no access list of their own, never a restricted one.
+	 */
+	acl?: string[];
 	collection?: string;
 	/** Per-call database override. */
 	database?: string;
@@ -308,6 +425,12 @@ abstract class Resource {
 		private readonly collection?: string,
 		private readonly allowedDatabases?: readonly string[],
 		private readonly allowedCollections?: readonly string[],
+		/**
+		 * The hand-rolled HTTP path, for the endpoints the SDK does not expose
+		 * (CONTRACT §2 rule 7). Optional only so tests that inject a fake SDK and
+		 * never touch such an endpoint need not build one.
+		 */
+		protected readonly raw?: RawTransport,
 	) {}
 
 	protected scope(override?: string, dbOverride?: string): ScopeFields {
@@ -383,8 +506,9 @@ export class ContextResource extends Resource {
 		collection?: string,
 		allowedDatabases?: readonly string[],
 		allowedCollections?: readonly string[],
+		raw?: RawTransport,
 	) {
-		super(sdk, database, collection, allowedDatabases, allowedCollections);
+		super(sdk, database, collection, allowedDatabases, allowedCollections, raw);
 	}
 
 	/**
@@ -451,6 +575,7 @@ export class ContextResource extends Resource {
 				ids: params.ids,
 				metadataFilters: params.metadataFilters,
 				numRelatedChunks: params.numRelatedChunks,
+				acl: params.acl,
 			}, req(opts)),
 		);
 	}
@@ -465,7 +590,7 @@ export class ContextResource extends Resource {
 	async ingest(
 		params: IngestParams,
 		opts?: RequestOptions,
-	): Promise<SDK.IngestionV2SourceUploadResponse> {
+	): Promise<SDK.IngestionV2IngestResponse> {
 		const request: SDK.IngestContextRequest = {
 			...this.scope(params.collection, params.database),
 			type: params.kind,
@@ -550,7 +675,7 @@ export class ContextResource extends Resource {
 	list(
 		params: ListParams = {},
 		opts?: RequestOptions,
-	): Promise<SDK.ListV2SourceListResponse> {
+	): Promise<SDK.ListV2ListResponse> {
 		return this.call("/context/list", () =>
 			this.sdk.context.list({
 				...this.scope(params.collection, params.database),
@@ -558,6 +683,7 @@ export class ContextResource extends Resource {
 				ids: params.ids,
 				page: params.page,
 				pageSize: params.pageSize,
+				acl: params.acl,
 			}, req(opts)),
 		);
 	}
@@ -573,6 +699,7 @@ export class ContextResource extends Resource {
 				id: params.id,
 				mode: params.mode,
 				expirySeconds: params.expirySeconds,
+				acl: params.acl,
 			}, req(opts)),
 		);
 	}
@@ -590,6 +717,49 @@ export class ContextResource extends Resource {
 		);
 	}
 
+	/**
+	 * The connected subgraph of one item (`GET /context/{id}/subgraph`): every
+	 * item reachable from it through item-level relations — explicit links, a
+	 * shared thread, parent/child — plus the relations among the members and
+	 * the structural graph around them.
+	 *
+	 * No SDK resource for this yet, so it takes the raw path (CONTRACT §2 rule
+	 * 7): same header, same envelope unwrap, same error type as everything else
+	 * here. When the SDK grows `context.subgraph`, only this method changes.
+	 */
+	async subgraph(params: SubgraphParams, opts?: RequestOptions): Promise<SubgraphResult> {
+		// `async` for the same reason `query` and `ingest` are: the scope check
+		// below throws, and a caller awaiting this must see a rejection, not a
+		// synchronous exception from the call site.
+		if (!this.raw) {
+			throw new HydraWrapperError(
+				"Hydra DB /context/{id}/subgraph → ERR: no HTTP transport configured",
+				"/context/{id}/subgraph",
+			);
+		}
+		// Blank is the one id the wrapper rejects locally: it would build
+		// "/context//subgraph" and fail as a remote routing error instead of a
+		// legible one. Everything else goes out byte for byte — ingest stores a
+		// source_id verbatim, so trimming here could address a different item.
+		if (params.id.trim() === "") {
+			throw new HydraWrapperError(
+				"Hydra DB /context/{id}/subgraph → ERR: id must not be empty",
+				"/context/{id}/subgraph",
+			);
+		}
+		const query = new URLSearchParams(this.scope(params.collection, params.database));
+		if (params.kind) query.set("type", params.kind);
+		if (params.depth != null) query.set("depth", String(params.depth));
+		if (params.maxSources != null) query.set("max_sources", String(params.maxSources));
+		// Repeated params, like the dashboard and the CLI: the API reads both
+		// repeated (acl=a&acl=b) and comma-separated forms. An empty array is
+		// the same as omitted server-side, so sending nothing keeps the
+		// request faithful to what the caller said.
+		for (const principal of params.acl ?? []) query.append("acl", principal);
+		const path = `/context/${encodeURIComponent(params.id)}/subgraph?${query.toString()}`;
+		return sendRaw<SubgraphResult>(this.raw, path, "GET", undefined, opts);
+	}
+
 	/** Knowledge-graph relations (SDK `context.relations`). */
 	relations(
 		params: RelationsParams = {},
@@ -601,6 +771,7 @@ export class ContextResource extends Resource {
 				type: params.kind,
 				limit: params.limit,
 				cursor: params.cursor,
+				acl: params.acl,
 			}),
 		);
 	}
@@ -716,12 +887,17 @@ export class HydraDB {
 		this.collection = config.collection;
 		this.allowedDatabases = config.allowedDatabases;
 		this.allowedCollections = config.allowedCollections;
+		const raw = newRawTransport(config, {
+			timeoutSeconds: DEFAULT_TIMEOUT_SECONDS,
+			maxRetries: DEFAULT_MAX_RETRIES,
+		});
 		this.context = new ContextResource(
 			client,
 			config.database,
 			config.collection,
 			config.allowedDatabases,
 			config.allowedCollections,
+			raw,
 		);
 		this.databases = new DatabasesResource(
 			client,

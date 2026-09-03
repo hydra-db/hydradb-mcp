@@ -348,6 +348,7 @@ export function createHydraDBServer(
 		num_related_chunks?: number;
 		recency_bias?: number;
 		query_apps?: boolean;
+		acl?: string[];
 		database?: string;
 		collection?: string;
 		collections?: string[];
@@ -368,6 +369,7 @@ export function createHydraDBServer(
 			operator: args.operator,
 			ids: args.source_ids,
 			metadataFilters: args.metadata_filters,
+			acl: args.acl,
 			numRelatedChunks: args.num_related_chunks,
 			graphContext: args.graph_context ?? true,
 			queryApps: args.query_apps,
@@ -666,6 +668,7 @@ export function createHydraDBServer(
 		source_ids?: string[];
 		page?: number;
 		page_size?: number;
+		acl?: string[];
 		database?: string;
 		collection?: string;
 	} = {}, signal?: AbortSignal): Promise<ToolResult> {
@@ -676,6 +679,7 @@ export function createHydraDBServer(
 			ids: args.source_ids,
 			page: args.page,
 			pageSize: args.page_size,
+			acl: args.acl,
 			database: args.database,
 			collection: args.collection,
 		}, { signal });
@@ -734,6 +738,7 @@ export function createHydraDBServer(
 		source_ids?: string[];
 		page?: number;
 		page_size?: number;
+		acl?: string[];
 		database?: string;
 		collection?: string;
 	}, signal?: AbortSignal): Promise<ToolResult> {
@@ -744,6 +749,7 @@ export function createHydraDBServer(
 			ids: args.source_ids,
 			page: args.page,
 			pageSize: args.page_size,
+			acl: args.acl,
 			database: args.database,
 			collection: args.collection,
 		}, { signal });
@@ -904,6 +910,7 @@ export function createHydraDBServer(
 			offset?: number;
 			limit?: number;
 			expiry_seconds?: number;
+			acl?: string[];
 			database?: string;
 			collection?: string;
 		};
@@ -930,9 +937,141 @@ export function createHydraDBServer(
 			offset: a.offset,
 			limit: a.limit,
 			expiry_seconds: a.expiry_seconds,
+			acl: a.acl,
 			database: a.database,
 			collection: a.collection,
 		};
+	}
+
+	async function runSubgraph(
+		args: {
+			id?: string;
+			kind?: "memory" | "knowledge";
+			depth?: number;
+			max_sources?: number;
+			acl?: string[];
+			database?: string;
+			collection?: string;
+		},
+		signal?: AbortSignal,
+	): Promise<ToolResult> {
+		// Blank is rejected; anything else is forwarded byte for byte. The
+		// server treats an item id as opaque (ingest stores a caller's
+		// source_id verbatim), so trimming here could ask about a different
+		// item. Same rule as the CLI's `hydradb subgraph`.
+		const id = args.id ?? "";
+		if (id.trim() === "") {
+			throw new Error(
+				`${TOOL_NAMES.SUBGRAPH} requires \`id\` — the value shown as [id: …] in ` +
+					`${TOOL_NAMES.QUERY} results or in [brackets] in ${TOOL_NAMES.LIST} output.`,
+			);
+		}
+		logger.debug(`${TOOL_NAMES.SUBGRAPH}: ${id}`);
+
+		const res = await hydra.context.subgraph(
+			{
+				id,
+				kind: args.kind,
+				depth: args.depth,
+				maxSources: args.max_sources,
+				acl: args.acl,
+				database: args.database,
+				collection: args.collection,
+			},
+			{ signal },
+		);
+
+		// Soft failure, like inspect: the server's own message, flagged.
+		if (!res.success) {
+			return errorResult(`Could not read the subgraph of ${id}: ${res.message || "unknown error"}`);
+		}
+
+		const members = res.sources ?? [];
+		if (members.length === 0) {
+			return structuredResult(
+				`No item with id ${id} was found in this collection, so there is no subgraph to show. ` +
+					`Ids come from ${TOOL_NAMES.QUERY} or ${TOOL_NAMES.LIST}; check the collection as well as the id.`,
+				// Same keys as a populated result: a client reading
+				// structuredContent should not have to branch on which shape it got.
+				{
+					seed_id: id,
+					member_count: 0,
+					max_depth_reached: 0,
+					truncated: false,
+					relations: [],
+					structural_link_count: 0,
+					structural_truncated: false,
+					members: [],
+				},
+			);
+		}
+
+		const hops = res.max_depth_reached ?? 0;
+		// Sorted once, then used for both the prose and structuredContent: a
+		// machine client that renders the members must not get a different
+		// order from the one a reader sees.
+		const ordered = [...members].sort((a, b) => a.depth - b.depth);
+		const lines: string[] = [
+			members.length === 1 && !res.is_truncated
+				? `${id} stands alone: nothing in the graph links to it yet.`
+				: `${members.length} item${members.length === 1 ? "" : "s"} connected to ${id} through ${hops} hop${hops === 1 ? "" : "s"}` +
+					(res.is_truncated ? ` (clipped at max_sources; the subgraph continues)` : "") +
+					":",
+			"",
+		];
+		// discovered_relation is the MECHANISM (same_thread, parent, child, or a
+		// relates_to type); discovered_via is the member this one was reached
+		// FROM — another member's id, so the list is also a tree. The parent id
+		// is shortened in the prose because it appears in full on its own line
+		// and in structuredContent; the relation is what a reader scans for.
+		const shortId = (id: string) => (id.length > 14 ? `${id.slice(0, 12)}…` : id);
+		for (const m of ordered) {
+			const title = m.title?.trim() || m.app_external_id || "(untitled)";
+			const reached =
+				m.depth === 0
+					? "the item you started from"
+					: `${m.discovered_relation || "linked"}${m.discovered_via ? ` from ${shortId(m.discovered_via)}` : ""}`;
+			const kind = [m.app_provider, m.app_kind].filter(Boolean).join(" ");
+			lines.push(`- [id: ${m.source_id}] ${title}${kind ? ` (${kind})` : ""} — depth ${m.depth}, ${reached}`);
+		}
+		lines.push(
+			"",
+			`${(res.relations ?? []).length} relation(s) among them; ` +
+				`${(res.auxiliary_relations ?? []).length} structural link(s) around them` +
+				(res.auxiliary_truncated ? " (structural links clipped)" : "") +
+				`. Pass any [id: …] to ${TOOL_NAMES.INSPECT} for its full content.`,
+		);
+
+		// The edges make it a graph rather than a list, so structuredContent
+		// carries them too, compacted to what a client can act on: both
+		// endpoints are Source nodes, so entity_id is the member's id. The
+		// structural links are about entities and comments, not members, so
+		// they stay a count plus their own clipped flag, exactly as the prose
+		// reports them.
+		const edges = (res.relations ?? []).map((r) => ({
+			from: r.source?.entity_id ?? null,
+			to: r.target?.entity_id ?? null,
+			type: r.relations?.[0]?.canonical_predicate ?? null,
+		}));
+
+		return structuredResult(lines.join("\n"), {
+			seed_id: res.seed_source_id || id,
+			member_count: members.length,
+			max_depth_reached: hops,
+			truncated: Boolean(res.is_truncated),
+			relations: edges,
+			structural_link_count: (res.auxiliary_relations ?? []).length,
+			structural_truncated: Boolean(res.auxiliary_truncated),
+			members: ordered.map((m) => ({
+				id: m.source_id,
+				title: m.title ?? null,
+				depth: m.depth,
+				discovered_via: m.discovered_via ?? null,
+				discovered_relation: m.discovered_relation ?? null,
+				app_provider: m.app_provider ?? null,
+				app_kind: m.app_kind ?? null,
+			})),
+		});
 	}
 
 	async function runInspect(args: {
@@ -941,6 +1080,7 @@ export function createHydraDBServer(
 		offset?: number;
 		limit?: number;
 		expiry_seconds?: number;
+		acl?: string[];
 		database?: string;
 		collection?: string;
 	}, signal?: AbortSignal): Promise<ToolResult> {
@@ -950,6 +1090,7 @@ export function createHydraDBServer(
 			id: args.source_id,
 			mode: args.mode ?? "content",
 			expirySeconds: args.expiry_seconds,
+			acl: args.acl,
 			database: args.database,
 			collection: args.collection,
 		}, { signal });
@@ -1642,6 +1783,10 @@ export function createHydraDBServer(
 			.min(1)
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.collections),
+		acl: z
+			.array(z.string())
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.acl),
 		...scopeSchema,
 	};
 
@@ -1770,6 +1915,10 @@ export function createHydraDBServer(
 			.max(100)
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.LIST].params.page_size),
+		acl: z
+			.array(z.string())
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.LIST].params.acl),
 		...scopeSchema,
 	};
 
@@ -1778,10 +1927,45 @@ export function createHydraDBServer(
 			.array(z.string())
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.LIST_SOURCES].params.source_ids),
+		acl: z
+			.array(z.string())
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.LIST].params.acl),
 		...scopeSchema,
 	};
 
 	const listMemoriesSchema = {
+		acl: z
+			.array(z.string())
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.LIST].params.acl),
+		...scopeSchema,
+	};
+
+	const subgraphSchema = {
+		id: z.string().min(1).describe(TOOL_DESCRIPTIONS[TOOL_NAMES.SUBGRAPH].params.id),
+		kind: z
+			.enum(["memory", "knowledge"])
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.SUBGRAPH].params.kind),
+		depth: z
+			.number()
+			.int()
+			.min(1)
+			.max(10)
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.SUBGRAPH].params.depth),
+		max_sources: z
+			.number()
+			.int()
+			.min(1)
+			.max(1000)
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.SUBGRAPH].params.max_sources),
+		acl: z
+			.array(z.string())
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.SUBGRAPH].params.acl),
 		...scopeSchema,
 	};
 
@@ -1821,6 +2005,10 @@ export function createHydraDBServer(
 			.min(1)
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INSPECT].params.expiry_seconds),
+		acl: z
+			.array(z.string())
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INSPECT].params.acl),
 		...scopeSchema,
 	};
 
@@ -2124,6 +2312,7 @@ export function createHydraDBServer(
 				source_ids?: string[];
 				page?: number;
 				page_size?: number;
+				acl?: string[];
 				database?: string;
 				collection?: string;
 			};
@@ -2157,6 +2346,7 @@ export function createHydraDBServer(
 						source_ids: ids,
 						page: a.page,
 						page_size: a.page_size,
+						acl: a.acl,
 						database: a.database,
 						collection: a.collection,
 					},
@@ -2168,6 +2358,7 @@ export function createHydraDBServer(
 					source_ids: ids,
 					page: a.page,
 					page_size: a.page_size,
+					acl: a.acl,
 					database: a.database,
 					collection: a.collection,
 				},
@@ -2182,6 +2373,13 @@ export function createHydraDBServer(
 		TOOL_NAMES.INSPECT,
 		inspectSchema,
 		(args, extra) => runInspect(toInspectArgs(args), extra?.signal),
+		readOnly,
+	);
+
+	register(
+		TOOL_NAMES.SUBGRAPH,
+		subgraphSchema,
+		(args, extra) => runSubgraph(args as Parameters<typeof runSubgraph>[0], extra?.signal),
 		readOnly,
 	);
 
@@ -2324,7 +2522,7 @@ export function createHydraDBServer(
 		listMemoriesSchema,
 		(args, extra) =>
 			runListMemories(
-				args as { database?: string; collection?: string },
+				args as { acl?: string[]; database?: string; collection?: string },
 				extra?.signal,
 			),
 		readOnly,
@@ -2337,6 +2535,7 @@ export function createHydraDBServer(
 			runListSources(
 				args as {
 					source_ids?: string[];
+					acl?: string[];
 					database?: string;
 					collection?: string;
 				},

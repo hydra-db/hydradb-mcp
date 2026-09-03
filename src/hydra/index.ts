@@ -25,6 +25,9 @@ export type {
 	InspectParams,
 	IngestionStatusParams,
 	RelationsParams,
+	SubgraphParams,
+	SubgraphMember,
+	SubgraphResult,
 	DeleteParams,
 	CreateDatabaseParams,
 } from "./client.js";
@@ -43,3 +46,5 @@ export {
 	ScopeNotAllowedError,
 } from "./client.js";
 export { unwrap } from "./envelope.js";
+export { DEFAULT_BASE_URL, newRawTransport, sendRaw } from "./transport.js";
+export type { RawTransport } from "./transport.js";

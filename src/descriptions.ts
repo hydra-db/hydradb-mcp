@@ -11,6 +11,7 @@ import { ALIAS_REPLACEMENTS, TOOL_NAMES } from "./tool-names.js";
 
 // Shared parameter blurbs, reused across canonical tools and their aliases.
 const PARAM = {
+	acl: "Principals to answer as, for permission-aware search (RBAC). Each entry is an email, a `domain:<host>`, or a `group:<provider>:<id>`; results are limited to documents whose access list admits at least one of them. Omit it to search everything this API key can reach. An EMPTY list is treated exactly like omitting it, so it is not a way to ask for \"nobody\" — to restrict, name real principals. Pass the principals of the end user you are answering for; a principal the deployment does not recognise fails closed, matching only documents that carry no access list of their own. This scopes results, it does not authenticate anyone: whoever holds the key can name any principal.",
 	query:
 		"What you want to know, as a natural-language question or topic — this is semantic " +
 		"search, so a full question beats keywords. Search for the CONCEPT, not the words " +
@@ -151,6 +152,16 @@ const PARAM = {
 		"chunk whole; use it when the snippets are being cut off mid-answer. Either way " +
 		"the response is capped, and hydradb_inspect returns any single source in full.",
 	fetch_source_id: "The source ID to fetch content for",
+	subgraph_id:
+		"The id of the item to start from — the value shown as [id: …] in hydradb_query results " +
+		"or in [brackets] in hydradb_list output.",
+	subgraph_kind:
+		"Which family the id belongs to: 'knowledge' (default) or 'memory'. The two graphs are separate.",
+	subgraph_depth:
+		"How many hops to traverse from the item (default 5, max 10). 1 is its direct " +
+		"links only; larger values reach further along threads and hierarchies.",
+	subgraph_max_sources:
+		"Cap on members returned (default 200). The result says when this clipped the traversal.",
 	fetch_mode:
 		"'content' (default) returns the text — normally what you want. 'url' returns a " +
 		"short-lived presigned download link INSTEAD of the text, for binary sources or " +
@@ -262,6 +273,14 @@ const LIST_SOURCES_BODY =
 	"and metadata. Use this to see what data sources have been ingested and to find " +
 	"source IDs for fetching content.";
 
+const SUBGRAPH_BODY = `Return the connected subgraph of ONE stored item: every item reachable from it through item-level links — explicit relations declared at ingest, the thread it belongs to, and parent/child hierarchy — traversed breadth-first up to \`depth\` hops. Use it after hydradb_query or hydradb_list when a single result is not enough and you need what surrounds it: the rest of a Slack thread, the replies under a ticket, the documents a page links to.
+
+Each member carries its id, title, depth from the start item (0 is the item itself) and how it was reached: the mechanism (\`same_thread\`, \`parent\`, \`child\`, or a \`relates_to\` type such as \`reply_to\`) and the id of the member it was reached from, so the list is also a tree. Pass any member's id to hydradb_inspect for its full content. The response also lists the relations among the members and the structural graph around them — the entities, comments, attachments and people attached to each — but NOT the chunk-level entity relations hydradb_query returns; those are a different read.
+
+An id nothing links to returns just that item. An unknown id returns an empty result, not an error. \`is_truncated\` means \`max_sources\` clipped the traversal; \`max_depth_reached\` says how far it got.
+
+Read-only; never changes anything.`;
+
 const INSPECT_BODY = `Fetch the full original content of ONE stored item by its id. Use it after hydradb_query or hydradb_list when a truncated chunk or listing row is not enough and you need the whole document.
 
 The id is the value shown as \`[id: …]\` in hydradb_query results and in [brackets] in hydradb_list output. Ids are not guessable — take one from those tools rather than constructing it.
@@ -338,6 +357,7 @@ export const TOOL_DESCRIPTIONS = {
 		title: "Query Hydra DB",
 		description: SEARCH_BODY,
 		params: {
+			acl: PARAM.acl,
 			query: PARAM.query,
 			kind: PARAM.query_kind,
 			max_results: PARAM.max_results,
@@ -394,6 +414,7 @@ Results are paginated. The response says how many of the total it showed and how
 
 Memory rows come back as [id] content. Knowledge rows as [id] — title (type), with no content — pass an id to hydradb_inspect for the text.`,
 		params: {
+			acl: PARAM.acl,
 			kind: PARAM.kind,
 			source_ids: PARAM.source_ids,
 			page: PARAM.page,
@@ -403,10 +424,25 @@ Memory rows come back as [id] content. Knowledge rows as [id] — title (type), 
 		},
 	},
 
+	[TOOL_NAMES.SUBGRAPH]: {
+		title: "Hydra DB Connected Subgraph",
+		description: SUBGRAPH_BODY,
+		params: {
+			id: PARAM.subgraph_id,
+			kind: PARAM.subgraph_kind,
+			depth: PARAM.subgraph_depth,
+			max_sources: PARAM.subgraph_max_sources,
+			acl: PARAM.acl,
+			database: PARAM.database,
+			collection: PARAM.collection,
+		},
+	},
+
 	[TOOL_NAMES.INSPECT]: {
 		title: "Inspect Hydra DB Source",
 		description: INSPECT_BODY,
 		params: {
+			acl: PARAM.acl,
 			source_id: PARAM.fetch_source_id,
 			mode: PARAM.fetch_mode,
 			offset: PARAM.fetch_offset,
@@ -592,9 +628,10 @@ THE TOOLS
 - ${TOOL_NAMES.INSPECT} — the complete original content of one source you already have an id for.
 - ${TOOL_NAMES.DELETE} — irreversible removal of one item by id.
 - ${TOOL_NAMES.STATUS} — whether an ingested source has finished indexing. Ingestion is asynchronous, so a query issued straight after a save can legitimately return nothing.
+- ${TOOL_NAMES.SUBGRAPH} — everything connected to one item you already have an id for: the rest of its thread, its replies, its parents and children, the items it links to. Reach for it when one result is not enough and you need what surrounds it.
 - ${TOOL_NAMES.DATABASES} — which databases this connection can address, with the default marked. Every tool takes an optional \`database\`; call this before naming one, or when a call was refused because the user confined this connection to a single database.
 
-Ids flow between these: ${TOOL_NAMES.QUERY} and ${TOOL_NAMES.LIST} emit them, ${TOOL_NAMES.INSPECT}, ${TOOL_NAMES.DELETE} and ${TOOL_NAMES.STATUS} accept them. Never invent one.
+Ids flow between these: ${TOOL_NAMES.QUERY}, ${TOOL_NAMES.LIST} and ${TOOL_NAMES.SUBGRAPH} emit them; ${TOOL_NAMES.INSPECT}, ${TOOL_NAMES.DELETE}, ${TOOL_NAMES.STATUS} and ${TOOL_NAMES.SUBGRAPH} accept them. Never invent one.
 
 THE GRAPH TOOLS (a separate product surface)
 
