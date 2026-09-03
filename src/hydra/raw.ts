@@ -22,22 +22,57 @@ export interface RawConfig {
 	token: string;
 	baseUrl?: string;
 	timeoutSeconds?: number;
+	/** Retries on 429/5xx and network failures, matching the SDK's budget. */
+	maxRetries?: number;
 	/** Test seam: a fetch that answers without a network. */
 	fetch?: typeof fetch;
 }
+
+const RETRY_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
 
 export class RawHttp {
 	private readonly baseUrl: string;
 	private readonly timeoutMs: number;
 	private readonly fetchImpl: typeof fetch;
+	private readonly maxRetries: number;
 
 	constructor(private readonly config: RawConfig) {
 		this.baseUrl = (config.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, "");
 		this.timeoutMs = (config.timeoutSeconds ?? 30) * 1000;
 		this.fetchImpl = config.fetch ?? fetch;
+		this.maxRetries = config.maxRetries ?? 2;
 	}
 
+	/**
+	 * Same retry tolerance the SDK gives every call: a 429/5xx or a network
+	 * failure is retried up to `maxRetries` times with a short backoff. A
+	 * cancellation by the caller is never retried.
+	 */
 	async request<T>(
+		method: "GET" | "POST" | "DELETE",
+		path: string,
+		body?: unknown,
+		signal?: AbortSignal,
+	): Promise<T> {
+		let lastErr: unknown;
+		for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
+			try {
+				return await this.once<T>(method, path, body, signal);
+			} catch (err) {
+				lastErr = err;
+				const retryable =
+					err instanceof HydraWrapperError &&
+					!signal?.aborted &&
+					(err.status == null || RETRY_STATUSES.has(err.status)) &&
+					!/cancelled by the caller/.test(err.message);
+				if (!retryable || attempt === this.maxRetries) throw err;
+				await new Promise((resolve) => setTimeout(resolve, Math.min(250 * 2 ** attempt, 2000)));
+			}
+		}
+		throw lastErr;
+	}
+
+	private async once<T>(
 		method: "GET" | "POST" | "DELETE",
 		path: string,
 		body?: unknown,

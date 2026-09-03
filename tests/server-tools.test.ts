@@ -2552,21 +2552,39 @@ test("empty scope overrides are rejected or fall back to default", async () => {
 // PRO-1618: on a unified database the host-owned defaults switch to `unified`,
 // because `memory`/`knowledge`/`all` are refused there; on a split database
 // (every database created before) the defaults are unchanged.
-function layoutFetch(type: "split" | "unified"): typeof fetch {
-	return ((url: string | URL | Request) =>
-		Promise.resolve(
-			new Response(
-				JSON.stringify({
-					success: true,
-					data: { databases: ["db_test"], details: [{ database: "db_test", type }] },
-				}),
-				{ status: 200, headers: { "content-type": "application/json" } },
-			),
-		)) as typeof fetch;
+type RawCall = { path: string; method: string; body?: unknown };
+
+/**
+ * A fetch that answers the layout probe with the given type and records every
+ * other raw v2 call (the ones a unified kind takes instead of the SDK).
+ */
+function layoutFetch(type: "split" | "unified", raw: RawCall[] = []): typeof fetch {
+	return ((url: string | URL | Request, init?: RequestInit) => {
+		const path = new URL(String(url)).pathname;
+		const method = init?.method ?? "GET";
+		if (path !== "/databases") {
+			raw.push({ path, method, body: init?.body ? JSON.parse(String(init.body)) : undefined });
+		}
+		const data =
+			path === "/databases"
+				? { databases: ["db_test"], details: [{ database: "db_test", type }] }
+				: path === "/context/list"
+					? { sources: [], total: 0 }
+					: path === "/context"
+						? { success: true, deleted_count: 1, results: [] }
+						: { chunks: [], sources: [] };
+		return Promise.resolve(
+			new Response(JSON.stringify({ success: true, data }), {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			}),
+		);
+	}) as typeof fetch;
 }
 
-function mockHydraWithLayout(type: "split" | "unified"): { hydra: HydraDB; calls: RecordedCall[] } {
+function mockHydraWithLayout(type: "split" | "unified"): { hydra: HydraDB; calls: RecordedCall[]; raw: RawCall[] } {
 	const calls: RecordedCall[] = [];
+	const raw: RawCall[] = [];
 	const record = (method: string, fallback: unknown) => (args?: Record<string, unknown>) => {
 		calls.push({ method, args: args ?? {} });
 		return Promise.resolve({ data: fallback, success: true });
@@ -2582,34 +2600,41 @@ function mockHydraWithLayout(type: "split" | "unified"): { hydra: HydraDB; calls
 		},
 	} as unknown as HydraDBClient;
 	const hydra = new HydraDB(
-		{ token: "t", database: "db_test", collection: "col_test", baseUrl: "https://api.test", fetch: layoutFetch(type) },
+		{ token: "t", database: "db_test", collection: "col_test", baseUrl: "https://api.test", fetch: layoutFetch(type, raw) },
 		sdk,
 	);
-	return { hydra, calls };
+	return { hydra, calls, raw };
 }
 
-test("hydradb_query defaults kind to unified on a unified database and to all on a split one", async () => {
-	for (const [type, want] of [["unified", "unified"], ["split", "all"]] as const) {
-		const { hydra, calls } = mockHydraWithLayout(type);
-		const client = await connect(hydra);
-		await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
-		const q = calls.find((c) => c.method === "query")!;
-		assert.equal(q.args.type, want, `layout ${type}`);
-	}
+test("hydradb_query defaults kind to unified on a unified database (raw v2 call) and to all on a split one (SDK)", async () => {
+	const unified = mockHydraWithLayout("unified");
+	await (await connect(unified.hydra)).callTool({ name: "hydradb_query", arguments: { query: "q" } });
+	assert.equal(unified.calls.find((c) => c.method === "query"), undefined, "unified must not use the SDK query serializer");
+	const rawQuery = unified.raw.find((c) => c.path === "/query")!;
+	assert.equal(rawQuery.method, "POST");
+	assert.equal((rawQuery.body as { type: string }).type, "unified");
+
+	const split = mockHydraWithLayout("split");
+	await (await connect(split.hydra)).callTool({ name: "hydradb_query", arguments: { query: "q" } });
+	assert.equal(split.calls.find((c) => c.method === "query")!.args.type, "all");
+	assert.equal(split.raw.length, 0, "a split database keeps every call on the SDK");
 });
 
 test("hydradb_delete defaults kind to unified on a unified database", async () => {
-	const { hydra, calls } = mockHydraWithLayout("unified");
+	const { hydra, calls, raw } = mockHydraWithLayout("unified");
 	const client = await connect(hydra);
 	await client.callTool({ name: "hydradb_delete", arguments: { ids: ["x"] } });
-	assert.equal(calls.find((c) => c.method === "delete")!.args.type, "unified");
+	assert.equal(calls.find((c) => c.method === "delete"), undefined);
+	const rawDelete = raw.find((c) => c.path === "/context")!;
+	assert.equal(rawDelete.method, "DELETE");
+	assert.deepEqual(rawDelete.body, { database: "db_test", collection: "col_test", ids: ["x"], type: "unified" });
 });
 
 test("hydradb_list kind=unified lists every item in the source shape", async () => {
-	const { hydra, calls } = mockHydraWithLayout("unified");
+	const { hydra, raw } = mockHydraWithLayout("unified");
 	const client = await connect(hydra);
 	const res = await client.callTool({ name: "hydradb_list", arguments: { kind: "unified" } });
-	assert.equal(calls.find((c) => c.method === "list")!.args.type, "unified");
+	assert.equal((raw.find((c) => c.path === "/context/list")!.body as { type: string }).type, "unified");
 	assert.equal((res.structuredContent as { kind: string }).kind, "unified");
 });
 
@@ -2623,4 +2648,34 @@ test("hydradb_databases names each database's layout", async () => {
 	const res = await client.callTool({ name: "hydradb_databases", arguments: {} });
 	assert.deepEqual((res.structuredContent as { types: Record<string, string> }).types, { db_test: "unified" });
 	assert.match(JSON.stringify(res.content), /unified/);
+});
+
+test("a defaulted kind refused by a unified database is retried once as unified; an explicit kind is not", async () => {
+	// The probe says split (or fails), the server says unified.
+	const calls: RecordedCall[] = [];
+	const raw: RawCall[] = [];
+	const sdk = {
+		query: (args: Record<string, unknown>) => {
+			calls.push({ method: "query", args });
+			return Promise.reject(
+				new HydraDBError({ statusCode: 400, body: { error: { message: "type 'all' is not valid on a unified database" } } }),
+			);
+		},
+		context: {},
+		databases: { list: () => Promise.resolve({ data: { databases: ["db_test"] }, success: true }) },
+	} as unknown as HydraDBClient;
+	const hydra = new HydraDB(
+		{ token: "t", database: "db_test", collection: "col_test", baseUrl: "https://api.test", fetch: layoutFetch("split", raw) },
+		sdk,
+	);
+	const client = await connect(hydra);
+
+	const defaulted = await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
+	assert.equal(calls.length, 1, "the SDK path was tried with the default first");
+	assert.equal(raw.filter((c) => c.path === "/query").length, 1, "then retried once as unified over the raw path");
+	assert.notEqual(defaulted.isError, true);
+
+	const explicit = await client.callTool({ name: "hydradb_query", arguments: { query: "q", kind: "memory" } });
+	assert.equal(explicit.isError, true, "an explicit kind is never rewritten");
+	assert.equal(raw.filter((c) => c.path === "/query").length, 1);
 });

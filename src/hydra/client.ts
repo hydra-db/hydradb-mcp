@@ -22,6 +22,7 @@ import { unwrap } from "./envelope.js";
 import { translateError } from "./errors.js";
 import { GraphResource } from "./graph.js";
 import { type Layout, RawHttp } from "./raw.js";
+import { serialization } from "@hydradb/sdk";
 
 export type { Layout } from "./raw.js";
 
@@ -298,6 +299,33 @@ export function assertCollectionAllowed(
 	}
 }
 
+/** The options the generated client itself passes to every response parser. */
+type SdkParseOptions = NonNullable<
+	Parameters<typeof serialization.SearchV2RetrievalResult.parseOrThrow>[1]
+>;
+const SDK_PARSE_OPTS: SdkParseOptions = {
+	unrecognizedObjectKeys: "passthrough",
+	allowUnrecognizedUnionMembers: true,
+	allowUnrecognizedEnumValues: true,
+	skipValidation: true,
+	breadcrumbsPrefix: ["response"],
+};
+
+/** Drop undefined values so a hand-built wire body carries only what was said. */
+function compact(record: Record<string, unknown>): Record<string, unknown> {
+	const out: Record<string, unknown> = {};
+	for (const [k, v] of Object.entries(record)) if (v !== undefined) out[k] = v;
+	return out;
+}
+
+/** `?a=b&c=d` from a record, skipping undefined values. */
+function queryString(record: Record<string, string | number | undefined>): string {
+	const params = new URLSearchParams();
+	for (const [k, v] of Object.entries(record)) if (v !== undefined) params.set(k, String(v));
+	const encoded = params.toString();
+	return encoded === "" ? "" : `?${encoded}`;
+}
+
 abstract class Resource {
 	/** Hand-rolled v2 transport for calls the pinned SDK cannot make; see ./raw.ts. */
 	protected raw?: RawHttp;
@@ -312,6 +340,25 @@ abstract class Resource {
 			throw new Error(`${what} needs the v2 transport, which this HydraDB instance was built without`);
 		}
 		return this.raw;
+	}
+
+	/**
+	 * A raw v2 call whose wire result is run through the SDK's OWN response
+	 * serializer, so the caller gets the same camelCase object the SDK path
+	 * returns. Used for `kind: "unified"` (PRO-1618): the pinned SDK's REQUEST
+	 * serializers reject that enum value before anything is sent, so the
+	 * request is built by hand, but nothing downstream has to know.
+	 */
+	protected async rawTyped<T>(
+		what: string,
+		method: "GET" | "POST" | "DELETE",
+		path: string,
+		body: unknown,
+		parse: (raw: unknown, opts?: SdkParseOptions) => T,
+		signal?: AbortSignal,
+	): Promise<T> {
+		const wire = await this.requireRaw(what).request<unknown>(method, path, body, signal);
+		return parse(wire, SDK_PARSE_OPTS);
 	}
 
 	protected constructor(
@@ -393,6 +440,33 @@ export class ContextResource extends Resource {
 		}
 		const queryBy =
 			params.queryBy ?? (params.operator != null ? "text" : undefined);
+
+		if (params.kind === "unified") {
+			return this.call("/query", () =>
+				this.rawTyped(
+					"unified query",
+					"POST",
+					"/query",
+					compact({
+						...this.scope(params.collection, params.database),
+						query: params.query,
+						type: "unified",
+						operator: params.operator,
+						query_by: queryBy,
+						max_results: params.maxResults,
+						mode: params.mode,
+						graph_context: params.graphContext,
+						alpha: params.alpha,
+						recency_bias: params.recencyBias,
+						ids: params.ids,
+						metadata_filters: params.metadataFilters,
+						num_related_chunks: params.numRelatedChunks,
+					}),
+					serialization.SearchV2RetrievalResult.parseOrThrow,
+					opts?.signal,
+				),
+			);
+		}
 
 		return this.call("/query", () =>
 			this.sdk.query({
@@ -539,10 +613,12 @@ export class ContextResource extends Resource {
 			...(params.upsert != null ? { upsert: params.upsert } : {}),
 		};
 		return this.call("/context/ingest", () =>
-			this.requireRaw("unified ingest").request<SDK.IngestionV2SourceUploadResponse>(
+			this.rawTyped(
+				"unified ingest",
 				"POST",
 				"/context/ingest",
 				body,
+				serialization.IngestionV2SourceUploadResponse.parseOrThrow,
 				opts?.signal,
 			),
 		);
@@ -553,6 +629,24 @@ export class ContextResource extends Resource {
 		params: ListParams = {},
 		opts?: RequestOptions,
 	): Promise<SDK.ListV2SourceListResponse> {
+		if (params.kind === "unified") {
+			return this.call("/context/list", () =>
+				this.rawTyped(
+					"unified list",
+					"POST",
+					"/context/list",
+					compact({
+						...this.scope(params.collection, params.database),
+						type: "unified",
+						ids: params.ids,
+						page: params.page,
+						page_size: params.pageSize,
+					}),
+					serialization.ListV2SourceListResponse.parseOrThrow,
+					opts?.signal,
+				),
+			);
+		}
 		return this.call("/context/list", () =>
 			this.sdk.context.list({
 				...this.scope(params.collection, params.database),
@@ -596,6 +690,25 @@ export class ContextResource extends Resource {
 	relations(
 		params: RelationsParams = {},
 	): Promise<SDK.GraphGraphRelationsResponse> {
+		if (params.kind === "unified") {
+			const scope = this.scope(params.collection, params.database);
+			return this.call("/context/relations", () =>
+				this.rawTyped(
+					"unified relations",
+					"GET",
+					`/context/relations${queryString({
+						database: scope.database,
+						collection: scope.collection,
+						id: params.id,
+						type: "unified",
+						limit: params.limit,
+						cursor: params.cursor,
+					})}`,
+					undefined,
+					serialization.GraphGraphRelationsResponse.parseOrThrow,
+				),
+			);
+		}
 		return this.call("/context/relations", () =>
 			this.sdk.context.relations({
 				...this.scope(params.collection, params.database),
@@ -612,6 +725,22 @@ export class ContextResource extends Resource {
 		params: DeleteParams,
 		opts?: RequestOptions,
 	): Promise<SDK.SourcesMemoryDeleteResponse> {
+		if (params.kind === "unified") {
+			return this.call("/context", () =>
+				this.rawTyped(
+					"unified delete",
+					"DELETE",
+					"/context",
+					compact({
+						...this.scope(params.collection, params.database),
+						ids: params.ids,
+						type: "unified",
+					}),
+					serialization.SourcesMemoryDeleteResponse.parseOrThrow,
+					opts?.signal,
+				),
+			);
+		}
 		return this.call("/context", () =>
 			this.sdk.context.delete({
 				...this.scope(params.collection, params.database),
@@ -684,12 +813,14 @@ export class DatabasesResource extends Resource {
 	 * a layout is fixed at creation, so it cannot go stale, and the probe is
 	 * what lets the tools pick `unified` as a default without a failed request.
 	 */
-	layouts(): Promise<Map<string, Layout>> {
+	layouts(signal?: AbortSignal): Promise<Map<string, Layout>> {
 		if (!this.layoutCache) {
 			this.layoutCache = this.call("/databases", () =>
 				this.requireRaw("layout probe").request<{ details?: { database?: string; type?: string }[] }>(
 					"GET",
 					"/databases",
+					undefined,
+					signal,
 				),
 			).then((listed) => {
 				const map = new Map<string, Layout>();
@@ -714,10 +845,13 @@ export class DatabasesResource extends Resource {
 	 * before PRO-1618 is; the worst case is the old default, never a wrong
 	 * unified call.
 	 */
-	async layout(database: string): Promise<Layout> {
+	async layout(database: string, signal?: AbortSignal): Promise<Layout> {
 		try {
-			return (await this.layouts()).get(database) ?? "split";
-		} catch {
+			return (await this.layouts(signal)).get(database) ?? "split";
+		} catch (err) {
+			// A cancelled probe is the caller's decision; propagate it so the
+			// tool call ends now rather than running on with a guessed layout.
+			if (signal?.aborted) throw err;
 			return "split";
 		}
 	}
@@ -795,6 +929,7 @@ export class HydraDB {
 			token: config.token,
 			baseUrl: config.baseUrl,
 			timeoutSeconds: config.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS,
+			maxRetries: config.maxRetries ?? DEFAULT_MAX_RETRIES,
 			fetch: config.fetch,
 		});
 		this.databases = new DatabasesResource(
