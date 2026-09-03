@@ -408,3 +408,98 @@ test("an unconfined client passes any per-call database through", async () => {
 	await hydra.context.query({ query: "hi", database: "work" });
 	assert.deepEqual(calls, ["query:work"]);
 });
+
+// PRO-1618: a database created with `type: "unified"` has one corpus. The
+// pinned SDK cannot send `items`, `type` on create, or read `details[]`, so
+// those three go over a hand-rolled v2 transport; these pin the wire shape.
+function fetchStub(body: unknown, status = 200): { fetch: typeof fetch; calls: { url: string; init: RequestInit }[] } {
+	const calls: { url: string; init: RequestInit }[] = [];
+	const impl = ((url: string | URL | Request, init?: RequestInit) => {
+		calls.push({ url: String(url), init: init ?? {} });
+		return Promise.resolve(new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } }));
+	}) as typeof fetch;
+	return { fetch: impl, calls };
+}
+
+test("unified ingest posts items[] as a JSON body, not the multipart memories field", async () => {
+	const { fetch, calls } = fetchStub({ success: true, data: { success: true, success_count: 1, failed_count: 0 } });
+	const sdk = { context: { ingest() { throw new Error("SDK path must not be used for unified"); } } } as unknown as HydraDBClient;
+	const hydra = new HydraDB({ token: "t", database: "db_u", collection: "c1", baseUrl: "https://api.test", fetch }, sdk);
+
+	await hydra.context.ingest({
+		kind: "unified",
+		pairs: [{ user: "I prefer dark mode", assistant: "Noted" }],
+		sourceId: "chat-1",
+		userName: "Ada",
+		infer: true,
+		customInstructions: "focus",
+		metadata: { topic: "ui" },
+		observationDate: "2026-09-01",
+		upsert: true,
+	});
+
+	assert.equal(calls.length, 1);
+	assert.equal(calls[0]!.url, "https://api.test/context/ingest");
+	assert.equal(calls[0]!.init.method, "POST");
+	assert.equal((calls[0]!.init.headers as Record<string, string>)["API-Version"], "2");
+	const body = JSON.parse(String(calls[0]!.init.body));
+	assert.deepEqual(body, {
+		database: "db_u",
+		collection: "c1",
+		upsert: true,
+		items: [
+			{
+				conversation: [
+					{ role: "user", content: "I prefer dark mode", name: "Ada" },
+					{ role: "assistant", content: "Noted" },
+				],
+				context_id: "chat-1",
+				enrich: true,
+				custom_instructions: "focus",
+				attributes: { topic: "ui" },
+				happened_at: "2026-09-01",
+			},
+		],
+	});
+});
+
+test("database create with a layout posts type, plain create keeps the SDK path", async () => {
+	const { fetch, calls } = fetchStub({ success: true, data: { success: true } });
+	let sdkCreates = 0;
+	const sdk = {
+		databases: {
+			create() {
+				sdkCreates += 1;
+				return Promise.resolve({ success: true, data: { success: true } });
+			},
+		},
+	} as unknown as HydraDBClient;
+	const hydra = new HydraDB({ token: "t", database: "db", baseUrl: "https://api.test", fetch }, sdk);
+
+	await hydra.databases.create({ database: "new-db", type: "unified" });
+	assert.equal(calls.length, 1);
+	assert.equal(calls[0]!.url, "https://api.test/databases");
+	assert.deepEqual(JSON.parse(String(calls[0]!.init.body)), { database: "new-db", type: "unified" });
+
+	await hydra.databases.create({ database: "old-db" });
+	assert.equal(sdkCreates, 1, "a create without a layout must stay on the SDK");
+	assert.equal(calls.length, 1);
+});
+
+test("layout() reads GET /databases details once and falls back to split", async () => {
+	const { fetch, calls } = fetchStub({
+		success: true,
+		data: { databases: ["a", "b"], details: [{ database: "a", type: "unified" }, { database: "b", type: "split" }] },
+	});
+	const hydra = new HydraDB({ token: "t", database: "a", baseUrl: "https://api.test", fetch }, {} as HydraDBClient);
+
+	assert.equal(await hydra.databases.layout("a"), "unified");
+	assert.equal(await hydra.databases.layout("b"), "split");
+	assert.equal(await hydra.databases.layout("never-listed"), "split");
+	assert.equal(calls.length, 1, "the probe is memoised for the process");
+	assert.equal(calls[0]!.init.method, "GET");
+
+	const failing = fetchStub({ success: false, error: { message: "nope" } }, 500);
+	const broken = new HydraDB({ token: "t", database: "a", baseUrl: "https://api.test", fetch: failing.fetch }, {} as HydraDBClient);
+	assert.equal(await broken.databases.layout("a"), "split");
+});

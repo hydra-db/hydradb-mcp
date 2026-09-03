@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — unified databases (PRO-1618)
+
+A database created with `type: "unified"` keeps knowledge and memory in ONE
+corpus. On it the server accepts only `kind: "unified"` (its default) and
+refuses `memory`/`knowledge`, so the server's host-owned defaults now follow
+the database's layout: `hydradb_query` defaults to `unified` there (still
+`all` on a split database), `hydradb_ingest` and `hydradb_delete` default to
+`unified` there (still `memory` on split), and `hydradb_list` accepts
+`kind: "unified"` to list every item in one page. `hydradb_databases` names
+each database's layout. The layout comes from one memoised `GET /databases`
+probe (`details[].type`); a probe that fails reads as split, so nothing
+changes for any existing database.
+
+Unified ingest sends the `items[]` body (text or a role/content conversation
+per item) and `hydradb_databases` can create a unified database through
+`type`. The pinned SDK predates both, so those calls and the layout probe go
+over a small hand-rolled v2 transport (`src/hydra/raw.ts`, the same shape as
+the BYOG one) with the same envelope unwrap and error translation; they move
+back onto the SDK once it is regenerated.
+
 ## [1.3.0] - 2026-08-28
 
 ### Added — OAuth resource server ("Sign in with HydraDB")

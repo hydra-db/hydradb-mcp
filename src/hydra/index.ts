@@ -27,6 +27,7 @@ export type {
 	RelationsParams,
 	DeleteParams,
 	CreateDatabaseParams,
+	Layout,
 } from "./client.js";
 export { GraphResource } from "./graph.js";
 export type {
