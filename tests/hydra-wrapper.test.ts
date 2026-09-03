@@ -408,3 +408,61 @@ test("an unconfined client passes any per-call database through", async () => {
 	await hydra.context.query({ query: "hi", database: "work" });
 	assert.deepEqual(calls, ["query:work"]);
 });
+
+// ── PRO-1684: permission-aware search ────────────────────────────────────────
+// The caller declares the principals to answer as, and the wrapper must carry
+// them to the wire on every read the API scopes by ACL.
+
+function captureSdk(seen: Record<string, unknown>) {
+	const grab = (key: string) => (req: unknown) => {
+		seen[key] = req;
+		return Promise.resolve({});
+	};
+	return {
+		query: grab("query"),
+		context: {
+			list: grab("list"),
+			inspect: grab("inspect"),
+			relations: grab("relations"),
+		},
+	} as unknown as HydraDBClient;
+}
+
+function wrapperFor(seen: Record<string, unknown>) {
+	return new HydraDB(
+		{ token: "t", database: "db_test", collection: "col_test" },
+		captureSdk(seen),
+	);
+}
+
+test("query carries acl principals to the SDK", async () => {
+	const seen: Record<string, { acl?: string[] }> = {};
+	await wrapperFor(seen).context.query({
+		query: "roadmap",
+		acl: ["alice@corp.com", "group:google:eng@corp.com"],
+	});
+	assert.deepEqual(seen.query.acl, ["alice@corp.com", "group:google:eng@corp.com"]);
+});
+
+test("list, inspect and relations each carry acl principals", async () => {
+	const seen: Record<string, { acl?: string[] }> = {};
+	const hydra = wrapperFor(seen);
+	await hydra.context.list({ acl: ["bob@corp.com"] });
+	await hydra.context.inspect({ id: "s1", acl: ["carol@corp.com"] });
+	await hydra.context.relations({ id: "s1", acl: ["dan@corp.com"] });
+	assert.deepEqual(seen.list.acl, ["bob@corp.com"]);
+	assert.deepEqual(seen.inspect.acl, ["carol@corp.com"]);
+	assert.deepEqual(seen.relations.acl, ["dan@corp.com"]);
+});
+
+test("an omitted acl stays undefined rather than becoming an empty list", async () => {
+	// The API treats `acl: []` the same as an absent acl, so [] is not a way to
+	// ask for "nobody". Sending nothing keeps the request faithful to what the
+	// caller actually said rather than relying on that equivalence.
+	const seen: Record<string, { acl?: string[] }> = {};
+	const hydra = wrapperFor(seen);
+	await hydra.context.query({ query: "roadmap" });
+	await hydra.context.list({});
+	assert.equal(seen.query.acl, undefined);
+	assert.equal(seen.list.acl, undefined);
+});

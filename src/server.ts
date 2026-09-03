@@ -346,6 +346,7 @@ export function createHydraDBServer(
 		source_ids?: string[];
 		metadata_filters?: Record<string, unknown>;
 		num_related_chunks?: number;
+		acl?: string[];
 		database?: string;
 		collection?: string;
 	}, signal?: AbortSignal): Promise<ToolResult> {
@@ -365,6 +366,7 @@ export function createHydraDBServer(
 			operator: args.operator,
 			ids: args.source_ids,
 			metadataFilters: args.metadata_filters,
+			acl: args.acl,
 			numRelatedChunks: args.num_related_chunks,
 			graphContext: args.graph_context ?? true,
 			database: args.database,
@@ -656,6 +658,7 @@ export function createHydraDBServer(
 		source_ids?: string[];
 		page?: number;
 		page_size?: number;
+		acl?: string[];
 		database?: string;
 		collection?: string;
 	} = {}, signal?: AbortSignal): Promise<ToolResult> {
@@ -666,6 +669,7 @@ export function createHydraDBServer(
 			ids: args.source_ids,
 			page: args.page,
 			pageSize: args.page_size,
+			acl: args.acl,
 			database: args.database,
 			collection: args.collection,
 		}, { signal });
@@ -724,6 +728,7 @@ export function createHydraDBServer(
 		source_ids?: string[];
 		page?: number;
 		page_size?: number;
+		acl?: string[];
 		database?: string;
 		collection?: string;
 	}, signal?: AbortSignal): Promise<ToolResult> {
@@ -734,6 +739,7 @@ export function createHydraDBServer(
 			ids: args.source_ids,
 			page: args.page,
 			pageSize: args.page_size,
+			acl: args.acl,
 			database: args.database,
 			collection: args.collection,
 		}, { signal });
@@ -894,6 +900,7 @@ export function createHydraDBServer(
 			offset?: number;
 			limit?: number;
 			expiry_seconds?: number;
+			acl?: string[];
 			database?: string;
 			collection?: string;
 		};
@@ -920,6 +927,7 @@ export function createHydraDBServer(
 			offset: a.offset,
 			limit: a.limit,
 			expiry_seconds: a.expiry_seconds,
+			acl: a.acl,
 			database: a.database,
 			collection: a.collection,
 		};
@@ -931,6 +939,7 @@ export function createHydraDBServer(
 		offset?: number;
 		limit?: number;
 		expiry_seconds?: number;
+		acl?: string[];
 		database?: string;
 		collection?: string;
 	}, signal?: AbortSignal): Promise<ToolResult> {
@@ -940,6 +949,7 @@ export function createHydraDBServer(
 			id: args.source_id,
 			mode: args.mode ?? "content",
 			expirySeconds: args.expiry_seconds,
+			acl: args.acl,
 			database: args.database,
 			collection: args.collection,
 		}, { signal });
@@ -1617,6 +1627,10 @@ export function createHydraDBServer(
 			.max(5)
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.num_related_chunks),
+		acl: z
+			.array(z.string())
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.acl),
 		...scopeSchema,
 	};
 
@@ -1745,6 +1759,10 @@ export function createHydraDBServer(
 			.max(100)
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.LIST].params.page_size),
+		acl: z
+			.array(z.string())
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.LIST].params.acl),
 		...scopeSchema,
 	};
 
@@ -1753,10 +1771,18 @@ export function createHydraDBServer(
 			.array(z.string())
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.LIST_SOURCES].params.source_ids),
+		acl: z
+			.array(z.string())
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.LIST].params.acl),
 		...scopeSchema,
 	};
 
 	const listMemoriesSchema = {
+		acl: z
+			.array(z.string())
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.LIST].params.acl),
 		...scopeSchema,
 	};
 
@@ -1796,6 +1822,10 @@ export function createHydraDBServer(
 			.min(1)
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INSPECT].params.expiry_seconds),
+		acl: z
+			.array(z.string())
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INSPECT].params.acl),
 		...scopeSchema,
 	};
 
@@ -2099,6 +2129,7 @@ export function createHydraDBServer(
 				source_ids?: string[];
 				page?: number;
 				page_size?: number;
+				acl?: string[];
 				database?: string;
 				collection?: string;
 			};
@@ -2132,6 +2163,7 @@ export function createHydraDBServer(
 						source_ids: ids,
 						page: a.page,
 						page_size: a.page_size,
+						acl: a.acl,
 						database: a.database,
 						collection: a.collection,
 					},
@@ -2143,6 +2175,7 @@ export function createHydraDBServer(
 					source_ids: ids,
 					page: a.page,
 					page_size: a.page_size,
+					acl: a.acl,
 					database: a.database,
 					collection: a.collection,
 				},
@@ -2299,7 +2332,7 @@ export function createHydraDBServer(
 		listMemoriesSchema,
 		(args, extra) =>
 			runListMemories(
-				args as { database?: string; collection?: string },
+				args as { acl?: string[]; database?: string; collection?: string },
 				extra?.signal,
 			),
 		readOnly,
@@ -2312,6 +2345,7 @@ export function createHydraDBServer(
 			runListSources(
 				args as {
 					source_ids?: string[];
+					acl?: string[];
 					database?: string;
 					collection?: string;
 				},

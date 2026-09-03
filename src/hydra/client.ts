@@ -132,6 +132,21 @@ export interface QueryParams {
 	ids?: string[];
 	/** Exact-match filters over stored metadata. No ranges, no partial matches. */
 	metadataFilters?: Record<string, unknown>;
+	/**
+	 * Principals to answer as (PRO-1684 document ACLs): an email, a
+	 * `domain:<host>`, or a `group:<provider>:<id>`. Results are restricted to
+	 * documents whose access list admits at least one of them.
+	 *
+	 * Omitted means NO ACL scoping — every document this key can reach. An empty
+	 * array is treated the SAME as omitted by the API (verified against staging:
+	 * `acl: []` and no `acl` both returned 134 sources where an unknown
+	 * principal returned 130), so it is not a way to ask for "nobody"; the
+	 * design doc's rule is that absent and `[]` alike mean unrestricted.
+	 *
+	 * A principal the deployment does not know fails CLOSED: it matches only
+	 * documents carrying no access list of their own, never a restricted one.
+	 */
+	acl?: string[];
 	/** Adjacent chunks pulled in alongside each match, for surrounding context. */
 	numRelatedChunks?: number;
 	/** Per-call collection override. */
@@ -184,6 +199,19 @@ export interface ListParams {
 	ids?: string[];
 	page?: number;
 	pageSize?: number;
+	/**
+	 * Principals to answer as (PRO-1684 document ACLs): an email, a
+	 * `domain:<host>`, or a `group:<provider>:<id>`. Results are restricted to
+	 * documents whose access list admits at least one of them.
+	 *
+	 * Omitted means NO ACL scoping — every document this key can reach. An empty
+	 * array is treated the SAME as omitted by the API, so it is not a way to ask
+	 * for "nobody" (design doc: absent and `[]` alike mean unrestricted).
+	 *
+	 * A principal the deployment does not know fails CLOSED: it matches only
+	 * documents carrying no access list of their own, never a restricted one.
+	 */
+	acl?: string[];
 	collection?: string;
 	/** Per-call database override. */
 	database?: string;
@@ -193,6 +221,19 @@ export interface InspectParams {
 	id: string;
 	mode?: string;
 	expirySeconds?: number;
+	/**
+	 * Principals to answer as (PRO-1684 document ACLs): an email, a
+	 * `domain:<host>`, or a `group:<provider>:<id>`. Results are restricted to
+	 * documents whose access list admits at least one of them.
+	 *
+	 * Omitted means NO ACL scoping — every document this key can reach. An empty
+	 * array is treated the SAME as omitted by the API, so it is not a way to ask
+	 * for "nobody" (design doc: absent and `[]` alike mean unrestricted).
+	 *
+	 * A principal the deployment does not know fails CLOSED: it matches only
+	 * documents carrying no access list of their own, never a restricted one.
+	 */
+	acl?: string[];
 	collection?: string;
 	/** Per-call database override. */
 	database?: string;
@@ -210,6 +251,19 @@ export interface RelationsParams {
 	kind?: ContextKind;
 	limit?: number;
 	cursor?: number;
+	/**
+	 * Principals to answer as (PRO-1684 document ACLs): an email, a
+	 * `domain:<host>`, or a `group:<provider>:<id>`. Results are restricted to
+	 * documents whose access list admits at least one of them.
+	 *
+	 * Omitted means NO ACL scoping — every document this key can reach. An empty
+	 * array is treated the SAME as omitted by the API, so it is not a way to ask
+	 * for "nobody" (design doc: absent and `[]` alike mean unrestricted).
+	 *
+	 * A principal the deployment does not know fails CLOSED: it matches only
+	 * documents carrying no access list of their own, never a restricted one.
+	 */
+	acl?: string[];
 	collection?: string;
 	/** Per-call database override. */
 	database?: string;
@@ -380,6 +434,7 @@ export class ContextResource extends Resource {
 				ids: params.ids,
 				metadataFilters: params.metadataFilters,
 				numRelatedChunks: params.numRelatedChunks,
+				acl: params.acl,
 			}, req(opts)),
 		);
 	}
@@ -394,7 +449,7 @@ export class ContextResource extends Resource {
 	async ingest(
 		params: IngestParams,
 		opts?: RequestOptions,
-	): Promise<SDK.IngestionV2SourceUploadResponse> {
+	): Promise<SDK.IngestionV2IngestResponse> {
 		const request: SDK.IngestContextRequest = {
 			...this.scope(params.collection, params.database),
 			type: params.kind,
@@ -479,7 +534,7 @@ export class ContextResource extends Resource {
 	list(
 		params: ListParams = {},
 		opts?: RequestOptions,
-	): Promise<SDK.ListV2SourceListResponse> {
+	): Promise<SDK.ListV2ListResponse> {
 		return this.call("/context/list", () =>
 			this.sdk.context.list({
 				...this.scope(params.collection, params.database),
@@ -487,6 +542,7 @@ export class ContextResource extends Resource {
 				ids: params.ids,
 				page: params.page,
 				pageSize: params.pageSize,
+				acl: params.acl,
 			}, req(opts)),
 		);
 	}
@@ -502,6 +558,7 @@ export class ContextResource extends Resource {
 				id: params.id,
 				mode: params.mode,
 				expirySeconds: params.expirySeconds,
+				acl: params.acl,
 			}, req(opts)),
 		);
 	}
@@ -530,6 +587,7 @@ export class ContextResource extends Resource {
 				type: params.kind,
 				limit: params.limit,
 				cursor: params.cursor,
+				acl: params.acl,
 			}),
 		);
 	}
