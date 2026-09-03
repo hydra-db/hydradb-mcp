@@ -335,6 +335,18 @@ export function createHydraDBServer(
 
 	// --- Handlers (shared by canonical tools and their deprecated aliases) ---
 
+	/**
+	 * Whether the database a call targets was created with `type: "unified"`
+	 * (PRO-1618). On such a database `memory`/`knowledge` are refused by the
+	 * server, so every host-owned default below switches to `unified` there;
+	 * on a split database (every one created before) nothing changes. One
+	 * memoised `GET /databases` probe answers for the whole process.
+	 */
+	async function isUnifiedDatabase(database?: string): Promise<boolean> {
+		const target = database?.trim() || hydra.database;
+		return (await hydra.databases.layout(target)) === "unified";
+	}
+
 	async function runQuery(args: {
 		query: string;
 		kind?: QueryKind;
@@ -353,7 +365,8 @@ export function createHydraDBServer(
 		// used to pin `kind: "memory"`, which made every ingested knowledge source
 		// unreachable from the MCP — `hydradb_list`/`hydradb_inspect` could browse
 		// knowledge but nothing could search it.
-		const kind = args.kind ?? "all";
+		const kind: QueryKind =
+			args.kind ?? ((await isUnifiedDatabase(args.database)) ? "unified" : "all");
 		logger.debug(`${TOOL_NAMES.QUERY}: "${args.query}" (kind=${kind})`);
 
 		const maxResults = args.max_results ?? 10;
@@ -515,7 +528,8 @@ export function createHydraDBServer(
 		database?: string;
 		collection?: string;
 	}, signal?: AbortSignal): Promise<ToolResult> {
-		const kind = args.kind ?? "memory";
+		const kind: ContextKind =
+			args.kind ?? ((await isUnifiedDatabase(args.database)) ? "unified" : "memory");
 		logger.debug(`${TOOL_NAMES.INGEST}: "${args.text.slice(0, 50)}..." (kind=${kind})`);
 
 		// The memory item shape has no counterpart on the knowledge path, which
@@ -524,7 +538,7 @@ export function createHydraDBServer(
 		// branch rather than dropping them, and passing them here unconditionally
 		// would make every knowledge write fail.
 		const memoryOnly =
-			kind === "memory"
+			kind !== "knowledge"
 				? {
 						sourceId: args.source_id,
 						infer: args.infer ?? true,
@@ -726,11 +740,14 @@ export function createHydraDBServer(
 		page_size?: number;
 		database?: string;
 		collection?: string;
+		/** `unified` lists every item of a unified database in one page (PRO-1618); the rows have the source shape. */
+		kind?: "knowledge" | "unified";
 	}, signal?: AbortSignal): Promise<ToolResult> {
 		logger.debug(TOOL_NAMES.LIST);
+		const listKind = args.kind ?? "knowledge";
 
 		const raw = await hydra.context.list({
-			kind: "knowledge",
+			kind: listKind,
 			ids: args.source_ids,
 			page: args.page,
 			pageSize: args.page_size,
@@ -745,7 +762,7 @@ export function createHydraDBServer(
 					? `No sources on page ${args.page}.`
 					: "No sources found.",
 				{
-					kind: "knowledge",
+					kind: listKind,
 					items: [],
 					shown: 0,
 					total: page.total ?? 0,
@@ -767,7 +784,7 @@ export function createHydraDBServer(
 		return structuredResult(
 			`${coverage(sources.length, page, args.page)} sources:\n\n${lines.join("\n")}`,
 			{
-				kind: "knowledge",
+				kind: listKind,
 				items: sources.map((src) => ({
 					id: src.id,
 					...(src.title != null ? { title: src.title } : {}),
@@ -1024,7 +1041,7 @@ export function createHydraDBServer(
 	 * gone when the server just declined to remove it.
 	 */
 	function deleteReport(
-		kind: "memory" | "knowledge",
+		kind: "memory" | "knowledge" | "unified",
 		ids: string[],
 		res: { success?: boolean; message?: string; results?: unknown },
 		removed: boolean,
@@ -1118,7 +1135,7 @@ export function createHydraDBServer(
 		const a = args as {
 			id?: string;
 			ids?: string[];
-			kind?: "memory" | "knowledge";
+			kind?: ContextKind;
 			database?: string;
 			collection?: string;
 		};
@@ -1134,11 +1151,12 @@ export function createHydraDBServer(
 
 	async function runDelete(args: {
 		ids: string[];
-		kind?: "memory" | "knowledge";
+		kind?: ContextKind;
 		database?: string;
 		collection?: string;
 	}, signal?: AbortSignal): Promise<ToolResult> {
-		const kind = args.kind ?? "memory";
+		const kind: ContextKind =
+			args.kind ?? ((await isUnifiedDatabase(args.database)) ? "unified" : "memory");
 		logger.debug(`${TOOL_NAMES.DELETE}: ${kind} ${args.ids.join(", ")}`);
 
 		const res = await hydra.context.delete({
@@ -1197,9 +1215,20 @@ export function createHydraDBServer(
 			databases = (listed.databases ?? listed.tenantIds ?? []).filter(Boolean);
 		}
 		if (!databases.includes(defaultDatabase)) databases.unshift(defaultDatabase);
+		// Storage layout per database (PRO-1618). A unified database takes no
+		// `kind`; naming it here is what lets a caller avoid a refused call. A
+		// confined connection keeps answering without a network call, as
+		// promised above; its per-call defaults still resolve the layout lazily.
+		const types: Record<string, string> = {};
+		if (!confined) {
+			const layouts = await hydra.databases.layouts().catch(() => new Map<string, string>());
+			for (const d of databases) types[d] = layouts.get(d) ?? "split";
+		}
 
 		const lines = databases.map(
-			(d) => `  - ${d}${d === defaultDatabase ? "  (default for this connection)" : ""}`,
+			(d) =>
+				`  - ${d}${types[d] === "unified" ? "  [unified: one corpus, kind not needed]" : ""}` +
+				`${d === defaultDatabase ? "  (default for this connection)" : ""}`,
 		);
 		const note = confined
 			? "\nThis connection is confined to the database(s) above; any other name is refused. " +
@@ -1207,7 +1236,7 @@ export function createHydraDBServer(
 			: "\nPass `database` on any tool to work in another one.";
 		return structuredResult(
 			`${databases.length} database(s):\n${lines.join("\n")}${note}`,
-			{ databases, default: defaultDatabase, confined },
+			{ databases, default: defaultDatabase, confined, ...(confined ? {} : { types }) },
 		);
 	}
 
@@ -1576,7 +1605,7 @@ export function createHydraDBServer(
 	const querySchema = {
 		query: z.string().describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.query),
 		kind: z
-			.enum(["memory", "knowledge", "all"])
+			.enum(["memory", "knowledge", "all", "unified"])
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.kind),
 		max_results: z
@@ -1680,7 +1709,7 @@ export function createHydraDBServer(
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.text),
 		kind: z
-			.enum(["memory", "knowledge"])
+			.enum(["memory", "knowledge", "unified"])
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.kind),
 		turns: z
@@ -1722,7 +1751,7 @@ export function createHydraDBServer(
 		// DB have?" never saw the knowledge corpus — which hydradb_query searches
 		// by default. Same class of bug as the query `kind` pin, on the list path.
 		kind: z
-			.enum(["memory", "knowledge"])
+			.enum(["memory", "knowledge", "unified"])
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.LIST].params.kind),
 		ids: z
 			.array(z.string())
@@ -1810,7 +1839,7 @@ export function createHydraDBServer(
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.DELETE].params.id),
 		kind: z
-			.enum(["memory", "knowledge"])
+			.enum(["memory", "knowledge", "unified"])
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.DELETE].params.kind),
 		...scopeSchema,
@@ -1820,7 +1849,7 @@ export function createHydraDBServer(
 	// Query stays prose: its payload IS text, and forcing it into fields would
 	// duplicate the rendered context rather than replace it.
 	const listOutputSchema = {
-		kind: z.enum(["memory", "knowledge"]),
+		kind: z.enum(["memory", "knowledge", "unified"]),
 		items: z.array(
 			z.object({
 				id: z.string(),
@@ -1844,7 +1873,7 @@ export function createHydraDBServer(
 
 	const deleteOutputSchema = {
 		ids: z.array(z.string()),
-		kind: z.enum(["memory", "knowledge"]),
+		kind: z.enum(["memory", "knowledge", "unified"]),
 		deleted: z.boolean(),
 		/** Absent when the server confirmed a removal without saying how many. */
 		deleted_count: z.number().optional(),
@@ -2094,7 +2123,7 @@ export function createHydraDBServer(
 		listSchema,
 		(args, extra) => {
 			const a = args as {
-				kind?: "memory" | "knowledge";
+				kind?: "memory" | "knowledge" | "unified";
 				ids?: string[];
 				source_ids?: string[];
 				page?: number;
@@ -2126,9 +2155,10 @@ export function createHydraDBServer(
 				);
 			}
 			const ids = a.ids ?? a.source_ids;
-			if (a.kind === "knowledge") {
+			if (a.kind === "knowledge" || a.kind === "unified") {
 				return runListSources(
 					{
+						kind: a.kind,
 						source_ids: ids,
 						page: a.page,
 						page_size: a.page_size,

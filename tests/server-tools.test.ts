@@ -2548,3 +2548,79 @@ test("empty scope overrides are rejected or fall back to default", async () => {
 
 	await client.close();
 });
+
+// PRO-1618: on a unified database the host-owned defaults switch to `unified`,
+// because `memory`/`knowledge`/`all` are refused there; on a split database
+// (every database created before) the defaults are unchanged.
+function layoutFetch(type: "split" | "unified"): typeof fetch {
+	return ((url: string | URL | Request) =>
+		Promise.resolve(
+			new Response(
+				JSON.stringify({
+					success: true,
+					data: { databases: ["db_test"], details: [{ database: "db_test", type }] },
+				}),
+				{ status: 200, headers: { "content-type": "application/json" } },
+			),
+		)) as typeof fetch;
+}
+
+function mockHydraWithLayout(type: "split" | "unified"): { hydra: HydraDB; calls: RecordedCall[] } {
+	const calls: RecordedCall[] = [];
+	const record = (method: string, fallback: unknown) => (args?: Record<string, unknown>) => {
+		calls.push({ method, args: args ?? {} });
+		return Promise.resolve({ data: fallback, success: true });
+	};
+	const sdk = {
+		query: record("query", { chunks: [] }),
+		context: {
+			list: record("list", { inner: { sources: [], total: 0 } }),
+			delete: record("delete", { success: true, deletedCount: 1 }),
+		},
+		databases: {
+			list: record("databases.list", { databases: ["db_test"] }),
+		},
+	} as unknown as HydraDBClient;
+	const hydra = new HydraDB(
+		{ token: "t", database: "db_test", collection: "col_test", baseUrl: "https://api.test", fetch: layoutFetch(type) },
+		sdk,
+	);
+	return { hydra, calls };
+}
+
+test("hydradb_query defaults kind to unified on a unified database and to all on a split one", async () => {
+	for (const [type, want] of [["unified", "unified"], ["split", "all"]] as const) {
+		const { hydra, calls } = mockHydraWithLayout(type);
+		const client = await connect(hydra);
+		await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
+		const q = calls.find((c) => c.method === "query")!;
+		assert.equal(q.args.type, want, `layout ${type}`);
+	}
+});
+
+test("hydradb_delete defaults kind to unified on a unified database", async () => {
+	const { hydra, calls } = mockHydraWithLayout("unified");
+	const client = await connect(hydra);
+	await client.callTool({ name: "hydradb_delete", arguments: { ids: ["x"] } });
+	assert.equal(calls.find((c) => c.method === "delete")!.args.type, "unified");
+});
+
+test("hydradb_list kind=unified lists every item in the source shape", async () => {
+	const { hydra, calls } = mockHydraWithLayout("unified");
+	const client = await connect(hydra);
+	const res = await client.callTool({ name: "hydradb_list", arguments: { kind: "unified" } });
+	assert.equal(calls.find((c) => c.method === "list")!.args.type, "unified");
+	assert.equal((res.structuredContent as { kind: string }).kind, "unified");
+});
+
+test("hydradb_databases names each database's layout", async () => {
+	const { hydra } = mockHydraWithLayout("unified");
+	// The databases tool is only registered for OAuth connections.
+	const server = createHydraDBServer(hydra, undefined, { oauthTools: true });
+	const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+	const client = new Client({ name: "test", version: "0.0.0" });
+	await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+	const res = await client.callTool({ name: "hydradb_databases", arguments: {} });
+	assert.deepEqual((res.structuredContent as { types: Record<string, string> }).types, { db_test: "unified" });
+	assert.match(JSON.stringify(res.content), /unified/);
+});
