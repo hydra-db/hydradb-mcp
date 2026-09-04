@@ -62,11 +62,13 @@ omitted `kind` still lists memories, and now says so: knowledge is a separate
 corpus there and the listing names what it did not cover, so it cannot be read
 as the whole store.
 
-Fields a unified database has nowhere to put are refused rather than dropped,
-matching the knowledge path: `is_markdown` has no counterpart there at all,
-and `user_name` only means something on a `turns` conversation, where it
-becomes the speaker's `name`. `user_name` is also no longer discarded on a
-text ingest.
+`is_markdown` and `user_name` are carried onto a unified item rather than
+dropped — both are fields on the server's ingest item. `user_name` goes on the
+item for a text ingest and stays on the turn for a conversation, because a
+turn's `name` is the finer-grained statement of the same fact and the server
+reads it first; sending both would risk one day discarding the per-turn
+speaker identity that anchoring depends on. `user_name` is also no longer
+discarded on a text ingest, which lost it on every layout.
 
 Unified ingest sends the `items[]` body (text or a role/content conversation
 per item) and `hydradb_databases` can create a unified database through

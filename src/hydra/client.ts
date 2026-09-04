@@ -821,27 +821,6 @@ export class ContextResource extends Resource {
 		params: IngestParams,
 		opts?: RequestOptions,
 	): Promise<SDK.IngestionV2IngestResponse> {
-		// Same rule as the knowledge branch above: a field with nowhere to go is
-		// REFUSED, never accepted and discarded. A caller that sets
-		// `is_markdown: true` and is answered "success: 1, failed: 0" has been
-		// told its instruction was honoured when it never left this function.
-		//
-		// `is_markdown` has no counterpart at all — the unified item shape is
-		// text or a conversation, and the server has no field to put it in.
-		// `user_name` DOES mean something here, but only on a conversation,
-		// where it rides on each turn's `name`; with no `pairs` there is no turn
-		// to carry it, so a text-only item would drop it.
-		const unsupported: string[] = [];
-		if (params.isMarkdown != null) unsupported.push("isMarkdown");
-		if (params.pairs == null && params.userName != null) unsupported.push("userName");
-		if (unsupported.length > 0) {
-			throw new Error(
-				`Unified ingestion does not support ${unsupported.join(", ")} — ` +
-				`a unified database stores one corpus of text or conversation items, ` +
-				`and those have nowhere to go on it. Drop them.`,
-			);
-		}
-
 		const item: Record<string, unknown> = {};
 		if (params.text != null) item.text = params.text;
 		if (params.pairs != null) {
@@ -850,6 +829,18 @@ export class ContextResource extends Resource {
 				{ role: "assistant", content: turn.assistant },
 			]);
 		}
+		// `is_markdown` is sent only when the caller said something. The server's
+		// field is a plain bool, so omitting it and sending `false` are the same
+		// thing, and every other field on this item is conditional too.
+		if (params.isMarkdown != null) item.is_markdown = params.isMarkdown;
+		// Speaker identity has TWO homes on a unified item and the server reads
+		// the finer-grained one first: a conversation names its speaker per turn
+		// (set above), and the item-level `user_name` fills in only when the
+		// turns supplied none. So it goes on the item for a TEXT item only —
+		// sending both would be redundant on the wire, and a client that let the
+		// item-level value win would silently discard the per-turn identity that
+		// speaker anchoring depends on.
+		if (params.pairs == null && params.userName != null) item.user_name = params.userName;
 		if (params.sourceId != null) item.context_id = params.sourceId;
 		if (params.title != null) item.title = params.title;
 		item.enrich = params.infer ?? true;

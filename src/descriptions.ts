@@ -92,9 +92,8 @@ const PARAM = {
 		"(default), or 'knowledge' to store a document as a searchable source. " +
 		"On a UNIFIED database leave unset (or pass 'unified'): everything is one family there. " +
 		"Memory-only options (turns, source_id, infer, is_markdown, user_name) do not " +
-		"apply to knowledge and are rejected rather than ignored. On a unified database " +
-		"is_markdown has no counterpart, and user_name only means something on a `turns` " +
-		"conversation — both are rejected rather than ignored there too.",
+		"apply to knowledge and are rejected rather than ignored. A unified database " +
+		"takes all of them.",
 	title:
 		"A short, specific label — always set it. This is the ONLY label shown next to " +
 		"this entry in later hydradb_query results, so 'Deployment rollback policy' is " +

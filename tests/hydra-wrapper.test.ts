@@ -736,36 +736,46 @@ test("unified ingest posts items[] as a JSON body, not the multipart memories fi
 	});
 });
 
-// Same rule the knowledge branch enforces: a field with nowhere to go is
-// REFUSED, not accepted and discarded. `is_markdown` has no counterpart in the
-// unified item shape at all, and `user_name` only exists there as a turn's
-// `name` — so a text-only item silently lost it while the caller was answered
-// "success: 1, failed: 0".
-test("unified ingest refuses the fields it cannot carry rather than dropping them", async () => {
-	const { fetch, calls } = fetchStub({ success: true, data: { success: true, success_count: 1, failed_count: 0 } });
+// `IngestItem` carries `is_markdown` and `user_name` (hydradb-application#870),
+// so these map onto the unified item instead of being refused. Refusing what
+// the plugin already sends would be the cross-client divergence these PRs exist
+// to close.
+test("unified ingest maps is_markdown, and puts user_name where the server reads it", async () => {
+	const stub = () => fetchStub({ success: true, data: { success: true, success_count: 1, failed_count: 0 } });
 	const sdk = { context: { ingest() { throw new Error("SDK path must not be used for unified"); } } } as unknown as HydraDBClient;
-	const hydra = new HydraDB({ token: "t", database: "db_u", collection: "c1", baseUrl: "https://api.test", fetchFn: fetch }, sdk);
+	const build = (fetch: typeof globalThis.fetch) =>
+		new HydraDB({ token: "t", database: "db_u", collection: "c1", baseUrl: "https://api.test", fetchFn: fetch }, sdk);
+	const itemOf = (calls: { init: RequestInit }[]) =>
+		(JSON.parse(String(calls[0]!.init.body)) as { items: Record<string, unknown>[] }).items[0]!;
 
-	await assert.rejects(
-		hydra.context.ingest({ kind: "unified", text: "a note", isMarkdown: true }),
-		(err: unknown) => err instanceof Error && /does not support isMarkdown/.test(err.message),
-	);
-	await assert.rejects(
-		hydra.context.ingest({ kind: "unified", text: "a note", userName: "Ada" }),
-		(err: unknown) => err instanceof Error && /does not support userName/.test(err.message),
-	);
-	assert.equal(calls.length, 0, "a refused field must not reach the server as a successful write");
+	// A TEXT item: user_name has no turn to ride on, so it goes on the item.
+	const text = stub();
+	await build(text.fetch).context.ingest({ kind: "unified", text: "a note", isMarkdown: true, userName: "Ada" });
+	const textItem = itemOf(text.calls);
+	assert.equal(textItem.is_markdown, true);
+	assert.equal(textItem.user_name, "Ada");
 
-	// `user_name` DOES mean something on a conversation, where it rides on each
-	// turn's `name` — refusing it there would break a write the server honours.
-	await hydra.context.ingest({
+	// A CONVERSATION: the per-turn `name` is the finer-grained statement of the
+	// same fact and the server reads it FIRST, so the item-level field is not
+	// sent alongside it. Sending both risks a client one day letting the
+	// item-level value win, which would discard per-turn speaker identity.
+	const convo = stub();
+	await build(convo.fetch).context.ingest({
 		kind: "unified",
 		pairs: [{ user: "hi", assistant: "hello" }],
 		userName: "Ada",
 	});
-	assert.equal(calls.length, 1);
-	const item = (JSON.parse(String(calls[0]!.init.body)) as { items: { conversation: { name?: string }[] }[] }).items[0]!;
-	assert.equal(item.conversation[0]!.name, "Ada");
+	const convoItem = itemOf(convo.calls) as { conversation: { name?: string }[]; user_name?: string };
+	assert.equal(convoItem.conversation[0]!.name, "Ada");
+	assert.equal(convoItem.user_name, undefined, "per-turn name is authoritative; do not send both");
+
+	// Omitted stays omitted: the server's is_markdown is a plain bool, so an
+	// absent field and `false` mean the same thing and the smaller body wins.
+	const bare = stub();
+	await build(bare.fetch).context.ingest({ kind: "unified", text: "a note" });
+	const bareItem = itemOf(bare.calls);
+	assert.equal("is_markdown" in bareItem, false);
+	assert.equal("user_name" in bareItem, false);
 });
 
 test("database create with a layout posts type, plain create keeps the SDK path", async () => {
