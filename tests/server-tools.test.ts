@@ -3206,19 +3206,27 @@ test("the sibling refusals that share the code are not retried as unified", asyn
 // The server has two wordings for this refusal and they put the words the other
 // way round: `type 'x' is not valid on a unified database` from the corpus-type
 // check, and `this database is unified: send the content as items…` from the
-// ingest handler — which still goes out with no code at all, so the prose match
-// is the only thing that catches it.
-test("both of the server's unified refusal wordings trigger the retry", async () => {
-	for (const message of [
+// ingest handler.
+//
+// Each is checked BOTH ways on purpose. The ingest wording carries no code on
+// the current server, so the prose match is the only thing that catches it
+// today — but hydradb-application#870 is adding the same code to that site
+// next, and the answer has to stay the same when it does. Getting that wrong
+// is silent: the retry simply stops happening on a server upgrade.
+test("both of the server's unified refusal wordings trigger the retry, coded or not", async () => {
+	const wordings = [
 		"type 'all' is not valid on a unified database: knowledge and memory are one corpus here",
 		"this database is unified: send the content as `items` (a JSON array of text or conversation items)",
-	]) {
-		const { hydra, raw } = refusingLayout(message);
-		const client = await connect(hydra);
-		const res = await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
-		assert.notEqual(res.isError, true, `not retried for: ${message}`);
-		assert.equal(raw.filter((c) => c.path === "/query").length, 1);
-		await client.close();
+	];
+	for (const message of wordings) {
+		for (const code of [undefined, "CORPUS_TYPE_UNSUPPORTED"]) {
+			const { hydra, raw } = refusingLayout(message, code);
+			const client = await connect(hydra);
+			const res = await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
+			assert.notEqual(res.isError, true, `not retried (code=${code}) for: ${message}`);
+			assert.equal(raw.filter((c) => c.path === "/query").length, 1, message);
+			await client.close();
+		}
 	}
 });
 
