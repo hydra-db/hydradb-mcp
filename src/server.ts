@@ -1007,6 +1007,7 @@ export function createHydraDBServer(
 		turns: ConversationTurn[],
 		sourceId: string,
 		opts?: {
+			kind?: ContextKind;
 			userName?: string;
 			infer?: boolean;
 			title?: string;
@@ -1017,14 +1018,23 @@ export function createHydraDBServer(
 		},
 		signal?: AbortSignal,
 	): Promise<ToolResult> {
+		// The kind was pinned to "memory" here, outside the layout resolution
+		// every sibling handler goes through, so the conversation half of
+		// `hydradb_ingest` answered a unified database with a 400 while the text
+		// half worked — one tool, one of its two input shapes broken. Resolved
+		// and retried exactly as `runStore` does.
+		const kind: ContextKind =
+			opts?.kind ?? ((await isUnifiedDatabase(opts?.database, signal)) ? "unified" : "memory");
 		logger.debug(
-			`${TOOL_NAMES.INGEST}: ${turns.length} turns -> ${sourceId}`,
+			`${TOOL_NAMES.INGEST}: ${turns.length} turns -> ${sourceId} (kind=${kind})`,
 		);
 
-		const raw = await hydra.context.ingest({
-			kind: "memory",
+		const raw = await withUnifiedFallback(opts?.kind == null, kind, (kindToSend) => hydra.context.ingest({
+			kind: kindToSend,
 			pairs: turns,
 			sourceId,
+			// On the unified path this becomes each user turn's `name`, which is
+			// where speaker identity lives there — so it is carried, not dropped.
 			userName: opts?.userName ?? "User",
 			infer: opts?.infer ?? true,
 			title: opts?.title,
@@ -1033,7 +1043,7 @@ export function createHydraDBServer(
 			upsert: opts?.overwrite ?? true,
 			database: opts?.database,
 			collection: opts?.collection,
-		}, { signal });
+		}, { signal }), opts?.database);
 
 		const res = toAddMemoryResponse(raw);
 
@@ -3308,6 +3318,10 @@ export function createHydraDBServer(
 				a.turns,
 				sourceId,
 				{
+					// Forwarded like every other option on this path: the kind
+					// was dropped here, so an explicit one was silently replaced
+					// by the pinned "memory" the handler used to send.
+					kind: a.kind,
 					userName: a.user_name,
 					infer: a.infer,
 					title: a.title,
