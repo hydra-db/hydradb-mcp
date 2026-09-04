@@ -3188,14 +3188,21 @@ test("an unrelated structured 400 is not retried as unified", async () => {
 // REVERSE direction, and a client that read the code alone would answer "unified
 // is only valid on a unified database" by sending unified again.
 test("the sibling refusals that share the code are not retried as unified", async () => {
+	// Copied from the server verbatim (handler/corpus.go, handler/errors.go,
+	// platform/storagelayout/corpus_type.go) rather than paraphrased — the whole
+	// point is that these exact strings decide the direction, so a paraphrase
+	// would pass while the real message failed.
+	const allOnIngest = "invalid type 'all': it selects both corpora for reads and deletes, but an ingest must name the one it writes to. ";
 	const siblings = [
-		`invalid type "bogus": must be 'knowledge', 'memory', 'unified' or 'all'`,
-		"invalid type 'all': it selects both corpora for reads and deletes, but an ingest must name the one it writes to. Use 'knowledge' or 'memory'. ",
-		// The same refusal's unified-database advice. Note it contains the words
-		// "This database is unified", which the PROSE fallback matches — the
-		// code branch is what keeps this one from being retried.
-		"invalid type 'all': it selects both corpora for reads and deletes, but an ingest must name the one it writes to. This database is unified, so send 'unified' or omit `type` entirely. ",
-		`type "unified" is only valid on a unified database; this database stores knowledge and memory separately`,
+		`invalid type "bogus": must be 'knowledge', 'memory', 'unified' or 'all'. `,
+		`${allOnIngest}Use 'knowledge' or 'memory'. `,
+		// The same refusal's unified-database advice. It contains the sentence
+		// "This database is unified", which the PROSE fallback matches — so the
+		// `invalid type 'all':` opening is the only thing keeping it out of the
+		// retry. That opening survived the advice rewrite; this pins it.
+		`${allOnIngest}This database is unified, so send 'unified' or omit \`type\` entirely. `,
+		`type "unified" is only valid on a unified database; this database stores knowledge and memory separately, so use "knowledge", "memory" or "all", or create a new unified database. `,
+		"items cannot be combined with type=knowledge: items are memory-shaped (text or a conversation); omit type or use the unified default. ",
 		// Not coded today, on purpose: its fix is "stop sending context_category",
 		// not "retry with another type". Covered anyway because it is one tidy-up
 		// away from being filed under this code, and it is a SPLIT database's

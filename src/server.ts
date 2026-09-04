@@ -408,19 +408,37 @@ export function createHydraDBServer(
 			//   - `invalid type 'all': … an ingest must name the one it writes to`
 			//   - `type "unified" is only valid on a unified database …` — the
 			//     REVERSE direction, where retrying as unified is exactly wrong
+			//   - `items cannot be combined with type=knowledge …`
 			// The siblings are excluded by name rather than the target being
 			// matched by name, so a copy edit to the one wording we do want
 			// still retries. That is the whole reason to prefer the code.
 			//
-			// `only SUPPORTED on a unified database` is covered alongside `only
-			// valid` for one refusal that does not carry this code today:
-			// `context_category is only supported on a unified database … This
-			// database is split`. It was deliberately left uncoded because its
-			// fix is "stop sending that field", not "retry with another type" —
-			// but it is one tidy-up away from being filed under this code, and
-			// if that happened this function would start answering a SPLIT
-			// database's refusal by retrying as unified, in silence.
-			return !/invalid type|only (?:valid|supported) on a unified database/i.test(err.message);
+			// The `all` refusal ends with layout-aware advice, and on a unified
+			// database that advice contains the sentence "This database is
+			// unified". The prose fallback below matches that phrase — so this
+			// exclusion, keyed on the unchanged `invalid type 'all':` opening,
+			// is the only thing keeping a bad `all` from being retried. Pinned
+			// by test, both advice variants.
+			//
+			// Two of these are unreachable from this client (`all` cannot be
+			// sent to `context.ingest` at all — it exists only on QueryKind —
+			// and the unified body carries no `type`, so items+knowledge cannot
+			// be built either). They are excluded anyway: the same list is
+			// shared across four clients, unreachable-today is one config change
+			// from reachable, and "correct by coincidence" is not worth keeping
+			// when the alternative is one alternation.
+			//
+			// `only SUPPORTED on a unified database` covers one refusal that
+			// does not carry this code today: `context_category is only
+			// supported on a unified database … This database is split`. It was
+			// deliberately left uncoded because its fix is "stop sending that
+			// field", not "retry with another type" — but it is one tidy-up away
+			// from being filed under this code, and if that happened this
+			// function would answer a SPLIT database's refusal by retrying as
+			// unified, in silence.
+			return !/invalid type|only (?:valid|supported) on a unified database|items cannot be combined with/i.test(
+				err.message,
+			);
 		}
 		// No code: fall back to the server's English prose. Both wordings are
 		// covered — `type %q is not valid on a unified database` from the
