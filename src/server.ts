@@ -411,7 +411,16 @@ export function createHydraDBServer(
 			// The siblings are excluded by name rather than the target being
 			// matched by name, so a copy edit to the one wording we do want
 			// still retries. That is the whole reason to prefer the code.
-			return !/invalid type|only valid on a unified database/i.test(err.message);
+			//
+			// `only SUPPORTED on a unified database` is covered alongside `only
+			// valid` for one refusal that does not carry this code today:
+			// `context_category is only supported on a unified database … This
+			// database is split`. It was deliberately left uncoded because its
+			// fix is "stop sending that field", not "retry with another type" —
+			// but it is one tidy-up away from being filed under this code, and
+			// if that happened this function would start answering a SPLIT
+			// database's refusal by retrying as unified, in silence.
+			return !/invalid type|only (?:valid|supported) on a unified database/i.test(err.message);
 		}
 		// No code: fall back to the server's English prose. Both wordings are
 		// covered — `type %q is not valid on a unified database` from the

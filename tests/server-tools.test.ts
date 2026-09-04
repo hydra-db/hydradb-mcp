@@ -3190,8 +3190,17 @@ test("an unrelated structured 400 is not retried as unified", async () => {
 test("the sibling refusals that share the code are not retried as unified", async () => {
 	const siblings = [
 		`invalid type "bogus": must be 'knowledge', 'memory', 'unified' or 'all'`,
-		"invalid type 'all': it selects both corpora for reads and deletes, but an ingest must name the one it writes to",
+		"invalid type 'all': it selects both corpora for reads and deletes, but an ingest must name the one it writes to. Use 'knowledge' or 'memory'. ",
+		// The same refusal's unified-database advice. Note it contains the words
+		// "This database is unified", which the PROSE fallback matches — the
+		// code branch is what keeps this one from being retried.
+		"invalid type 'all': it selects both corpora for reads and deletes, but an ingest must name the one it writes to. This database is unified, so send 'unified' or omit `type` entirely. ",
 		`type "unified" is only valid on a unified database; this database stores knowledge and memory separately`,
+		// Not coded today, on purpose: its fix is "stop sending context_category",
+		// not "retry with another type". Covered anyway because it is one tidy-up
+		// away from being filed under this code, and it is a SPLIT database's
+		// refusal — retrying it as unified would be the reverse direction again.
+		'context_category is only supported on a unified database, where knowledge and memory are one corpus. This database is split, so `type` already selects the corpus; omit context_category (or send "auto"). ',
 	];
 	for (const message of siblings) {
 		const { hydra, raw } = refusingLayout(message, "CORPUS_TYPE_UNSUPPORTED");
