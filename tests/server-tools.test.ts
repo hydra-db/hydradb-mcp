@@ -2973,6 +2973,7 @@ function mockHydraWithLayout(type: "split" | "unified"): { hydra: HydraDB; calls
 	const sdk = {
 		query: record("query", { chunks: [] }),
 		context: {
+			ingest: record("ingest", { success: true, successCount: 1, failedCount: 0 }),
 			list: record("list", { inner: { sources: [], total: 0 } }),
 			delete: record("delete", { success: true, deletedCount: 1 }),
 		},
@@ -3017,6 +3018,42 @@ test("hydradb_list kind=unified lists every item in the source shape", async () 
 	const res = await client.callTool({ name: "hydradb_list", arguments: { kind: "unified" } });
 	assert.equal((raw.find((c) => c.path === "/context/list")!.body as { type: string }).type, "unified");
 	assert.equal((res.structuredContent as { kind: string }).kind, "unified");
+});
+
+// The text half of hydradb_ingest resolved the layout; the conversation half
+// pinned kind:"memory" outside that resolution, so one tool had one of its two
+// input shapes answering a unified database with a 400.
+test("hydradb_ingest with turns defaults to unified on a unified database", async () => {
+	const { hydra, calls, raw } = mockHydraWithLayout("unified");
+	const client = await connect(hydra);
+
+	const res = await client.callTool({
+		name: "hydradb_ingest",
+		arguments: { turns: [{ user: "i prefer dark mode", assistant: "noted" }], user_name: "Ada" },
+	});
+
+	assert.notEqual(res.isError, true, JSON.stringify(res.content));
+	assert.equal(calls.find((c) => c.method === "ingest"), undefined, "unified must not use the SDK ingest serializer");
+	const body = raw.find((c) => c.path === "/context/ingest")!.body as {
+		items: { conversation: { role: string; content: string; name?: string }[] }[];
+	};
+	assert.deepEqual(body.items[0]!.conversation, [
+		{ role: "user", content: "i prefer dark mode", name: "Ada" },
+		{ role: "assistant", content: "noted" },
+	]);
+	await client.close();
+});
+
+test("hydradb_ingest with turns keeps the memory path on a split database", async () => {
+	const { hydra, calls, raw } = mockHydraWithLayout("split");
+	const client = await connect(hydra);
+	await client.callTool({
+		name: "hydradb_ingest",
+		arguments: { turns: [{ user: "hi", assistant: "hello" }] },
+	});
+	assert.equal(calls.find((c) => c.method === "ingest")?.args.type, "memory");
+	assert.equal(raw.length, 0, "a split database keeps every call on the SDK");
+	await client.close();
 });
 
 test("hydradb_databases names each database's layout", async () => {

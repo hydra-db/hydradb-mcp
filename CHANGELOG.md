@@ -51,6 +51,12 @@ probe (`details[].type`); a probe that fails reads as split, so nothing
 changes for any existing database, and a layout the server reveals by refusing
 a defaulted kind is remembered rather than relearned on every call.
 
+Both of `hydradb_ingest`'s input shapes follow the layout. The conversation
+path (`turns`) pinned `memory` outside the resolution the text path went
+through, so it answered a unified database with a 400 while the text path
+worked; it now resolves and retries the same way, and an explicit `kind` is
+carried there instead of being replaced.
+
 `hydradb_list`'s `kind` is optional again as a result. On a split database an
 omitted `kind` still lists memories, and now says so: knowledge is a separate
 corpus there and the listing names what it did not cover, so it cannot be read
