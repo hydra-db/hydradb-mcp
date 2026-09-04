@@ -17,9 +17,11 @@ Run it two ways, same tools either way:
 | `hydradb_inspect` | Fetch one source's full content by id |
 | `hydradb_delete` | Remove one or more items by id, irreversibly |
 | `hydradb_status` | Check whether an ingested source has finished indexing |
+| `hydradb_subgraph` | Everything connected to one item — its thread, replies, parents, children, links |
+| `hydradb_feedback` | Report whether a query's results were useful, by its `request_id` |
 
-Ids flow between these: `hydradb_query` and `hydradb_list` emit them;
-`hydradb_inspect`, `hydradb_delete` and `hydradb_status` accept them.
+Ids flow between these: `hydradb_query`, `hydradb_list` and `hydradb_subgraph` emit them;
+`hydradb_inspect`, `hydradb_delete`, `hydradb_status` and `hydradb_subgraph` accept them.
 
 ### Graph tools (Cypher)
 
@@ -91,8 +93,18 @@ chunks with their source id, a relevance score, and knowledge-graph context.
 | `graph_context` | boolean | No | Include knowledge-graph relations (default: true) |
 | `operator` | string | No | `or`, `and`, or `phrase`. Switches the query to keyword retrieval (`query_by=text`), which is the only mode Hydra DB accepts an operator on — semantic matching is off for that query. Unset (the default) is hybrid semantic search |
 | `source_ids` | array | No | Restrict the search to these sources |
+| `titles` | array | No | Restrict to exact document titles (case-insensitive); resolved to source IDs before normal search |
 | `metadata_filters` | object | No | Exact-match filters over stored metadata |
 | `num_related_chunks` | number | No | Adjacent chunks to attach per match (0-5, default: 0) |
+| `recency_bias` | number | No | Favour recently-updated sources when ranking, 0-1 (default: 0). Re-ranks only; it never excludes older sources |
+| `query_apps` | boolean | No | App-aware retrieval over connector sources — exact IDs and actors, thread reconstruction, parent/child expansion (default: false) |
+| `collections` | array | No | Search several collections at once. Pass either this or `collection`, never both |
+
+Results include `resolved_scope` and per-source `inspect_args` when the source's
+collection is known. Copy those arguments, including your ACL, to follow-up calls;
+tools never inherit a previous call's scope. With multiple collections, an ID
+alone is not enough: use the collection attached to that source. If it is missing,
+resolve the collection before inspecting. Explicit scope is never widened.
 
 ### **hydradb_ingest**
 
@@ -128,10 +140,51 @@ tells you nothing about which knowledge sources exist.
 | `kind` | string | **Yes** | `memory` or `knowledge`; `unified` lists every item of a unified database |
 | `ids` | array | No | Restrict to these ids |
 | `source_ids` | array | No | Deprecated alias for `ids` |
+| `external_id` | string | No | Exact originating-system ID, such as a Confluence page ID or Drive file ID; knowledge only |
+| `parent_external_id` | string | No | Exact provider parent ID; returns indexed direct children only. Requires `kind: "knowledge"`, `provider` and `connector_id` |
+| `connector_id` | string | No | Exact originating connector instance from stored `additional_metadata.connector_id`; required for parent lookup, optional for other knowledge lookups |
+| `url` | string | No | Exact original URL stored at ingestion; knowledge only, not a live web fetch |
+| `provider` | string | No | Connector provider, such as `confluence` or `google_drive`; knowledge only |
 | `page` | number | No | Page to return, 1-indexed (default: 1) |
 | `page_size` | number | No | Items per page (1-100) |
 
 The response reports how many of the total it showed and how to reach the rest.
+
+For a known document link, resolve its provider ID or exact stored URL first,
+then use the returned HydraDB source ID with `hydradb_inspect` or
+`hydradb_query.source_ids`:
+
+```json
+{
+  "name": "hydradb_list",
+  "arguments": {
+    "kind": "knowledge",
+    "external_id": "123456",
+    "provider": "confluence",
+    "database": "your_database",
+    "collection": "your_collection"
+  }
+}
+```
+
+Supplied selectors are combined with AND and preserve the caller's permissions.
+URL matching does not normalize links, follow redirects or fetch external pages.
+Multiple sites or copies may match an ID; inspect the candidates and pagination.
+No visible match in a scope is not proof a document was never ingested. For a
+document known only by name, use `hydradb_query.titles` or ordinary search instead.
+These selectors are rejected for `kind: "memory"`, never silently ignored.
+
+To enumerate indexed children, resolve the parent first, then use `parent_external_id`
+with its provider ID, `provider`, `connector_id`, and the same database, collection
+and ACL. Provider IDs can repeat across sites/accounts; never guess a connector ID.
+Missing connector metadata needs investigation before safely enumerating children.
+Follow `next_args` while
+`has_more` is true. Returned identity fields (`external_id`, `provider`,
+`parent_external_id`, `connector_id`) are included when stored. For descendants, use
+each child's `children_args`, track visited identities, and inspect each
+document separately. This is not a live provider tree: absent/stale parent metadata,
+permissions or incomplete ingestion can omit children. `hydradb_subgraph` includes
+other relationships and bounded traversal; it is not an exhaustive child listing.
 
 ### **hydradb_inspect**
 
@@ -148,6 +201,68 @@ Fetches one source's full content by id.
 
 Long sources come back in slices, and binary sources are never inlined — you get
 their type and size, and `mode: "url"` returns a download link.
+
+Text and structured output expose the same bounded slice. Follow `next_args` until
+`has_more` is false, keeping the same scope and ACL. Offsets count UTF-16 code units;
+a 125,000-character source needs seven default-size calls, not three. `complete`
+means the current response contains the whole text. Each slice re-fetches current
+content; compare `content_sha256` and restart if it changes. There is no pinned
+snapshot across calls. Reading a document index does not read every linked document.
+
+### **hydradb_feedback**
+
+Records whether a query's results were actually useful. Correlated to that query
+by its `request_id`, which `hydradb_query` prints at the end of its output — copy
+it verbatim, it cannot be guessed or reconstructed.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `request_id` | string | Yes | The id `hydradb_query` printed for the query being rated |
+| `feedback` | string | No | What was wrong, missing or good, in plain words (max 8000) |
+| `rating` | string | No | `positive`, `negative` or `neutral` |
+| `ground_truth_answer` | string | No | The answer a correct system would have given |
+| `ground_truth_source_ids` | string[] | No | Sources that actually contain the answer (max 100) |
+| `metadata` | object | No | Your own string labels, e.g. an eval run name (max 20) |
+| `database`, `collection` | string | No | Scope overrides |
+
+Send text, ground truth, or both — a submission with neither records nothing and
+is refused. Ground truth is worth far more than prose because it is
+machine-checkable: `source_ids` turns one submission into a retrieval judgement
+(did the query surface these, at what rank, at all?), which is recall measured on
+real traffic rather than on a benchmark that stops resembling production the day
+it is written.
+
+Feedback never changes the result of the query it describes and never alters
+stored data. Rows are labelled `source: agent`, because everything reaching this
+server came from a model — agent feedback is a different population from human
+feedback and is separated at write time.
+
+### **hydradb_subgraph**
+
+Returns the connected subgraph of one item: every item reachable from it through
+item-level links — explicit relations declared at ingest, a shared thread,
+parent/child hierarchy — traversed breadth-first. Use it when one result is not
+enough and you need what surrounds it: the rest of a Slack thread, the replies
+under a ticket, the documents a page links to.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `id` | string | Yes | The item to start from, from `hydradb_query` or `hydradb_list` |
+| `kind` | string | No | `knowledge` (default) or `memory` — the two graphs are separate |
+| `depth` | number | No | Hops to traverse (default 5, max 10) |
+| `max_sources` | number | No | Cap on members returned (default 200, max 1000) |
+| `database`, `collection` | string | No | Scope overrides |
+
+Each member carries its id, title, depth from the start item and how it was
+reached — `discovered_relation` is the mechanism (`same_thread`, `parent`,
+`child`, or a `relates_to` type such as `reply_to`) and `discovered_via` the id
+of the member it was reached from, so the list is also a tree.
+`structuredContent` carries those same members, in the same order, plus
+`relations`: the edges among them as `{from, to, type}`, so a client can rebuild
+the graph and not just the list. `truncated` means `max_sources` clipped the
+traversal; `structural_link_count` and `structural_truncated` report the
+structural graph (entities, comments, attachments, actors) around the members.
+Chunk-level entity relations are not included; those come from `hydradb_query`.
 
 ### **hydradb_delete**
 
@@ -182,7 +297,7 @@ Checks whether ingested sources have finished indexing.
 | -------------------- | ------------------------------------ | ------------------------- |
 | `HYDRADB_API_KEY`    | Your Hydra DB API key                | *Required*                |
 | `HYDRADB_DATABASE`   | Your Hydra DB database (tenant scope) | *Required*                |
-| `HYDRADB_COLLECTION` | Collection (sub-tenant) for partitioning | `hydra-db-mcp`        |
+| `HYDRADB_COLLECTION` | Collection (sub-tenant) for partitioning | *none* — unset means the workspace's own collection; the model can also name one per call via `collection`/`collections` (see `hydradb_list_collections`) |
 | `HYDRADB_BASE_URL`   | Base URL override                    | `https://api.hydradb.com` |
 | `HYDRADB_LOG_LEVEL`  | Log level: DEBUG, INFO, WARN, ERROR  | `ERROR`                   |
 | `HYDRADB_TIMEOUT_SECONDS` | Per-attempt request timeout     | `30`                      |
@@ -318,7 +433,7 @@ number of independent users. The headers a request may send:
 | --- | --- | --- |
 | `Authorization: Bearer <key>` | Hydra DB API key (`X-HydraDB-Api-Key` also accepted) | Yes\* |
 | `X-HydraDB-Database` | Default database (tenant scope) | Yes\* |
-| `X-HydraDB-Collection` | Default collection (sub-tenant); defaults to `hydra-db-mcp` | No |
+| `X-HydraDB-Collection` | Default collection (sub-tenant); unset means the workspace's own collection | No |
 | `X-HydraDB-Graph-Database` | Default graph database for the Cypher tools; defaults to the request's database | No |
 | `X-HydraDB-Graph-Collection` | Default graph collection; defaults to `default` | No |
 

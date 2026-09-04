@@ -24,7 +24,7 @@
 import type { OAuthConfig } from "./oauth.js";
 import { resolveOAuthConfig } from "./oauth.js";
 import {
-	DEFAULT_COLLECTION,
+	LEGACY_SHARED_COLLECTION,
 	type EnvSource,
 	type GraphConfig,
 	nonNegativeInt,
@@ -175,7 +175,12 @@ export type RequestHeaders = Record<string, string | string[] | undefined>;
 export interface RequestCredentials {
 	apiKey: string;
 	database: string;
-	collection: string;
+	/**
+	 * Collection scope. ABSENT means the request omits it and the API answers
+	 * from the caller's own workspace default, which is what a user added to a
+	 * workspace expects. Present only when a grant, header or env named one.
+	 */
+	collection?: string;
 	/** Databases a per-call override may name; absent means any. */
 	allowedDatabases?: string[];
 	/** Collections a per-call override may name; absent means any. */
@@ -309,12 +314,15 @@ export function resolveRequestCredentials(
 		};
 	}
 
-	// Collection is a partition WITHIN the resolved database, not a cross-tenant
-	// boundary, so an env default is safe for either mode.
+	// Collection is a partition WITHIN the resolved database, not a
+	// cross-tenant boundary. An OAuth grant's collection wins, then an
+	// explicit header, then the operator's env. There is deliberately NO final
+	// literal fallback: leaving it undefined makes the request omit collection
+	// so the API answers from the caller's own workspace, which is what a user
+	// added to a workspace expects to see.
 	const collection =
 		(identity ? identity.collection : headerValue(headers, HEADER_COLLECTION)) ??
-		readEnv(env, "HYDRADB_COLLECTION", "HYDRA_DB_SUB_TENANT_ID", noopWarn) ??
-		DEFAULT_COLLECTION;
+		readEnv(env, "HYDRADB_COLLECTION", "HYDRA_DB_SUB_TENANT_ID", noopWarn);
 
 	// Operator-owned transport knobs. Same env vars, same parsing as resolveConfig.
 	const baseUrl = readEnv(env, "HYDRADB_BASE_URL", "HYDRA_DB_BASE_URL", noopWarn);
@@ -326,7 +334,7 @@ export function resolveRequestCredentials(
 		credentials: {
 			apiKey,
 			database,
-			collection,
+			...(collection ? { collection } : {}),
 			...(identity?.allowedDatabases ? { allowedDatabases: identity.allowedDatabases } : {}),
 			...(identity?.allowedCollections
 				? { allowedCollections: identity.allowedCollections }

@@ -11,7 +11,13 @@
 export interface HydraDBConfig {
 	apiKey: string;
 	database: string;
-	collection: string;
+	/**
+	 * Collection (sub-tenant) scope. ABSENT means "let the workspace decide":
+	 * the request omits it and the API resolves the caller's own default
+	 * collection from their API key. Only set when HYDRADB_COLLECTION was
+	 * given explicitly.
+	 */
+	collection?: string;
 	baseUrl?: string;
 	timeoutSeconds?: number;
 	maxRetries?: number;
@@ -60,7 +66,20 @@ function flag(raw: string | undefined, fallback: boolean): boolean {
 export type EnvSource = Record<string, string | undefined>;
 export type WarnFn = (message: string) => void;
 
-export const DEFAULT_COLLECTION = "hydra-db-mcp";
+/**
+ * The collection this server used to fall back to when none was configured.
+ *
+ * It is no longer a default, because it is a SHARED literal: every user who
+ * did not set HYDRADB_COLLECTION landed in one namespace together. Worse, a
+ * user added to a workspace read that empty shared collection instead of
+ * their workspace's own data, saw nothing, and concluded the product was
+ * empty. Absent now means "ask the workspace", which is what the API already
+ * does from the caller's API key.
+ *
+ * Still exported so an operator who wants the old behaviour has a name to
+ * put in HYDRADB_COLLECTION.
+ */
+export const LEGACY_SHARED_COLLECTION = "hydra-db-mcp";
 
 // Process-lifetime dedupe so each deprecated alias warns at most once.
 const warnedOnce = new Set<string>();
@@ -119,9 +138,14 @@ export function resolveConfig(
 		);
 	}
 
-	const collection =
-		readEnv(env, "HYDRADB_COLLECTION", "HYDRA_DB_SUB_TENANT_ID", warn) ??
-		DEFAULT_COLLECTION;
+	// No fallback. Unset stays undefined so the request omits collection and
+	// the workspace decides.
+	const collection = readEnv(
+		env,
+		"HYDRADB_COLLECTION",
+		"HYDRA_DB_SUB_TENANT_ID",
+		warn,
+	);
 
 	const baseUrl = readEnv(env, "HYDRADB_BASE_URL", "HYDRA_DB_BASE_URL", warn);
 
@@ -133,7 +157,7 @@ export function resolveConfig(
 	return {
 		apiKey,
 		database,
-		collection,
+		...(collection ? { collection } : {}),
 		baseUrl,
 		...(timeoutSeconds != null ? { timeoutSeconds } : {}),
 		...(maxRetries != null ? { maxRetries } : {}),

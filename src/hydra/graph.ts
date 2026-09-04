@@ -19,11 +19,8 @@
  * insulated from yet.
  */
 
-import { unwrap } from "./envelope.js";
-import { HydraWrapperError, responseError, translateError } from "./errors.js";
-
-/** The SDK's own default, restated so this file does not depend on importing it. */
-const DEFAULT_BASE_URL = "https://api.hydradb.com";
+import { HydraWrapperError } from "./errors.js";
+import { newRawTransport, type RawTransport, sendRaw } from "./transport.js";
 
 export interface GraphConfig {
 	token: string;
@@ -58,9 +55,6 @@ export interface RequestOptions {
  * rejected construct, a Cypher error and a bad collection name all fail
  * identically on retry, so retrying them only delays the message.
  */
-function isRetryable(status: number): boolean {
-	return status === 429 || (status >= 500 && status <= 599);
-}
 
 /**
  * A 2xx whose body is not the shape this endpoint promises.
@@ -89,16 +83,10 @@ function unexpectedShape(path: string, expected: string, got: unknown): HydraWra
 }
 
 export class GraphResource {
-	private readonly baseUrl: string;
-	private readonly timeoutMs: number;
-	private readonly maxRetries: number;
+	private readonly transport: RawTransport;
 
-	constructor(private readonly config: GraphConfig) {
-		// Trailing slashes would produce `//byog/query`, which some proxies treat
-		// as a different path.
-		this.baseUrl = (config.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, "");
-		this.timeoutMs = (config.timeoutSeconds ?? 30) * 1000;
-		this.maxRetries = config.maxRetries ?? 2;
+	constructor(config: GraphConfig) {
+		this.transport = newRawTransport(config, { timeoutSeconds: 30, maxRetries: 2 });
 	}
 
 	/**
@@ -210,105 +198,12 @@ export class GraphResource {
 
 	// --- Transport ---
 
-	private async send<T>(
+	private send<T>(
 		path: string,
 		method: "GET" | "POST" | "DELETE",
 		body: unknown,
 		opts?: RequestOptions,
 	): Promise<T> {
-		let lastError: unknown;
-
-		for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
-			try {
-				return await this.attempt<T>(path, method, body, opts);
-			} catch (err) {
-				lastError = err;
-				const status = err instanceof HydraWrapperError ? err.status : undefined;
-
-				// A caller who cancelled is not waiting for a retry.
-				if (opts?.signal?.aborted) throw err;
-				if (attempt === this.maxRetries) break;
-				if (status != null && !isRetryable(status)) break;
-
-				// Exponential backoff. Bounded so a 429 on the last attempt does not
-				// hold the MCP host's tool timeout open for its own sake.
-				const delay = Math.min(250 * 2 ** attempt, 2_000);
-				await new Promise((resolve) => setTimeout(resolve, delay));
-			}
-		}
-
-		throw lastError;
-	}
-
-	private async attempt<T>(
-		path: string,
-		method: "GET" | "POST" | "DELETE",
-		body: unknown,
-		opts?: RequestOptions,
-	): Promise<T> {
-		// The host's cancellation and our own deadline both have to be able to
-		// abort the request, and `AbortSignal.any` is not available on every Node
-		// 18 this package supports — so they are combined by hand.
-		const controller = new AbortController();
-		const timer = setTimeout(() => controller.abort(), this.timeoutMs);
-		const onAbort = () => controller.abort();
-		opts?.signal?.addEventListener("abort", onAbort, { once: true });
-
-		try {
-			const response = await fetch(`${this.baseUrl}${path}`, {
-				method,
-				headers: {
-					Authorization: `Bearer ${this.config.token}`,
-					"Content-Type": "application/json",
-					// CONTRACT §2 rule 6. The SDK sends this on every call; a
-					// hand-rolled path that omitted it would silently get v1
-					// behaviour from the same endpoints.
-					"API-Version": "2",
-				},
-				...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-				signal: controller.signal,
-			});
-
-			const text = await response.text();
-			let parsed: unknown;
-			try {
-				parsed = text === "" ? null : JSON.parse(text);
-			} catch {
-				parsed = text;
-			}
-
-			if (!response.ok) {
-				// Hand the parsed envelope to the shared formatter so a BYOG
-				// failure reads exactly like an SDK one, error code and request id
-				// and all.
-				throw responseError(path, response.status, parsed);
-			}
-
-			return unwrap<T>(parsed);
-		} catch (err) {
-			if (err instanceof HydraWrapperError) throw err;
-
-			// Distinguish our own deadline from the caller's cancellation: they
-			// need different actions, and "aborted" alone says neither.
-			if (err instanceof Error && err.name === "AbortError") {
-				if (opts?.signal?.aborted) {
-					throw new HydraWrapperError(
-						`Hydra DB ${path} → ERR: request cancelled by the caller`,
-						path,
-						{ cause: err },
-					);
-				}
-				throw new HydraWrapperError(
-					`Hydra DB ${path} → ERR: request timed out after ${this.timeoutMs / 1000}s`,
-					path,
-					{ cause: err },
-				);
-			}
-
-			throw translateError(path, err);
-		} finally {
-			clearTimeout(timer);
-			opts?.signal?.removeEventListener("abort", onAbort);
-		}
+		return sendRaw<T>(this.transport, path, method, body, opts);
 	}
 }

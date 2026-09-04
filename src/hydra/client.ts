@@ -15,16 +15,17 @@
  */
 
 import { Buffer } from "node:buffer";
-import { HydraDBClient } from "@hydradb/sdk";
+import { HydraDBClient, HydraDBEnvironment, HydraDBError, serialization } from "@hydradb/sdk";
 import type { HydraDB as SDK } from "@hydradb/sdk";
+import { z } from "zod";
 
 import { unwrap } from "./envelope.js";
-import { translateError } from "./errors.js";
+import { HydraWrapperError, translateError } from "./errors.js";
 import { GraphResource } from "./graph.js";
-import { type Layout, RawHttp } from "./raw.js";
-import { serialization } from "@hydradb/sdk";
+import { type RawTransport, newRawTransport, sendRaw } from "./transport.js";
 
-export type { Layout } from "./raw.js";
+/** Storage layout of a database (PRO-1618): fixed at creation, never changed. */
+export type Layout = "split" | "unified";
 
 /**
  * `unified` (PRO-1618) names the ONE corpus of a database created with
@@ -41,6 +42,7 @@ export type ContextKind = "memory" | "knowledge" | "unified";
  * instead of a generic host-side timeout carrying no information.
  */
 export const DEFAULT_TIMEOUT_SECONDS = 30;
+
 export const DEFAULT_MAX_RETRIES = 2;
 
 /**
@@ -52,6 +54,20 @@ export const DEFAULT_MAX_RETRIES = 2;
  */
 export interface RequestOptions {
 	signal?: AbortSignal;
+	/**
+	 * Receives the envelope's `meta` for this one call.
+	 *
+	 * `unwrap` keeps only `data`, which is right for every caller that just wants
+	 * the payload — but it drops `request_id`, and that is the ONLY key
+	 * POST /feedback accepts to correlate a submission with the query it is
+	 * about. Without it an agent can run a query and then have nothing to say
+	 * feedback ON.
+	 *
+	 * A per-call callback rather than a field on the resource: two tool calls can
+	 * be in flight at once, and a `lastRequestId` would hand one of them the
+	 * other's id. Opt-in, so no existing caller changes.
+	 */
+	onMeta?: (meta: { requestId?: string }) => void;
 }
 
 /**
@@ -89,6 +105,20 @@ function req(opts?: RequestOptions): { abortSignal?: AbortSignal } | undefined {
 	return opts?.signal ? { abortSignal: opts.signal } : undefined;
 }
 
+/** Generated deserialization is deliberately permissive; reject false empties. */
+function validateQueryResponse(response: unknown): void {
+	const successful = z.object({ success: z.literal(true).optional(), error: z.null().optional() });
+	const payload = unwrap<unknown>(response);
+	if (!successful.safeParse(response).success || !successful.extend({
+		chunks: z.array(z.object({ id: z.string().trim().min(1) })),
+	}).safeParse(payload).success) {
+		throw new HydraDBError({ statusCode: 200, body: { error: {
+			code: "INVALID_QUERY_RESPONSE",
+			message: "Invalid successful query response: expected a chunks array with nonempty source IDs and no failure flag.",
+		} } });
+	}
+}
+
 export interface HydraConfig {
 	/** Bearer token (the HydraDB API key). */
 	token: string;
@@ -116,8 +146,8 @@ export interface HydraConfig {
 	timeoutSeconds?: number;
 	/** Retries per call. The SDK defaults to 2; set explicitly so it is a choice. */
 	maxRetries?: number;
-	/** Test seam for the hand-rolled v2 calls (see ./raw.ts); production uses global fetch. */
-	fetch?: typeof fetch;
+	/** Test seam for the hand-rolled HTTP path (see ./transport.ts); production never sets it. */
+	fetchFn?: typeof fetch;
 }
 
 export interface QueryParams {
@@ -143,12 +173,45 @@ export interface QueryParams {
 	 * returns nothing rather than widening when none match.
 	 */
 	ids?: string[];
+	/**
+	 * Restrict retrieval to sources whose complete title equals one of these
+	 * values, case-insensitively. The API resolves them to source ids before
+	 * running the normal query pipeline.
+	 */
+	titles?: string[];
 	/** Exact-match filters over stored metadata. No ranges, no partial matches. */
 	metadataFilters?: Record<string, unknown>;
+	/**
+	 * Principals to answer as (PRO-1684 document ACLs): an email, a
+	 * `domain:<host>`, or a `group:<provider>:<id>`. Results are restricted to
+	 * documents whose access list admits at least one of them.
+	 *
+	 * Omitted means NO ACL scoping — every document this key can reach. An empty
+	 * array is treated the SAME as omitted by the API (verified against staging:
+	 * `acl: []` and no `acl` both returned 134 sources where an unknown
+	 * principal returned 130), so it is not a way to ask for "nobody"; the
+	 * design doc's rule is that absent and `[]` alike mean unrestricted.
+	 *
+	 * A principal the deployment does not know fails CLOSED: it matches only
+	 * documents carrying no access list of their own, never a restricted one.
+	 */
+	acl?: string[];
 	/** Adjacent chunks pulled in alongside each match, for surrounding context. */
 	numRelatedChunks?: number;
+	/**
+	 * App-aware knowledge retrieval: exact IDs and actors, thread reconstruction,
+	 * and parent/child expansion over connector-ingested sources. Applies to
+	 * knowledge hybrid queries; the server ignores it elsewhere.
+	 */
+	queryApps?: boolean;
 	/** Per-call collection override. */
 	collection?: string;
+	/**
+	 * Multi-collection scope: a list for equal weighting, or a {collection:
+	 * weight} object to rank some higher than others. Mutually exclusive with
+	 * `collection` — see the guard in `query`.
+	 */
+	collections?: SDK.SearchQueryRequestCollections;
 	/** Per-call database override. */
 	database?: string;
 }
@@ -197,15 +260,52 @@ export interface ListParams {
 	ids?: string[];
 	page?: number;
 	pageSize?: number;
+	/**
+	 * Principals to answer as (PRO-1684 document ACLs): an email, a
+	 * `domain:<host>`, or a `group:<provider>:<id>`. Results are restricted to
+	 * documents whose access list admits at least one of them.
+	 *
+	 * Omitted means NO ACL scoping — every document this key can reach. An empty
+	 * array is treated the SAME as omitted by the API, so it is not a way to ask
+	 * for "nobody" (design doc: absent and `[]` alike mean unrestricted).
+	 *
+	 * A principal the deployment does not know fails CLOSED: it matches only
+	 * documents carrying no access list of their own, never a restricted one.
+	 */
+	acl?: string[];
 	collection?: string;
 	/** Per-call database override. */
 	database?: string;
+	/**
+	 * Exact-match constraints on well-known source fields, resolved server-side
+	 * before listing (`filters.source_fields` on POST /context/list). Used for
+	 * direct lookup by a source's originating-system identity —
+	 * `app_external_id`, `url`, `app_provider`. Keys are the API's allow-listed
+	 * source-field names; values match exactly (case-sensitive). Empty/absent
+	 * means no such narrowing.
+	 */
+	sourceFields?: Record<string, string>;
+	/** Exact originating connector instance, stored in additional_metadata. */
+	connectorId?: string;
 }
 
 export interface InspectParams {
 	id: string;
 	mode?: string;
 	expirySeconds?: number;
+	/**
+	 * Principals to answer as (PRO-1684 document ACLs): an email, a
+	 * `domain:<host>`, or a `group:<provider>:<id>`. Results are restricted to
+	 * documents whose access list admits at least one of them.
+	 *
+	 * Omitted means NO ACL scoping — every document this key can reach. An empty
+	 * array is treated the SAME as omitted by the API, so it is not a way to ask
+	 * for "nobody" (design doc: absent and `[]` alike mean unrestricted).
+	 *
+	 * A principal the deployment does not know fails CLOSED: it matches only
+	 * documents carrying no access list of their own, never a restricted one.
+	 */
+	acl?: string[];
 	collection?: string;
 	/** Per-call database override. */
 	database?: string;
@@ -218,11 +318,84 @@ export interface IngestionStatusParams {
 	database?: string;
 }
 
+/** One member of a connected subgraph (wire shape, unchanged from the API). */
+export interface SubgraphMember {
+	source_id: string;
+	title?: string;
+	app_kind?: string;
+	app_provider?: string;
+	app_external_id?: string;
+	thread_id?: string;
+	/** Hops from the seed; 0 is the seed itself. */
+	depth: number;
+	hydration?: string;
+	discovered_via?: string;
+	discovered_relation?: string;
+}
+
+/**
+ * One edge of the subgraph. `source` and `target` are Source nodes, so their
+ * `entity_id` is the member's item id; `relations[0].canonical_predicate` is
+ * the edge type (`relates_to`, `same_thread`, `child_of`, ...).
+ */
+export interface SubgraphRelation {
+	source?: { entity_id?: string; name?: string };
+	target?: { entity_id?: string; name?: string };
+	relations?: { canonical_predicate?: string }[];
+}
+
+export interface SubgraphResult {
+	seed_source_id: string;
+	sources: SubgraphMember[];
+	relations: SubgraphRelation[];
+	auxiliary_relations: unknown[];
+	auxiliary_truncated: boolean;
+	is_truncated: boolean;
+	max_depth_reached: number;
+	success: boolean;
+	message: string;
+}
+
+export interface SubgraphParams {
+	/** The item whose connected subgraph to return. */
+	id: string;
+	kind?: ContextKind;
+	/** Max traversal depth in hops (server default 5). */
+	depth?: number;
+	/** Max members returned (server default 200). */
+	maxSources?: number;
+	/**
+	 * Principals to answer as (PRO-1684 document ACLs): an email, a
+	 * `domain:<host>`, or a `group:<provider>:<id>`. The subgraph contains
+	 * only items those principals may see, filtered at every hop.
+	 *
+	 * Omitted means NO ACL scoping. An empty array is treated the SAME as
+	 * omitted by the API, so it is not a way to ask for "nobody".
+	 */
+	acl?: string[];
+	collection?: string;
+	/** Per-call database override. */
+	database?: string;
+}
+
 export interface RelationsParams {
 	id?: string;
 	kind?: ContextKind;
 	limit?: number;
 	cursor?: number;
+	/**
+	 * Principals to answer as (PRO-1684 document ACLs): an email, a
+	 * `domain:<host>`, or a `group:<provider>:<id>`. Results are restricted to
+	 * documents whose access list admits at least one of them.
+	 *
+	 * Omitted means NO ACL scoping — every document this key can reach. An empty
+	 * array is treated the SAME as omitted by the API, so it is not a way to ask
+	 * for "nobody" (design doc: absent and `[]` alike mean unrestricted).
+	 *
+	 * A principal the deployment does not know fails CLOSED: it matches only
+	 * documents carrying no access list of their own, never a restricted one.
+	 */
+	acl?: string[];
 	collection?: string;
 	/** Per-call database override. */
 	database?: string;
@@ -244,7 +417,17 @@ export interface CreateDatabaseParams {
 	embeddingsDimension?: number;
 }
 
+export interface DeleteCollectionParams {
+	database: string;
+	collection: string;
+}
+
 type ScopeFields = { database: string; collection?: string };
+
+type MultiScopeFields = {
+	database: string;
+	collections: SDK.SearchQueryRequestCollections;
+};
 
 /**
  * A per-call `database` named one the connection is not allowed to touch.
@@ -326,22 +509,37 @@ function queryString(record: Record<string, string | number | undefined>): strin
 	return encoded === "" ? "" : `?${encoded}`;
 }
 
+/**
+ * Pull the request id out of an envelope, or undefined when the response is not
+ * enveloped (several SDK methods return bare objects — see envelope.ts).
+ *
+ * BOTH spellings are read, and that is not defensiveness. The wire is
+ * snake_case, but the SDK camel-cases `meta` on the way through, so an SDK call
+ * yields `requestId` while anything read straight off the HTTP response yields
+ * `request_id` — which is the spelling errors.ts already handles for the raw
+ * transport path. A reader that knows only one of them works on some calls and
+ * silently returns undefined on the rest.
+ */
+const requestMetaEnvelopeSchema = z.object({
+	meta: z
+		.object({
+			requestId: z.string().optional(),
+			request_id: z.string().optional(),
+		})
+		.optional(),
+});
+
+function readRequestId<T>(value: T): string | undefined {
+	const parsed = requestMetaEnvelopeSchema.safeParse(value);
+
+	if (!parsed.success) return undefined;
+
+	const id = parsed.data.meta?.requestId ?? parsed.data.meta?.request_id;
+
+	return id !== "" ? id : undefined;
+}
+
 abstract class Resource {
-	/** Hand-rolled v2 transport for calls the pinned SDK cannot make; see ./raw.ts. */
-	protected raw?: RawHttp;
-
-	/** @internal */
-	attachRaw(raw: RawHttp): void {
-		this.raw = raw;
-	}
-
-	protected requireRaw(what: string): RawHttp {
-		if (!this.raw) {
-			throw new Error(`${what} needs the v2 transport, which this HydraDB instance was built without`);
-		}
-		return this.raw;
-	}
-
 	/**
 	 * A raw v2 call whose wire result is run through the SDK's OWN response
 	 * serializer, so the caller gets the same camelCase object the SDK path
@@ -349,6 +547,20 @@ abstract class Resource {
 	 * serializers reject that enum value before anything is sent, so the
 	 * request is built by hand, but nothing downstream has to know.
 	 */
+	/** A raw v2 call whose wire shape the SDK has no serializer for. */
+	protected async rawJSON<T>(
+		what: string,
+		method: "GET" | "POST" | "DELETE",
+		path: string,
+		body: unknown,
+		signal?: AbortSignal,
+	): Promise<T> {
+		if (!this.raw) {
+			throw new Error(`${what} needs the v2 transport, which this HydraDB instance was built without`);
+		}
+		return sendRaw<T>(this.raw, path, method, body, signal ? { signal } : undefined);
+	}
+
 	protected async rawTyped<T>(
 		what: string,
 		method: "GET" | "POST" | "DELETE",
@@ -357,7 +569,10 @@ abstract class Resource {
 		parse: (raw: unknown, opts?: SdkParseOptions) => T,
 		signal?: AbortSignal,
 	): Promise<T> {
-		const wire = await this.requireRaw(what).request<unknown>(method, path, body, signal);
+		if (!this.raw) {
+			throw new Error(`${what} needs the v2 transport, which this HydraDB instance was built without`);
+		}
+		const wire = await sendRaw<unknown>(this.raw, path, method, body, signal ? { signal } : undefined);
 		return parse(wire, SDK_PARSE_OPTS);
 	}
 
@@ -367,25 +582,83 @@ abstract class Resource {
 		private readonly collection?: string,
 		private readonly allowedDatabases?: readonly string[],
 		private readonly allowedCollections?: readonly string[],
+		/**
+		 * The hand-rolled HTTP path, for the endpoints the SDK does not expose
+		 * (CONTRACT §2 rule 7). Optional only so tests that inject a fake SDK and
+		 * never touch such an endpoint need not build one.
+		 */
+		protected readonly raw?: RawTransport,
 	) {}
 
 	protected scope(override?: string, dbOverride?: string): ScopeFields {
 		const database = dbOverride?.trim() || this.database;
+
 		// Enforced HERE, on the one path every per-call scope takes, so no tool
 		// can forget to check. The configured defaults are always allowed.
 		if (database !== this.database) assertDatabaseAllowed(database, this.allowedDatabases);
 		const collection = override?.trim() || this.collection;
+
 		if (collection && collection !== this.collection) {
 			assertCollectionAllowed(collection, this.allowedCollections);
 		}
+
 		return collection != null && collection !== ""
 			? { database, collection }
 			: { database };
 	}
 
-	protected async call<T>(path: string, fn: () => Promise<unknown>): Promise<T> {
+	/**
+	 * Scope for a query that names SEVERAL collections.
+	 *
+	 * Deliberately does NOT fall back to the configured default collection. The
+	 * server folds the singular `collection` into the deprecated `sub_tenant_id`
+	 * and refuses any request that carries it alongside a multi-scope selector,
+	 * so injecting the default here would turn every `collections` call on a
+	 * scoped connection into a 400. Naming the collections IS the scope.
+	 *
+	 * Confinement is enforced on the same path as `scope`: every named
+	 * collection is checked, so a multi-scope selector cannot reach past what an
+	 * OAuth connection was confined to.
+	 */
+	protected multiScope(
+		collections: SDK.SearchQueryRequestCollections,
+		dbOverride?: string,
+	): MultiScopeFields {
+		const database = dbOverride?.trim() || this.database;
+
+		if (database !== this.database) assertDatabaseAllowed(database, this.allowedDatabases);
+
+		const names = Array.isArray(collections)
+			? collections
+			: Object.keys(collections);
+
+		if (names.length === 0) {
+			throw new Error(
+				"collections was empty — pass at least one collection name, or omit " +
+				"collections to search the connection's default scope.",
+			);
+		}
+
+		for (const name of names) {
+			if (name !== this.collection) {
+				assertCollectionAllowed(name, this.allowedCollections);
+			}
+		}
+
+		return { database, collections };
+	}
+
+	protected async call<T, Response>(
+		path: string,
+		fn: () => Promise<Response>,
+		onMeta?: (meta: { requestId?: string }) => void,
+	): Promise<T> {
 		try {
-			return unwrap<T>(await fn());
+			const raw = await fn();
+
+			if (onMeta) onMeta({ requestId: readRequestId(raw) });
+
+			return unwrap<T>(raw);
 		} catch (err) {
 			// A refused database is a decision the user made, not a transport
 			// failure from `path`; it keeps its own type and message.
@@ -405,8 +678,9 @@ export class ContextResource extends Resource {
 		collection?: string,
 		allowedDatabases?: readonly string[],
 		allowedCollections?: readonly string[],
+		raw?: RawTransport,
 	) {
-		super(sdk, database, collection, allowedDatabases, allowedCollections);
+		super(sdk, database, collection, allowedDatabases, allowedCollections, raw);
 	}
 
 	/**
@@ -438,9 +712,32 @@ export class ContextResource extends Resource {
 				`hybrid retrieval, or pass queryBy "text" to match on the terms.`,
 			);
 		}
+
 		const queryBy =
 			params.queryBy ?? (params.operator != null ? "text" : undefined);
 
+		// One scope selector per request. The server rejects a multi-scope
+		// selector sent alongside the singular one it folds `collection` into, so
+		// a caller that sets both has stated two different scopes and only they
+		// can say which they meant — the same stance taken on operator/queryBy
+		// above, rather than silently dropping one.
+		if (params.collections != null && params.collection != null) {
+			throw new Error(
+				"pass either collection (one scope) or collections (several) — not " +
+				"both. Hydra DB refuses a request carrying both selectors.",
+			);
+		}
+
+		const scope =
+			params.collections != null
+				? this.multiScope(params.collections, params.database)
+				: this.scope(params.collection, params.database);
+
+		// `unified` is refused by the pinned SDK's request serializer before
+		// anything is sent, so that kind is built by hand and its result parsed
+		// with the SDK's own response serializer (PRO-1618). The body is already
+		// hand-written snake_case, so `titles` folds in directly instead of
+		// needing the passthrough below.
 		if (params.kind === "unified") {
 			return this.call("/query", () =>
 				this.rawTyped(
@@ -448,7 +745,7 @@ export class ContextResource extends Resource {
 					"POST",
 					"/query",
 					compact({
-						...this.scope(params.collection, params.database),
+						...scope,
 						query: params.query,
 						type: "unified",
 						operator: params.operator,
@@ -458,33 +755,110 @@ export class ContextResource extends Resource {
 						graph_context: params.graphContext,
 						alpha: params.alpha,
 						recency_bias: params.recencyBias,
+						query_apps: params.queryApps,
 						ids: params.ids,
+						titles: params.titles,
 						metadata_filters: params.metadataFilters,
 						num_related_chunks: params.numRelatedChunks,
+						acl: params.acl,
 					}),
 					serialization.SearchV2RetrievalResult.parseOrThrow,
 					opts?.signal,
 				),
+				opts?.onMeta,
 			);
 		}
 
-		return this.call("/query", () =>
-			this.sdk.query({
-				...this.scope(params.collection, params.database),
-				query: params.query,
-				type: params.kind as SDK.SearchSourceType | undefined,
-				operator: params.operator,
-				queryBy,
-				maxResults: params.maxResults,
-				mode: params.mode,
-				graphContext: params.graphContext,
-				alpha: params.alpha,
-				recencyBias: params.recencyBias,
-				ids: params.ids,
-				metadataFilters: params.metadataFilters,
-				numRelatedChunks: params.numRelatedChunks,
-			}, req(opts)),
-		);
+		const request = {
+			...scope,
+			query: params.query,
+			type: params.kind,
+			operator: params.operator,
+			queryBy,
+			maxResults: params.maxResults,
+			mode: params.mode,
+			graphContext: params.graphContext,
+			alpha: params.alpha,
+			recencyBias: params.recencyBias,
+			queryApps: params.queryApps,
+			ids: params.ids,
+			metadataFilters: params.metadataFilters,
+			numRelatedChunks: params.numRelatedChunks,
+			acl: params.acl,
+		};
+
+		// @hydradb/sdk 2.1.4 predates the titles request field and its generated
+		// serializer drops unknown properties. Its authenticated passthrough still
+		// supplies the SDK's auth, retry, timeout and fetch configuration, including
+		// for a ContextResource constructed directly without our RawTransport. Once
+		// the generated request exposes titles this can collapse back into sdk.query.
+		if (params.titles != null && params.titles.length > 0) {
+			return this.call(
+				"/query",
+				async () => {
+				const response = await this.sdk.fetch(
+					"/query",
+					{
+						method: "POST",
+						headers: { "API-Version": "2", "Content-Type": "application/json" },
+						body: JSON.stringify({
+							...scope,
+							query: params.query,
+							type: params.kind,
+							operator: params.operator,
+							query_by: queryBy,
+							max_results: params.maxResults,
+							mode: params.mode,
+							graph_context: params.graphContext,
+							alpha: params.alpha,
+							recency_bias: params.recencyBias,
+							query_apps: params.queryApps,
+							ids: params.ids,
+							titles: params.titles,
+							metadata_filters: params.metadataFilters,
+							num_related_chunks: params.numRelatedChunks,
+							acl: params.acl,
+						}),
+					},
+					req(opts),
+				);
+				const text = await response.text();
+				let body: unknown = text;
+				try {
+					body = text === "" ? null : JSON.parse(text);
+				} catch {
+					// Preserve a non-JSON proxy response for the shared error formatter.
+				}
+				if (!response.ok) {
+					throw new HydraDBError({ statusCode: response.status, body });
+				}
+					validateQueryResponse(body);
+					// Use the SAME wire-to-SDK conversion as sdk.query, including nested
+					// graph context and metadata. Casting raw JSON loses their contents.
+					const envelope = unwrap<unknown>(body) === body ? { success: true, data: body } : body;
+					return serialization.HandlerEnvelopeSearchV2RetrievalResult.parseOrThrow(envelope, {
+						unrecognizedObjectKeys: "passthrough",
+						allowUnrecognizedUnionMembers: true,
+						allowUnrecognizedEnumValues: true,
+						skipValidation: true,
+						breadcrumbsPrefix: ["response"],
+					});
+				},
+				// The request id has to survive this path too. A query that used
+				// `titles` would otherwise print no id, and hydradb_feedback would
+				// have nothing to attach to for exactly the queries a title filter
+				// was used on. readRequestId reads both spellings, so the raw
+				// envelope's snake_case `meta.request_id` resolves here the same way
+				// the SDK's camelCase does.
+				opts?.onMeta,
+			);
+		}
+
+		return this.call("/query", async () => {
+			const response = await this.sdk.query(request, req(opts));
+			validateQueryResponse(response);
+			return response;
+		}, opts?.onMeta);
 	}
 
 	/**
@@ -497,12 +871,13 @@ export class ContextResource extends Resource {
 	async ingest(
 		params: IngestParams,
 		opts?: RequestOptions,
-	): Promise<SDK.IngestionV2SourceUploadResponse> {
+	): Promise<SDK.IngestionV2IngestResponse> {
 		if (params.kind === "unified") return this.ingestUnified(params, opts);
 		const request: SDK.IngestContextRequest = {
 			...this.scope(params.collection, params.database),
 			type: params.kind as SDK.IngestContextRequestType,
 		};
+
 		if (params.upsert != null) {
 			request.upsert = String(params.upsert);
 		}
@@ -510,25 +885,35 @@ export class ContextResource extends Resource {
 		if (params.kind === "memory") {
 			const infer = params.infer ?? true;
 			const item: Record<string, unknown> = {};
+
 			if (params.pairs != null) item.user_assistant_pairs = params.pairs;
+
 			if (params.text != null) item.text = params.text;
 			item.infer = infer;
 			item.is_markdown = params.isMarkdown ?? false;
+
 			// Preserve the v1 omission behaviour: custom_instructions is only
 			// attached when inference is enabled.
 			if (infer && params.customInstructions != null) {
 				item.custom_instructions = params.customInstructions;
 			}
+
 			if (params.sourceId != null) item.source_id = params.sourceId;
+
 			if (params.title != null) item.title = params.title;
+
 			if (params.userName != null) item.user_name = params.userName;
+
 			if (params.metadata != null) item.metadata = params.metadata;
+
 			if (params.additionalMetadata != null) {
 				item.additional_metadata = params.additionalMetadata;
 			}
+
 			if (params.observationDate != null) {
 				item.observation_date = params.observationDate;
 			}
+
 			request.memories = JSON.stringify([item]);
 		} else {
 			// The knowledge path can only carry the document itself and its
@@ -589,7 +974,7 @@ export class ContextResource extends Resource {
 	private ingestUnified(
 		params: IngestParams,
 		opts?: RequestOptions,
-	): Promise<SDK.IngestionV2SourceUploadResponse> {
+	): Promise<SDK.IngestionV2IngestResponse> {
 		const item: Record<string, unknown> = {};
 		if (params.text != null) item.text = params.text;
 		if (params.pairs != null) {
@@ -618,7 +1003,7 @@ export class ContextResource extends Resource {
 				"POST",
 				"/context/ingest",
 				body,
-				serialization.IngestionV2SourceUploadResponse.parseOrThrow,
+				serialization.IngestionV2IngestResponse.parseOrThrow,
 				opts?.signal,
 			),
 		);
@@ -628,7 +1013,16 @@ export class ContextResource extends Resource {
 	list(
 		params: ListParams = {},
 		opts?: RequestOptions,
-	): Promise<SDK.ListV2SourceListResponse> {
+	): Promise<SDK.ListV2ListResponse> {
+		const hasSourceFields =
+			params.sourceFields != null &&
+			Object.keys(params.sourceFields).length > 0;
+
+		// `unified` is refused by the pinned SDK's request serializer, so that
+		// kind is built by hand and parsed with the SDK's own response
+		// serializer (PRO-1618). The body is already hand-written snake_case, so
+		// the source-field filters fold in directly instead of needing the
+		// passthrough below.
 		if (params.kind === "unified") {
 			return this.call("/context/list", () =>
 				this.rawTyped(
@@ -641,12 +1035,106 @@ export class ContextResource extends Resource {
 						ids: params.ids,
 						page: params.page,
 						page_size: params.pageSize,
+						acl: params.acl,
+						filters:
+							hasSourceFields || params.connectorId != null
+								? {
+										source_fields: params.sourceFields,
+										additional_metadata:
+											params.connectorId != null
+												? { connector_id: params.connectorId }
+												: undefined,
+									}
+								: undefined,
 					}),
-					serialization.ListV2SourceListResponse.parseOrThrow,
+					serialization.ListV2ListResponse.parseOrThrow,
 					opts?.signal,
 				),
+				opts?.onMeta,
 			);
 		}
+
+
+		// @hydradb/sdk 2.1.4 predates the list `filters` request field and its
+		// generated serializer drops unknown properties (same limitation the
+		// titles filter hit on /query). Its authenticated passthrough still
+		// supplies auth, retry, timeout and fetch config. Once the generated
+		// request exposes `filters` this can collapse back into sdk.context.list.
+		if (hasSourceFields || params.connectorId != null) {
+			const scope = this.scope(params.collection, params.database);
+			return this.call<SDK.ListV2ListResponse, unknown>(
+				"/context/list",
+				async () => {
+					const response = await this.sdk.fetch(
+						"/context/list",
+						{
+							method: "POST",
+							headers: {
+								"API-Version": "2",
+								"Content-Type": "application/json",
+							},
+							body: JSON.stringify({
+								...scope,
+								type: params.kind,
+								ids: params.ids,
+								page: params.page,
+								page_size: params.pageSize,
+								acl: params.acl,
+								filters: {
+									source_fields: params.sourceFields,
+									additional_metadata: params.connectorId != null ? { connector_id: params.connectorId } : undefined,
+								},
+								group_threads: false,
+							}),
+						},
+						req(opts),
+					);
+					const text = await response.text();
+					let body: unknown = text;
+					try {
+						body = text === "" ? null : JSON.parse(text);
+					} catch {
+						// Preserve a non-JSON proxy response for the shared formatter.
+					}
+					if (!response.ok) {
+						throw new HydraDBError({ statusCode: response.status, body });
+					}
+					// Unlike the generated method, passthrough does not validate JSON.
+					// A proxy's HTML login page must be an error, not "no sources".
+					// Accept both the wire payload and the historical `inner` shape
+					// understood by the list adapters, including a valid empty array.
+					const rowsKey = params.kind === "memory" ? "user_memories" : "sources";
+					const identityKeys = params.kind === "memory"
+						? ["memory_id", "id", "source_id"]
+						: ["id", "source_id"];
+					const listRow = z.record(z.unknown()).refine((row) => {
+						// Use the adapters' first-string precedence: a blank `id`
+						// must not hide behind a valid legacy `source_id`.
+						const id = identityKeys.map((key) => row[key]).find((value) => typeof value === "string");
+						return typeof id === "string" && id.trim() !== "";
+					});
+					const successfulObject = z.object({ success: z.literal(true).optional() });
+					const listPayload = successfulObject.extend({
+						[rowsKey]: z.array(listRow),
+					});
+					const payload = unwrap<unknown>(body);
+					if (
+						!successfulObject.safeParse(body).success ||
+						!z.union([
+							listPayload,
+							successfulObject.extend({ inner: listPayload }),
+						]).safeParse(payload).success
+					) {
+						throw new Error(
+							`Invalid successful list response: expected a ${rowsKey} array with nonempty row IDs and no failure flag.`,
+						);
+					}
+					return body;
+				},
+				opts?.onMeta,
+			);
+		}
+
 		return this.call("/context/list", () =>
 			this.sdk.context.list({
 				...this.scope(params.collection, params.database),
@@ -654,6 +1142,7 @@ export class ContextResource extends Resource {
 				ids: params.ids,
 				page: params.page,
 				pageSize: params.pageSize,
+				acl: params.acl,
 			}, req(opts)),
 		);
 	}
@@ -669,6 +1158,7 @@ export class ContextResource extends Resource {
 				id: params.id,
 				mode: params.mode,
 				expirySeconds: params.expirySeconds,
+				acl: params.acl,
 			}, req(opts)),
 		);
 	}
@@ -684,6 +1174,56 @@ export class ContextResource extends Resource {
 				ids: params.ids,
 			}, req(opts)),
 		);
+	}
+
+	/**
+	 * The connected subgraph of one item (`GET /context/{id}/subgraph`): every
+	 * item reachable from it through item-level relations — explicit links, a
+	 * shared thread, parent/child — plus the relations among the members and
+	 * the structural graph around them.
+	 *
+	 * No SDK resource for this yet, so it takes the raw path (CONTRACT §2 rule
+	 * 7): same header, same envelope unwrap, same error type as everything else
+	 * here. When the SDK grows `context.subgraph`, only this method changes.
+	 */
+	async subgraph(params: SubgraphParams, opts?: RequestOptions): Promise<SubgraphResult> {
+		// `async` for the same reason `query` and `ingest` are: the scope check
+		// below throws, and a caller awaiting this must see a rejection, not a
+		// synchronous exception from the call site.
+		if (!this.raw) {
+			throw new HydraWrapperError(
+				"Hydra DB /context/{id}/subgraph → ERR: no HTTP transport configured",
+				"/context/{id}/subgraph",
+			);
+		}
+
+		// Blank is the one id the wrapper rejects locally: it would build
+		// "/context//subgraph" and fail as a remote routing error instead of a
+		// legible one. Everything else goes out byte for byte — ingest stores a
+		// source_id verbatim, so trimming here could address a different item.
+		if (params.id.trim() === "") {
+			throw new HydraWrapperError(
+				"Hydra DB /context/{id}/subgraph → ERR: id must not be empty",
+				"/context/{id}/subgraph",
+			);
+		}
+
+		const query = new URLSearchParams(this.scope(params.collection, params.database));
+
+		if (params.kind) query.set("type", params.kind);
+
+		if (params.depth != null) query.set("depth", String(params.depth));
+
+		if (params.maxSources != null) query.set("max_sources", String(params.maxSources));
+
+		// Repeated params, like the dashboard and the CLI: the API reads both
+		// repeated (acl=a&acl=b) and comma-separated forms. An empty array is
+		// the same as omitted server-side, so sending nothing keeps the
+		// request faithful to what the caller said.
+		for (const principal of params.acl ?? []) query.append("acl", principal);
+		const path = `/context/${encodeURIComponent(params.id)}/subgraph?${query.toString()}`;
+
+		return sendRaw<SubgraphResult>(this.raw, path, "GET", undefined, opts);
 	}
 
 	/** Knowledge-graph relations (SDK `context.relations`). */
@@ -716,6 +1256,7 @@ export class ContextResource extends Resource {
 				type: params.kind as SDK.RelationsContextRequestType | undefined,
 				limit: params.limit,
 				cursor: params.cursor,
+				acl: params.acl,
 			}),
 		);
 	}
@@ -761,8 +1302,12 @@ export class DatabasesResource extends Resource {
 		collection?: string,
 		allowedDatabases?: readonly string[],
 		allowedCollections?: readonly string[],
+		// The shared raw transport. `create` with a layout and the layout probe
+		// both need it: the pinned SDK has neither `type` on create nor
+		// `details[]` on the list (PRO-1618).
+		raw?: RawTransport,
 	) {
-		super(sdk, database, collection, allowedDatabases, allowedCollections);
+		super(sdk, database, collection, allowedDatabases, allowedCollections, raw);
 	}
 
 	create(
@@ -772,7 +1317,8 @@ export class DatabasesResource extends Resource {
 			// The pinned SDK's create request has no `type`; the generated
 			// serializer would drop it and provision a split database in silence.
 			return this.call("/databases", () =>
-				this.requireRaw("database create with a layout").request<SDK.TenantsTenantCreateAcceptedResponse>(
+				this.rawTyped(
+					"database create with a layout",
 					"POST",
 					"/databases",
 					{
@@ -785,6 +1331,7 @@ export class DatabasesResource extends Resource {
 							? { embeddings_dimension: params.embeddingsDimension }
 							: {}),
 					},
+					serialization.TenantsTenantCreateAcceptedResponse.parseOrThrow,
 				),
 			);
 		}
@@ -816,7 +1363,8 @@ export class DatabasesResource extends Resource {
 	layouts(signal?: AbortSignal): Promise<Map<string, Layout>> {
 		if (!this.layoutCache) {
 			this.layoutCache = this.call("/databases", () =>
-				this.requireRaw("layout probe").request<{ details?: { database?: string; type?: string }[] }>(
+				this.rawJSON<{ details?: { database?: string; type?: string }[] }>(
+					"layout probe",
 					"GET",
 					"/databases",
 					undefined,
@@ -856,15 +1404,18 @@ export class DatabasesResource extends Resource {
 		}
 	}
 
-	collections(database: string): Promise<SDK.TenantsSubTenantIdsResponse> {
+	collections(
+		database: string,
+		opts?: RequestOptions,
+	): Promise<SDK.TenantsSubTenantIdsResponse> {
 		return this.call("/databases/collections", () =>
-			this.sdk.databases.collections({ database }),
+			this.sdk.databases.collections({ database }, req(opts)),
 		);
 	}
 
-	stats(database: string): Promise<SDK.TenantsTenantStatsResponse> {
+	stats(database: string, opts?: RequestOptions): Promise<SDK.TenantsTenantStatsResponse> {
 		return this.call("/databases/stats", () =>
-			this.sdk.databases.stats({ database }),
+			this.sdk.databases.stats({ database }, req(opts)),
 		);
 	}
 
@@ -874,6 +1425,60 @@ export class DatabasesResource extends Resource {
 			this.sdk.databases.status({ database }),
 		);
 	}
+
+	/**
+	 * Permanently delete one collection and all of its data
+	 * (`DELETE /databases/collections`). Not yet on the pinned SDK, so this
+	 * is a hand-rolled path matching GraphResource.
+	 */
+	async deleteCollection(
+		params: DeleteCollectionParams,
+		opts?: RequestOptions,
+	): Promise<{
+		database?: string;
+		collection?: string;
+		status?: string;
+		message?: string;
+	}> {
+		// Hand-rolled for the same reason `context.subgraph` is (CONTRACT §2
+		// rule 7): the pinned SDK has no `databases.delete_collection`. It goes
+		// through the same raw transport, so it shares the retry, envelope
+		// unwrap and error type of every other call here.
+		if (!this.raw) {
+			throw new HydraWrapperError(
+				"Hydra DB /databases/collections → ERR: no HTTP transport configured",
+				"/databases/collections",
+			);
+		}
+
+		// A caller who already cancelled is not waiting for the request to go
+		// out: reject a pre-aborted signal rather than send and then unwind.
+		if (opts?.signal?.aborted) {
+			throw translateError(
+				"/databases/collections",
+				opts.signal.reason ?? new Error("aborted"),
+			);
+		}
+
+		if (params.collection.trim() === "") {
+			throw new HydraWrapperError(
+				"Hydra DB /databases/collections → ERR: collection must not be empty",
+				"/databases/collections",
+			);
+		}
+
+		// scope() resolves the default database, enforces any confinement, and
+		// returns the canonical `database`/`collection` names the API expects.
+		const query = new URLSearchParams(this.scope(params.collection, params.database));
+		const path = `/databases/collections?${query.toString()}`;
+
+		return sendRaw<{
+			database?: string;
+			collection?: string;
+			status?: string;
+			message?: string;
+		}>(this.raw, path, "DELETE", undefined, opts);
+	}
 }
 
 /**
@@ -881,9 +1486,213 @@ export class DatabasesResource extends Resource {
  * pass an existing `HydraDBClient` as the second argument to inject a mocked
  * SDK transport (used by the conformance runner).
  */
+const feedbackRatingSchema = z.enum(["positive", "negative", "neutral"]);
+
+/** Ratings POST /feedback accepts. Absent is its own state: prose with no rating. */
+export type FeedbackRating = z.infer<typeof feedbackRatingSchema>;
+
+/**
+ * Who authored the feedback. The server defaults this to "user"; this wrapper
+ * sends "agent" instead, because everything reaching it came from a model. The
+ * two populations are separated at write time — agent feedback is far more
+ * voluminous and fails systematically rather than subjectively — so guessing
+ * wrong here poisons the analysis it exists to feed.
+ */
+const feedbackSourceSchema = z.enum(["user", "agent"]);
+
+export type FeedbackSource = z.infer<typeof feedbackSourceSchema>;
+
+/** The server's cap, applied to the DE-DUPLICATED list (internal/domain/feedback). */
+export const MAX_GROUND_TRUTH_SOURCE_IDS = 100;
+
+const normalizedGroundTruthSchema = z.object({
+	answer: z.string().optional(),
+	source_ids: z.array(z.string()).optional(),
+});
+
+type NormalizedGroundTruth = z.infer<typeof normalizedGroundTruthSchema>;
+
+const feedbackGroundTruthSchema = z
+	.object({
+		/** The answer a correct system would have produced. */
+		answer: z.string().optional(),
+		/** Source ids that actually contain the answer — a recall judgement. */
+		sourceIds: z.array(z.string()).optional(),
+	})
+	.transform((groundTruth): NormalizedGroundTruth | undefined => {
+		const answer = groundTruth.answer?.trim() ?? "";
+
+		const sourceIds = Array.from(
+			new Set(
+				(groundTruth.sourceIds ?? [])
+					.map((sourceId) => sourceId.trim())
+					.filter((sourceId) => sourceId !== ""),
+			),
+		);
+
+		if (answer === "" && sourceIds.length === 0) return undefined;
+
+		return normalizedGroundTruthSchema.parse({
+			answer: answer || undefined,
+			source_ids: sourceIds.length > 0 ? sourceIds : undefined,
+		});
+	});
+
+export type FeedbackGroundTruth = z.input<typeof feedbackGroundTruthSchema>;
+
+const feedbackParamsSchema = z
+	.object({
+		requestId: z.string().trim().min(1, {
+			message:
+				"requestId is required: it is the request_id of the query this feedback is about, " +
+				"returned in that query's response meta.",
+		}),
+		feedback: z.string().transform((feedback) => feedback.trim()).optional(),
+		rating: feedbackRatingSchema.optional(),
+		source: feedbackSourceSchema.optional(),
+		groundTruth: feedbackGroundTruthSchema.optional(),
+		database: z.string().optional(),
+		collection: z.string().optional(),
+		metadata: z.record(z.string()).optional(),
+	})
+	.superRefine((params, context) => {
+		const sourceIds = params.groundTruth?.source_ids ?? [];
+
+		// This limit intentionally runs after the ground-truth transform has
+		// trimmed and de-duplicated IDs. A raw `.max(100)` would reject 150 inputs
+		// that normalize to 80 distinct sources even though the API accepts them.
+		if (sourceIds.length > MAX_GROUND_TRUTH_SOURCE_IDS) {
+			context.addIssue({
+				code: z.ZodIssueCode.custom,
+				path: ["groundTruth", "sourceIds"],
+				message:
+					`ground_truth.source_ids has ${sourceIds.length} distinct ids, over the limit of ` +
+					`${MAX_GROUND_TRUTH_SOURCE_IDS}. Narrow it to the sources that actually carry the answer.`,
+			});
+		}
+
+		if ((params.feedback ?? "") === "" && params.groundTruth == null) {
+			context.addIssue({
+				code: z.ZodIssueCode.custom,
+				message: "send feedback text, ground_truth, or both — a submission with neither records nothing.",
+			});
+		}
+	});
+
+export type FeedbackParams = z.input<typeof feedbackParamsSchema>;
+
+/**
+ * The response exactly as POST /feedback returns it.
+ *
+ * snake_case because this endpoint takes the raw HTTP path: sendRaw unwraps the
+ * envelope without renaming anything, so the keys here are the wire's keys. The
+ * SDK would have camel-cased them, and this type was originally written for that
+ * path — which made `feedback_id` read as undefined and quietly dropped the id
+ * from the tool's output. `SubgraphResult` above declares the same way, for the
+ * same reason.
+ */
+const feedbackResultSchema = z.object({
+	recorded: z.boolean().optional(),
+	feedback_id: z.string().optional(),
+	request_id: z.string().optional(),
+	message: z.string().optional(),
+	created_at: z.string().optional(),
+});
+
+export type FeedbackResult = z.infer<typeof feedbackResultSchema>;
+
+const feedbackRequestBodySchema = z.object({
+	request_id: z.string(),
+	feedback: z.string().optional(),
+	rating: feedbackRatingSchema.optional(),
+	source: feedbackSourceSchema,
+	ground_truth: normalizedGroundTruthSchema.optional(),
+	database: z.string().optional(),
+	collection: z.string().optional(),
+	metadata: z.record(z.string()).optional(),
+});
+
+/**
+ * POST /feedback — a signal about a query that ALREADY ran.
+ *
+ * Correlated only by `request_id`; nothing about the original query is re-sent,
+ * so nothing about it has to be trusted from the client. Recording feedback
+ * never changes the result of the query it describes.
+ */
+export class FeedbackResource extends Resource {
+	// The base constructor is `protected`, so this one is what makes the class
+	// instantiable from outside the file. Removing it fails with TS2674.
+	// biome-ignore lint/complexity/noUselessConstructor: widens visibility
+	constructor(
+		sdk: HydraDBClient,
+		database: string,
+		collection?: string,
+		allowedDatabases?: readonly string[],
+		allowedCollections?: readonly string[],
+		raw?: RawTransport,
+	) {
+		super(sdk, database, collection, allowedDatabases, allowedCollections, raw);
+	}
+
+	async submit(params: FeedbackParams, opts?: RequestOptions): Promise<FeedbackResult> {
+		const validated = feedbackParamsSchema.parse(params);
+
+		// Scope is optional on /feedback, but a collection cannot be resolved
+		// without its database (the server 400s on collection-alone), so this goes
+		// through the same scope path every other call takes — which is also what
+		// enforces an OAuth connection's confinement.
+		const scope =
+			validated.database != null || validated.collection != null
+				? this.scope(validated.collection, validated.database)
+				: {};
+
+		// The SDK cannot express this request. Its generated model for
+		// POST /feedback is an undiscriminated union of `{ feedback }` and
+		// `{ groundTruth }` — the anyOf in the spec collapsed to the two
+		// alternatives and lost every field they share — so its serializer
+		// STRIPS request_id, and the server rejects the call it produces:
+		//   Hydra DB /feedback -> 400: INVALID_INPUT: request_id is required
+		// Verified against prod. So this takes the hand-rolled HTTP path, which
+		// exists for exactly this (CONTRACT §2 rule 7), and sends the documented
+		// snake_case body. Move back to the SDK once its model carries the whole
+		// request.
+		if (!this.raw) {
+			throw new HydraWrapperError(
+				"Hydra DB /feedback → ERR: no HTTP transport configured",
+				"/feedback",
+			);
+		}
+
+		const body = feedbackRequestBodySchema.parse({
+			request_id: validated.requestId,
+			feedback: validated.feedback || undefined,
+			rating: validated.rating,
+			source: validated.source ?? "agent",
+			ground_truth: validated.groundTruth,
+			metadata:
+				validated.metadata != null && Object.keys(validated.metadata).length > 0
+					? validated.metadata
+					: undefined,
+			...scope,
+		});
+
+		const result = await sendRaw<z.input<typeof feedbackResultSchema>>(
+			this.raw,
+			"/feedback",
+			"POST",
+			body,
+			opts,
+		);
+
+		return feedbackResultSchema.parse(result);
+	}
+}
+
 export class HydraDB {
 	readonly context: ContextResource;
 	readonly databases: DatabasesResource;
+	/** Feedback about a query that already ran (POST /feedback). */
+	readonly feedback: FeedbackResource;
 	/** The default database every unscoped call uses. */
 	readonly database: string;
 	/** Databases a per-call override may name; undefined means any. */
@@ -898,12 +1707,15 @@ export class HydraDB {
 	 */
 	readonly graph: GraphResource;
 
-	constructor(config: HydraConfig, sdk?: HydraDBClient) {
+	constructor(config: HydraConfig, sdk?: HydraDBClient, rawOverride?: RawTransport) {
 		const client =
 			sdk ??
 			new HydraDBClient({
 				token: config.token,
-				...(config.baseUrl != null ? { baseUrl: config.baseUrl } : {}),
+				// SDK 2.1.4's generated methods apply this default, but its fetch
+				// passthrough does not. Set it for both title and source lookups so
+				// their relative paths work without HYDRADB_BASE_URL as well.
+				baseUrl: config.baseUrl ?? HydraDBEnvironment.Default,
 				// Both are stated rather than inherited. The SDK's defaults (60s,
 				// 2 retries) were never chosen by this server, and their product is
 				// a ~3 minute worst case on the slowest tool it exposes.
@@ -914,30 +1726,42 @@ export class HydraDB {
 				// overridden — level and silencing keep the SDK's own defaults.
 				logging: { logger: STDERR_LOGGER },
 			});
+
 		this.database = config.database;
 		this.collection = config.collection;
 		this.allowedDatabases = config.allowedDatabases;
 		this.allowedCollections = config.allowedCollections;
+
+		const raw =
+			rawOverride ??
+			newRawTransport(config, {
+				timeoutSeconds: DEFAULT_TIMEOUT_SECONDS,
+				maxRetries: DEFAULT_MAX_RETRIES,
+			});
+
 		this.context = new ContextResource(
 			client,
 			config.database,
 			config.collection,
 			config.allowedDatabases,
 			config.allowedCollections,
+			raw,
 		);
-		const raw = new RawHttp({
-			token: config.token,
-			baseUrl: config.baseUrl,
-			timeoutSeconds: config.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS,
-			maxRetries: config.maxRetries ?? DEFAULT_MAX_RETRIES,
-			fetch: config.fetch,
-		});
+		this.feedback = new FeedbackResource(
+			client,
+			config.database,
+			config.collection,
+			config.allowedDatabases,
+			config.allowedCollections,
+			raw,
+		);
 		this.databases = new DatabasesResource(
 			client,
 			config.database,
 			config.collection,
 			config.allowedDatabases,
 			config.allowedCollections,
+			raw,
 		);
 		this.graph = new GraphResource({
 			token: config.token,
@@ -945,7 +1769,5 @@ export class HydraDB {
 			timeoutSeconds: config.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS,
 			maxRetries: config.maxRetries ?? DEFAULT_MAX_RETRIES,
 		});
-		this.context.attachRaw(raw);
-		this.databases.attachRaw(raw);
 	}
 }

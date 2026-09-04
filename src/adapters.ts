@@ -9,6 +9,7 @@
  */
 
 import type { HydraDB as SDK } from "@hydradb/sdk";
+import { z } from "zod";
 
 import type { AddMemoryResponse, MemoryResultItem } from "./types.js";
 
@@ -23,7 +24,7 @@ import type { AddMemoryResponse, MemoryResultItem } from "./types.js";
  * the item that succeeded.
  */
 function toMemoryResultItem(
-	item: SDK.IngestionV2SourceUploadResultItem,
+	item: SDK.IngestionV2IngestResultItem,
 ): MemoryResultItem {
 	return {
 		source_id: item.id ?? "",
@@ -38,7 +39,7 @@ function toMemoryResultItem(
 }
 
 export function toAddMemoryResponse(
-	data: SDK.IngestionV2SourceUploadResponse,
+	data: SDK.IngestionV2IngestResponse,
 ): AddMemoryResponse {
 	return {
 		success: data.success ?? false,
@@ -123,7 +124,7 @@ function toPageInfo(
 }
 
 /** SDK list result → memory rows. Field names vary across v2 records, so read defensively. */
-export function toMemoryList(data: SDK.ListV2SourceListResponse): MemoryList {
+export function toMemoryList(data: SDK.ListV2ListResponse): MemoryList {
 	// Memory listings surface at top-level `user_memories` — not under an
 	// `.inner` wrapper, and not under `sources` (that is the knowledge shape).
 	const d = data as unknown as Record<string, unknown>;
@@ -145,6 +146,10 @@ export interface SourceListItem {
 	id: string;
 	title?: string;
 	type?: string;
+	external_id?: string;
+	provider?: string;
+	parent_external_id?: string;
+	connector_id?: string;
 }
 
 export interface SourceList {
@@ -154,7 +159,7 @@ export interface SourceList {
 }
 
 /** SDK list result → knowledge source rows + total. */
-export function toSourceList(data: SDK.ListV2SourceListResponse): SourceList {
+export function toSourceList(data: SDK.ListV2ListResponse): SourceList {
 	// Knowledge listings surface at top-level `sources`, not under `.inner`.
 	const d = data as unknown as Record<string, unknown>;
 	const container =
@@ -163,11 +168,21 @@ export function toSourceList(data: SDK.ListV2SourceListResponse): SourceList {
 		asRecords(d.sources) ??
 		asRecords((d.inner as Record<string, unknown> | undefined)?.sources) ??
 		[];
-	const sources = records.map((record) => ({
-		id: str(record, "id", "source_id") ?? "",
-		title: str(record, "title"),
-		type: str(record, "type", "source_type"),
-	}));
+	const sources = records.map((record) => {
+		const metadata = z.object({ connector_id: z.string().optional() }).safeParse(record.additional_metadata ?? record.additionalMetadata);
+		const externalId = str(record, "app_external_id", "appExternalId");
+		const provider = str(record, "app_provider", "appProvider");
+		const parentExternalId = str(record, "app_parent_id", "appParentId");
+		return {
+			id: str(record, "id", "source_id") ?? "",
+			title: str(record, "title"),
+			type: str(record, "type", "source_type"),
+			...(externalId != null ? { external_id: externalId } : {}),
+			...(provider != null ? { provider } : {}),
+			...(parentExternalId != null ? { parent_external_id: parentExternalId } : {}),
+			...(metadata.success && metadata.data.connector_id != null ? { connector_id: metadata.data.connector_id } : {}),
+		};
+	});
 	const total =
 		d.total ?? (d.inner as Record<string, unknown> | undefined)?.total;
 	return {

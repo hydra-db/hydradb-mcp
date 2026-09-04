@@ -205,7 +205,7 @@ export function renderedChunkCount(response: RecallResponse): number {
 	const chunks = response.chunks ?? [];
 	const contained = containedChunkIndices(
 		chunks.map((c) => extractChunkText(c.chunkContent)),
-		chunks.map((c) => c.id),
+		chunks.map((c) => c.id == null ? undefined : JSON.stringify([c.collection, c.id])),
 	);
 	// Every chunk is still rendered; only duplicated BODIES are collapsed.
 	return chunks.length;
@@ -310,7 +310,7 @@ function render(
 		maxChunkChars == null
 			? containedChunkIndices(
 					chunks.map((c) => extractChunkText(c.chunkContent)),
-					chunks.map((c) => c.id),
+					chunks.map((c) => c.id == null ? undefined : JSON.stringify([c.collection, c.id])),
 				)
 			: new Map<number, number>();
 	// Extra context is deduped by CONTENT as well as by id: the same passage
@@ -347,6 +347,7 @@ function render(
 				? `  (${Math.round(chunk.relevancyScore * 100)}%)`
 				: "";
 		lines.push(`Chunk ${rendered}${chunkId ? `  [id: ${chunkId}]` : ""}${score}`);
+		if (chunk.collection) lines.push(`Collection: ${JSON.stringify(chunk.collection)}`);
 
 		const meta = chunk.additionalMetadata ?? {};
 		const title =
@@ -582,4 +583,3 @@ function render(
 	}
 	return { text, shown: chunkSections.length };
 }
-

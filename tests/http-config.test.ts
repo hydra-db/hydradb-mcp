@@ -73,8 +73,12 @@ test("credentials come from Authorization + X-HydraDB-Database headers", () => {
 	assert.ok(result.ok);
 	assert.equal(result.credentials.apiKey, "secret-key");
 	assert.equal(result.credentials.database, "tenant-a");
-	// Collection defaults, and the graph database mirrors the memory database.
-	assert.equal(result.credentials.collection, "hydra-db-mcp");
+	// Collection is left UNSET so the request omits it and the API answers
+	// from the caller's own workspace. It used to fall back to the shared
+	// literal "hydra-db-mcp", which put every unconfigured user in one
+	// namespace and showed a workspace member an empty collection instead of
+	// their workspace's data.
+	assert.equal(result.credentials.collection, undefined);
 	assert.equal(result.credentials.graph.database, "tenant-a");
 	assert.equal(result.credentials.graph.enabled, true);
 });

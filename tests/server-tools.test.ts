@@ -1,18 +1,19 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { HydraDBError } from "@hydradb/sdk";
 import type { HydraDBClient } from "@hydradb/sdk";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { z } from "zod";
 
 import { HydraDB } from "../src/hydra/index.js";
 import {
 	__resetAliasWarnings,
 	__resetShutdown,
-	beginShutdown,
+	__setFanoutListTimeoutForTests, __setListCollectionsStatsTimeoutForTests, 
 	awaitInFlight,
-	createHydraDBServer,
+	beginShutdown,createHydraDBServer,
 	inFlightCount,
 	legacyToolsEnabled,
 } from "../src/server.js";
@@ -26,21 +27,40 @@ type RecordedCall = { method: string; args: Record<string, unknown> };
 
 /** Per-method response overrides, for tests that care what the API returned. */
 type Responses = Partial<
-	Record<"query" | "ingest" | "list" | "inspect" | "delete", unknown>
+	Record<
+		"query" | "ingest" | "list" | "inspect" | "delete" | "collections" | "stats" | "feedback",
+		unknown
+	>
 >;
 
-function mockHydra(responses: Responses = {}): {
+function mockHydra(
+	responses: Responses = {},
+	opts: { collection?: string | null; allowedDatabases?: string[]; allowedCollections?: string[] } = {},
+): {
 	hydra: HydraDB;
 	calls: RecordedCall[];
 } {
 	const calls: RecordedCall[] = [];
+
 	const record =
-		(method: string, fallback: unknown) => (args?: Record<string, unknown>) => {
+		(method: string, fallback: unknown) =>
+		(args?: Record<string, unknown>, requestOptions?: { abortSignal?: AbortSignal }) => {
 			calls.push({ method, args: args ?? {} });
+
 			const data = method in responses
 				? responses[method as keyof Responses]
 				: fallback;
-			return Promise.resolve({ data, success: true });
+
+			// A function response takes over the call, for tests that need the
+			// request's abort signal or a response that never arrives.
+			if (typeof data === "function") {
+				return (data as (a: unknown, ro: unknown) => Promise<unknown>)(args, requestOptions);
+			}
+
+			// camelCase because that is what the SDK actually returns — verified
+			// against prod, where an earlier snake_case mock here agreed with a
+			// wrong assumption in the reader and hid the bug from this suite.
+			return Promise.resolve({ data, success: true, meta: { requestId: "req-from-meta" } });
 		};
 
 	const sdk = {
@@ -53,12 +73,101 @@ function mockHydra(responses: Responses = {}): {
 			relations: record("relations", {}),
 			status: record("status", {}),
 		},
+		databases: {
+			collections: record("collections", { collections: ["engineering", "sales"] }),
+			stats: record("stats", {
+				knowledgeCollection: { rowCount: 265 },
+				memoryCollection: { rowCount: 1 },
+			}),
+		},
+		// The SDK 2.1.4 serializer drops request fields it predates (titles on
+		// /query, filters on /context/list), so those paths use the SDK's
+		// authenticated raw fetch. Record the parsed body under the endpoint's
+		// last path segment so a boundary test can assert what was actually sent.
+		fetch: async (input: string | URL | Request, init?: RequestInit) => {
+			const path = String(typeof input === "object" && "url" in input ? input.url : input);
+			const method = path.split("/").filter(Boolean).pop() ?? "fetch";
+			calls.push({ method: `${method}-fetch`, args: JSON.parse(String(init?.body ?? "{}")) });
+			const data = method === "query" ? { chunks: [] } : "list" in responses ? responses.list : { sources: [], total: 0 };
+			return new Response(JSON.stringify({ success: true, data }), {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			});
+		},
 	} as unknown as HydraDBClient;
 
+	const feedbackResponseSchema = z.object({
+		recorded: z.boolean().optional(),
+		feedback_id: z.string().optional(),
+		request_id: z.string().optional(),
+		message: z.string().optional(),
+		created_at: z.string().optional(),
+	});
+
+	const feedbackResponse = feedbackResponseSchema.optional().parse(responses.feedback) ?? {};
+
+	const raw = {
+		token: "t",
+		baseUrl: "https://api.test",
+		timeoutMs: 5000,
+		maxRetries: 0,
+		fetchFn: async (_url: string | URL | Request, init?: RequestInit) => {
+			calls.push({ method: "feedback", args: JSON.parse(String(init?.body ?? "{}")) });
+
+			const body = {
+				data: {
+					recorded: true,
+					feedback_id: "fb_1",
+					request_id: "r1",
+					...feedbackResponse,
+				},
+				success: true,
+			};
+
+			return new Response(JSON.stringify(body), {
+				status: 201,
+				headers: { "content-type": "application/json" },
+			});
+		},
+	};
+
 	const hydra = new HydraDB(
-		{ token: "t", database: "db_test", collection: "col_test" },
+		{
+			token: "t",
+			database: "db_test",
+			// `null` deliberately omits the field: the consent screen's
+			// "no specific collection" state, under which the model must
+			// discover and choose collections itself.
+			...(opts.collection === null
+				? {}
+				: { collection: opts.collection ?? "col_test" }),
+			...(opts.allowedDatabases ? { allowedDatabases: opts.allowedDatabases } : {}),
+			...(opts.allowedCollections ? { allowedCollections: opts.allowedCollections } : {}),
+		},
 		sdk,
+		raw,
 	);
+
+	// Feedback POSTs over the hand-rolled HTTP path, not the SDK (its generated
+	// model strips request_id — see FeedbackResource.submit). Only the wire is
+	// faked, through the transport's injectable fetchFn, so the REAL submit runs:
+	// stubbing the method instead would skip the validation and normalisation
+	// that live inside it, and those are most of what is worth testing here.
+	// The subgraph read takes the raw HTTP path, not the SDK, so it is stubbed
+	// on the resource: without this it throws "no HTTP transport configured".
+	// The stub records like every SDK method so dispatch-level tests cover it.
+	(hydra.context as unknown as Record<string, unknown>).subgraph = record("subgraph", {
+		seed_source_id: "s1",
+		sources: [],
+		relations: [],
+		auxiliary_relations: [],
+		is_truncated: false,
+		auxiliary_truncated: false,
+		max_depth_reached: 0,
+		success: true,
+		message: "ok",
+	});
+
 	return { hydra, calls };
 }
 
@@ -67,6 +176,7 @@ async function connect(hydra: HydraDB) {
 	const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
 	const client = new Client({ name: "test", version: "0.0.0" });
 	await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+
 	return client;
 }
 
@@ -162,6 +272,7 @@ test("deprecated alias warns exactly once per process, across two server instanc
 	// Two independent server instances in the same process.
 	const clientA = await connect(mockHydra().hydra);
 	const clientB = await connect(mockHydra().hydra);
+
 	try {
 		await clientA.callTool({ name: "hydra_db_search", arguments: { query: "x" } });
 		await clientB.callTool({ name: "hydra_db_search", arguments: { query: "y" } });
@@ -184,7 +295,7 @@ test("deprecated alias warns exactly once per process, across two server instanc
 	await clientB.close();
 });
 
-test("canonical hydradb_query still renders the empty-result message", async () => {
+test("empty query result names the collection that was searched and points at discovery", async () => {
 	const { hydra } = mockHydra();
 	const client = await connect(hydra);
 
@@ -192,8 +303,30 @@ test("canonical hydradb_query still renders the empty-result message", async () 
 		name: "hydradb_query",
 		arguments: { query: "anything" },
 	});
+
 	const text = (result.content as { type: string; text: string }[])[0]!.text;
-	assert.equal(text, "No relevant context items found in Hydra DB.");
+	// mockHydra pins collection "col_test": the message must say WHICH partition
+	// came back empty and how to look elsewhere, not a bare "nothing found"
+	// that reads as "the data does not exist".
+	assert.match(text, /collection "col_test" of database "db_test"/);
+	assert.match(text, /hydradb_list_collections/);
+
+	await client.close();
+});
+
+test("empty query result with no default collection says the workspace default ran", async () => {
+	// No collections exist, so there is nothing to widen to and the default ran.
+	const { hydra } = mockHydra({ collections: { collections: [] } }, { collection: null });
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_query",
+		arguments: { query: "anything" },
+	});
+
+	const text = (result.content as { type: string; text: string }[])[0]!.text;
+	assert.match(text, /workspace default/);
+	assert.match(text, /hydradb_list_collections/);
 
 	await client.close();
 });
@@ -268,6 +401,7 @@ function mockHydraWithDelete(deleteResponse: Record<string, unknown>): HydraDB {
 			delete: () => Promise.resolve({ data: deleteResponse, success: true }),
 		},
 	} as unknown as HydraDBClient;
+
 	return new HydraDB({ token: "t", database: "db_test" }, sdk);
 }
 
@@ -279,6 +413,7 @@ async function deleteText(
 	const result = await client.callTool({ name: "hydradb_delete", arguments: args });
 	const text = (result.content as { type: string; text: string }[])[0]!.text;
 	await client.close();
+
 	return text;
 }
 
@@ -365,6 +500,7 @@ async function ingestText(
 	const { hydra } = mockHydra({ ingest });
 	const client = await connect(hydra);
 	const result = await client.callTool({ name: "hydradb_ingest", arguments: args });
+
 	return ((result.content as { text: string }[])[0]?.text ?? "");
 }
 
@@ -457,12 +593,14 @@ test("hydradb_query emits source ids the other tools accept", async () => {
 			],
 		},
 	});
+
 	const client = await connect(hydra);
 
 	const result = await client.callTool({
 		name: "hydradb_query",
 		arguments: { query: "indentation" },
 	});
+
 	const text = (result.content as { text: string }[])[0]!.text;
 
 	// One block now, not two. The id rides in the chunk header alongside the
@@ -509,6 +647,7 @@ async function listText(
 	const client = await connect(hydra);
 	const result = await client.callTool({ name: "hydradb_list", arguments: args });
 	await client.close();
+
 	return { text: (result.content as { text: string }[])[0]?.text ?? "", calls };
 }
 
@@ -532,6 +671,127 @@ test("hydradb_list says how much of the corpus a memory page covered", async () 
 	assert.match(text, /2 of 412/, "must not present one page as the whole store");
 	assert.match(text, /page 1/);
 	assert.match(text, /page=2/, "must say how to reach the rest");
+});
+
+// A provider-id/URL selector only means anything on the knowledge corpus. An
+// earlier version dropped it on the memory branch, so `kind:"memory"` with an
+// external_id returned an unrelated, unfiltered memory instead of erroring.
+test("hydradb_list rejects every source selector on the memory corpus before a request", async () => {
+	for (const selector of [
+		{ external_id: "123456" },
+		{ url: "https://example.test/wiki/pages/123456" },
+		{ provider: "confluence" },
+		{ external_id: "123456", provider: "confluence" },
+	]) {
+		const { hydra, calls } = mockHydra({ list: { user_memories: [], total: 0 } });
+		const client = await connect(hydra);
+		try {
+			const result = await client.callTool({
+				name: "hydradb_list",
+				arguments: { kind: "memory", ...selector },
+			});
+			assert.equal(result.isError, true, "must not silently ignore the selector");
+			assert.match((result.content as { text: string }[])[0]!.text, /only valid with kind: "knowledge"/);
+			assert.equal(calls.length, 0, "rejected selectors must not list unrelated memories");
+		} finally {
+			await client.close();
+		}
+	}
+});
+
+test("hydradb_list resolves a knowledge source by provider id through source_fields", async () => {
+	const { hydra, calls } = mockHydra({
+		list: { sources: [{ id: "src-confluence-1", title: "Example Architecture" }], total: 1 },
+	});
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_list",
+		arguments: { kind: "knowledge", external_id: "123456", provider: "confluence" },
+	});
+
+	assert.notEqual(result.isError, true);
+	assert.match((result.content as { text: string }[])[0]!.text, /src-confluence-1/);
+	// filters ride the raw-fetch bypass (SDK serializer drops them), so assert on
+	// the body actually sent to /context/list.
+	const call = calls.find((c) => c.method === "list-fetch");
+	assert.ok(call, "a source-field list must reach /context/list");
+	assert.deepEqual(call.args.filters, {
+		source_fields: { app_external_id: "123456", app_provider: "confluence" },
+	});
+	assert.equal(call.args.type, "knowledge");
+	assert.equal(call.args.database, "db_test");
+	await client.close();
+});
+
+test("hydradb_list combines source selectors without losing scope, ACL, ids or pagination", async () => {
+	const { hydra, calls } = mockHydra({ list: { sources: [], total: 0 } });
+	const client = await connect(hydra);
+	try {
+		const result = await client.callTool({
+			name: "hydradb_list",
+			arguments: {
+				kind: "knowledge", external_id: "page-1", provider: "confluence",
+				url: "https://example.test/wiki/pages/page-1", ids: ["source-1"],
+				database: " customer_db ", collection: " research ", acl: ["user-1"],
+				page: 2, page_size: 10,
+			},
+		});
+		assert.notEqual(result.isError, true);
+		assert.deepEqual(calls.map((call) => call.method), ["list-fetch"], "no unfiltered retry");
+		assert.deepEqual(calls[0]!.args, {
+			database: "customer_db", collection: "research", type: "knowledge",
+			ids: ["source-1"], page: 2, page_size: 10, acl: ["user-1"],
+			filters: { source_fields: {
+				app_external_id: "page-1", url: "https://example.test/wiki/pages/page-1", app_provider: "confluence",
+			} },
+			group_threads: false,
+		});
+		const text = (result.content as { text: string }[])[0]!.text;
+		assert.match(text, /No visible sources.*page 2.*customer_db.*research/);
+		assert.match(text, /does not prove the document was never ingested/);
+		assert.match(text, /ACL unchanged/);
+	} finally {
+		await client.close();
+	}
+});
+
+test("hydradb_list URL-only lookup identifies the default workspace on an empty result", async () => {
+	const { hydra, calls } = mockHydra({ list: { sources: [], total: 0 } }, { collection: null });
+	const client = await connect(hydra);
+	try {
+		const result = await client.callTool({
+			name: "hydradb_list",
+			arguments: { kind: "knowledge", url: "https://example.test/wiki/pages/page-1" },
+		});
+		assert.notEqual(result.isError, true);
+		assert.deepEqual(calls[0]!.args.filters, {
+			source_fields: { url: "https://example.test/wiki/pages/page-1" },
+		});
+		assert.equal(calls[0]!.args.collection, undefined);
+		assert.match((result.content as { text: string }[])[0]!.text, /No visible sources.*db_test.*workspace default/);
+	} finally {
+		await client.close();
+	}
+});
+
+test("hydradb_list source lookups respect database and collection confinement", async () => {
+	for (const override of [{ database: "forbidden" }, { collection: "forbidden" }]) {
+		const { hydra, calls } = mockHydra({}, {
+			allowedDatabases: ["db_test"], allowedCollections: ["col_test"],
+		});
+		const client = await connect(hydra);
+		try {
+			const result = await client.callTool({
+				name: "hydradb_list",
+				arguments: { kind: "knowledge", external_id: "page-1", ...override },
+			});
+			assert.equal(result.isError, true);
+			assert.equal(calls.length, 0, "forbidden scope must fail before any outbound request");
+		} finally {
+			await client.close();
+		}
+	}
 });
 
 test("hydradb_list forwards page and page_size for memories", async () => {
@@ -671,11 +931,13 @@ test("generated conversation source ids do not collide within a millisecond", as
 		.filter((c) => c.method === "ingest")
 		.map((c) => {
 			const item = (JSON.parse(String(c.args.memories)) as Record<string, unknown>[])[0]!;
+
 			return String(item.source_id);
 		});
 
 	assert.equal(ids.length, 20);
 	assert.equal(new Set(ids).size, 20, "every generated source id must be distinct");
+
 	for (const id of ids) {
 		assert.match(id, /^mcp-conversation-\d+-[0-9a-f]{8}$/);
 	}
@@ -698,6 +960,7 @@ test("an explicit source_id is still used verbatim", async () => {
 	const item = (
 		JSON.parse(String(calls.find((c) => c.method === "ingest")!.args.memories)) as Record<string, unknown>[]
 	)[0]!;
+
 	assert.equal(item.source_id, "session-42");
 
 	await client.close();
@@ -752,6 +1015,7 @@ async function inspectText(
 	const client = await connect(hydra);
 	const result = await client.callTool({ name: "hydradb_inspect", arguments: args });
 	await client.close();
+
 	return (result.content as { text: string }[])[0]?.text ?? "";
 }
 
@@ -948,6 +1212,7 @@ test("hydradb_status reports per-source indexing state", async () => {
 				}),
 		},
 	} as unknown as HydraDBClient;
+
 	const client2 = await connect(
 		new HydraDB({ token: "t", database: "db_test" }, sdk),
 	);
@@ -956,6 +1221,7 @@ test("hydradb_status reports per-source indexing state", async () => {
 		name: "hydradb_status",
 		arguments: { ids: ["s1", "s2", "s3"] },
 	});
+
 	const out = (result.content as { text: string }[])[0]!.text;
 
 	assert.match(out, /s1: completed/);
@@ -978,6 +1244,7 @@ test("hydradb_status says when everything is settled", async () => {
 				}),
 		},
 	} as unknown as HydraDBClient;
+
 	const client = await connect(new HydraDB({ token: "t", database: "db_test" }, sdk));
 
 	const result = await client.callTool({
@@ -1060,6 +1327,7 @@ test("hydradb_inspect never inlines binary content", async () => {
 
 test("hydradb_inspect caps long text and says how to continue", async () => {
 	const body = "x".repeat(50_000);
+
 	const text = await inspectText(
 		{ success: true, content: body },
 		{ source_id: "s1" },
@@ -1072,6 +1340,7 @@ test("hydradb_inspect caps long text and says how to continue", async () => {
 
 test("hydradb_inspect honours offset and limit", async () => {
 	const body = "abcdefghij".repeat(1000); // 10k chars
+
 	const text = await inspectText(
 		{ success: true, content: body },
 		{ source_id: "s1", offset: 5000, limit: 100 },
@@ -1158,6 +1427,7 @@ async function callRaw(
 	const client = await connect(hydra);
 	const result = await client.callTool({ name, arguments: args });
 	await client.close();
+
 	return {
 		text: (result.content as { text: string }[])[0]?.text ?? "",
 		isError: result.isError,
@@ -1228,6 +1498,7 @@ test("a successful delete is not flagged as an error", async () => {
 // question the caller can settle by retrying.
 test("in-flight tool calls are tracked so shutdown can wait for them", async () => {
 	let release!: () => void;
+
 	const blocked = new Promise<void>((resolve) => {
 		release = resolve;
 	});
@@ -1235,6 +1506,7 @@ test("in-flight tool calls are tracked so shutdown can wait for them", async () 
 	const sdk = {
 		query: async () => {
 			await blocked;
+
 			return { data: { chunks: [] }, success: true };
 		},
 	} as unknown as HydraDBClient;
@@ -1270,6 +1542,7 @@ test("a failing tool call still decrements the in-flight count", async () => {
 	const sdk = {
 		query: () => Promise.reject(new Error("boom")),
 	} as unknown as HydraDBClient;
+
 	const client = await connect(new HydraDB({ token: "t", database: "db" }, sdk));
 
 	await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
@@ -1278,6 +1551,27 @@ test("a failing tool call still decrements the in-flight count", async () => {
 		inFlightCount(),
 		0,
 		"a thrown handler must not leave the process permanently undrainable",
+	);
+	await client.close();
+});
+
+// A handler that rejects an argument combination BEFORE it awaits anything
+// throws synchronously; trackInFlight must still decrement, or shutdown hangs.
+// The list source-selector guard (kind:"memory" + external_id) is such a path.
+test("a synchronously-rejected tool call still decrements the in-flight count", async () => {
+	const { hydra } = mockHydra({ list: { user_memories: [], total: 0 } });
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_list",
+		arguments: { kind: "memory", external_id: "123456" },
+	});
+
+	assert.equal(result.isError, true, "the guard should reject, not silently pass");
+	assert.equal(
+		inFlightCount(),
+		0,
+		"a synchronous throw must not leave the process permanently undrainable",
 	);
 	await client.close();
 });
@@ -1310,6 +1604,7 @@ test("no new tool call is accepted once shutdown has begun", async () => {
 	const client = await connect(hydra);
 
 	beginShutdown();
+
 	try {
 		const result = await client.callTool({
 			name: "hydradb_query",
@@ -1333,7 +1628,9 @@ test("no new tool call is accepted once shutdown has begun", async () => {
 });
 
 test("calls are accepted again once the shutdown flag is cleared", async () => {
-	const { hydra, calls } = mockHydra();
+	// mockHydraWithLayout so the layout probe lands in `raw`, not `calls` — the
+	// assertion below counts the SDK calls a query makes.
+	const { hydra, calls } = mockHydraWithLayout("split");
 	const client = await connect(hydra);
 
 	await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
@@ -1345,6 +1642,7 @@ test("calls are accepted again once the shutdown flag is cleared", async () => {
 /** Tool names advertised by a server built under the given env. */
 async function listedTools(legacy: string | undefined): Promise<string[]> {
 	const previous = process.env.HYDRADB_MCP_LEGACY_TOOLS;
+
 	if (legacy == null) delete process.env.HYDRADB_MCP_LEGACY_TOOLS;
 	else process.env.HYDRADB_MCP_LEGACY_TOOLS = legacy;
 
@@ -1354,6 +1652,7 @@ async function listedTools(legacy: string | undefined): Promise<string[]> {
 
 	if (previous == null) delete process.env.HYDRADB_MCP_LEGACY_TOOLS;
 	else process.env.HYDRADB_MCP_LEGACY_TOOLS = previous;
+
 	return tools.map((t) => t.name);
 }
 
@@ -1367,9 +1666,11 @@ test("deprecated aliases are not registered by default", async () => {
 	for (const canonical of CANONICAL_TOOL_NAMES) {
 		assert.ok(names.includes(canonical), `${canonical} must always be registered`);
 	}
+
 	for (const alias of DEPRECATED_TOOL_NAMES) {
 		assert.ok(!names.includes(alias), `${alias} must be off by default`);
 	}
+
 	// The graph family IS on by default — it is a product surface with no other
 	// client exposing it, not a legacy alias.
 	assert.equal(
@@ -1384,6 +1685,7 @@ test("HYDRADB_MCP_LEGACY_TOOLS restores every alias", async () => {
 	for (const alias of DEPRECATED_TOOL_NAMES) {
 		assert.ok(names.includes(alias), `${alias} should return when opted in`);
 	}
+
 	assert.equal(
 		names.length,
 		CANONICAL_TOOL_NAMES.length +
@@ -1396,12 +1698,14 @@ test("the legacy opt-in accepts the usual truthy spellings and nothing else", as
 	for (const on of ["1", "true", "TRUE", "yes", "on", " 1 "]) {
 		assert.ok(legacyToolsEnabled({ HYDRADB_MCP_LEGACY_TOOLS: on }), `"${on}" should enable`);
 	}
+
 	for (const off of ["0", "false", "no", "off", "", "maybe"]) {
 		assert.ok(
 			!legacyToolsEnabled({ HYDRADB_MCP_LEGACY_TOOLS: off }),
 			`"${off}" should not enable`,
 		);
 	}
+
 	assert.ok(!legacyToolsEnabled({}));
 });
 
@@ -1409,13 +1713,16 @@ test("the legacy opt-in accepts the usual truthy spellings and nothing else", as
 test("dropping the aliases materially shrinks the tool manifest", async () => {
 	const measure = async (legacy: string | undefined) => {
 		const previous = process.env.HYDRADB_MCP_LEGACY_TOOLS;
+
 		if (legacy == null) delete process.env.HYDRADB_MCP_LEGACY_TOOLS;
 		else process.env.HYDRADB_MCP_LEGACY_TOOLS = legacy;
 		const client = await connect(mockHydra().hydra);
 		const size = JSON.stringify((await client.listTools()).tools).length;
 		await client.close();
+
 		if (previous == null) delete process.env.HYDRADB_MCP_LEGACY_TOOLS;
 		else process.env.HYDRADB_MCP_LEGACY_TOOLS = previous;
+
 		return size;
 	};
 
@@ -1456,6 +1763,7 @@ test("hydradb_list still serves each family when kind is given", async () => {
 			{ user_memories: [], sources: [], total: 0 },
 			{ kind },
 		);
+
 		assert.equal(calls.find((c) => c.method === "list")?.args.type, kind);
 	}
 });
@@ -1479,6 +1787,7 @@ test("hydradb_ingest derives a title instead of stamping a constant", async () =
 		const item = (
 			JSON.parse(String(calls.find((c) => c.method === "ingest")!.args.memories)) as Record<string, unknown>[]
 		)[0]!;
+
 		assert.equal(item.title, expected, `title derived from: ${JSON.stringify(text)}`);
 		assert.notEqual(item.title, "MCP Memory");
 		await client.close();
@@ -1496,6 +1805,7 @@ test("a long first line is truncated rather than used whole as a title", async (
 	const item = (
 		JSON.parse(String(calls.find((c) => c.method === "ingest")!.args.memories)) as Record<string, unknown>[]
 	)[0]!;
+
 	assert.ok(String(item.title).length <= 61, `title too long: ${item.title}`);
 	assert.match(String(item.title), /…$/);
 	await client.close();
@@ -1512,6 +1822,7 @@ test("an explicit title always wins", async () => {
 	const item = (
 		JSON.parse(String(calls.find((c) => c.method === "ingest")!.args.memories)) as Record<string, unknown>[]
 	)[0]!;
+
 	assert.equal(item.title, "Deployment rollback policy");
 	await client.close();
 });
@@ -1530,6 +1841,7 @@ test("every tool declares all four behaviour hints explicitly", async () => {
 
 	for (const tool of tools) {
 		const a = tool.annotations ?? {};
+
 		for (const hint of [
 			"readOnlyHint",
 			"destructiveHint",
@@ -1543,6 +1855,7 @@ test("every tool declares all four behaviour hints explicitly", async () => {
 			);
 		}
 	}
+
 	await client.close();
 });
 
@@ -1616,6 +1929,7 @@ test("hydradb_list accepts ids and the old source_ids spelling", async () => {
 			{ user_memories: [], total: 0 },
 			{ kind: "memory", [key]: ["s1", "s2"] },
 		);
+
 		assert.deepEqual(calls.find((c) => c.method === "list")?.args.ids, ["s1", "s2"]);
 	}
 });
@@ -1657,11 +1971,14 @@ test("hydradb_list returns structured items alongside the text", async () => {
 			pagination: { page: 1, page_size: 2, total_pages: 206, has_next: true },
 		},
 	});
+
 	const client = await connect(hydra);
+
 	const result = await client.callTool({
 		name: "hydradb_list",
 		arguments: { kind: "memory" },
 	});
+
 	await client.close();
 
 	const structured = result.structuredContent as Record<string, unknown>;
@@ -1685,11 +2002,14 @@ test("hydradb_ingest returns the created id as structured data", async () => {
 			results: [{ id: "srv-9", status: "completed", error: "" }],
 		},
 	});
+
 	const client = await connect(hydra);
+
 	const result = await client.callTool({
 		name: "hydradb_ingest",
 		arguments: { text: "a note" },
 	});
+
 	await client.close();
 
 	const structured = result.structuredContent as Record<string, unknown>;
@@ -1709,10 +2029,12 @@ test("hydradb_delete reports its outcome as structured data", async () => {
 	for (const [response, expected] of cases) {
 		const { hydra } = mockHydra({ delete: response });
 		const client = await connect(hydra);
+
 		const result = await client.callTool({
 			name: "hydradb_delete",
 			arguments: { id: "m1", kind: "memory" },
 		});
+
 		await client.close();
 
 		const structured = result.structuredContent as Record<string, unknown>;
@@ -1732,10 +2054,12 @@ test("hydradb_delete reports its outcome as structured data", async () => {
 test("an empty listing still carries structured content", async () => {
 	const { hydra } = mockHydra({ list: { user_memories: [], total: 0 } });
 	const client = await connect(hydra);
+
 	const result = await client.callTool({
 		name: "hydradb_list",
 		arguments: { kind: "memory" },
 	});
+
 	await client.close();
 
 	const structured = result.structuredContent as Record<string, unknown>;
@@ -1758,20 +2082,25 @@ test("structured list items are bounded like the text preview", async () => {
 			total: 20,
 		},
 	});
+
 	const client = await connect(hydra);
+
 	const result = await client.callTool({
 		name: "hydradb_list",
 		arguments: { kind: "memory" },
 	});
+
 	await client.close();
 
 	const items = (result.structuredContent as { items: { content: string }[] }).items;
+
 	for (const item of items) {
 		assert.ok(
 			item.content.length <= 153,
 			`structured content must be previewed, got ${item.content.length} chars`,
 		);
 	}
+
 	assert.ok(JSON.stringify(items).length < 5000, "the whole payload must stay small");
 });
 
@@ -1780,10 +2109,12 @@ test("structured list items are bounded like the text preview", async () => {
 test("hydradb_inspect rejects conflicting id and source_id", async () => {
 	const { hydra, calls } = mockHydra();
 	const client = await connect(hydra);
+
 	const result = await client.callTool({
 		name: "hydradb_inspect",
 		arguments: { id: "wanted", source_id: "different" },
 	});
+
 	await client.close();
 
 	assert.equal(result.isError, true);
@@ -1794,10 +2125,12 @@ test("hydradb_inspect rejects conflicting id and source_id", async () => {
 test("matching id and source_id are accepted", async () => {
 	const { hydra, calls } = mockHydra({ inspect: { success: true, content: "body" } });
 	const client = await connect(hydra);
+
 	const result = await client.callTool({
 		name: "hydradb_inspect",
 		arguments: { id: "same", source_id: "same" },
 	});
+
 	await client.close();
 
 	assert.notEqual(result.isError, true);
@@ -1807,10 +2140,12 @@ test("matching id and source_id are accepted", async () => {
 test("hydradb_list rejects conflicting ids and source_ids", async () => {
 	const { hydra, calls } = mockHydra();
 	const client = await connect(hydra);
+
 	const result = await client.callTool({
 		name: "hydradb_list",
 		arguments: { kind: "memory", ids: ["a"], source_ids: ["b"] },
 	});
+
 	await client.close();
 
 	assert.equal(result.isError, true);
@@ -1834,10 +2169,12 @@ test("hydradb_list accepts the same ids in a different order", async () => {
 test("hydradb_list still rejects genuinely different id sets", async () => {
 	const { hydra, calls } = mockHydra();
 	const client = await connect(hydra);
+
 	const result = await client.callTool({
 		name: "hydradb_list",
 		arguments: { kind: "memory", ids: ["a", "b"], source_ids: ["a", "c"] },
 	});
+
 	await client.close();
 
 	assert.equal(result.isError, true);
@@ -1850,10 +2187,12 @@ test("hydradb_list still rejects genuinely different id sets", async () => {
 test("hydradb_list rejects id sets that differ only by repetition", async () => {
 	const { hydra, calls } = mockHydra();
 	const client = await connect(hydra);
+
 	const result = await client.callTool({
 		name: "hydradb_list",
 		arguments: { kind: "memory", ids: ["a", "b"], source_ids: ["a", "a"] },
 	});
+
 	await client.close();
 
 	assert.equal(result.isError, true, "these filters ask for different things");
@@ -1897,6 +2236,7 @@ async function queryText(args: Record<string, unknown>, chunks = longChunks(10))
 	const client = await connect(hydra);
 	const result = await client.callTool({ name: "hydradb_query", arguments: args });
 	await client.close();
+
 	return (result.content as { text: string }[])[0]!.text;
 }
 
@@ -2003,6 +2343,7 @@ test("hydradb_query sends query_by=text whenever an operator is set", async () =
 	for (const operator of ["or", "and", "phrase"] as const) {
 		const { hydra, calls } = mockHydra();
 		const client = await connect(hydra);
+
 		const result = await client.callTool({
 			name: "hydradb_query",
 			arguments: { query: "ECONNRESET on deploy", operator },
@@ -2035,6 +2376,7 @@ test("hydradb_query stays on hybrid retrieval when no operator is set", async ()
 test("hydradb_query accepts mode auto", async () => {
 	const { hydra, calls } = mockHydra();
 	const client = await connect(hydra);
+
 	const result = await client.callTool({
 		name: "hydradb_query",
 		arguments: { query: "q", mode: "auto" },
@@ -2049,6 +2391,7 @@ test("hydradb_inspect forwards expiry_seconds", async () => {
 	const { hydra, calls } = mockHydra({
 		inspect: { success: true, presignedUrl: "https://example.invalid/x" },
 	});
+
 	const client = await connect(hydra);
 	await client.callTool({
 		name: "hydradb_inspect",
@@ -2065,11 +2408,14 @@ test("hydradb_delete removes several ids in one call", async () => {
 	const { hydra, calls } = mockHydra({
 		delete: { success: true, deletedCount: 3 },
 	});
+
 	const client = await connect(hydra);
+
 	const result = await client.callTool({
 		name: "hydradb_delete",
 		arguments: { ids: ["a", "b", "c"], kind: "memory" },
 	});
+
 	await client.close();
 
 	assert.deepEqual(calls.find((c) => c.method === "delete")?.args.ids, ["a", "b", "c"]);
@@ -2083,10 +2429,12 @@ test("hydradb_delete removes several ids in one call", async () => {
 test("hydradb_delete reports a partial removal as partial", async () => {
 	const { hydra } = mockHydra({ delete: { success: true, deletedCount: 1 } });
 	const client = await connect(hydra);
+
 	const result = await client.callTool({
 		name: "hydradb_delete",
 		arguments: { ids: ["a", "b", "c"], kind: "memory" },
 	});
+
 	await client.close();
 
 	const text = (result.content as { text: string }[])[0]!.text;
@@ -2098,10 +2446,12 @@ test("hydradb_delete reports a partial removal as partial", async () => {
 test("hydradb_delete still accepts a single id", async () => {
 	const { hydra, calls } = mockHydra({ delete: { success: true, userMemoryDeleted: 1 } });
 	const client = await connect(hydra);
+
 	const result = await client.callTool({
 		name: "hydradb_delete",
 		arguments: { id: "solo", kind: "memory" },
 	});
+
 	await client.close();
 
 	assert.deepEqual(calls.find((c) => c.method === "delete")?.args.ids, ["solo"]);
@@ -2133,6 +2483,26 @@ test("hydradb_query forwards source_ids as a retrieval filter", async () => {
 	await client.close();
 });
 
+test("hydradb_query forwards exact titles as a retrieval filter", async () => {
+	const { hydra, calls } = mockHydra();
+	(hydra.context as unknown as { query: (args: Record<string, unknown>) => Promise<unknown> }).query =
+		(args) => {
+			calls.push({ method: "query", args });
+			return Promise.resolve({ chunks: [] });
+		};
+	const client = await connect(hydra);
+	await client.callTool({
+		name: "hydradb_query",
+		arguments: { query: "auth flow", titles: ["Smith, John", "Q3 Roadmap.md"] },
+	});
+
+	assert.deepEqual(calls.find((c) => c.method === "query")?.args.titles, [
+		"Smith, John",
+		"Q3 Roadmap.md",
+	]);
+	await client.close();
+});
+
 test("hydradb_query forwards metadata filters and related-chunk count", async () => {
 	const { hydra, calls } = mockHydra();
 	const client = await connect(hydra);
@@ -2155,6 +2525,7 @@ test("hydradb_query forwards metadata filters and related-chunk count", async ()
 test("num_related_chunks is capped", async () => {
 	const { hydra } = mockHydra();
 	const client = await connect(hydra);
+
 	const result = await client.callTool({
 		name: "hydradb_query",
 		arguments: { query: "q", num_related_chunks: 50 },
@@ -2195,6 +2566,7 @@ test("hydradb_ingest sends metadata and observation_date", async () => {
 	const item = (
 		JSON.parse(String(calls.find((c) => c.method === "ingest")!.args.memories)) as Record<string, unknown>[]
 	)[0]!;
+
 	assert.deepEqual(item.metadata, { project: "hydradb", kind: "decision" });
 	assert.equal(item.observation_date, "2026-03-14");
 	await client.close();
@@ -2208,6 +2580,7 @@ test("metadata keys are omitted entirely when not provided", async () => {
 	const item = (
 		JSON.parse(String(calls.find((c) => c.method === "ingest")!.args.memories)) as Record<string, unknown>[]
 	)[0]!;
+
 	assert.ok(!("metadata" in item), "an absent field must not be sent as null");
 	assert.ok(!("observation_date" in item));
 	await client.close();
@@ -2231,6 +2604,7 @@ test("an ISO date-time observation_date is kept as its calendar date", async () 
 	const item = (
 		JSON.parse(String(calls.find((c) => c.method === "ingest")!.args.memories)) as Record<string, unknown>[]
 	)[0]!;
+
 	assert.equal(item.observation_date, "2026-08-17");
 	await client.close();
 });
@@ -2248,6 +2622,7 @@ test("a date-time with an offset keeps the date the caller wrote", async () => {
 	const item = (
 		JSON.parse(String(calls.find((c) => c.method === "ingest")!.args.memories)) as Record<string, unknown>[]
 	)[0]!;
+
 	assert.equal(item.observation_date, "2026-08-17");
 	await client.close();
 });
@@ -2257,6 +2632,7 @@ test("a date-time with an offset keeps the date the caller wrote", async () => {
 test("a non-date observation_date is rejected before the request goes out", async () => {
 	const { hydra, calls } = mockHydra();
 	const client = await connect(hydra);
+
 	const result = await client.callTool({
 		name: "hydradb_ingest",
 		arguments: { text: "a note", observation_date: "last Tuesday" },
@@ -2281,6 +2657,7 @@ test("observation_date advertises its format in the input schema", async () => {
 
 	const properties = tools.find((t) => t.name === "hydradb_ingest")!.inputSchema
 		.properties as Record<string, { pattern?: string; description?: string }>;
+
 	const observationDate = properties.observation_date!;
 
 	assert.ok(
@@ -2299,6 +2676,7 @@ test("observation_date advertises its format in the input schema", async () => {
 test("knowledge ingest rejects metadata rather than dropping it", async () => {
 	const { hydra } = mockHydra();
 	const client = await connect(hydra);
+
 	const result = await client.callTool({
 		name: "hydradb_ingest",
 		arguments: { text: "doc body", kind: "knowledge", metadata: { a: 1 } },
@@ -2316,10 +2694,12 @@ test("knowledge ingest rejects metadata rather than dropping it", async () => {
 test("a boolean-only delete response is not reported as partial", async () => {
 	const { hydra } = mockHydra({ delete: { success: true, userMemoryDeleted: true } });
 	const client = await connect(hydra);
+
 	const result = await client.callTool({
 		name: "hydradb_delete",
 		arguments: { ids: ["a", "b", "c"], kind: "memory" },
 	});
+
 	await client.close();
 
 	const text = (result.content as { text: string }[])[0]!.text;
@@ -2347,10 +2727,12 @@ test("an explicit count still distinguishes partial from complete", async () => 
 	] as const) {
 		const { hydra } = mockHydra({ delete: { success: true, deletedCount } });
 		const client = await connect(hydra);
+
 		const result = await client.callTool({
 			name: "hydradb_delete",
 			arguments: { ids: ["a", "b", "c"], kind: "memory" },
 		});
+
 		await client.close();
 
 		const structured = result.structuredContent as Record<string, unknown>;
@@ -2371,10 +2753,12 @@ test("an explicit count still distinguishes partial from complete", async () => 
 /** A client whose every SDK call rejects with the given error. */
 async function failingClient(error: unknown) {
 	const reject = () => Promise.reject(error);
+
 	const sdk = {
 		query: reject,
 		context: { ingest: reject, list: reject, inspect: reject, delete: reject, status: reject },
 	} as unknown as HydraDBClient;
+
 	return connect(new HydraDB({ token: "t", database: "db" }, sdk));
 }
 
@@ -2401,8 +2785,147 @@ for (const status of [401, 403, 429, 500]) {
 			assert.match(text, new RegExp(String(status)), `${name} should carry the status`);
 		}
 
-		await client.close();
+	await client.close();
+});
+
+test("hydradb_list_collections lists collection ids", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_list_collections",
+		arguments: {},
 	});
+
+	assert.notEqual(result.isError, true);
+	const text = (result.content as { type: string; text: string }[])[0]!.text;
+	assert.match(text, /engineering/);
+	assert.match(text, /sales/);
+	// The connection's default is named, and the sizes make the listing a
+	// basis for choosing, not just a name list.
+	assert.match(text, /Default for this connection: "col_test"/);
+	assert.match(text, /265 knowledge row\(s\), 1 memory row\(s\)/);
+	const listed = calls.find((c) => c.method === "collections");
+	assert.ok(listed);
+	assert.equal(listed.args.database, "db_test");
+
+	await client.close();
+});
+
+test("hydradb_list_collections with no default tells the model it must choose the scope", async () => {
+	const { hydra } = mockHydra({}, { collection: null });
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_list_collections",
+		arguments: {},
+	});
+
+	const text = (result.content as { type: string; text: string }[])[0]!.text;
+	assert.match(text, /no default collection/);
+	assert.match(text, /pass `collection`/);
+
+	// The structured shape carries the same facts for hosts that parse it:
+	// the names as strings (unchanged contract) plus the default marker.
+	const structured = (result as { structuredContent?: Record<string, unknown> })
+		.structuredContent;
+
+	assert.equal(structured?.default, null);
+	assert.deepEqual(structured?.collections, ["engineering", "sales"]);
+
+	await client.close();
+});
+
+test("hydradb_list_collections survives a failing stats call — the listing stands alone", async () => {
+	const { hydra } = mockHydra({ stats: undefined });
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_list_collections",
+		arguments: {},
+	});
+
+	assert.notEqual(result.isError, true);
+	const text = (result.content as { type: string; text: string }[])[0]!.text;
+	assert.match(text, /engineering/);
+	assert.doesNotMatch(text, /knowledge row/);
+
+	await client.close();
+});
+
+test("hydradb_list_collections on a database with no collections says how one starts", async () => {
+	const { hydra } = mockHydra({ collections: { collections: [] } });
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_list_collections",
+		arguments: {},
+	});
+
+	const text = (result.content as { type: string; text: string }[])[0]!.text;
+	assert.match(text, /No collections in db_test/);
+	assert.match(text, /first\s+ingest/);
+
+	await client.close();
+});
+
+test("hydradb_delete_collection requires a collection name", async () => {
+	const { hydra } = mockHydra();
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_delete_collection",
+		arguments: {},
+	});
+
+	assert.equal(result.isError, true);
+	const text = (result.content as { type: string; text: string }[])[0]!.text;
+	assert.match(text, /collection/i);
+
+	await client.close();
+});
+
+test("hydradb_delete_collection schedules deletion", async () => {
+	const { hydra } = mockHydra();
+	const calls: { database: string; collection: string }[] = [];
+	hydra.databases.deleteCollection = async (params) => {
+		calls.push(params);
+
+		return { database: params.database, collection: params.collection, status: "deletion_scheduled" };
+	};
+
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_delete_collection",
+		arguments: { collection: "engineering" },
+	});
+
+	assert.notEqual(result.isError, true);
+	const text = (result.content as { type: string; text: string }[])[0]!.text;
+	assert.match(text, /engineering/);
+	assert.deepEqual(calls, [{ database: "db_test", collection: "engineering" }]);
+
+	await client.close();
+});
+
+test("hydradb_list_collections errors on a malformed payload", async () => {
+	const { hydra } = mockHydra();
+	hydra.databases.collections = async () => ({ collections: [1, 2] }) as never;
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_list_collections",
+		arguments: {},
+	});
+
+	assert.equal(result.isError, true);
+	const text = (result.content as { type: string; text: string }[])[0]!.text;
+	assert.match(text, /malformed/i);
+
+	await client.close();
+});
+
 }
 
 test("a transport failure with no status is still reported", async () => {
@@ -2438,6 +2961,7 @@ test("malformed JSON from the API surfaces as an error, not a crash", async () =
 	const sdk = {
 		query: () => Promise.resolve({ data: "this is not the expected shape", success: true }),
 	} as unknown as HydraDBClient;
+
 	const client = await connect(new HydraDB({ token: "t", database: "db" }, sdk));
 
 	// Must not throw out of the handler; the tool answers one way or the other.
@@ -2540,11 +3064,358 @@ test("empty scope overrides are rejected or fall back to default", async () => {
 		database: "   ",
 		collection: "",
 	});
+
 	assert.ok(res);
 	const queryCall = calls.find((c) => c.method === "query");
 	assert.ok(queryCall);
 	assert.equal(queryCall.args.database, "db_test");
 	assert.equal(queryCall.args.collection, "col_test");
+
+	await client.close();
+});
+
+test("query forwards recency_bias, and still defaults it to 0", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
+	assert.equal(
+		calls.find((c) => c.method === "query")?.args.recencyBias,
+		0,
+		"the host default must not change for callers that do not set it",
+	);
+
+	calls.length = 0;
+	await client.callTool({
+		name: "hydradb_query",
+		arguments: { query: "q", recency_bias: 0.9 },
+	});
+	assert.equal(
+		calls.find((c) => c.method === "query")?.args.recencyBias,
+		0.9,
+		"a caller asking for current state must be able to raise it",
+	);
+
+	await client.close();
+});
+
+test("query forwards query_apps for connector-aware retrieval", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	await client.callTool({
+		name: "hydradb_query",
+		arguments: { query: "q", query_apps: true },
+	});
+
+	assert.equal(calls.find((c) => c.method === "query")?.args.queryApps, true);
+	await client.close();
+});
+
+test("query forwards a multi-collection scope instead of the singular one", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	await client.callTool({
+		name: "hydradb_query",
+		arguments: { query: "q", collections: ["policies", "handbook"] },
+	});
+
+	const args = calls.find((c) => c.method === "query")?.args;
+	assert.deepEqual(args?.collections, ["policies", "handbook"]);
+	// The server refuses both selectors at once, so the configured default
+	// collection must not ride along beside the one the caller named.
+	assert.equal(args?.collection, undefined);
+
+	await client.close();
+});
+
+// ── hydradb_subgraph (PRO-1848) ─────────────────────────────────────────
+
+async function subgraphText(
+	result: unknown,
+	args: Record<string, unknown>,
+): Promise<{ text: string; structured: Record<string, unknown> | undefined; isError: boolean | undefined; calls: unknown[] }> {
+	const { hydra } = mockHydra();
+	const calls: unknown[] = [];
+	// The wrapper method takes the raw HTTP path, not the SDK, so it is stubbed
+	// on the resource rather than through the SDK mock.
+	(hydra.context as unknown as { subgraph: unknown }).subgraph = async (p: unknown) => {
+		calls.push(p);
+
+		return result;
+	};
+
+	const client = await connect(hydra);
+	const res = await client.callTool({ name: "hydradb_subgraph", arguments: args });
+	await client.close();
+
+	return {
+		text: (res.content as { text: string }[])[0]?.text ?? "",
+		structured: res.structuredContent as Record<string, unknown> | undefined,
+		isError: res.isError as boolean | undefined,
+		calls,
+	};
+}
+
+const subgraphOf = (members: Record<string, unknown>[], over: Record<string, unknown> = {}) => ({
+	seed_source_id: "thread-root",
+	sources: members,
+	relations: [
+		{ source: { entity_id: "thread-root" }, target: { entity_id: "reply-2" }, relations: [{ canonical_predicate: "same_thread" }] },
+		{ source: { entity_id: "reply-2" }, target: { entity_id: "doc-9" }, relations: [{ canonical_predicate: "relates_to" }] },
+	],
+	auxiliary_relations: [{}, {}, {}],
+	auxiliary_truncated: false,
+	is_truncated: false,
+	max_depth_reached: 1,
+	success: true,
+	message: "ok",
+	...over,
+});
+
+test("hydradb_subgraph lists members by depth with ids the other tools accept", async () => {
+	const { text, structured, isError, calls } = await subgraphText(
+		subgraphOf([
+			// discovered_via is the member this one was reached FROM, not a mechanism.
+			{ source_id: "reply-2", title: "re: budget", depth: 1, discovered_via: "thread-root", discovered_relation: "same_thread", app_provider: "slack" },
+			{ source_id: "thread-root", title: "Q3 budget", depth: 0 },
+		]),
+		{ id: "thread-root", depth: 3, kind: "knowledge" },
+	);
+
+	assert.notEqual(isError, true);
+	assert.match(text, /2 items connected to thread-root through 1 hop\b/);
+	// Depth order, seed first, each with a composable id.
+	const rootAt = text.indexOf("[id: thread-root]");
+	const replyAt = text.indexOf("[id: reply-2]");
+	assert.ok(rootAt >= 0 && replyAt > rootAt, "seed listed before its reply");
+	assert.match(text, /reply-2\] re: budget \(slack\) — depth 1, same_thread from thread-root/);
+	assert.match(text, /thread-root\] Q3 budget — depth 0, the item you started from/);
+	assert.match(text, /hydradb_inspect/);
+	assert.equal(structured?.member_count, 2);
+	assert.equal(structured?.truncated, false);
+	// structuredContent is ordered the same way the prose is: a client rendering
+	// the members must not see a different order from the reader.
+	assert.deepEqual((structured?.members as { id: string }[]).map((m) => m.id), ["thread-root", "reply-2"]);
+	// The edges come through, so a client can rebuild the graph rather than
+	// only the member list; the structural links stay a count plus their flag.
+	assert.deepEqual(structured?.relations, [
+		{ from: "thread-root", to: "reply-2", type: "same_thread" },
+		{ from: "reply-2", to: "doc-9", type: "relates_to" },
+	]);
+	assert.equal(structured?.structural_link_count, 3);
+	assert.equal(structured?.structural_truncated, false);
+	// Args reach the wrapper under the wrapper's names.
+	assert.deepEqual(calls[0], { id: "thread-root", kind: "knowledge", depth: 3, maxSources: undefined, acl: undefined, database: undefined, collection: undefined });
+});
+
+test("hydradb_subgraph says when max_sources clipped the traversal", async () => {
+	const { text, structured } = await subgraphText(
+		subgraphOf([{ source_id: "a", depth: 0 }, { source_id: "b", depth: 1 }], { is_truncated: true, max_depth_reached: 3 }),
+		{ id: "a" },
+	);
+
+	assert.match(text, /clipped at max_sources/);
+	assert.match(text, /3 hops/);
+	assert.equal(structured?.truncated, true);
+});
+
+test("hydradb_subgraph distinguishes 'stands alone' from 'not found'", async () => {
+	const alone = await subgraphText(subgraphOf([{ source_id: "solo", depth: 0 }], { max_depth_reached: 0 }), { id: "solo" });
+	assert.match(alone.text, /stands alone/);
+	assert.notEqual(alone.isError, true);
+
+	const missing = await subgraphText(subgraphOf([]), { id: "nope" });
+	assert.match(missing.text, /No item with id nope/);
+	assert.equal(missing.structured?.member_count, 0);
+	assert.notEqual(missing.isError, true, "an unknown id is an answer, not a failure");
+});
+
+// One member plus is_truncated means the traversal was cut at max_sources, not
+// that the item is isolated. Reporting it as isolated is a wrong answer, not a
+// terse one.
+test("hydradb_subgraph does not call a clipped result 'stands alone'", async () => {
+	const { text, structured } = await subgraphText(
+		subgraphOf([{ source_id: "solo", depth: 0 }], { is_truncated: true, max_depth_reached: 0 }),
+		{ id: "solo", max_sources: 1 },
+	);
+
+	assert.doesNotMatch(text, /stands alone/);
+	assert.match(text, /clipped at max_sources/);
+	assert.equal(structured?.truncated, true);
+});
+
+test("hydradb_subgraph reports clipped structural links", async () => {
+	const { text, structured } = await subgraphText(
+		subgraphOf([{ source_id: "a", depth: 0 }, { source_id: "b", depth: 1 }], { auxiliary_truncated: true }),
+		{ id: "a" },
+	);
+
+	assert.match(text, /structural links clipped/);
+	assert.equal(structured?.structural_truncated, true);
+});
+
+// An empty result carries the same keys as a populated one, so a client never
+// has to branch on which shape it got.
+test("hydradb_subgraph returns one structured shape whether or not it found anything", async () => {
+	const found = await subgraphText(subgraphOf([{ source_id: "a", depth: 0 }, { source_id: "b", depth: 1 }]), { id: "a" });
+	const missing = await subgraphText(subgraphOf([]), { id: "nope" });
+	assert.deepEqual(Object.keys(missing.structured ?? {}).sort(), Object.keys(found.structured ?? {}).sort());
+});
+
+test("hydradb_subgraph flags a server-reported failure", async () => {
+	const { text, isError } = await subgraphText(subgraphOf([], { success: false, message: "graph unavailable" }), { id: "x" });
+	assert.equal(isError, true);
+	assert.match(text, /graph unavailable/);
+});
+
+test("hydradb_subgraph requires an id", async () => {
+	const { hydra } = mockHydra();
+	const client = await connect(hydra);
+	const res = await client.callTool({ name: "hydradb_subgraph", arguments: {} });
+	assert.equal(res.isError, true);
+	await client.close();
+});
+
+// ── PRO-1684: acl must survive TOOL DISPATCH, not just the wrapper ───────────
+// The first cut of this feature added `acl` to the schemas and to the wrapper,
+// and passed its wrapper-level tests, while the list and inspect dispatch paths
+// silently dropped the field: they rebuild an explicit argument object from a
+// whitelist, so a parameter that is not named there is discarded. The tool then
+// ADVERTISED acl and answered unscoped, which is the worst possible shape for a
+// permission feature. These tests drive the real tool surface end to end so that
+// gap cannot reopen.
+
+test("hydradb_query forwards acl principals through dispatch", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	await client.callTool({
+		name: "hydradb_query",
+		arguments: { query: "roadmap", acl: ["alice@corp.com", "group:google:eng@corp.com"] },
+	});
+
+	const call = calls.find((c) => c.method === "query");
+	assert.ok(call, "wrapper should have called query");
+	assert.deepEqual(call.args.acl, ["alice@corp.com", "group:google:eng@corp.com"]);
+	await client.close();
+});
+
+test("hydradb_list forwards acl principals through dispatch, both kinds", async () => {
+	for (const kind of ["memory", "knowledge"] as const) {
+		const { hydra, calls } = mockHydra();
+		const client = await connect(hydra);
+
+		await client.callTool({
+			name: "hydradb_list",
+			arguments: { kind, acl: ["bob@corp.com"] },
+		});
+
+		const call = calls.find((c) => c.method === "list");
+		assert.ok(call, `wrapper should have called list for ${kind}`);
+		assert.deepEqual(call.args.acl, ["bob@corp.com"], `acl dropped on kind=${kind}`);
+		await client.close();
+	}
+});
+
+test("hydradb_inspect forwards acl principals through dispatch", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	await client.callTool({
+		name: "hydradb_inspect",
+		arguments: { id: "s1", acl: ["carol@corp.com"] },
+	});
+
+	const call = calls.find((c) => c.method === "inspect");
+	assert.ok(call, "wrapper should have called inspect");
+	assert.deepEqual(call.args.acl, ["carol@corp.com"]);
+	await client.close();
+});
+
+test("hydradb_subgraph forwards acl principals through dispatch", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	await client.callTool({
+		name: "hydradb_subgraph",
+		arguments: { id: "s1", acl: ["carol@corp.com"] },
+	});
+
+	const call = calls.find((c) => c.method === "subgraph");
+	assert.ok(call, "wrapper should have called subgraph");
+	assert.deepEqual(call.args.acl, ["carol@corp.com"]);
+	await client.close();
+});
+
+test("omitting acl sends no acl field rather than an empty list", async () => {
+	// Wire hygiene, not semantics: the API treats `acl: []` exactly like an
+	// absent acl (verified against staging — both returned 134 sources where an
+	// unknown principal returned 130), so [] is NOT a way to ask for "nobody".
+	// We still send nothing rather than [] so the request says what the caller
+	// said, instead of leaning on that equivalence holding forever.
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	await client.callTool({ name: "hydradb_query", arguments: { query: "roadmap" } });
+	await client.callTool({ name: "hydradb_list", arguments: { kind: "knowledge" } });
+	await client.callTool({ name: "hydradb_inspect", arguments: { id: "s1" } });
+	await client.callTool({ name: "hydradb_subgraph", arguments: { id: "s1" } });
+
+	for (const method of ["query", "list", "inspect", "subgraph"]) {
+		const call = calls.find((c) => c.method === method);
+		assert.ok(call, `wrapper should have called ${method}`);
+		assert.equal(call.args.acl, undefined, `${method} must omit acl entirely`);
+	}
+
+	await client.close();
+});
+
+test("every tool that advertises acl actually forwards it", async () => {
+	// Guards the general failure: a schema that accepts a permission parameter
+	// the dispatch then ignores. Derived from the advertised schema, so a new
+	// acl-bearing tool is covered without editing this test.
+	const { hydra } = mockHydra();
+	const client = await connect(hydra);
+	const { tools } = await client.listTools();
+
+	const advertising = tools
+		.filter((t) => (t.inputSchema?.properties as Record<string, unknown> | undefined)?.acl != null)
+		.map((t) => t.name);
+
+	assert.ok(
+		advertising.includes("hydradb_query")
+			&& advertising.includes("hydradb_list")
+			&& advertising.includes("hydradb_inspect")
+			&& advertising.includes("hydradb_subgraph"),
+		`expected the three canonical reads plus subgraph to advertise acl, got: ${advertising.join(", ")}`,
+	);
+
+	const args: Record<string, Record<string, unknown>> = {
+		hydradb_query: { query: "q" },
+		hydradb_list: { kind: "knowledge" },
+		hydradb_inspect: { id: "s1" },
+		hydradb_subgraph: { id: "s1" },
+	};
+
+	const method: Record<string, string> = {
+		hydradb_query: "query",
+		hydradb_list: "list",
+		hydradb_inspect: "inspect",
+		hydradb_subgraph: "subgraph",
+	};
+
+	for (const name of advertising) {
+		if (args[name] == null) continue;
+		const fresh = mockHydra();
+		const c = await connect(fresh.hydra);
+		await c.callTool({ name, arguments: { ...args[name], acl: ["dan@corp.com"] } });
+		const call = fresh.calls.find((x) => x.method === method[name]);
+		assert.ok(call, `${name} should have reached the wrapper`);
+		assert.deepEqual(call.args.acl, ["dan@corp.com"], `${name} advertises acl but drops it`);
+		await c.close();
+	}
 
 	await client.close();
 });
@@ -2600,7 +3471,7 @@ function mockHydraWithLayout(type: "split" | "unified"): { hydra: HydraDB; calls
 		},
 	} as unknown as HydraDBClient;
 	const hydra = new HydraDB(
-		{ token: "t", database: "db_test", collection: "col_test", baseUrl: "https://api.test", fetch: layoutFetch(type, raw) },
+		{ token: "t", database: "db_test", collection: "col_test", baseUrl: "https://api.test", fetchFn: layoutFetch(type, raw) },
 		sdk,
 	);
 	return { hydra, calls, raw };
@@ -2665,7 +3536,7 @@ test("a defaulted kind refused by a unified database is retried once as unified;
 		databases: { list: () => Promise.resolve({ data: { databases: ["db_test"] }, success: true }) },
 	} as unknown as HydraDBClient;
 	const hydra = new HydraDB(
-		{ token: "t", database: "db_test", collection: "col_test", baseUrl: "https://api.test", fetch: layoutFetch("split", raw) },
+		{ token: "t", database: "db_test", collection: "col_test", baseUrl: "https://api.test", fetchFn: layoutFetch("split", raw) },
 		sdk,
 	);
 	const client = await connect(hydra);
@@ -2678,4 +3549,491 @@ test("a defaulted kind refused by a unified database is retried once as unified;
 	const explicit = await client.callTool({ name: "hydradb_query", arguments: { query: "q", kind: "memory" } });
 	assert.equal(explicit.isError, true, "an explicit kind is never rewritten");
 	assert.equal(raw.filter((c) => c.path === "/query").length, 1);
+});
+
+// Greptile P1 on #77: discovery forwarded the caller's database straight to the
+// SDK, beneath the resource layer's confinement check, so a database-confined
+// grant could enumerate another database's collection names and row counts.
+test("hydradb_list_collections refuses a database the connection is confined away from", async () => {
+	const { hydra, calls } = mockHydra({}, { allowedDatabases: ["db_test"] });
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_list_collections",
+		arguments: { database: "someone-else" },
+	});
+
+	assert.equal(result.isError, true);
+	const text = (result.content as { type: string; text: string }[])[0]!.text;
+	assert.match(text, /cannot use database "someone-else"/);
+	assert.equal(
+		calls.some((c) => c.method === "collections" || c.method === "stats"),
+		false,
+		"neither discovery nor stats may reach the API for an unapproved database",
+	);
+
+	await client.close();
+});
+
+test("hydradb_list_collections still lists the approved database on a confined connection", async () => {
+	const { hydra, calls } = mockHydra({}, { allowedDatabases: ["db_test"] });
+	const client = await connect(hydra);
+
+	const result = await client.callTool({ name: "hydradb_list_collections", arguments: {} });
+	assert.notEqual(result.isError, true);
+	assert.ok(calls.some((c) => c.method === "collections"));
+
+	await client.close();
+});
+
+// Greptile P2 on #77: the race bounded only the wait; the losing stats request
+// kept running. It must now be aborted, and the listing still returned.
+test("hydradb_list_collections aborts a stats call that outlives its wait", async () => {
+	__setListCollectionsStatsTimeoutForTests(20);
+	let seen: AbortSignal | undefined;
+
+	const { hydra } = mockHydra({
+		stats: (_args: unknown, ro: { abortSignal?: AbortSignal } | undefined) => {
+			seen = ro?.abortSignal;
+
+			return new Promise((_resolve, reject) => {
+				ro?.abortSignal?.addEventListener("abort", () => reject(new Error("aborted")), {
+					once: true,
+				});
+			});
+		},
+	});
+
+	try {
+		const client = await connect(hydra);
+		const result = await client.callTool({ name: "hydradb_list_collections", arguments: {} });
+		assert.notEqual(result.isError, true);
+		const text = (result.content as { type: string; text: string }[])[0]!.text;
+		assert.match(text, /engineering/);
+		assert.doesNotMatch(text, /Database-wide/);
+		assert.ok(seen, "stats must receive an abort signal");
+		assert.equal(seen!.aborted, true, "the losing stats request must be aborted, not left running");
+		await client.close();
+	} finally {
+		__setListCollectionsStatsTimeoutForTests(5000);
+	}
+});
+
+// ---- PRO-1942: a query with no collection anywhere searches every collection ----
+const queryCall = (calls: RecordedCall[]) => calls.filter((c) => c.method === "query");
+
+const clientResultSchema = z.object({
+	content: z.array(z.object({ text: z.string() })),
+	isError: z.boolean().optional(),
+});
+
+const groundTruthSchema = z.object({
+	answer: z.string().optional(),
+	source_ids: z.array(z.string()).optional(),
+});
+
+const parsedClientResult = <Result>(result: Result) => clientResultSchema.parse(result);
+
+const firstText = <Result>(result: Result) => parsedClientResult(result).content[0]!.text;
+
+const isError = <Result>(result: Result) => parsedClientResult(result).isError === true;
+
+test("every bare query lists collections afresh, so a collection written moments ago is searched", async () => {
+	const { hydra, calls } = mockHydra({}, { collection: null });
+	const client = await connect(hydra);
+	await client.callTool({ name: "hydradb_query", arguments: { query: "one" } });
+	await client.callTool({ name: "hydradb_query", arguments: { query: "two" } });
+	assert.equal(calls.filter((c) => c.method === "collections").length, 2);
+	await client.close();
+});
+
+test("a query with no collection anywhere searches every collection of the database", async () => {
+	const { hydra, calls } = mockHydra({}, { collection: null });
+	const client = await connect(hydra);
+	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
+	assert.deepEqual(queryCall(calls)[0]!.args.collections, ["engineering", "sales"]);
+	assert.match(firstText(result), /any of the 2 collections of database "db_test" \(engineering, sales\)/);
+	await client.close();
+});
+
+test("a connection with a default collection never widens", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+	await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
+	assert.equal(calls.some((c) => c.method === "collections"), false);
+	assert.equal(queryCall(calls)[0]!.args.collections, undefined);
+	await client.close();
+});
+
+test("an explicitly named collection is searched alone, not widened", async () => {
+	const { hydra, calls } = mockHydra({}, { collection: null });
+	const client = await connect(hydra);
+	await client.callTool({ name: "hydradb_query", arguments: { query: "q", collection: "sales" } });
+	assert.equal(calls.some((c) => c.method === "collections"), false);
+	assert.equal(queryCall(calls)[0]!.args.collections, undefined);
+	await client.close();
+});
+
+test("a database with one collection is searched as that collection", async () => {
+	const { hydra, calls } = mockHydra({ collections: { collections: ["only"] } }, { collection: null });
+	const client = await connect(hydra);
+	await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
+	assert.equal(queryCall(calls)[0]!.args.collection, "only");
+	assert.equal(queryCall(calls)[0]!.args.collections, undefined);
+	await client.close();
+});
+
+test("more collections than the cap keeps the default scope, and says how many there are", async () => {
+	const many = Array.from({ length: 12 }, (_, i) => `c${i}`);
+	const { hydra, calls } = mockHydra({ collections: { collections: many } }, { collection: null });
+	const client = await connect(hydra);
+	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
+	assert.equal(queryCall(calls)[0]!.args.collections, undefined);
+	assert.match(firstText(result), /12 collections, more than the 10 searched automatically/);
+	await client.close();
+});
+
+test("a failed collection listing searches exactly as before", async () => {
+	const { hydra, calls } = mockHydra(
+		{ collections: () => Promise.reject(new Error("listing down")) },
+		{ collection: null },
+	);
+
+	const client = await connect(hydra);
+	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
+	assert.notEqual(result.isError, true);
+	assert.equal(queryCall(calls)[0]!.args.collections, undefined);
+	await client.close();
+});
+
+test("a hanging collection listing does not stall the query", async () => {
+	__setFanoutListTimeoutForTests(20);
+
+	const { hydra, calls } = mockHydra(
+		{
+			collections: (_a: unknown, ro: { abortSignal?: AbortSignal } | undefined) =>
+				new Promise((_resolve, reject) => {
+					ro?.abortSignal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+				}),
+		},
+		{ collection: null },
+	);
+
+	try {
+		const client = await connect(hydra);
+		const result = await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
+		assert.notEqual(result.isError, true);
+		assert.equal(queryCall(calls)[0]!.args.collections, undefined);
+		await client.close();
+	} finally {
+		__setFanoutListTimeoutForTests(3000);
+	}
+});
+
+test("a failed multi-collection search stays an error rather than silently changing scope", async () => {
+	const { hydra, calls } = mockHydra(
+		{
+			query: (args: { collections?: unknown }) =>
+				args?.collections != null
+					? Promise.reject(new Error('sub_tenant_id "sales" query failed'))
+					: Promise.resolve({ data: { chunks: [] }, success: true }),
+		},
+		{ collection: null },
+	);
+
+	const client = await connect(hydra);
+	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
+	assert.equal(result.isError, true);
+	const qs = queryCall(calls);
+	assert.equal(qs.length, 1);
+	assert.deepEqual(qs[0]!.args.collections, ["engineering", "sales"]);
+	await client.close();
+});
+
+
+test("widening stays inside a collection confinement", async () => {
+	const { hydra, calls } = mockHydra({}, { collection: null, allowedCollections: ["sales"] });
+	const client = await connect(hydra);
+	await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
+	assert.equal(queryCall(calls)[0]!.args.collection, "sales");
+	assert.equal(queryCall(calls)[0]!.args.collections, undefined);
+	await client.close();
+});
+
+test("an unapproved database is refused before any collection listing", async () => {
+	const { hydra, calls } = mockHydra({}, { collection: null, allowedDatabases: ["db_test"] });
+	const client = await connect(hydra);
+	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "q", database: "other" } });
+	assert.equal(result.isError, true);
+	assert.match(firstText(result), /cannot use database "other"/);
+	assert.equal(calls.some((c) => c.method === "collections"), false);
+	await client.close();
+});
+
+test("an empty bare listing says where it looked and points at collections", async () => {
+	const { hydra } = mockHydra({}, { collection: null });
+	const client = await connect(hydra);
+	const result = await client.callTool({ name: "hydradb_list", arguments: { kind: "knowledge" } });
+	assert.match(firstText(result), /workspace default of database "db_test"/);
+	assert.match(firstText(result), /hydradb_list_collections/);
+	await client.close();
+});
+
+test("widened empty-result message names the trimmed database, not the raw argument", async () => {
+	const { hydra } = mockHydra({}, { collection: null });
+	const client = await connect(hydra);
+	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "q", database: "  db_test  " } });
+	assert.match(firstText(result), /database "db_test"/);
+	await client.close();
+});
+
+// --- hydradb_feedback (POST /feedback) ---
+
+test("feedback: sends the request id, and labels the row as agent-authored", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+	await client.callTool({
+		name: "hydradb_feedback",
+		arguments: {
+			request_id: "8f1c0e8a-0000-4000-8000-000000000001",
+			feedback: "top chunks were about onboarding, not billing",
+			rating: "negative",
+		},
+	});
+	const call = calls.find((c) => c.method === "feedback");
+	assert.ok(call, "feedback should reach the SDK");
+	assert.equal(call.args.request_id, "8f1c0e8a-0000-4000-8000-000000000001");
+	assert.equal(call.args.rating, "negative");
+	// Everything reaching this server came from a model. Letting the server
+	// default it to "user" would mix agent volume into the human population.
+	assert.equal(call.args.source, "agent");
+});
+
+test("feedback: ground truth is normalised — trimmed, de-duplicated, snake_case", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+	await client.callTool({
+		name: "hydradb_feedback",
+		arguments: {
+			request_id: "8f1c0e8a-0000-4000-8000-000000000002",
+			ground_truth_answer: "  the billing cycle is monthly  ",
+			ground_truth_source_ids: ["s1", " s1 ", "s2", ""],
+		},
+	});
+	const call = calls.find((c) => c.method === "feedback");
+	assert.ok(call);
+	const gt = groundTruthSchema.parse(call.args.ground_truth);
+	assert.equal(gt.answer, "the billing cycle is monthly");
+	// De-duplicated because these are SCORED: the same document twice would
+	// weight one piece of evidence as two.
+	assert.deepEqual(gt.source_ids, ["s1", "s2"]);
+});
+
+test("feedback: a submission carrying neither text nor ground truth is refused locally", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	const res = await client.callTool({
+		name: "hydradb_feedback",
+		arguments: { request_id: "8f1c0e8a-0000-4000-8000-000000000003" },
+	});
+
+	assert.equal(isError(res), true);
+	// Refused before the wire: the server would 400 on this too, and saying so
+	// without a round trip puts the message where the caller can still act.
+	assert.equal(calls.filter((c) => c.method === "feedback").length, 0);
+});
+
+test("feedback: a blank request_id names the tool that prints it", async () => {
+	const { hydra } = mockHydra();
+	const client = await connect(hydra);
+
+	const res = await client.callTool({
+		name: "hydradb_feedback",
+		arguments: { request_id: "  ", feedback: "wrong" },
+	});
+
+	assert.equal(isError(res), true);
+	const text = JSON.stringify(res);
+	assert.match(text, /hydradb_query/, "should point at where the id comes from");
+});
+
+test("feedback: recorded:false is reported as not stored, not as success", async () => {
+	const { hydra } = mockHydra({
+		feedback: { recorded: false, message: "storage unavailable" },
+	});
+
+	const client = await connect(hydra);
+
+	const res = await client.callTool({
+		name: "hydradb_feedback",
+		arguments: { request_id: "8f1c0e8a-0000-4000-8000-000000000004", feedback: "x" },
+	});
+
+	const text = JSON.stringify(res);
+	assert.match(text, /not durably stored/);
+});
+
+test("query: prints the request id so feedback has something to attach to", async () => {
+	const { hydra } = mockHydra({
+		query: { chunks: [{ chunkUuid: "c1", id: "s1", chunkContent: "hello" }] },
+	});
+
+	const client = await connect(hydra);
+
+	const res = await client.callTool({
+		name: "hydradb_query",
+		arguments: { query: "anything" },
+	});
+
+	const text = JSON.stringify(res);
+	// unwrap() keeps only `data`, so without the onMeta channel this id never
+	// reaches the agent and the feedback tool is unusable.
+	assert.match(text, /request_id: req-from-meta/);
+	assert.match(text, /hydradb_feedback/);
+});
+
+test("feedback: over-long prose is refused locally, not after a round trip", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	const res = await client.callTool({
+		name: "hydradb_feedback",
+		arguments: {
+			request_id: "8f1c0e8a-0000-4000-8000-000000000005",
+			feedback: "x".repeat(8001),
+		},
+	});
+
+	assert.equal(isError(res), true);
+	assert.equal(calls.filter((c) => c.method === "feedback").length, 0, "never reached the wire");
+});
+
+test("feedback: more than 20 metadata entries is refused locally", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+	const metadata: Record<string, string> = {};
+
+	for (let i = 0; i < 21; i++) metadata[`k${i}`] = "v";
+
+	const res = await client.callTool({
+		name: "hydradb_feedback",
+		arguments: { request_id: "8f1c0e8a-0000-4000-8000-000000000006", feedback: "x", metadata },
+	});
+
+	assert.equal(isError(res), true);
+	assert.equal(calls.filter((c) => c.method === "feedback").length, 0);
+});
+
+// The server caps the DE-DUPLICATED list, so the raw array length is the wrong
+// thing to refuse on: this request is valid and must reach the wire.
+test("feedback: 150 source ids that collapse under 100 are accepted", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+	const ids = Array.from({ length: 150 }, (_, i) => `s${i % 80}`); // 80 distinct
+
+	const res = await client.callTool({
+		name: "hydradb_feedback",
+		arguments: { request_id: "8f1c0e8a-0000-4000-8000-000000000007", ground_truth_source_ids: ids },
+	});
+
+	assert.notEqual(isError(res), true);
+	const call = calls.find((c) => c.method === "feedback");
+	assert.ok(call);
+	assert.equal(groundTruthSchema.parse(call.args.ground_truth).source_ids?.length, 80);
+});
+
+test("feedback: over 100 DISTINCT source ids is refused locally", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+	const ids = Array.from({ length: 101 }, (_, i) => `s${i}`);
+
+	const res = await client.callTool({
+		name: "hydradb_feedback",
+		arguments: { request_id: "8f1c0e8a-0000-4000-8000-000000000008", ground_truth_source_ids: ids },
+	});
+
+	assert.equal(isError(res), true);
+	assert.equal(calls.filter((c) => c.method === "feedback").length, 0);
+});
+
+// The id is the caller's handle on the row they just wrote. It went missing in
+// production for a while: FeedbackResult was written for the SDK path, which
+// camel-cases, then the call moved to the raw path, which does not rename keys —
+// so res.feedback_id read as undefined and this line silently vanished.
+test("feedback: the recorded id is echoed back, read with the wire's spelling", async () => {
+	const { hydra } = mockHydra({ feedback: { recorded: true, feedback_id: "fb_from_wire" } });
+	const client = await connect(hydra);
+
+	const res = await client.callTool({
+		name: "hydradb_feedback",
+		arguments: { request_id: "8f1c0e8a-0000-4000-8000-000000000009", feedback: "useful" },
+	});
+
+	assert.match(JSON.stringify(res), /fb_from_wire/, "the feedback id must reach the caller");
+});
+
+// `kind` defaults to "memory", so a knowledge-source id sent without one is
+// looked up in the wrong family and comes back empty. Found driving the real
+// MCP server against staging: deleting an ingested knowledge source without
+// `kind` answered "Could NOT delete memory <id> … Memory not found", which
+// reads as "your id is wrong" when the id was right and the family was not.
+// The old not-found wording made it worse by advising "check the id rather
+// than retrying" — steering away from the one thing that would have worked.
+test("hydradb_delete names the assumed kind when nothing was found", async () => {
+	const text = await deleteText({ success: true, deletedCount: 0 }, { id: "src-1" });
+
+	assert.match(text, /`kind` was not given/);
+	assert.match(text, /kind: "knowledge"/);
+	assert.doesNotMatch(
+		text,
+		/check the id rather than retrying/,
+		"must not steer away from the retry that would actually work",
+	);
+});
+
+test("hydradb_delete does not second-guess a kind the caller chose", async () => {
+	const text = await deleteText(
+		{ success: true, deletedCount: 0 },
+		{ id: "mem-1", kind: "memory" },
+	);
+
+	assert.doesNotMatch(text, /`kind` was not given/);
+	assert.match(text, /check the id rather than retrying/);
+});
+
+// The refusal path carries the same ambiguity when the refusal IS a not-found.
+// This body is what staging returned for a knowledge id sent as a memory.
+test("hydradb_delete explains an assumed kind behind a not-found refusal", async () => {
+	const text = await deleteText(
+		{
+			success: false,
+			message: "Memory not found or already deleted",
+			deletedCount: 0,
+		},
+		{ id: "src-1" },
+	);
+
+	assert.match(text, /could NOT delete/i);
+	assert.match(text, /kind: "knowledge"/);
+});
+
+// ...but only then. "Still processing" is about the family we asked for, so
+// pointing at the other one would be actively wrong advice.
+test("hydradb_delete stays quiet about kind when the refusal is not a not-found", async () => {
+	const text = await deleteText(
+		{
+			success: false,
+			message: "Source is still processing; retry deletion after ingestion completes",
+			deletedCount: 0,
+		},
+		{ id: "src-1" },
+	);
+
+	assert.match(text, /still processing/);
+	assert.doesNotMatch(
+		text,
+		/kind: "knowledge"/,
+		"a processing refusal is not a wrong-family miss",
+	);
 });

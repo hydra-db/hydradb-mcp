@@ -86,7 +86,7 @@ function makeRecorder(): { sdk: HydraDBClient; calls: RecordedCall[] } {
 		(method: string, contentType: string) =>
 		(args?: Record<string, unknown>) => {
 			calls.push({ method, args: args ?? {}, contentType });
-			return Promise.resolve({ data: {}, success: true });
+			return Promise.resolve({ data: method === "query" ? { chunks: [] } : {}, success: true });
 		};
 
 	const sdk = {

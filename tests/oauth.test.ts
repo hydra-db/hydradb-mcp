@@ -3,14 +3,14 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { after, before, test } from "node:test";
 
-import { createHttpApp } from "../src/http.js";
 import { buildAllowedHosts, resolveRequestCredentials } from "../src/http-config.js";
+import { createHttpApp } from "../src/http.js";
 import {
+	type OAuthConfig,
 	__resetIntrospectionCache,
 	introspect,
 	isAccessToken,
 	metadataUrl,
-	type OAuthConfig,
 	protectedResourceMetadata,
 	resolveOAuthConfig,
 	wwwAuthenticate,
@@ -140,6 +140,21 @@ test("introspection sends the secret and the token as a form, and maps the answe
 	const headers = calls[0].init.headers as Record<string, string>;
 	assert.equal(headers.Authorization, "Bearer s3cret");
 	assert.equal(calls[0].init.body, "token=hmat_tok1");
+});
+
+test("empty allowlists from the issuer are absent, not confine-to-nothing", async () => {
+	__resetIntrospectionCache();
+	// A confined grant that chose "no specific collection" must not parse as an
+	// EMPTY allowlist: that would refuse every per-call collection override
+	// for a grant whose user never picked a collection to allow.
+	const { fetchFn } = fakeFetch(() => ({
+		status: 200,
+		body: active({ databases: [], collections: [], collection: undefined }),
+	}));
+	const result = await introspect({ ...CONFIG, fetchFn, now: () => NOW }, "hmat_lists");
+	assert.ok(result.ok);
+	assert.equal(result.token.allowedDatabases, undefined);
+	assert.equal(result.token.allowedCollections, undefined);
 });
 
 test("a token for another resource is refused even though the issuer says it is active", async () => {
@@ -663,6 +678,37 @@ test("a collection-confined connection cannot drop a whole database", async () =
 	assert.match(r.content[0].text, /Nothing was deleted/);
 });
 
+test("a database confinement with no collection at all refuses both irreversible actions", async () => {
+	// The consent screen's blank collection means "the workspace's own", which
+	// the API resolves from the key: the connection never learns its name. So a
+	// database-confined grant with a blank collection has NOTHING to scope a
+	// deletion to, and every downstream check passes vacuously. Picking the
+	// strictest option on the screen must not be the way to the widest delete.
+	__resetIntrospectionCache();
+	introspectAnswer = () => ({
+		status: 200,
+		body: active({ database: "personal", databases: ["personal"], collection: undefined, collections: null }),
+	});
+	const call = async (args: Record<string, unknown>) => {
+		const res = await request(
+			"POST",
+			"/",
+			{ host: `127.0.0.1:${port}`, ...JSON_HEADERS, authorization: "Bearer hmat_nocol" },
+			JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "hydradb_graph_admin", arguments: args } }),
+		);
+		return JSON.parse(res.body).result;
+	};
+
+	const dropDb = await call({ action: "drop_database", database: "personal" });
+	assert.equal(dropDb.isError, true);
+	assert.match(dropDb.content[0].text, /no boundary to respect/);
+	assert.match(dropDb.content[0].text, /Nothing was deleted/);
+
+	const dropCol = await call({ action: "drop_collection", database: "personal", collection: "someone-elses" });
+	assert.equal(dropCol.isError, true);
+	assert.match(dropCol.content[0].text, /no boundary to respect/);
+});
+
 test("a database-only confinement still permits drop_database inside its list", async () => {
 	// Confined to databases but not collections: drop_database is in scope for
 	// an allowed database, and still refused for any other.
@@ -692,4 +738,27 @@ test("a database-only confinement still permits drop_database inside its list", 
 	// is a different kind of error entirely).
 	const allowed = await call("personal");
 	assert.doesNotMatch(allowed.content[0].text, /This connection is confined to/);
+});
+
+test("a database-confined OAuth connection cannot enumerate another database's collections", async () => {
+	__resetIntrospectionCache();
+	introspectAnswer = () => ({
+		status: 200,
+		body: active({ database: "personal", databases: ["personal"], collection: undefined, collections: null }),
+	});
+	const res = await request(
+		"POST",
+		"/",
+		{ host: `127.0.0.1:${port}`, ...JSON_HEADERS, authorization: "Bearer hmat_lc_confined" },
+		JSON.stringify({
+			jsonrpc: "2.0",
+			id: 1,
+			method: "tools/call",
+			params: { name: "hydradb_list_collections", arguments: { database: "work" } },
+		}),
+	);
+	assert.equal(res.status, 200, res.body);
+	const r = JSON.parse(res.body).result;
+	assert.equal(r.isError, true);
+	assert.match(r.content[0].text, /cannot use database "work"/);
 });

@@ -74,14 +74,25 @@ test("canonical wins when both canonical and deprecated are set (no warning)", (
 	assert.deepEqual(messages, []);
 });
 
-test("collection defaults when unset; baseUrl is optional", () => {
+test("collection is left to the workspace when unset; baseUrl is optional", () => {
 	const { warn } = collect();
 	const config = resolveConfig(
 		{ HYDRADB_API_KEY: "key", HYDRADB_DATABASE: "db" },
 		warn,
 	);
-	assert.equal(config.collection, "hydra-db-mcp");
+	// Undefined, not a literal: the request omits collection and the API
+	// resolves the caller's own workspace default from their API key.
+	assert.equal(config.collection, undefined);
 	assert.equal(config.baseUrl, undefined);
+});
+
+test("an explicit HYDRADB_COLLECTION is still honoured", () => {
+	const { warn } = collect();
+	const config = resolveConfig(
+		{ HYDRADB_API_KEY: "key", HYDRADB_DATABASE: "db", HYDRADB_COLLECTION: "team-notes" },
+		warn,
+	);
+	assert.equal(config.collection, "team-notes");
 });
 
 test("HYDRADB_LOG_LEVEL is canonical; the HYDRA_DB_ spelling warns but still works", () => {
