@@ -3146,6 +3146,26 @@ test("an unrelated structured 400 is not retried as unified", async () => {
 	await client.close();
 });
 
+// CORPUS_TYPE_UNSUPPORTED covers four refusals and only one of them is answered
+// by retrying as unified. The third below is the dangerous one: it is the
+// REVERSE direction, and a client that read the code alone would answer "unified
+// is only valid on a unified database" by sending unified again.
+test("the sibling refusals that share the code are not retried as unified", async () => {
+	const siblings = [
+		`invalid type "bogus": must be 'knowledge', 'memory', 'unified' or 'all'`,
+		"invalid type 'all': it selects both corpora for reads and deletes, but an ingest must name the one it writes to",
+		`type "unified" is only valid on a unified database; this database stores knowledge and memory separately`,
+	];
+	for (const message of siblings) {
+		const { hydra, raw } = refusingLayout(message, "CORPUS_TYPE_UNSUPPORTED");
+		const client = await connect(hydra);
+		const res = await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
+		assert.equal(res.isError, true, `should not have been retried: ${message}`);
+		assert.equal(raw.filter((c) => c.path === "/query").length, 0, message);
+		await client.close();
+	}
+});
+
 // The server has two wordings for this refusal and they put the words the other
 // way round: `type 'x' is not valid on a unified database` from the corpus-type
 // check, and `this database is unified: send the content as items…` from the

@@ -397,15 +397,29 @@ export function createHydraDBServer(
 	 */
 	function refusedForUnified(err: unknown): boolean {
 		if (!(err instanceof HydraWrapperError) || err.status !== 400) return false;
-		if (layoutErrorCode(err.body) === UNIFIED_LAYOUT_ERROR_CODE) return true;
-		// Fallback only: matched against the server's English prose, which is
-		// why the code above is preferred. Both refusals are covered —
-		// `type %q is not valid on a unified database` from the corpus-type
-		// check, and `this database is unified: send the content as items…`
-		// from the ingest handler, which a bare /unified database/ pattern
-		// misses because the two words are the other way round. The second one
-		// is still the ONLY path here that carries no code, so this is not dead
-		// weight even against a current server.
+		if (layoutErrorCode(err.body) === UNIFIED_LAYOUT_ERROR_CODE) {
+			// The code names the CLASS — "that `type` is not one this request can
+			// use" — and FOUR refusals share it, only one of which this retry
+			// answers. So the code decides that we are looking at a corpus-type
+			// problem, and the line below decides which one. Matching the code
+			// alone would turn the other three into a second, equally refused
+			// request:
+			//   - `invalid type "x": must be 'knowledge', 'memory', …` (unknown value)
+			//   - `invalid type 'all': … an ingest must name the one it writes to`
+			//   - `type "unified" is only valid on a unified database …` — the
+			//     REVERSE direction, where retrying as unified is exactly wrong
+			// The siblings are excluded by name rather than the target being
+			// matched by name, so a copy edit to the one wording we do want
+			// still retries. That is the whole reason to prefer the code.
+			return !/invalid type|only valid on a unified database/i.test(err.message);
+		}
+		// No code: fall back to the server's English prose. Both wordings are
+		// covered — `type %q is not valid on a unified database` from the
+		// corpus-type check, and `this database is unified: send the content as
+		// items…` from the ingest handler, which a bare /unified database/
+		// pattern misses because the two words are the other way round. That
+		// second one is still the ONLY refusal here that goes out with no code,
+		// so this is not dead weight against a current server.
 		return /is not valid on a unified database|database is unified/i.test(err.message);
 	}
 
