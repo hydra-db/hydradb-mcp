@@ -483,7 +483,22 @@ function abortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
 	if (!signal) return promise;
 	const cancelled = () =>
 		new HydraWrapperError("Hydra DB /databases → ERR: request cancelled by the caller", "/databases");
-	if (signal.aborted) return Promise.reject(cancelled());
+	if (signal.aborted) {
+		// Take the rejection off `promise` before walking away from it.
+		//
+		// This waiter is gone, so nothing below ever attaches a handler — and
+		// `promise` is the SHARED layout probe, which is allowed to fail. An
+		// unrejected failure with no observer is an unhandled rejection, and
+		// Node's default for those is to terminate the process. So one host
+		// cancelling one tool call, against a database whose probe happens to
+		// be failing, could take the whole MCP server down with it.
+		//
+		// Swallowing here loses nothing: every waiter that still cares gets the
+		// same rejection through its own `promise.then` below, and `layout()`
+		// turns it into the `split` default.
+		void promise.catch(() => {});
+		return Promise.reject(cancelled());
+	}
 	return new Promise<T>((resolve, reject) => {
 		const onAbort = () => reject(cancelled());
 		signal.addEventListener("abort", onAbort, { once: true });

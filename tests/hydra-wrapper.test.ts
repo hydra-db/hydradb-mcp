@@ -946,6 +946,38 @@ test("unified relations carries acl principals and the unified type", async () =
 // later caller who cancelled kept waiting, and a first caller who cancelled
 // failed everyone else's probe (they then read the database as split). The
 // shared request now takes no caller signal; each waiter honours its own.
+// A waiter that arrives ALREADY cancelled walks away without attaching a
+// handler to the shared probe. The probe is allowed to fail, and a failure
+// nobody observes is an unhandled rejection — which Node answers by killing the
+// process. So one host cancelling one tool call, against a database whose probe
+// happens to be down, could take the whole MCP server with it.
+test("an already-cancelled waiter does not orphan the shared probe's rejection", async () => {
+	const unhandled: unknown[] = [];
+	const onUnhandled = (reason: unknown) => unhandled.push(reason);
+	process.on("unhandledRejection", onUnhandled);
+	try {
+		const failing = fetchStub({ success: false, error: { message: "down" } }, 503);
+		const hydra = new HydraDB(
+			{ token: "t", database: "a", baseUrl: "https://api.test", fetchFn: failing.fetch, maxRetries: 0 },
+			{} as HydraDBClient,
+		);
+		const controller = new AbortController();
+		controller.abort();
+
+		await assert.rejects(
+			hydra.databases.layout("a", controller.signal),
+			(err: unknown) => err instanceof HydraWrapperError && /cancelled by the caller/.test(err.message),
+			"the cancelled caller still gets told it was cancelled",
+		);
+
+		// Rejections are reported a turn after they settle, so give the loop one.
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		assert.deepEqual(unhandled, [], "a cancelled waiter must not leave the probe's failure unobserved");
+	} finally {
+		process.off("unhandledRejection", onUnhandled);
+	}
+});
+
 test("a cancelled layout waiter rejects alone while the shared probe still serves the others", async () => {
 	let release: (r: Response) => void = () => {};
 	const gate = new Promise<Response>((resolve) => { release = resolve; });
@@ -980,6 +1012,41 @@ test("an abort during retry backoff ends the loop without another request", asyn
 		(err: unknown) => err instanceof HydraWrapperError && /cancelled by the caller/.test(err.message),
 	);
 	assert.equal(attempts, 1, "no request is made for a caller who already cancelled");
+});
+
+// The sibling test above goes through `layout()`, which wraps the probe in
+// `abortable` — so it rejects the moment the signal fires and asserts the count
+// while the backoff is still sleeping. That passes whether or not the transport
+// rechecks after the sleep, so it does NOT cover the recheck. Verified by
+// deleting the recheck and watching it stay green.
+//
+// This one takes a path with no `abortable` in it (a unified ingest goes
+// straight to sendRaw), and waits for the backoff to elapse before asserting.
+// A cancelled non-idempotent WRITE reaching the server after the caller gave up
+// is the failure being guarded here, so it is worth a test that can see it.
+test("a cancel during backoff stops the retry loop before it writes again", async () => {
+	let attempts = 0;
+	const controller = new AbortController();
+	const flaky = (() => {
+		attempts += 1;
+		// Cancel while the transport is sleeping before its retry.
+		setTimeout(() => controller.abort(), 10);
+		return Promise.resolve(new Response("upstream", { status: 503 }));
+	}) as typeof fetch;
+	const sdk = { context: { ingest() { throw new Error("SDK path must not be used for unified"); } } } as unknown as HydraDBClient;
+	const hydra = new HydraDB(
+		{ token: "t", database: "db_u", baseUrl: "https://api.test", fetchFn: flaky, maxRetries: 3 },
+		sdk,
+	);
+
+	await assert.rejects(
+		hydra.context.ingest({ kind: "unified", text: "a note" }, { signal: controller.signal }),
+		(err: unknown) => err instanceof HydraWrapperError && /cancelled by the caller/.test(err.message),
+	);
+	// Outlast the 250ms first backoff: without the post-sleep recheck the loop
+	// wakes up here and sends the write a second time.
+	await new Promise((resolve) => setTimeout(resolve, 600));
+	assert.equal(attempts, 1, "a cancelled write must not be replayed after the backoff");
 });
 
 test("the raw transport retries 5xx and network failures, never a 4xx", async () => {
