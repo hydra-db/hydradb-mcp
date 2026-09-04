@@ -3203,10 +3203,12 @@ test("the sibling refusals that share the code are not retried as unified", asyn
 		`${allOnIngest}This database is unified, so send 'unified' or omit \`type\` entirely. `,
 		`type "unified" is only valid on a unified database; this database stores knowledge and memory separately, so use "knowledge", "memory" or "all", or create a new unified database. `,
 		"items cannot be combined with type=knowledge: items are memory-shaped (text or a conversation); omit type or use the unified default. ",
-		// Not coded today, on purpose: its fix is "stop sending context_category",
-		// not "retry with another type". Covered anyway because it is one tidy-up
-		// away from being filed under this code, and it is a SPLIT database's
-		// refusal — retrying it as unified would be the reverse direction again.
+		// Carries its OWN code (CONTEXT_CATEGORY_UNSUPPORTED), on purpose: it
+		// refuses a different field, and its fix is "stop sending
+		// context_category" rather than "retry with another type". So it cannot
+		// reach the branch under test as things stand. Asserted anyway, against
+		// the day someone reuses the corpus code here — it is a SPLIT database's
+		// refusal, so retrying it as unified would be the reverse direction.
 		'context_category is only supported on a unified database, where knowledge and memory are one corpus. This database is split, so `type` already selects the corpus; omit context_category (or send "auto"). ',
 	];
 	for (const message of siblings) {

@@ -429,13 +429,18 @@ export function createHydraDBServer(
 			// when the alternative is one alternation.
 			//
 			// `only SUPPORTED on a unified database` covers one refusal that
-			// does not carry this code today: `context_category is only
-			// supported on a unified database … This database is split`. It was
-			// deliberately left uncoded because its fix is "stop sending that
-			// field", not "retry with another type" — but it is one tidy-up away
-			// from being filed under this code, and if that happened this
-			// function would answer a SPLIT database's refusal by retrying as
-			// unified, in silence.
+			// does not carry THIS code: `context_category is only supported on a
+			// unified database … This database is split`. It carries its own
+			// `CONTEXT_CATEGORY_UNSUPPORTED` instead, deliberately, because it
+			// refuses a different FIELD — the repair is "stop sending
+			// context_category", not "retry with another type", and filing it
+			// under the corpus code would send a caller round the `type` values
+			// forever.
+			//
+			// So this alternation is belt and braces: that message cannot reach
+			// this branch as things stand. It is kept because if anyone ever did
+			// reuse the corpus code there, the failure would be a SPLIT
+			// database's refusal answered by a retry as unified, in silence.
 			return !/invalid type|only (?:valid|supported) on a unified database|items cannot be combined with/i.test(
 				err.message,
 			);
