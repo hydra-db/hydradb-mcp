@@ -539,6 +539,33 @@ function readRequestId<T>(value: T): string | undefined {
 	return id !== "" ? id : undefined;
 }
 
+/**
+ * A view of a shared promise that rejects as soon as THIS caller's signal
+ * aborts, without cancelling the shared work for anyone else. Used for the
+ * memoised layout probe: many tool calls can be waiting on one request, and a
+ * host cancelling one of them must not keep it waiting, nor fail the rest.
+ */
+function abortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+	if (!signal) return promise;
+	const cancelled = () =>
+		new HydraWrapperError("Hydra DB /databases → ERR: request cancelled by the caller", "/databases");
+	if (signal.aborted) return Promise.reject(cancelled());
+	return new Promise<T>((resolve, reject) => {
+		const onAbort = () => reject(cancelled());
+		signal.addEventListener("abort", onAbort, { once: true });
+		promise.then(
+			(value) => {
+				signal.removeEventListener("abort", onAbort);
+				resolve(value);
+			},
+			(err) => {
+				signal.removeEventListener("abort", onAbort);
+				reject(err);
+			},
+		);
+	});
+}
+
 abstract class Resource {
 	/**
 	 * A raw v2 call whose wire result is run through the SDK's OWN response
@@ -1370,13 +1397,18 @@ export class DatabasesResource extends Resource {
 	 */
 	layouts(signal?: AbortSignal): Promise<Map<string, Layout>> {
 		if (!this.layoutCache) {
+			// The shared probe deliberately takes NO caller signal: it is
+			// bounded by the transport's own deadline, and it serves every
+			// tool call that arrives while it is in flight. Binding it to the
+			// first caller would let that caller's cancellation fail everyone
+			// else's, and the others would then read the database as split.
+			// Each caller's own cancellation is honoured below, per waiter.
 			this.layoutCache = this.call("/databases", () =>
 				this.rawJSON<{ details?: { database?: string; type?: string }[] }>(
 					"layout probe",
 					"GET",
 					"/databases",
 					undefined,
-					signal,
 				),
 			).then((listed) => {
 				const map = new Map<string, Layout>();
@@ -1392,7 +1424,7 @@ export class DatabasesResource extends Resource {
 				throw err;
 			});
 		}
-		return this.layoutCache;
+		return abortable(this.layoutCache, signal);
 	}
 
 	/**

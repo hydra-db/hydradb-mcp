@@ -75,6 +75,15 @@ export async function sendRaw<T>(
 			// hold the MCP host's tool timeout open for its own sake.
 			const delay = Math.min(250 * 2 ** attempt, 2_000);
 			await new Promise((resolve) => setTimeout(resolve, delay));
+			// The caller may have cancelled DURING the backoff. An abort
+			// listener registered afterwards never fires for a signal that is
+			// already aborted, so without this check the next attempt would
+			// run to completion for a caller who has already gone.
+			if (opts?.signal?.aborted) {
+				throw new HydraWrapperError(`Hydra DB ${path} → ERR: request cancelled by the caller`, path, {
+					cause: lastError,
+				});
+			}
 		}
 	}
 	throw lastError;
@@ -94,6 +103,9 @@ async function attemptRaw<T>(
 	const timer = setTimeout(() => controller.abort(), t.timeoutMs);
 	const onAbort = () => controller.abort();
 	opts?.signal?.addEventListener("abort", onAbort, { once: true });
+	// An already-aborted signal never fires "abort" again; carry it over so
+	// the fetch below is cancelled immediately instead of running for nobody.
+	if (opts?.signal?.aborted) controller.abort();
 	const doFetch = t.fetchFn ?? fetch;
 
 	try {
