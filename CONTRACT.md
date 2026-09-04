@@ -82,6 +82,7 @@ project directory) and must never denote a database, collection, or org.
 | **inspect** | fetch content, get content, fetch_content |
 | **delete** | remove, forget |
 | **relations** | graph_relations, graph_relations_by_id |
+| **subgraph** | source_subgraph, connected subgraph, thread (as a graph read) — Group 2 only |
 
 ### The `status` disambiguation (mandatory)
 
@@ -134,6 +135,7 @@ current SDK method internally. Language casing: `snake_case` in Python, `camelCa
 | `context.inspect(database, id, …)` | `context.inspect(…)` | was "fetch content" |
 | `context.ingestionStatus(database, ids)` | `context.status(…)` | **renamed away from `status`** |
 | `context.relations(database, id?, …)` | `context.relations(…)` | — |
+| `context.subgraph(database, id, depth?, maxSources?)` | *(none — raw `GET /context/{id}/subgraph`)* | connected subgraph; **no SDK resource yet** |
 | `context.delete(database, ids, kind)` | `context.delete(…)` | one path for memory + knowledge |
 | `graph.query(database, collection, query, params?)` | *(none — raw `POST /byog/query`)* | BYOG Cypher; **no SDK resource at 2.1.2** |
 | `graph.createDatabase(database)` | *(none — raw `POST /byog/databases`)* | — |
@@ -182,6 +184,7 @@ skill files and persisted to `state.json`; the CLI's `--output json` is a docume
 | `hydradb_list` | `hydra_db_list_memories`, `hydra_db_list_sources` |
 | `hydradb_inspect` | `hydra_db_fetch_content` |
 | `hydradb_delete` | `hydra_db_delete_memory` |
+| `hydradb_subgraph` | — (new in PRO-1848; no prior spelling) |
 
 ### OpenClaw (agent tool / slash / CLI — align all three)
 
@@ -203,6 +206,7 @@ skill files and persisted to `state.json`; the CLI's `--output json` is a docume
 | `hydradb list …` | `memories list`, `fetch sources` |
 | `hydradb inspect …` | `fetch content` |
 | `hydradb relations …` | `fetch relations` |
+| `hydradb subgraph <id>` | — (new in PRO-1848; no prior spelling) |
 | `hydradb delete …` | `memories delete`, `knowledge delete` |
 | `hydradb doctor` | `whoami` (config half) |
 

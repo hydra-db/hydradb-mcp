@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-09-01
+
+### Added — `recency_bias`, `query_apps` and multi-collection scope on `hydradb_query`
+
+Three retrieval controls the API accepts were unreachable through the MCP.
+
+- `recency_bias` (0-1) was hardcoded to `0` with no override. That is still the
+  default, and the API's own, so ranking is unchanged for callers that do not
+  set it — but "where does this stand now" is a different question from "what
+  matches this", and it could not be asked. It re-ranks and never excludes, so
+  read the dates rather than trusting the top hit. Note that on
+  connector-ingested corpora it currently ranks by the date the API reports,
+  which is the ingest time rather than the content's own date (HydraDB
+  PRO-1832) — the knob is correct, the data behind it is not yet.
+- `query_apps` enables app-aware retrieval over connector-ingested sources:
+  exact IDs and actors, thread reconstruction, and parent/child expansion. A
+  Jira comment without its issue, or a Slack reply without its thread, is
+  usually not an answer.
+- `collections` scopes one query across several collections, as a list or a
+  `{collection: weight}` object. It replaces the singular `collection` for that
+  request rather than joining it: Hydra DB refuses a request carrying both
+  selectors, so passing both is rejected here instead of failing on the wire,
+  and the configured default collection is not injected alongside it. OAuth
+  confinement is enforced on every named collection, so a multi-scope selector
+  cannot reach past what a connection was confined to.
+
+Temporal retrieval (`temporal_now` / `temporal_facts`) remains unreachable: the
+fields are live in the API but absent from the OpenAPI spec, so `@hydradb/sdk`
+does not generate them. Blocked on the spec, not on this server.
+
 ### Added — unified databases (PRO-1618)
 
 A database created with `type: "unified"` keeps knowledge and memory in ONE
@@ -23,9 +53,9 @@ changes for any existing database.
 Unified ingest sends the `items[]` body (text or a role/content conversation
 per item) and `hydradb_databases` can create a unified database through
 `type`. The pinned SDK predates both, so those calls and the layout probe go
-over a small hand-rolled v2 transport (`src/hydra/raw.ts`, the same shape as
-the BYOG one) with the same envelope unwrap and error translation; they move
-back onto the SDK once it is regenerated.
+over the wrapper's shared raw v2 transport (`src/hydra/transport.ts`, the
+same one the BYOG and subgraph paths use) with the same envelope unwrap and
+error translation; they move back onto the SDK once it is regenerated.
 
 ## [1.3.0] - 2026-08-28
 

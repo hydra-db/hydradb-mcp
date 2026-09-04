@@ -409,6 +409,279 @@ test("an unconfined client passes any per-call database through", async () => {
 	assert.deepEqual(calls, ["query:work"]);
 });
 
+test("collections and collection cannot be sent together", async () => {
+	const calls: string[] = [];
+	const sdk = {
+		query(args: Record<string, unknown>) {
+			calls.push(`query:${JSON.stringify(args.collections ?? args.collection)}`);
+			return Promise.resolve({ data: { chunks: [] }, success: true });
+		},
+	} as unknown as HydraDBClient;
+	const hydra = new HydraDB({ token: "t", database: "db" }, sdk);
+
+	// Hydra DB refuses a request carrying both selectors, so this must fail here
+	// rather than travel to the wire to fail there.
+	await assert.rejects(
+		() =>
+			hydra.context.query({
+				query: "hi",
+				collection: "a",
+				collections: ["b", "c"],
+			}),
+		/not\s+both/,
+	);
+	await assert.rejects(
+		() => hydra.context.query({ query: "hi", collections: [] }),
+		/at least one collection/,
+	);
+	assert.deepEqual(calls, [], "neither call should reach the SDK");
+});
+
+test("a confined client enforces confinement on every named collection", async () => {
+	const calls: string[] = [];
+	const sdk = {
+		query(args: Record<string, unknown>) {
+			calls.push(`query:${JSON.stringify(args.collections)}`);
+			return Promise.resolve({ data: { chunks: [] }, success: true });
+		},
+	} as unknown as HydraDBClient;
+	const hydra = new HydraDB(
+		{
+			token: "t",
+			database: "db",
+			collection: "allowed_a",
+			allowedCollections: ["allowed_a", "allowed_b"],
+		},
+		sdk,
+	);
+
+	await hydra.context.query({ query: "hi", collections: ["allowed_a", "allowed_b"] });
+
+	// A multi-scope selector must not be a way around the confinement that the
+	// singular selector enforces.
+	await assert.rejects(
+		() => hydra.context.query({ query: "hi", collections: ["allowed_a", "secret"] }),
+		(e: unknown) => {
+			assert.ok(e instanceof ScopeNotAllowedError);
+			assert.equal(e.requested, "secret");
+			return true;
+		},
+	);
+	assert.deepEqual(calls, ['query:["allowed_a","allowed_b"]']);
+});
+
+test("a weighted collections object is scoped and forwarded as given", async () => {
+	const calls: unknown[] = [];
+	const sdk = {
+		query(args: Record<string, unknown>) {
+			calls.push(args.collections);
+			return Promise.resolve({ data: { chunks: [] }, success: true });
+		},
+	} as unknown as HydraDBClient;
+	const hydra = new HydraDB(
+		{ token: "t", database: "db", allowedCollections: ["a", "b"] },
+		sdk,
+	);
+
+	await hydra.context.query({ query: "hi", collections: { a: 2, b: 1 } });
+	assert.deepEqual(calls, [{ a: 2, b: 1 }]);
+
+	// The weights are keyed by collection name, so confinement reads the keys.
+	await assert.rejects(
+		() => hydra.context.query({ query: "hi", collections: { a: 2, secret: 1 } }),
+		ScopeNotAllowedError,
+	);
+});
+
+// ── context.subgraph (PRO-1848): the raw path, behind the same surface ─────
+
+function fakeRawFetch(
+	handler: (url: string, init?: RequestInit) => { status: number; body: unknown },
+) {
+	const calls: { url: string; init?: RequestInit }[] = [];
+	const fetchFn = (async (url: string | URL, init?: RequestInit) => {
+		calls.push({ url: String(url), init });
+		const { status, body } = handler(String(url), init);
+		return new Response(JSON.stringify(body), {
+			status,
+			headers: { "content-type": "application/json" },
+		});
+	}) as unknown as typeof fetch;
+	return { fetchFn, calls };
+}
+
+test("context.subgraph hits GET /context/{id}/subgraph with the scope and API-Version", async () => {
+	const { fetchFn, calls } = fakeRawFetch(() => ({
+		status: 200,
+		body: {
+			data: { seed_source_id: "s 1", sources: [{ source_id: "s 1", depth: 0 }], relations: [], auxiliary_relations: [], is_truncated: false, auxiliary_truncated: false, max_depth_reached: 0, success: true, message: "ok" },
+			success: true,
+			meta: {},
+		},
+	}));
+	const hydra = new HydraDB(
+		{ token: "tok", database: "db_test", collection: "col_test", baseUrl: "https://h.test/", fetchFn },
+		{} as unknown as HydraDBClient,
+	);
+
+	const res = await hydra.context.subgraph({ id: "s 1", depth: 2, maxSources: 50, kind: "memory" });
+
+	assert.equal(res.seed_source_id, "s 1", "envelope unwrapped to .data");
+	assert.equal(calls.length, 1);
+	const url = new URL(calls[0]!.url);
+	// The id is a path segment, so it is escaped; a trailing slash on the base
+	// must not produce "//context".
+	assert.equal(url.pathname, "/context/s%201/subgraph");
+	assert.equal(url.searchParams.get("database"), "db_test");
+	assert.equal(url.searchParams.get("collection"), "col_test");
+	assert.equal(url.searchParams.get("type"), "memory");
+	assert.equal(url.searchParams.get("depth"), "2");
+	assert.equal(url.searchParams.get("max_sources"), "50");
+	const headers = calls[0]!.init?.headers as Record<string, string>;
+	assert.equal(headers["API-Version"], "2", "CONTRACT §2 rule 6");
+	assert.equal(headers.Authorization, "Bearer tok");
+	assert.equal(calls[0]!.init?.method, "GET");
+});
+
+test("context.subgraph translates a failure into the wrapper's own error", async () => {
+	const { fetchFn } = fakeRawFetch(() => ({
+		status: 400,
+		body: { success: false, error: { code: "INVALID_INPUT", message: "depth must be a positive integer" } },
+	}));
+	const hydra = new HydraDB(
+		{ token: "tok", database: "db_test", baseUrl: "https://h.test", fetchFn },
+		{} as unknown as HydraDBClient,
+	);
+	await assert.rejects(
+		() => hydra.context.subgraph({ id: "x", depth: 99 }),
+		(e: unknown) => {
+			assert.ok(e instanceof HydraWrapperError, "same error type as an SDK failure");
+			assert.equal(e.status, 400);
+			assert.match(e.message, /depth must be a positive integer/);
+			return true;
+		},
+	);
+});
+
+// The server treats an item id as opaque: ingest stores a caller's source_id
+// verbatim, so " s1" and "s1" are two different items and a wrapper that
+// trimmed would quietly ask about the other one.
+test("context.subgraph sends the id verbatim, and rejects only a blank one", async () => {
+	const { fetchFn, calls } = fakeRawFetch(() => ({
+		status: 200,
+		body: { data: { seed_source_id: " s1 ", sources: [], relations: [], auxiliary_relations: [], is_truncated: false, auxiliary_truncated: false, max_depth_reached: 0, success: true, message: "ok" }, success: true },
+	}));
+	const hydra = new HydraDB(
+		{ token: "tok", database: "db_test", baseUrl: "https://h.test", fetchFn },
+		{} as unknown as HydraDBClient,
+	);
+
+	await hydra.context.subgraph({ id: " s1 " });
+	assert.equal(new URL(calls[0]!.url).pathname, "/context/%20s1%20/subgraph");
+
+	// Blank is the one id rejected locally: it would build "/context//subgraph"
+	// and come back as an opaque routing failure.
+	await assert.rejects(
+		() => hydra.context.subgraph({ id: "   " }),
+		(e: unknown) => {
+			assert.ok(e instanceof HydraWrapperError);
+			assert.match(e.message, /id must not be empty/);
+			return true;
+		},
+	);
+	assert.equal(calls.length, 1, "the blank id never reached the network");
+});
+
+test("context.subgraph refuses a database the connection is confined away from", async () => {
+	const { fetchFn, calls } = fakeRawFetch(() => ({ status: 200, body: { data: {}, success: true } }));
+	const hydra = new HydraDB(
+		{ token: "tok", database: "db_test", allowedDatabases: ["db_test"], baseUrl: "https://h.test", fetchFn },
+		{} as unknown as HydraDBClient,
+	);
+	await assert.rejects(() => hydra.context.subgraph({ id: "x", database: "other" }));
+	assert.equal(calls.length, 0, "a refused scope never reaches the network");
+});
+
+// PRO-1684: the subgraph read is ACL-scoped server-side, so the wrapper must
+// carry the principals to the wire as repeated acl params. An omitted acl
+// sends nothing.
+test("context.subgraph carries acl principals to the wire", async () => {
+	const { fetchFn, calls } = fakeRawFetch(() => ({
+		status: 200,
+		body: { data: { seed_source_id: "s1", sources: [], relations: [], auxiliary_relations: [], is_truncated: false, auxiliary_truncated: false, max_depth_reached: 0, success: true, message: "ok" }, success: true },
+	}));
+	const hydra = new HydraDB(
+		{ token: "tok", database: "db_test", baseUrl: "https://h.test", fetchFn },
+		{} as unknown as HydraDBClient,
+	);
+
+	await hydra.context.subgraph({ id: "s1", acl: ["alice@corp.com", "group:google:eng@corp.com"] });
+	const url = new URL(calls[0]!.url);
+	assert.deepEqual(url.searchParams.getAll("acl"), ["alice@corp.com", "group:google:eng@corp.com"]);
+
+	await hydra.context.subgraph({ id: "s1" });
+	assert.equal(new URL(calls[1]!.url).searchParams.has("acl"), false, "omitted acl sends no acl field");
+});
+
+// ── PRO-1684: permission-aware search ────────────────────────────────────────
+// The caller declares the principals to answer as, and the wrapper must carry
+// them to the wire on every read the API scopes by ACL.
+
+function captureSdk(seen: Record<string, unknown>) {
+	const grab = (key: string) => (req: unknown) => {
+		seen[key] = req;
+		return Promise.resolve({});
+	};
+	return {
+		query: grab("query"),
+		context: {
+			list: grab("list"),
+			inspect: grab("inspect"),
+			relations: grab("relations"),
+		},
+	} as unknown as HydraDBClient;
+}
+
+function wrapperFor(seen: Record<string, unknown>) {
+	return new HydraDB(
+		{ token: "t", database: "db_test", collection: "col_test" },
+		captureSdk(seen),
+	);
+}
+
+test("query carries acl principals to the SDK", async () => {
+	const seen: Record<string, { acl?: string[] }> = {};
+	await wrapperFor(seen).context.query({
+		query: "roadmap",
+		acl: ["alice@corp.com", "group:google:eng@corp.com"],
+	});
+	assert.deepEqual(seen.query.acl, ["alice@corp.com", "group:google:eng@corp.com"]);
+});
+
+test("list, inspect and relations each carry acl principals", async () => {
+	const seen: Record<string, { acl?: string[] }> = {};
+	const hydra = wrapperFor(seen);
+	await hydra.context.list({ acl: ["bob@corp.com"] });
+	await hydra.context.inspect({ id: "s1", acl: ["carol@corp.com"] });
+	await hydra.context.relations({ id: "s1", acl: ["dan@corp.com"] });
+	assert.deepEqual(seen.list.acl, ["bob@corp.com"]);
+	assert.deepEqual(seen.inspect.acl, ["carol@corp.com"]);
+	assert.deepEqual(seen.relations.acl, ["dan@corp.com"]);
+});
+
+test("an omitted acl stays undefined rather than becoming an empty list", async () => {
+	// The API treats `acl: []` the same as an absent acl, so [] is not a way to
+	// ask for "nobody". Sending nothing keeps the request faithful to what the
+	// caller actually said rather than relying on that equivalence.
+	const seen: Record<string, { acl?: string[] }> = {};
+	const hydra = wrapperFor(seen);
+	await hydra.context.query({ query: "roadmap" });
+	await hydra.context.list({});
+	assert.equal(seen.query.acl, undefined);
+	assert.equal(seen.list.acl, undefined);
+});
+
+
 // PRO-1618: a database created with `type: "unified"` has one corpus. The
 // pinned SDK cannot send `items`, `type` on create, or read `details[]`, so
 // those three go over a hand-rolled v2 transport; these pin the wire shape.
@@ -424,7 +697,7 @@ function fetchStub(body: unknown, status = 200): { fetch: typeof fetch; calls: {
 test("unified ingest posts items[] as a JSON body, not the multipart memories field", async () => {
 	const { fetch, calls } = fetchStub({ success: true, data: { success: true, success_count: 1, failed_count: 0 } });
 	const sdk = { context: { ingest() { throw new Error("SDK path must not be used for unified"); } } } as unknown as HydraDBClient;
-	const hydra = new HydraDB({ token: "t", database: "db_u", collection: "c1", baseUrl: "https://api.test", fetch }, sdk);
+	const hydra = new HydraDB({ token: "t", database: "db_u", collection: "c1", baseUrl: "https://api.test", fetchFn: fetch }, sdk);
 
 	await hydra.context.ingest({
 		kind: "unified",
@@ -474,7 +747,7 @@ test("database create with a layout posts type, plain create keeps the SDK path"
 			},
 		},
 	} as unknown as HydraDBClient;
-	const hydra = new HydraDB({ token: "t", database: "db", baseUrl: "https://api.test", fetch }, sdk);
+	const hydra = new HydraDB({ token: "t", database: "db", baseUrl: "https://api.test", fetchFn: fetch }, sdk);
 
 	await hydra.databases.create({ database: "new-db", type: "unified" });
 	assert.equal(calls.length, 1);
@@ -491,7 +764,7 @@ test("layout() reads GET /databases details once and falls back to split", async
 		success: true,
 		data: { databases: ["a", "b"], details: [{ database: "a", type: "unified" }, { database: "b", type: "split" }] },
 	});
-	const hydra = new HydraDB({ token: "t", database: "a", baseUrl: "https://api.test", fetch }, {} as HydraDBClient);
+	const hydra = new HydraDB({ token: "t", database: "a", baseUrl: "https://api.test", fetchFn: fetch }, {} as HydraDBClient);
 
 	assert.equal(await hydra.databases.layout("a"), "unified");
 	assert.equal(await hydra.databases.layout("b"), "split");
@@ -500,7 +773,7 @@ test("layout() reads GET /databases details once and falls back to split", async
 	assert.equal(calls[0]!.init.method, "GET");
 
 	const failing = fetchStub({ success: false, error: { message: "nope" } }, 500);
-	const broken = new HydraDB({ token: "t", database: "a", baseUrl: "https://api.test", fetch: failing.fetch }, {} as HydraDBClient);
+	const broken = new HydraDB({ token: "t", database: "a", baseUrl: "https://api.test", fetchFn: failing.fetch }, {} as HydraDBClient);
 	assert.equal(await broken.databases.layout("a"), "split");
 });
 
@@ -529,7 +802,7 @@ test("unified query, list and delete bypass the SDK request serializers and retu
 			delete() { throw new Error("SDK delete must not be used for unified"); },
 		},
 	} as unknown as HydraDBClient;
-	const hydra = new HydraDB({ token: "t", database: "db_u", collection: "c1", baseUrl: "https://api.test", fetch: fetchImpl }, sdk);
+	const hydra = new HydraDB({ token: "t", database: "db_u", collection: "c1", baseUrl: "https://api.test", fetchFn: fetchImpl }, sdk);
 
 	const q = await hydra.context.query({ query: "acme", kind: "unified", maxResults: 5, operator: "and" });
 	assert.equal(q.chunks?.[0]?.chunkContent, "body", "query result is parsed to the SDK's camelCase");
@@ -557,7 +830,7 @@ test("the raw transport retries 5xx and network failures, never a 4xx", async ()
 			new Response(JSON.stringify({ success: true, data: { databases: ["a"], details: [{ database: "a", type: "unified" }] } }), { status: 200 }),
 		);
 	}) as typeof fetch;
-	const hydra = new HydraDB({ token: "t", database: "a", baseUrl: "https://api.test", fetch: flaky, maxRetries: 2 }, {} as HydraDBClient);
+	const hydra = new HydraDB({ token: "t", database: "a", baseUrl: "https://api.test", fetchFn: flaky, maxRetries: 2 }, {} as HydraDBClient);
 	assert.equal(await hydra.databases.layout("a"), "unified");
 	assert.equal(attempts, 3);
 
@@ -566,7 +839,7 @@ test("the raw transport retries 5xx and network failures, never a 4xx", async ()
 		rejected += 1;
 		return Promise.resolve(new Response(JSON.stringify({ success: false, error: { message: "no" } }), { status: 400 }));
 	}) as typeof fetch;
-	const strict = new HydraDB({ token: "t", database: "a", baseUrl: "https://api.test", fetch: refusing, maxRetries: 2 }, {} as HydraDBClient);
+	const strict = new HydraDB({ token: "t", database: "a", baseUrl: "https://api.test", fetchFn: refusing, maxRetries: 2 }, {} as HydraDBClient);
 	await assert.rejects(() => strict.databases.create({ database: "x", type: "unified" }));
 	assert.equal(rejected, 1, "a 4xx is final");
 });

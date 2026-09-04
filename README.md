@@ -17,9 +17,10 @@ Run it two ways, same tools either way:
 | `hydradb_inspect` | Fetch one source's full content by id |
 | `hydradb_delete` | Remove one or more items by id, irreversibly |
 | `hydradb_status` | Check whether an ingested source has finished indexing |
+| `hydradb_subgraph` | Everything connected to one item — its thread, replies, parents, children, links |
 
-Ids flow between these: `hydradb_query` and `hydradb_list` emit them;
-`hydradb_inspect`, `hydradb_delete` and `hydradb_status` accept them.
+Ids flow between these: `hydradb_query`, `hydradb_list` and `hydradb_subgraph` emit them;
+`hydradb_inspect`, `hydradb_delete`, `hydradb_status` and `hydradb_subgraph` accept them.
 
 ### Graph tools (Cypher)
 
@@ -93,6 +94,9 @@ chunks with their source id, a relevance score, and knowledge-graph context.
 | `source_ids` | array | No | Restrict the search to these sources |
 | `metadata_filters` | object | No | Exact-match filters over stored metadata |
 | `num_related_chunks` | number | No | Adjacent chunks to attach per match (0-5, default: 0) |
+| `recency_bias` | number | No | Favour recently-updated sources when ranking, 0-1 (default: 0). Re-ranks only; it never excludes older sources |
+| `query_apps` | boolean | No | App-aware retrieval over connector sources — exact IDs and actors, thread reconstruction, parent/child expansion (default: false) |
+| `collections` | array | No | Search several collections at once. Pass either this or `collection`, never both |
 
 ### **hydradb_ingest**
 
@@ -148,6 +152,33 @@ Fetches one source's full content by id.
 
 Long sources come back in slices, and binary sources are never inlined — you get
 their type and size, and `mode: "url"` returns a download link.
+
+### **hydradb_subgraph**
+
+Returns the connected subgraph of one item: every item reachable from it through
+item-level links — explicit relations declared at ingest, a shared thread,
+parent/child hierarchy — traversed breadth-first. Use it when one result is not
+enough and you need what surrounds it: the rest of a Slack thread, the replies
+under a ticket, the documents a page links to.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `id` | string | Yes | The item to start from, from `hydradb_query` or `hydradb_list` |
+| `kind` | string | No | `knowledge` (default) or `memory` — the two graphs are separate |
+| `depth` | number | No | Hops to traverse (default 5, max 10) |
+| `max_sources` | number | No | Cap on members returned (default 200, max 1000) |
+| `database`, `collection` | string | No | Scope overrides |
+
+Each member carries its id, title, depth from the start item and how it was
+reached — `discovered_relation` is the mechanism (`same_thread`, `parent`,
+`child`, or a `relates_to` type such as `reply_to`) and `discovered_via` the id
+of the member it was reached from, so the list is also a tree.
+`structuredContent` carries those same members, in the same order, plus
+`relations`: the edges among them as `{from, to, type}`, so a client can rebuild
+the graph and not just the list. `truncated` means `max_sources` clipped the
+traversal; `structural_link_count` and `structural_truncated` report the
+structural graph (entities, comments, attachments, actors) around the members.
+Chunk-level entity relations are not included; those come from `hydradb_query`.
 
 ### **hydradb_delete**
 

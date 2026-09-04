@@ -59,6 +59,20 @@ function mockHydra(responses: Responses = {}): {
 		{ token: "t", database: "db_test", collection: "col_test" },
 		sdk,
 	);
+	// The subgraph read takes the raw HTTP path, not the SDK, so it is stubbed
+	// on the resource: without this it throws "no HTTP transport configured".
+	// The stub records like every SDK method so dispatch-level tests cover it.
+	(hydra.context as unknown as Record<string, unknown>).subgraph = record("subgraph", {
+		seed_source_id: "s1",
+		sources: [],
+		relations: [],
+		auxiliary_relations: [],
+		is_truncated: false,
+		auxiliary_truncated: false,
+		max_depth_reached: 0,
+		success: true,
+		message: "ok",
+	});
 	return { hydra, calls };
 }
 
@@ -2549,6 +2563,342 @@ test("empty scope overrides are rejected or fall back to default", async () => {
 	await client.close();
 });
 
+test("query forwards recency_bias, and still defaults it to 0", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
+	assert.equal(
+		calls.find((c) => c.method === "query")?.args.recencyBias,
+		0,
+		"the host default must not change for callers that do not set it",
+	);
+
+	calls.length = 0;
+	await client.callTool({
+		name: "hydradb_query",
+		arguments: { query: "q", recency_bias: 0.9 },
+	});
+	assert.equal(
+		calls.find((c) => c.method === "query")?.args.recencyBias,
+		0.9,
+		"a caller asking for current state must be able to raise it",
+	);
+
+	await client.close();
+});
+
+test("query forwards query_apps for connector-aware retrieval", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	await client.callTool({
+		name: "hydradb_query",
+		arguments: { query: "q", query_apps: true },
+	});
+
+	assert.equal(calls.find((c) => c.method === "query")?.args.queryApps, true);
+	await client.close();
+});
+
+test("query forwards a multi-collection scope instead of the singular one", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	await client.callTool({
+		name: "hydradb_query",
+		arguments: { query: "q", collections: ["policies", "handbook"] },
+	});
+
+	const args = calls.find((c) => c.method === "query")?.args;
+	assert.deepEqual(args?.collections, ["policies", "handbook"]);
+	// The server refuses both selectors at once, so the configured default
+	// collection must not ride along beside the one the caller named.
+	assert.equal(args?.collection, undefined);
+
+	await client.close();
+});
+
+// ── hydradb_subgraph (PRO-1848) ─────────────────────────────────────────
+
+async function subgraphText(
+	result: unknown,
+	args: Record<string, unknown>,
+): Promise<{ text: string; structured: Record<string, unknown> | undefined; isError: boolean | undefined; calls: unknown[] }> {
+	const { hydra } = mockHydra();
+	const calls: unknown[] = [];
+	// The wrapper method takes the raw HTTP path, not the SDK, so it is stubbed
+	// on the resource rather than through the SDK mock.
+	(hydra.context as unknown as { subgraph: unknown }).subgraph = async (p: unknown) => {
+		calls.push(p);
+		return result;
+	};
+	const client = await connect(hydra);
+	const res = await client.callTool({ name: "hydradb_subgraph", arguments: args });
+	await client.close();
+	return {
+		text: (res.content as { text: string }[])[0]?.text ?? "",
+		structured: res.structuredContent as Record<string, unknown> | undefined,
+		isError: res.isError as boolean | undefined,
+		calls,
+	};
+}
+
+const subgraphOf = (members: Record<string, unknown>[], over: Record<string, unknown> = {}) => ({
+	seed_source_id: "thread-root",
+	sources: members,
+	relations: [
+		{ source: { entity_id: "thread-root" }, target: { entity_id: "reply-2" }, relations: [{ canonical_predicate: "same_thread" }] },
+		{ source: { entity_id: "reply-2" }, target: { entity_id: "doc-9" }, relations: [{ canonical_predicate: "relates_to" }] },
+	],
+	auxiliary_relations: [{}, {}, {}],
+	auxiliary_truncated: false,
+	is_truncated: false,
+	max_depth_reached: 1,
+	success: true,
+	message: "ok",
+	...over,
+});
+
+test("hydradb_subgraph lists members by depth with ids the other tools accept", async () => {
+	const { text, structured, isError, calls } = await subgraphText(
+		subgraphOf([
+			// discovered_via is the member this one was reached FROM, not a mechanism.
+			{ source_id: "reply-2", title: "re: budget", depth: 1, discovered_via: "thread-root", discovered_relation: "same_thread", app_provider: "slack" },
+			{ source_id: "thread-root", title: "Q3 budget", depth: 0 },
+		]),
+		{ id: "thread-root", depth: 3, kind: "knowledge" },
+	);
+	assert.notEqual(isError, true);
+	assert.match(text, /2 items connected to thread-root through 1 hop\b/);
+	// Depth order, seed first, each with a composable id.
+	const rootAt = text.indexOf("[id: thread-root]");
+	const replyAt = text.indexOf("[id: reply-2]");
+	assert.ok(rootAt >= 0 && replyAt > rootAt, "seed listed before its reply");
+	assert.match(text, /reply-2\] re: budget \(slack\) — depth 1, same_thread from thread-root/);
+	assert.match(text, /thread-root\] Q3 budget — depth 0, the item you started from/);
+	assert.match(text, /hydradb_inspect/);
+	assert.equal(structured?.member_count, 2);
+	assert.equal(structured?.truncated, false);
+	// structuredContent is ordered the same way the prose is: a client rendering
+	// the members must not see a different order from the reader.
+	assert.deepEqual((structured?.members as { id: string }[]).map((m) => m.id), ["thread-root", "reply-2"]);
+	// The edges come through, so a client can rebuild the graph rather than
+	// only the member list; the structural links stay a count plus their flag.
+	assert.deepEqual(structured?.relations, [
+		{ from: "thread-root", to: "reply-2", type: "same_thread" },
+		{ from: "reply-2", to: "doc-9", type: "relates_to" },
+	]);
+	assert.equal(structured?.structural_link_count, 3);
+	assert.equal(structured?.structural_truncated, false);
+	// Args reach the wrapper under the wrapper's names.
+	assert.deepEqual(calls[0], { id: "thread-root", kind: "knowledge", depth: 3, maxSources: undefined, acl: undefined, database: undefined, collection: undefined });
+});
+
+test("hydradb_subgraph says when max_sources clipped the traversal", async () => {
+	const { text, structured } = await subgraphText(
+		subgraphOf([{ source_id: "a", depth: 0 }, { source_id: "b", depth: 1 }], { is_truncated: true, max_depth_reached: 3 }),
+		{ id: "a" },
+	);
+	assert.match(text, /clipped at max_sources/);
+	assert.match(text, /3 hops/);
+	assert.equal(structured?.truncated, true);
+});
+
+test("hydradb_subgraph distinguishes 'stands alone' from 'not found'", async () => {
+	const alone = await subgraphText(subgraphOf([{ source_id: "solo", depth: 0 }], { max_depth_reached: 0 }), { id: "solo" });
+	assert.match(alone.text, /stands alone/);
+	assert.notEqual(alone.isError, true);
+
+	const missing = await subgraphText(subgraphOf([]), { id: "nope" });
+	assert.match(missing.text, /No item with id nope/);
+	assert.equal(missing.structured?.member_count, 0);
+	assert.notEqual(missing.isError, true, "an unknown id is an answer, not a failure");
+});
+
+// One member plus is_truncated means the traversal was cut at max_sources, not
+// that the item is isolated. Reporting it as isolated is a wrong answer, not a
+// terse one.
+test("hydradb_subgraph does not call a clipped result 'stands alone'", async () => {
+	const { text, structured } = await subgraphText(
+		subgraphOf([{ source_id: "solo", depth: 0 }], { is_truncated: true, max_depth_reached: 0 }),
+		{ id: "solo", max_sources: 1 },
+	);
+	assert.doesNotMatch(text, /stands alone/);
+	assert.match(text, /clipped at max_sources/);
+	assert.equal(structured?.truncated, true);
+});
+
+test("hydradb_subgraph reports clipped structural links", async () => {
+	const { text, structured } = await subgraphText(
+		subgraphOf([{ source_id: "a", depth: 0 }, { source_id: "b", depth: 1 }], { auxiliary_truncated: true }),
+		{ id: "a" },
+	);
+	assert.match(text, /structural links clipped/);
+	assert.equal(structured?.structural_truncated, true);
+});
+
+// An empty result carries the same keys as a populated one, so a client never
+// has to branch on which shape it got.
+test("hydradb_subgraph returns one structured shape whether or not it found anything", async () => {
+	const found = await subgraphText(subgraphOf([{ source_id: "a", depth: 0 }, { source_id: "b", depth: 1 }]), { id: "a" });
+	const missing = await subgraphText(subgraphOf([]), { id: "nope" });
+	assert.deepEqual(Object.keys(missing.structured ?? {}).sort(), Object.keys(found.structured ?? {}).sort());
+});
+
+test("hydradb_subgraph flags a server-reported failure", async () => {
+	const { text, isError } = await subgraphText(subgraphOf([], { success: false, message: "graph unavailable" }), { id: "x" });
+	assert.equal(isError, true);
+	assert.match(text, /graph unavailable/);
+});
+
+test("hydradb_subgraph requires an id", async () => {
+	const { hydra } = mockHydra();
+	const client = await connect(hydra);
+	const res = await client.callTool({ name: "hydradb_subgraph", arguments: {} });
+	assert.equal(res.isError, true);
+	await client.close();
+});
+
+// ── PRO-1684: acl must survive TOOL DISPATCH, not just the wrapper ───────────
+// The first cut of this feature added `acl` to the schemas and to the wrapper,
+// and passed its wrapper-level tests, while the list and inspect dispatch paths
+// silently dropped the field: they rebuild an explicit argument object from a
+// whitelist, so a parameter that is not named there is discarded. The tool then
+// ADVERTISED acl and answered unscoped, which is the worst possible shape for a
+// permission feature. These tests drive the real tool surface end to end so that
+// gap cannot reopen.
+
+test("hydradb_query forwards acl principals through dispatch", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	await client.callTool({
+		name: "hydradb_query",
+		arguments: { query: "roadmap", acl: ["alice@corp.com", "group:google:eng@corp.com"] },
+	});
+
+	const call = calls.find((c) => c.method === "query");
+	assert.ok(call, "wrapper should have called query");
+	assert.deepEqual(call.args.acl, ["alice@corp.com", "group:google:eng@corp.com"]);
+	await client.close();
+});
+
+test("hydradb_list forwards acl principals through dispatch, both kinds", async () => {
+	for (const kind of ["memory", "knowledge"] as const) {
+		const { hydra, calls } = mockHydra();
+		const client = await connect(hydra);
+
+		await client.callTool({
+			name: "hydradb_list",
+			arguments: { kind, acl: ["bob@corp.com"] },
+		});
+
+		const call = calls.find((c) => c.method === "list");
+		assert.ok(call, `wrapper should have called list for ${kind}`);
+		assert.deepEqual(call.args.acl, ["bob@corp.com"], `acl dropped on kind=${kind}`);
+		await client.close();
+	}
+});
+
+test("hydradb_inspect forwards acl principals through dispatch", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	await client.callTool({
+		name: "hydradb_inspect",
+		arguments: { id: "s1", acl: ["carol@corp.com"] },
+	});
+
+	const call = calls.find((c) => c.method === "inspect");
+	assert.ok(call, "wrapper should have called inspect");
+	assert.deepEqual(call.args.acl, ["carol@corp.com"]);
+	await client.close();
+});
+
+test("hydradb_subgraph forwards acl principals through dispatch", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	await client.callTool({
+		name: "hydradb_subgraph",
+		arguments: { id: "s1", acl: ["carol@corp.com"] },
+	});
+
+	const call = calls.find((c) => c.method === "subgraph");
+	assert.ok(call, "wrapper should have called subgraph");
+	assert.deepEqual(call.args.acl, ["carol@corp.com"]);
+	await client.close();
+});
+
+test("omitting acl sends no acl field rather than an empty list", async () => {
+	// Wire hygiene, not semantics: the API treats `acl: []` exactly like an
+	// absent acl (verified against staging — both returned 134 sources where an
+	// unknown principal returned 130), so [] is NOT a way to ask for "nobody".
+	// We still send nothing rather than [] so the request says what the caller
+	// said, instead of leaning on that equivalence holding forever.
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	await client.callTool({ name: "hydradb_query", arguments: { query: "roadmap" } });
+	await client.callTool({ name: "hydradb_list", arguments: { kind: "knowledge" } });
+	await client.callTool({ name: "hydradb_inspect", arguments: { id: "s1" } });
+	await client.callTool({ name: "hydradb_subgraph", arguments: { id: "s1" } });
+
+	for (const method of ["query", "list", "inspect", "subgraph"]) {
+		const call = calls.find((c) => c.method === method);
+		assert.ok(call, `wrapper should have called ${method}`);
+		assert.equal(call.args.acl, undefined, `${method} must omit acl entirely`);
+	}
+	await client.close();
+});
+
+test("every tool that advertises acl actually forwards it", async () => {
+	// Guards the general failure: a schema that accepts a permission parameter
+	// the dispatch then ignores. Derived from the advertised schema, so a new
+	// acl-bearing tool is covered without editing this test.
+	const { hydra } = mockHydra();
+	const client = await connect(hydra);
+	const { tools } = await client.listTools();
+
+	const advertising = tools
+		.filter((t) => (t.inputSchema?.properties as Record<string, unknown> | undefined)?.acl != null)
+		.map((t) => t.name);
+
+	assert.ok(
+		advertising.includes("hydradb_query")
+			&& advertising.includes("hydradb_list")
+			&& advertising.includes("hydradb_inspect")
+			&& advertising.includes("hydradb_subgraph"),
+		`expected the three canonical reads plus subgraph to advertise acl, got: ${advertising.join(", ")}`,
+	);
+
+	const args: Record<string, Record<string, unknown>> = {
+		hydradb_query: { query: "q" },
+		hydradb_list: { kind: "knowledge" },
+		hydradb_inspect: { id: "s1" },
+		hydradb_subgraph: { id: "s1" },
+	};
+	const method: Record<string, string> = {
+		hydradb_query: "query",
+		hydradb_list: "list",
+		hydradb_inspect: "inspect",
+		hydradb_subgraph: "subgraph",
+	};
+
+	for (const name of advertising) {
+		if (args[name] == null) continue;
+		const fresh = mockHydra();
+		const c = await connect(fresh.hydra);
+		await c.callTool({ name, arguments: { ...args[name], acl: ["dan@corp.com"] } });
+		const call = fresh.calls.find((x) => x.method === method[name]);
+		assert.ok(call, `${name} should have reached the wrapper`);
+		assert.deepEqual(call.args.acl, ["dan@corp.com"], `${name} advertises acl but drops it`);
+		await c.close();
+	}
+	await client.close();
+});
+
 // PRO-1618: on a unified database the host-owned defaults switch to `unified`,
 // because `memory`/`knowledge`/`all` are refused there; on a split database
 // (every database created before) the defaults are unchanged.
@@ -2600,7 +2950,7 @@ function mockHydraWithLayout(type: "split" | "unified"): { hydra: HydraDB; calls
 		},
 	} as unknown as HydraDBClient;
 	const hydra = new HydraDB(
-		{ token: "t", database: "db_test", collection: "col_test", baseUrl: "https://api.test", fetch: layoutFetch(type, raw) },
+		{ token: "t", database: "db_test", collection: "col_test", baseUrl: "https://api.test", fetchFn: layoutFetch(type, raw) },
 		sdk,
 	);
 	return { hydra, calls, raw };
@@ -2665,7 +3015,7 @@ test("a defaulted kind refused by a unified database is retried once as unified;
 		databases: { list: () => Promise.resolve({ data: { databases: ["db_test"] }, success: true }) },
 	} as unknown as HydraDBClient;
 	const hydra = new HydraDB(
-		{ token: "t", database: "db_test", collection: "col_test", baseUrl: "https://api.test", fetch: layoutFetch("split", raw) },
+		{ token: "t", database: "db_test", collection: "col_test", baseUrl: "https://api.test", fetchFn: layoutFetch("split", raw) },
 		sdk,
 	);
 	const client = await connect(hydra);

@@ -19,12 +19,13 @@ import { HydraDBClient } from "@hydradb/sdk";
 import type { HydraDB as SDK } from "@hydradb/sdk";
 
 import { unwrap } from "./envelope.js";
-import { translateError } from "./errors.js";
+import { newRawTransport, type RawTransport, sendRaw } from "./transport.js";
+import { HydraWrapperError, translateError } from "./errors.js";
 import { GraphResource } from "./graph.js";
-import { type Layout, RawHttp } from "./raw.js";
 import { serialization } from "@hydradb/sdk";
 
-export type { Layout } from "./raw.js";
+/** Storage layout of a database (PRO-1618): fixed at creation, never changed. */
+export type Layout = "split" | "unified";
 
 /**
  * `unified` (PRO-1618) names the ONE corpus of a database created with
@@ -116,8 +117,8 @@ export interface HydraConfig {
 	timeoutSeconds?: number;
 	/** Retries per call. The SDK defaults to 2; set explicitly so it is a choice. */
 	maxRetries?: number;
-	/** Test seam for the hand-rolled v2 calls (see ./raw.ts); production uses global fetch. */
-	fetch?: typeof fetch;
+	/** Test seam for the hand-rolled HTTP path (see ./transport.ts); production never sets it. */
+	fetchFn?: typeof fetch;
 }
 
 export interface QueryParams {
@@ -145,10 +146,37 @@ export interface QueryParams {
 	ids?: string[];
 	/** Exact-match filters over stored metadata. No ranges, no partial matches. */
 	metadataFilters?: Record<string, unknown>;
+	/**
+	 * Principals to answer as (PRO-1684 document ACLs): an email, a
+	 * `domain:<host>`, or a `group:<provider>:<id>`. Results are restricted to
+	 * documents whose access list admits at least one of them.
+	 *
+	 * Omitted means NO ACL scoping — every document this key can reach. An empty
+	 * array is treated the SAME as omitted by the API (verified against staging:
+	 * `acl: []` and no `acl` both returned 134 sources where an unknown
+	 * principal returned 130), so it is not a way to ask for "nobody"; the
+	 * design doc's rule is that absent and `[]` alike mean unrestricted.
+	 *
+	 * A principal the deployment does not know fails CLOSED: it matches only
+	 * documents carrying no access list of their own, never a restricted one.
+	 */
+	acl?: string[];
 	/** Adjacent chunks pulled in alongside each match, for surrounding context. */
 	numRelatedChunks?: number;
+	/**
+	 * App-aware knowledge retrieval: exact IDs and actors, thread reconstruction,
+	 * and parent/child expansion over connector-ingested sources. Applies to
+	 * knowledge hybrid queries; the server ignores it elsewhere.
+	 */
+	queryApps?: boolean;
 	/** Per-call collection override. */
 	collection?: string;
+	/**
+	 * Multi-collection scope: a list for equal weighting, or a {collection:
+	 * weight} object to rank some higher than others. Mutually exclusive with
+	 * `collection` — see the guard in `query`.
+	 */
+	collections?: SDK.SearchQueryRequestCollections;
 	/** Per-call database override. */
 	database?: string;
 }
@@ -197,6 +225,19 @@ export interface ListParams {
 	ids?: string[];
 	page?: number;
 	pageSize?: number;
+	/**
+	 * Principals to answer as (PRO-1684 document ACLs): an email, a
+	 * `domain:<host>`, or a `group:<provider>:<id>`. Results are restricted to
+	 * documents whose access list admits at least one of them.
+	 *
+	 * Omitted means NO ACL scoping — every document this key can reach. An empty
+	 * array is treated the SAME as omitted by the API, so it is not a way to ask
+	 * for "nobody" (design doc: absent and `[]` alike mean unrestricted).
+	 *
+	 * A principal the deployment does not know fails CLOSED: it matches only
+	 * documents carrying no access list of their own, never a restricted one.
+	 */
+	acl?: string[];
 	collection?: string;
 	/** Per-call database override. */
 	database?: string;
@@ -206,6 +247,19 @@ export interface InspectParams {
 	id: string;
 	mode?: string;
 	expirySeconds?: number;
+	/**
+	 * Principals to answer as (PRO-1684 document ACLs): an email, a
+	 * `domain:<host>`, or a `group:<provider>:<id>`. Results are restricted to
+	 * documents whose access list admits at least one of them.
+	 *
+	 * Omitted means NO ACL scoping — every document this key can reach. An empty
+	 * array is treated the SAME as omitted by the API, so it is not a way to ask
+	 * for "nobody" (design doc: absent and `[]` alike mean unrestricted).
+	 *
+	 * A principal the deployment does not know fails CLOSED: it matches only
+	 * documents carrying no access list of their own, never a restricted one.
+	 */
+	acl?: string[];
 	collection?: string;
 	/** Per-call database override. */
 	database?: string;
@@ -218,11 +272,84 @@ export interface IngestionStatusParams {
 	database?: string;
 }
 
+/** One member of a connected subgraph (wire shape, unchanged from the API). */
+export interface SubgraphMember {
+	source_id: string;
+	title?: string;
+	app_kind?: string;
+	app_provider?: string;
+	app_external_id?: string;
+	thread_id?: string;
+	/** Hops from the seed; 0 is the seed itself. */
+	depth: number;
+	hydration?: string;
+	discovered_via?: string;
+	discovered_relation?: string;
+}
+
+/**
+ * One edge of the subgraph. `source` and `target` are Source nodes, so their
+ * `entity_id` is the member's item id; `relations[0].canonical_predicate` is
+ * the edge type (`relates_to`, `same_thread`, `child_of`, ...).
+ */
+export interface SubgraphRelation {
+	source?: { entity_id?: string; name?: string };
+	target?: { entity_id?: string; name?: string };
+	relations?: { canonical_predicate?: string }[];
+}
+
+export interface SubgraphResult {
+	seed_source_id: string;
+	sources: SubgraphMember[];
+	relations: SubgraphRelation[];
+	auxiliary_relations: unknown[];
+	auxiliary_truncated: boolean;
+	is_truncated: boolean;
+	max_depth_reached: number;
+	success: boolean;
+	message: string;
+}
+
+export interface SubgraphParams {
+	/** The item whose connected subgraph to return. */
+	id: string;
+	kind?: ContextKind;
+	/** Max traversal depth in hops (server default 5). */
+	depth?: number;
+	/** Max members returned (server default 200). */
+	maxSources?: number;
+	/**
+	 * Principals to answer as (PRO-1684 document ACLs): an email, a
+	 * `domain:<host>`, or a `group:<provider>:<id>`. The subgraph contains
+	 * only items those principals may see, filtered at every hop.
+	 *
+	 * Omitted means NO ACL scoping. An empty array is treated the SAME as
+	 * omitted by the API, so it is not a way to ask for "nobody".
+	 */
+	acl?: string[];
+	collection?: string;
+	/** Per-call database override. */
+	database?: string;
+}
+
 export interface RelationsParams {
 	id?: string;
 	kind?: ContextKind;
 	limit?: number;
 	cursor?: number;
+	/**
+	 * Principals to answer as (PRO-1684 document ACLs): an email, a
+	 * `domain:<host>`, or a `group:<provider>:<id>`. Results are restricted to
+	 * documents whose access list admits at least one of them.
+	 *
+	 * Omitted means NO ACL scoping — every document this key can reach. An empty
+	 * array is treated the SAME as omitted by the API, so it is not a way to ask
+	 * for "nobody" (design doc: absent and `[]` alike mean unrestricted).
+	 *
+	 * A principal the deployment does not know fails CLOSED: it matches only
+	 * documents carrying no access list of their own, never a restricted one.
+	 */
+	acl?: string[];
 	collection?: string;
 	/** Per-call database override. */
 	database?: string;
@@ -245,6 +372,11 @@ export interface CreateDatabaseParams {
 }
 
 type ScopeFields = { database: string; collection?: string };
+
+type MultiScopeFields = {
+	database: string;
+	collections: SDK.SearchQueryRequestCollections;
+};
 
 /**
  * A per-call `database` named one the connection is not allowed to touch.
@@ -327,21 +459,6 @@ function queryString(record: Record<string, string | number | undefined>): strin
 }
 
 abstract class Resource {
-	/** Hand-rolled v2 transport for calls the pinned SDK cannot make; see ./raw.ts. */
-	protected raw?: RawHttp;
-
-	/** @internal */
-	attachRaw(raw: RawHttp): void {
-		this.raw = raw;
-	}
-
-	protected requireRaw(what: string): RawHttp {
-		if (!this.raw) {
-			throw new Error(`${what} needs the v2 transport, which this HydraDB instance was built without`);
-		}
-		return this.raw;
-	}
-
 	/**
 	 * A raw v2 call whose wire result is run through the SDK's OWN response
 	 * serializer, so the caller gets the same camelCase object the SDK path
@@ -349,6 +466,20 @@ abstract class Resource {
 	 * serializers reject that enum value before anything is sent, so the
 	 * request is built by hand, but nothing downstream has to know.
 	 */
+	/** A raw v2 call whose wire shape the SDK has no serializer for. */
+	protected async rawJSON<T>(
+		what: string,
+		method: "GET" | "POST" | "DELETE",
+		path: string,
+		body: unknown,
+		signal?: AbortSignal,
+	): Promise<T> {
+		if (!this.raw) {
+			throw new Error(`${what} needs the v2 transport, which this HydraDB instance was built without`);
+		}
+		return sendRaw<T>(this.raw, path, method, body, signal ? { signal } : undefined);
+	}
+
 	protected async rawTyped<T>(
 		what: string,
 		method: "GET" | "POST" | "DELETE",
@@ -357,7 +488,10 @@ abstract class Resource {
 		parse: (raw: unknown, opts?: SdkParseOptions) => T,
 		signal?: AbortSignal,
 	): Promise<T> {
-		const wire = await this.requireRaw(what).request<unknown>(method, path, body, signal);
+		if (!this.raw) {
+			throw new Error(`${what} needs the v2 transport, which this HydraDB instance was built without`);
+		}
+		const wire = await sendRaw<unknown>(this.raw, path, method, body, signal ? { signal } : undefined);
 		return parse(wire, SDK_PARSE_OPTS);
 	}
 
@@ -367,6 +501,12 @@ abstract class Resource {
 		private readonly collection?: string,
 		private readonly allowedDatabases?: readonly string[],
 		private readonly allowedCollections?: readonly string[],
+		/**
+		 * The hand-rolled HTTP path, for the endpoints the SDK does not expose
+		 * (CONTRACT §2 rule 7). Optional only so tests that inject a fake SDK and
+		 * never touch such an endpoint need not build one.
+		 */
+		protected readonly raw?: RawTransport,
 	) {}
 
 	protected scope(override?: string, dbOverride?: string): ScopeFields {
@@ -381,6 +521,43 @@ abstract class Resource {
 		return collection != null && collection !== ""
 			? { database, collection }
 			: { database };
+	}
+
+	/**
+	 * Scope for a query that names SEVERAL collections.
+	 *
+	 * Deliberately does NOT fall back to the configured default collection. The
+	 * server folds the singular `collection` into the deprecated `sub_tenant_id`
+	 * and refuses any request that carries it alongside a multi-scope selector,
+	 * so injecting the default here would turn every `collections` call on a
+	 * scoped connection into a 400. Naming the collections IS the scope.
+	 *
+	 * Confinement is enforced on the same path as `scope`: every named
+	 * collection is checked, so a multi-scope selector cannot reach past what an
+	 * OAuth connection was confined to.
+	 */
+	protected multiScope(
+		collections: SDK.SearchQueryRequestCollections,
+		dbOverride?: string,
+	): MultiScopeFields {
+		const database = dbOverride?.trim() || this.database;
+		if (database !== this.database) assertDatabaseAllowed(database, this.allowedDatabases);
+
+		const names = Array.isArray(collections)
+			? collections
+			: Object.keys(collections);
+		if (names.length === 0) {
+			throw new Error(
+				"collections was empty — pass at least one collection name, or omit " +
+				"collections to search the connection's default scope.",
+			);
+		}
+		for (const name of names) {
+			if (name !== this.collection) {
+				assertCollectionAllowed(name, this.allowedCollections);
+			}
+		}
+		return { database, collections };
 	}
 
 	protected async call<T>(path: string, fn: () => Promise<unknown>): Promise<T> {
@@ -405,8 +582,9 @@ export class ContextResource extends Resource {
 		collection?: string,
 		allowedDatabases?: readonly string[],
 		allowedCollections?: readonly string[],
+		raw?: RawTransport,
 	) {
-		super(sdk, database, collection, allowedDatabases, allowedCollections);
+		super(sdk, database, collection, allowedDatabases, allowedCollections, raw);
 	}
 
 	/**
@@ -441,6 +619,25 @@ export class ContextResource extends Resource {
 		const queryBy =
 			params.queryBy ?? (params.operator != null ? "text" : undefined);
 
+		// One scope selector per request. The server rejects a multi-scope
+		// selector sent alongside the singular one it folds `collection` into, so
+		// a caller that sets both has stated two different scopes and only they
+		// can say which they meant — the same stance taken on operator/queryBy
+		// above, rather than silently dropping one.
+		if (params.collections != null && params.collection != null) {
+			throw new Error(
+				"pass either collection (one scope) or collections (several) — not " +
+				"both. Hydra DB refuses a request carrying both selectors.",
+			);
+		}
+		const scope =
+			params.collections != null
+				? this.multiScope(params.collections, params.database)
+				: this.scope(params.collection, params.database);
+
+		// `unified` is refused by the pinned SDK's request serializer before
+		// anything is sent, so that kind is built by hand and its result parsed
+		// with the SDK's own response serializer (PRO-1618).
 		if (params.kind === "unified") {
 			return this.call("/query", () =>
 				this.rawTyped(
@@ -448,7 +645,7 @@ export class ContextResource extends Resource {
 					"POST",
 					"/query",
 					compact({
-						...this.scope(params.collection, params.database),
+						...scope,
 						query: params.query,
 						type: "unified",
 						operator: params.operator,
@@ -458,9 +655,11 @@ export class ContextResource extends Resource {
 						graph_context: params.graphContext,
 						alpha: params.alpha,
 						recency_bias: params.recencyBias,
+						query_apps: params.queryApps,
 						ids: params.ids,
 						metadata_filters: params.metadataFilters,
 						num_related_chunks: params.numRelatedChunks,
+						acl: params.acl,
 					}),
 					serialization.SearchV2RetrievalResult.parseOrThrow,
 					opts?.signal,
@@ -470,7 +669,7 @@ export class ContextResource extends Resource {
 
 		return this.call("/query", () =>
 			this.sdk.query({
-				...this.scope(params.collection, params.database),
+				...scope,
 				query: params.query,
 				type: params.kind as SDK.SearchSourceType | undefined,
 				operator: params.operator,
@@ -480,9 +679,11 @@ export class ContextResource extends Resource {
 				graphContext: params.graphContext,
 				alpha: params.alpha,
 				recencyBias: params.recencyBias,
+				queryApps: params.queryApps,
 				ids: params.ids,
 				metadataFilters: params.metadataFilters,
 				numRelatedChunks: params.numRelatedChunks,
+				acl: params.acl,
 			}, req(opts)),
 		);
 	}
@@ -497,7 +698,7 @@ export class ContextResource extends Resource {
 	async ingest(
 		params: IngestParams,
 		opts?: RequestOptions,
-	): Promise<SDK.IngestionV2SourceUploadResponse> {
+	): Promise<SDK.IngestionV2IngestResponse> {
 		if (params.kind === "unified") return this.ingestUnified(params, opts);
 		const request: SDK.IngestContextRequest = {
 			...this.scope(params.collection, params.database),
@@ -589,7 +790,7 @@ export class ContextResource extends Resource {
 	private ingestUnified(
 		params: IngestParams,
 		opts?: RequestOptions,
-	): Promise<SDK.IngestionV2SourceUploadResponse> {
+	): Promise<SDK.IngestionV2IngestResponse> {
 		const item: Record<string, unknown> = {};
 		if (params.text != null) item.text = params.text;
 		if (params.pairs != null) {
@@ -618,7 +819,7 @@ export class ContextResource extends Resource {
 				"POST",
 				"/context/ingest",
 				body,
-				serialization.IngestionV2SourceUploadResponse.parseOrThrow,
+				serialization.IngestionV2IngestResponse.parseOrThrow,
 				opts?.signal,
 			),
 		);
@@ -628,7 +829,10 @@ export class ContextResource extends Resource {
 	list(
 		params: ListParams = {},
 		opts?: RequestOptions,
-	): Promise<SDK.ListV2SourceListResponse> {
+	): Promise<SDK.ListV2ListResponse> {
+		// `unified` is refused by the pinned SDK's request serializer, so that
+		// kind is built by hand and parsed with the SDK's own response
+		// serializer (PRO-1618).
 		if (params.kind === "unified") {
 			return this.call("/context/list", () =>
 				this.rawTyped(
@@ -641,8 +845,9 @@ export class ContextResource extends Resource {
 						ids: params.ids,
 						page: params.page,
 						page_size: params.pageSize,
+						acl: params.acl,
 					}),
-					serialization.ListV2SourceListResponse.parseOrThrow,
+					serialization.ListV2ListResponse.parseOrThrow,
 					opts?.signal,
 				),
 			);
@@ -654,6 +859,7 @@ export class ContextResource extends Resource {
 				ids: params.ids,
 				page: params.page,
 				pageSize: params.pageSize,
+				acl: params.acl,
 			}, req(opts)),
 		);
 	}
@@ -669,6 +875,7 @@ export class ContextResource extends Resource {
 				id: params.id,
 				mode: params.mode,
 				expirySeconds: params.expirySeconds,
+				acl: params.acl,
 			}, req(opts)),
 		);
 	}
@@ -684,6 +891,49 @@ export class ContextResource extends Resource {
 				ids: params.ids,
 			}, req(opts)),
 		);
+	}
+
+	/**
+	 * The connected subgraph of one item (`GET /context/{id}/subgraph`): every
+	 * item reachable from it through item-level relations — explicit links, a
+	 * shared thread, parent/child — plus the relations among the members and
+	 * the structural graph around them.
+	 *
+	 * No SDK resource for this yet, so it takes the raw path (CONTRACT §2 rule
+	 * 7): same header, same envelope unwrap, same error type as everything else
+	 * here. When the SDK grows `context.subgraph`, only this method changes.
+	 */
+	async subgraph(params: SubgraphParams, opts?: RequestOptions): Promise<SubgraphResult> {
+		// `async` for the same reason `query` and `ingest` are: the scope check
+		// below throws, and a caller awaiting this must see a rejection, not a
+		// synchronous exception from the call site.
+		if (!this.raw) {
+			throw new HydraWrapperError(
+				"Hydra DB /context/{id}/subgraph → ERR: no HTTP transport configured",
+				"/context/{id}/subgraph",
+			);
+		}
+		// Blank is the one id the wrapper rejects locally: it would build
+		// "/context//subgraph" and fail as a remote routing error instead of a
+		// legible one. Everything else goes out byte for byte — ingest stores a
+		// source_id verbatim, so trimming here could address a different item.
+		if (params.id.trim() === "") {
+			throw new HydraWrapperError(
+				"Hydra DB /context/{id}/subgraph → ERR: id must not be empty",
+				"/context/{id}/subgraph",
+			);
+		}
+		const query = new URLSearchParams(this.scope(params.collection, params.database));
+		if (params.kind) query.set("type", params.kind);
+		if (params.depth != null) query.set("depth", String(params.depth));
+		if (params.maxSources != null) query.set("max_sources", String(params.maxSources));
+		// Repeated params, like the dashboard and the CLI: the API reads both
+		// repeated (acl=a&acl=b) and comma-separated forms. An empty array is
+		// the same as omitted server-side, so sending nothing keeps the
+		// request faithful to what the caller said.
+		for (const principal of params.acl ?? []) query.append("acl", principal);
+		const path = `/context/${encodeURIComponent(params.id)}/subgraph?${query.toString()}`;
+		return sendRaw<SubgraphResult>(this.raw, path, "GET", undefined, opts);
 	}
 
 	/** Knowledge-graph relations (SDK `context.relations`). */
@@ -716,6 +966,7 @@ export class ContextResource extends Resource {
 				type: params.kind as SDK.RelationsContextRequestType | undefined,
 				limit: params.limit,
 				cursor: params.cursor,
+				acl: params.acl,
 			}),
 		);
 	}
@@ -761,8 +1012,12 @@ export class DatabasesResource extends Resource {
 		collection?: string,
 		allowedDatabases?: readonly string[],
 		allowedCollections?: readonly string[],
+		// The shared raw transport. `create` with a layout and the layout probe
+		// both need it: the pinned SDK has neither `type` on create nor
+		// `details[]` on the list (PRO-1618).
+		raw?: RawTransport,
 	) {
-		super(sdk, database, collection, allowedDatabases, allowedCollections);
+		super(sdk, database, collection, allowedDatabases, allowedCollections, raw);
 	}
 
 	create(
@@ -772,7 +1027,8 @@ export class DatabasesResource extends Resource {
 			// The pinned SDK's create request has no `type`; the generated
 			// serializer would drop it and provision a split database in silence.
 			return this.call("/databases", () =>
-				this.requireRaw("database create with a layout").request<SDK.TenantsTenantCreateAcceptedResponse>(
+				this.rawTyped(
+					"database create with a layout",
 					"POST",
 					"/databases",
 					{
@@ -785,6 +1041,7 @@ export class DatabasesResource extends Resource {
 							? { embeddings_dimension: params.embeddingsDimension }
 							: {}),
 					},
+					serialization.TenantsTenantCreateAcceptedResponse.parseOrThrow,
 				),
 			);
 		}
@@ -816,7 +1073,8 @@ export class DatabasesResource extends Resource {
 	layouts(signal?: AbortSignal): Promise<Map<string, Layout>> {
 		if (!this.layoutCache) {
 			this.layoutCache = this.call("/databases", () =>
-				this.requireRaw("layout probe").request<{ details?: { database?: string; type?: string }[] }>(
+				this.rawJSON<{ details?: { database?: string; type?: string }[] }>(
+					"layout probe",
 					"GET",
 					"/databases",
 					undefined,
@@ -918,26 +1176,25 @@ export class HydraDB {
 		this.collection = config.collection;
 		this.allowedDatabases = config.allowedDatabases;
 		this.allowedCollections = config.allowedCollections;
+		const raw = newRawTransport(config, {
+			timeoutSeconds: DEFAULT_TIMEOUT_SECONDS,
+			maxRetries: DEFAULT_MAX_RETRIES,
+		});
 		this.context = new ContextResource(
 			client,
 			config.database,
 			config.collection,
 			config.allowedDatabases,
 			config.allowedCollections,
+			raw,
 		);
-		const raw = new RawHttp({
-			token: config.token,
-			baseUrl: config.baseUrl,
-			timeoutSeconds: config.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS,
-			maxRetries: config.maxRetries ?? DEFAULT_MAX_RETRIES,
-			fetch: config.fetch,
-		});
 		this.databases = new DatabasesResource(
 			client,
 			config.database,
 			config.collection,
 			config.allowedDatabases,
 			config.allowedCollections,
+			raw,
 		);
 		this.graph = new GraphResource({
 			token: config.token,
@@ -945,7 +1202,5 @@ export class HydraDB {
 			timeoutSeconds: config.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS,
 			maxRetries: config.maxRetries ?? DEFAULT_MAX_RETRIES,
 		});
-		this.context.attachRaw(raw);
-		this.databases.attachRaw(raw);
 	}
 }

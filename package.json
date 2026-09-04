@@ -1,6 +1,6 @@
 {
   "name": "@hydradb/mcp",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "MCP server for Hydra DB: State-of-the-art agentic memory with recall, ingest, and knowledge graph context",
   "license": "Apache-2.0",
   "type": "module",
@@ -32,7 +32,7 @@
     "lint": "biome lint src tests conformance scripts"
   },
   "dependencies": {
-    "@hydradb/sdk": "2.1.2",
+    "@hydradb/sdk": "2.1.4",
     "@modelcontextprotocol/sdk": "^1.21.1",
     "cors": "^2.8.6",
     "express": "^5.2.1",
