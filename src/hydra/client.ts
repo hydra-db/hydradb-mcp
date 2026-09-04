@@ -942,18 +942,26 @@ export class ContextResource extends Resource {
 	): Promise<SDK.GraphGraphRelationsResponse> {
 		if (params.kind === "unified") {
 			const scope = this.scope(params.collection, params.database);
+			const query = new URLSearchParams();
+			for (const [k, v] of Object.entries({
+				database: scope.database,
+				collection: scope.collection,
+				id: params.id,
+				type: "unified",
+				limit: params.limit,
+				cursor: params.cursor,
+			}))
+				if (v !== undefined) query.set(k, String(v));
+			// Same repeated form the SDK path and `subgraph` send (PRO-1684):
+			// a unified database enforces document ACLs like any other, so the
+			// raw path has to carry the principals or "view as" silently
+			// widens to everything on this layout.
+			for (const principal of params.acl ?? []) query.append("acl", principal);
 			return this.call("/context/relations", () =>
 				this.rawTyped(
 					"unified relations",
 					"GET",
-					`/context/relations${queryString({
-						database: scope.database,
-						collection: scope.collection,
-						id: params.id,
-						type: "unified",
-						limit: params.limit,
-						cursor: params.cursor,
-					})}`,
+					`/context/relations?${query.toString()}`,
 					undefined,
 					serialization.GraphGraphRelationsResponse.parseOrThrow,
 				),

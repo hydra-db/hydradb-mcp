@@ -821,6 +821,35 @@ test("unified query, list and delete bypass the SDK request serializers and retu
 	assert.deepEqual(JSON.parse(String(calls[2]!.init.body)), { database: "db_u", collection: "c1", ids: ["a", "b"], type: "unified" });
 });
 
+// PRO-1684 on PRO-1618: a unified database enforces document ACLs like a
+// split one, so the hand-built relations request has to carry the principals
+// in the same repeated form the SDK path sends. Dropping them would make
+// "view as" silently widen to everything on this layout.
+test("unified relations carries acl principals and the unified type", async () => {
+	const calls: string[] = [];
+	const fetchImpl = ((url: string | URL | Request) => {
+		calls.push(String(url));
+		return Promise.resolve(
+			new Response(JSON.stringify({ success: true, data: { relations: [], total: 0 } }), { status: 200, headers: { "content-type": "application/json" } }),
+		);
+	}) as typeof fetch;
+	const sdk = { context: { relations() { throw new Error("SDK relations must not be used for unified"); } } } as unknown as HydraDBClient;
+	const hydra = new HydraDB({ token: "t", database: "db_u", collection: "c1", baseUrl: "https://api.test", fetchFn: fetchImpl }, sdk);
+
+	await hydra.context.relations({ kind: "unified", id: "s1", limit: 3, acl: ["alice@acme.com", "group:slack:C1"] });
+	const sent = new URL(calls[0]!);
+	assert.equal(sent.pathname, "/context/relations");
+	assert.equal(sent.searchParams.get("type"), "unified");
+	assert.equal(sent.searchParams.get("id"), "s1");
+	assert.equal(sent.searchParams.get("limit"), "3");
+	assert.deepEqual(sent.searchParams.getAll("acl"), ["alice@acme.com", "group:slack:C1"]);
+
+	// No principals means no acl parameter at all: absent and [] are the same
+	// to the API, and the request should say what the caller said.
+	await hydra.context.relations({ kind: "unified", id: "s1" });
+	assert.equal(new URL(calls[1]!).searchParams.has("acl"), false);
+});
+
 test("the raw transport retries 5xx and network failures, never a 4xx", async () => {
 	let attempts = 0;
 	const flaky = ((url: string | URL | Request) => {
