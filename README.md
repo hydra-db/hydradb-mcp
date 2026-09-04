@@ -129,7 +129,7 @@ tells you nothing about which knowledge sources exist.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `kind` | string | **Yes** | `memory` or `knowledge`; `unified` lists every item of a unified database |
+| `kind` | string | No | `memory` or `knowledge` — always set it on a split database, since one listing never covers both; omitting it lists memories and says so. On a unified database omit it, or pass `unified`, and one page covers everything |
 | `ids` | array | No | Restrict to these ids |
 | `source_ids` | array | No | Deprecated alias for `ids` |
 | `page` | number | No | Page to return, 1-indexed (default: 1) |

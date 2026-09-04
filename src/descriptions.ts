@@ -92,7 +92,9 @@ const PARAM = {
 		"(default), or 'knowledge' to store a document as a searchable source. " +
 		"On a UNIFIED database leave unset (or pass 'unified'): everything is one family there. " +
 		"Memory-only options (turns, source_id, infer, is_markdown, user_name) do not " +
-		"apply to knowledge and are rejected rather than ignored.",
+		"apply to knowledge and are rejected rather than ignored. On a unified database " +
+		"is_markdown has no counterpart, and user_name only means something on a `turns` " +
+		"conversation — both are rejected rather than ignored there too.",
 	title:
 		"A short, specific label — always set it. This is the ONLY label shown next to " +
 		"this entry in later hydradb_query results, so 'Deployment rollback policy' is " +
@@ -136,9 +138,11 @@ const PARAM = {
 		"rather than about an anonymous participant. Applies to `turns` only.",
 	kind:
 		"Which family to list: 'memory' (stored memories) or 'knowledge' (ingested " +
-		"sources). REQUIRED — on a split database these are separate corpora with different " +
-		"output, and no single listing covers both, so call this twice to see everything. " +
-		"On a UNIFIED database pass 'unified' to see every item in one page.",
+		"sources). ALWAYS SET IT on a split database — these are separate corpora with " +
+		"different output, and no single listing covers both, so call this twice to see " +
+		"everything; omitting it lists memories only and says so. " +
+		"On a UNIFIED database there is one corpus: leave it unset (or pass 'unified') " +
+		"and one page covers everything.",
 	source_ids:
 		"Optional array of specific source IDs to filter by. If omitted, lists all sources.",
 	page:

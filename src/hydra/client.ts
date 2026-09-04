@@ -27,6 +27,21 @@ import { serialization } from "@hydradb/sdk";
 /** Storage layout of a database (PRO-1618): fixed at creation, never changed. */
 export type Layout = "split" | "unified";
 
+/** One `GET /databases` `details[]` row: a database and its storage layout. */
+export interface DatabaseDetail {
+	database?: string;
+	type?: string;
+}
+
+/**
+ * `GET /databases`, with the `details[]` the pinned SDK's response model does
+ * not declare (PRO-1618). Declared here rather than left to `unknown` so a
+ * caller reading the layout is type-checked against the shape the server sends.
+ */
+export type DatabaseListing = SDK.TenantsTenantIdsResponse & {
+	details?: DatabaseDetail[];
+};
+
 /**
  * `unified` (PRO-1618) names the ONE corpus of a database created with
  * `type: "unified"`, where knowledge and memory are not separate. On such a
@@ -491,22 +506,10 @@ abstract class Resource {
 	 * serializer, so the caller gets the same camelCase object the SDK path
 	 * returns. Used for `kind: "unified"` (PRO-1618): the pinned SDK's REQUEST
 	 * serializers reject that enum value before anything is sent, so the
-	 * request is built by hand, but nothing downstream has to know.
+	 * request is built by hand, but nothing downstream has to know — and for
+	 * `GET /databases`, whose `details[]` the pinned RESPONSE model does not
+	 * declare.
 	 */
-	/** A raw v2 call whose wire shape the SDK has no serializer for. */
-	protected async rawJSON<T>(
-		what: string,
-		method: "GET" | "POST" | "DELETE",
-		path: string,
-		body: unknown,
-		signal?: AbortSignal,
-	): Promise<T> {
-		if (!this.raw) {
-			throw new Error(`${what} needs the v2 transport, which this HydraDB instance was built without`);
-		}
-		return sendRaw<T>(this.raw, path, method, body, signal ? { signal } : undefined);
-	}
-
 	protected async rawTyped<T>(
 		what: string,
 		method: "GET" | "POST" | "DELETE",
@@ -818,6 +821,27 @@ export class ContextResource extends Resource {
 		params: IngestParams,
 		opts?: RequestOptions,
 	): Promise<SDK.IngestionV2IngestResponse> {
+		// Same rule as the knowledge branch above: a field with nowhere to go is
+		// REFUSED, never accepted and discarded. A caller that sets
+		// `is_markdown: true` and is answered "success: 1, failed: 0" has been
+		// told its instruction was honoured when it never left this function.
+		//
+		// `is_markdown` has no counterpart at all — the unified item shape is
+		// text or a conversation, and the server has no field to put it in.
+		// `user_name` DOES mean something here, but only on a conversation,
+		// where it rides on each turn's `name`; with no `pairs` there is no turn
+		// to carry it, so a text-only item would drop it.
+		const unsupported: string[] = [];
+		if (params.isMarkdown != null) unsupported.push("isMarkdown");
+		if (params.pairs == null && params.userName != null) unsupported.push("userName");
+		if (unsupported.length > 0) {
+			throw new Error(
+				`Unified ingestion does not support ${unsupported.join(", ")} — ` +
+				`a unified database stores one corpus of text or conversation items, ` +
+				`and those have nowhere to go on it. Drop them.`,
+			);
+		}
+
 		const item: Record<string, unknown> = {};
 		if (params.text != null) item.text = params.text;
 		if (params.pairs != null) {
@@ -1093,11 +1117,56 @@ export class DatabasesResource extends Resource {
 		return this.call("/databases", () => this.sdk.databases.delete({ database }));
 	}
 
-	list(): Promise<SDK.TenantsTenantIdsResponse> {
-		return this.call("/databases", () => this.sdk.databases.list());
+	/**
+	 * Every database this key can see (`GET /databases`), INCLUDING the
+	 * `details[]` rows that carry each one's storage layout (PRO-1618).
+	 *
+	 * Hand-rolled rather than the SDK call, and it is the ONE reader of this
+	 * endpoint: `layouts()` below goes through it rather than issuing a second,
+	 * identical request, so listing databases and reading their layouts is one
+	 * round trip instead of two. The wire result is still run through the SDK's
+	 * own response serializer, so callers get the same camelCase object the SDK
+	 * path returned (`tenantIds`), with `details[]` — a key the pinned model
+	 * does not declare — passed through beside it.
+	 *
+	 * The raw path is not a downgrade here: `sendRaw` retries 429/5xx with
+	 * bounded backoff, exactly as the SDK does, and translates failures into
+	 * the same `HydraWrapperError`.
+	 */
+	list(signal?: AbortSignal): Promise<DatabaseListing> {
+		return this.call("/databases", () =>
+			this.rawTyped(
+				"database list",
+				"GET",
+				"/databases",
+				undefined,
+				serialization.TenantsTenantIdsResponse.parseOrThrow,
+				signal,
+			),
+		);
 	}
 
 	private layoutCache?: Promise<Map<string, Layout>>;
+
+	/**
+	 * Layouts learned outside the probe: a defaulted kind the server refused,
+	 * which the caller's `unified` retry then satisfied. That answer is as
+	 * authoritative as the probe's — the server just told us — and without
+	 * recording it a process whose probe failed pays the refused request again
+	 * on every defaulted call for the life of the process.
+	 */
+	private readonly learnedLayouts = new Map<string, Layout>();
+
+	/**
+	 * Record a layout the probe did not supply. See `learnedLayouts`.
+	 *
+	 * Kept in its own map rather than written into `layoutCache`: that cache is
+	 * a promise that clears itself on failure, so a write into it races the
+	 * clear and can be discarded exactly when it is most needed.
+	 */
+	recordLayout(database: string, layout: Layout): void {
+		this.learnedLayouts.set(database, layout);
+	}
 
 	/**
 	 * Every database this key can see, with its storage layout (PRO-1618), read
@@ -1106,24 +1175,17 @@ export class DatabasesResource extends Resource {
 	 * what lets the tools pick `unified` as a default without a failed request.
 	 */
 	layouts(signal?: AbortSignal): Promise<Map<string, Layout>> {
-		if (!this.layoutCache) {
+		let cache = this.layoutCache;
+		if (!cache) {
 			// The shared probe deliberately takes NO caller signal: it is
 			// bounded by the transport's own deadline, and it serves every
 			// tool call that arrives while it is in flight. Binding it to the
 			// first caller would let that caller's cancellation fail everyone
 			// else's, and the others would then read the database as split.
 			// Each caller's own cancellation is honoured below, per waiter.
-			this.layoutCache = this.call("/databases", () =>
-				this.rawJSON<{ details?: { database?: string; type?: string }[] }>(
-					"layout probe",
-					"GET",
-					"/databases",
-					undefined,
-				),
-			).then((listed) => {
+			cache = this.list().then((listed) => {
 				const map = new Map<string, Layout>();
-				const rows = (listed as { details?: { database?: string; type?: string }[] }).details ?? [];
-				for (const row of rows) {
+				for (const row of listed.details ?? []) {
 					if (row.database) map.set(row.database, row.type === "unified" ? "unified" : "split");
 				}
 				return map;
@@ -1133,8 +1195,14 @@ export class DatabasesResource extends Resource {
 				this.layoutCache = undefined;
 				throw err;
 			});
+			this.layoutCache = cache;
 		}
-		return abortable(this.layoutCache, signal);
+		// Merged at READ time, not when the probe resolved: a layout learned
+		// after the cache was built still has to be visible here.
+		const probed = cache.then((map) =>
+			this.learnedLayouts.size === 0 ? map : new Map([...map, ...this.learnedLayouts]),
+		);
+		return abortable(probed, signal);
 	}
 
 	/**
@@ -1144,6 +1212,11 @@ export class DatabasesResource extends Resource {
 	 * unified call.
 	 */
 	async layout(database: string, signal?: AbortSignal): Promise<Layout> {
+		// A learned layout answers before the probe is consulted at all, so a
+		// process whose probe keeps failing still stops guessing after the
+		// first refusal.
+		const learned = this.learnedLayouts.get(database);
+		if (learned != null) return learned;
 		try {
 			return (await this.layouts(signal)).get(database) ?? "split";
 		} catch (err) {

@@ -1448,19 +1448,50 @@ test("dropping the aliases materially shrinks the tool manifest", async () => {
 // things across three tools (query defaults to `all`, list and delete to
 // `memory`), so a model that learned "kind covers everything" from query read an
 // empty-of-knowledge listing as proof no knowledge exists.
-test("hydradb_list requires kind rather than silently picking one", async () => {
+//
+// `kind` is optional again (PRO-1618) because a UNIFIED database has no corpus
+// to choose between: requiring one there means naming a kind the server refuses.
+// The original fix survives the change — on a SPLIT database an omitted kind
+// still lists memories, and now says out loud that it did not cover knowledge,
+// so the listing can no longer be read as the complete inventory.
+test("hydradb_list without kind lists memories and names the corpus it did not cover", async () => {
 	const { hydra, calls } = mockHydra();
 	const client = await connect(hydra);
 
 	const result = await client.callTool({ name: "hydradb_list", arguments: {} });
 
-	assert.equal(result.isError, true, "omitting kind must not quietly mean 'memory'");
-	assert.equal(
-		calls.filter((c) => c.method === "list").length,
-		0,
-		"no listing should be issued when the corpus is ambiguous",
+	assert.notEqual(result.isError, true);
+	const listCalls = calls.filter((c) => c.method === "list");
+	assert.equal(listCalls.length, 1);
+	assert.equal(listCalls[0]!.args.type, "memory", "a split database keeps the old default");
+	assert.match(
+		(result.content as { text: string }[])[0]?.text ?? "",
+		/knowledge is a separate corpus/i,
+		"a memory-only listing must not read as the whole store",
 	);
 
+	await client.close();
+});
+
+// The note is for a kind the HOST chose. A caller who asked for memories knows
+// what they asked for, and telling them again is noise on every page.
+test("hydradb_list does not add the corpus note when the caller named the kind", async () => {
+	const { text } = await listText(
+		{ user_memories: [{ memory_id: "m1", memory_content: "prefers tabs" }], total: 1 },
+		{ kind: "memory" },
+	);
+	assert.doesNotMatch(text, /separate corpus/i);
+});
+
+// The whole point of making it optional: a unified database resolves to its one
+// corpus with no failed request and no kind for the model to invent.
+test("hydradb_list without kind lists unified on a unified database", async () => {
+	const { hydra, raw } = mockHydraWithLayout("unified");
+	const client = await connect(hydra);
+	const res = await client.callTool({ name: "hydradb_list", arguments: {} });
+	assert.notEqual(res.isError, true);
+	assert.equal((raw.find((c) => c.path === "/context/list")!.body as { type: string }).type, "unified");
+	assert.equal((res.structuredContent as { kind: string }).kind, "unified");
 	await client.close();
 });
 
@@ -3028,4 +3059,144 @@ test("a defaulted kind refused by a unified database is retried once as unified;
 	const explicit = await client.callTool({ name: "hydradb_query", arguments: { query: "q", kind: "memory" } });
 	assert.equal(explicit.isError, true, "an explicit kind is never rewritten");
 	assert.equal(raw.filter((c) => c.path === "/query").length, 1);
+});
+
+/**
+ * A fetch whose layout probe FAILS, so nothing can be learned from it, and
+ * whose SDK-path answers are the server's unified refusal. `message` is the
+ * refusal text under test.
+ */
+function refusingLayout(message: string, code?: string): {
+	hydra: HydraDB;
+	raw: RawCall[];
+	sdkQueries: () => number;
+} {
+	const raw: RawCall[] = [];
+	let sdkQueries = 0;
+	const sdk = {
+		query: () => {
+			sdkQueries += 1;
+			return Promise.reject(
+				new HydraDBError({
+					statusCode: 400,
+					body: { error: { message, ...(code != null ? { code } : {}) } },
+				}),
+			);
+		},
+		context: {},
+	} as unknown as HydraDBClient;
+	const fetchFn = ((url: string | URL | Request, init?: RequestInit) => {
+		const path = new URL(String(url)).pathname;
+		if (path === "/databases") {
+			return Promise.resolve(new Response("down", { status: 503 }));
+		}
+		raw.push({ path, method: init?.method ?? "GET", body: init?.body ? JSON.parse(String(init.body)) : undefined });
+		return Promise.resolve(
+			new Response(JSON.stringify({ success: true, data: { chunks: [], sources: [] } }), {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			}),
+		);
+	}) as typeof fetch;
+	const hydra = new HydraDB(
+		{ token: "t", database: "db_test", collection: "col_test", baseUrl: "https://api.test", fetchFn, maxRetries: 0 },
+		sdk,
+	);
+	return { hydra, raw, sdkQueries: () => sdkQueries };
+}
+
+// The probe is memoised; its FAILURE was not. So a process whose probe went
+// down paid the refused request on every defaulted call thereafter — it had
+// already been told the database is unified and threw the answer away.
+test("a layout recovered by the unified retry is remembered for the next call", async () => {
+	const { hydra, raw, sdkQueries } = refusingLayout("type 'all' is not valid on a unified database");
+	const client = await connect(hydra);
+
+	await client.callTool({ name: "hydradb_query", arguments: { query: "one" } });
+	assert.equal(sdkQueries(), 1, "the first call learns it the hard way");
+	assert.equal(raw.filter((c) => c.path === "/query").length, 1);
+
+	await client.callTool({ name: "hydradb_query", arguments: { query: "two" } });
+	assert.equal(sdkQueries(), 1, "the second call must not repeat the refused request");
+	assert.equal(raw.filter((c) => c.path === "/query").length, 2, "it goes straight to unified");
+
+	await client.close();
+});
+
+// The stable half of the signal. The server gives this refusal a code
+// (CORPUS_TYPE_UNSUPPORTED, hydradb-application#870); prose that no pattern here
+// has ever seen must still retry when the code says what happened.
+test("the structured error code triggers the retry on its own", async () => {
+	const { hydra, raw } = refusingLayout("le type demandé n'est pas accepté", "CORPUS_TYPE_UNSUPPORTED");
+	const client = await connect(hydra);
+	const res = await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
+	assert.notEqual(res.isError, true);
+	assert.equal(raw.filter((c) => c.path === "/query").length, 1);
+	await client.close();
+});
+
+// And it does not fire on a 400 that merely happens to be structured: a
+// different code with prose that says nothing about a layout is a real failure.
+test("an unrelated structured 400 is not retried as unified", async () => {
+	const { hydra, raw } = refusingLayout("max_results must be between 1 and 50", "INVALID_INPUT");
+	const client = await connect(hydra);
+	const res = await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
+	assert.equal(res.isError, true);
+	assert.equal(raw.filter((c) => c.path === "/query").length, 0);
+	await client.close();
+});
+
+// The server has two wordings for this refusal and they put the words the other
+// way round: `type 'x' is not valid on a unified database` from the corpus-type
+// check, and `this database is unified: send the content as items…` from the
+// ingest handler — which still goes out with no code at all, so the prose match
+// is the only thing that catches it.
+test("both of the server's unified refusal wordings trigger the retry", async () => {
+	for (const message of [
+		"type 'all' is not valid on a unified database: knowledge and memory are one corpus here",
+		"this database is unified: send the content as `items` (a JSON array of text or conversation items)",
+	]) {
+		const { hydra, raw } = refusingLayout(message);
+		const client = await connect(hydra);
+		const res = await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
+		assert.notEqual(res.isError, true, `not retried for: ${message}`);
+		assert.equal(raw.filter((c) => c.path === "/query").length, 1);
+		await client.close();
+	}
+});
+
+// runDatabases asked for the same listing twice — once through the SDK for the
+// names, once through the layout probe for the types — when one response
+// carries both.
+test("hydradb_databases issues exactly one GET /databases", async () => {
+	let listings = 0;
+	const fetchFn = ((url: string | URL | Request) => {
+		const path = new URL(String(url)).pathname;
+		if (path === "/databases") listings += 1;
+		return Promise.resolve(
+			new Response(
+				JSON.stringify({
+					success: true,
+					data: { databases: ["db_test", "other"], details: [{ database: "db_test", type: "unified" }] },
+				}),
+				{ status: 200, headers: { "content-type": "application/json" } },
+			),
+		);
+	}) as typeof fetch;
+	const hydra = new HydraDB(
+		{ token: "t", database: "db_test", baseUrl: "https://api.test", fetchFn },
+		{ databases: { list: () => assert.fail("the SDK list path must not be used") } } as unknown as HydraDBClient,
+	);
+	const server = createHydraDBServer(hydra, undefined, { oauthTools: true });
+	const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+	const client = new Client({ name: "test", version: "0.0.0" });
+	await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+
+	const res = await client.callTool({ name: "hydradb_databases", arguments: {} });
+	assert.equal(listings, 1);
+	assert.deepEqual(
+		(res.structuredContent as { types: Record<string, string> }).types,
+		{ db_test: "unified", other: "split" },
+	);
+	await client.close();
 });

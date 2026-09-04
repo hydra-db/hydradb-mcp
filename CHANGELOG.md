@@ -44,11 +44,23 @@ corpus. On it the server accepts only `kind: "unified"` (its default) and
 refuses `memory`/`knowledge`, so the server's host-owned defaults now follow
 the database's layout: `hydradb_query` defaults to `unified` there (still
 `all` on a split database), `hydradb_ingest` and `hydradb_delete` default to
-`unified` there (still `memory` on split), and `hydradb_list` accepts
-`kind: "unified"` to list every item in one page. `hydradb_databases` names
+`unified` there (still `memory` on split), and `hydradb_list` defaults to
+`unified` there too, listing every item in one page. `hydradb_databases` names
 each database's layout. The layout comes from one memoised `GET /databases`
 probe (`details[].type`); a probe that fails reads as split, so nothing
-changes for any existing database.
+changes for any existing database, and a layout the server reveals by refusing
+a defaulted kind is remembered rather than relearned on every call.
+
+`hydradb_list`'s `kind` is optional again as a result. On a split database an
+omitted `kind` still lists memories, and now says so: knowledge is a separate
+corpus there and the listing names what it did not cover, so it cannot be read
+as the whole store.
+
+Fields a unified database has nowhere to put are refused rather than dropped,
+matching the knowledge path: `is_markdown` has no counterpart there at all,
+and `user_name` only means something on a `turns` conversation, where it
+becomes the speaker's `name`. `user_name` is also no longer discarded on a
+text ingest.
 
 Unified ingest sends the `items[]` body (text or a role/content conversation
 per item) and `hydradb_databases` can create a unified database through

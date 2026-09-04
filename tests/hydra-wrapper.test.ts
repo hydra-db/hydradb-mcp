@@ -736,6 +736,38 @@ test("unified ingest posts items[] as a JSON body, not the multipart memories fi
 	});
 });
 
+// Same rule the knowledge branch enforces: a field with nowhere to go is
+// REFUSED, not accepted and discarded. `is_markdown` has no counterpart in the
+// unified item shape at all, and `user_name` only exists there as a turn's
+// `name` — so a text-only item silently lost it while the caller was answered
+// "success: 1, failed: 0".
+test("unified ingest refuses the fields it cannot carry rather than dropping them", async () => {
+	const { fetch, calls } = fetchStub({ success: true, data: { success: true, success_count: 1, failed_count: 0 } });
+	const sdk = { context: { ingest() { throw new Error("SDK path must not be used for unified"); } } } as unknown as HydraDBClient;
+	const hydra = new HydraDB({ token: "t", database: "db_u", collection: "c1", baseUrl: "https://api.test", fetchFn: fetch }, sdk);
+
+	await assert.rejects(
+		hydra.context.ingest({ kind: "unified", text: "a note", isMarkdown: true }),
+		(err: unknown) => err instanceof Error && /does not support isMarkdown/.test(err.message),
+	);
+	await assert.rejects(
+		hydra.context.ingest({ kind: "unified", text: "a note", userName: "Ada" }),
+		(err: unknown) => err instanceof Error && /does not support userName/.test(err.message),
+	);
+	assert.equal(calls.length, 0, "a refused field must not reach the server as a successful write");
+
+	// `user_name` DOES mean something on a conversation, where it rides on each
+	// turn's `name` — refusing it there would break a write the server honours.
+	await hydra.context.ingest({
+		kind: "unified",
+		pairs: [{ user: "hi", assistant: "hello" }],
+		userName: "Ada",
+	});
+	assert.equal(calls.length, 1);
+	const item = (JSON.parse(String(calls[0]!.init.body)) as { items: { conversation: { name?: string }[] }[] }).items[0]!;
+	assert.equal(item.conversation[0]!.name, "Ada");
+});
+
 test("database create with a layout posts type, plain create keeps the SDK path", async () => {
 	const { fetch, calls } = fetchStub({ success: true, data: { success: true } });
 	let sdkCreates = 0;
@@ -775,6 +807,56 @@ test("layout() reads GET /databases details once and falls back to split", async
 	const failing = fetchStub({ success: false, error: { message: "nope" } }, 500);
 	const broken = new HydraDB({ token: "t", database: "a", baseUrl: "https://api.test", fetchFn: failing.fetch }, {} as HydraDBClient);
 	assert.equal(await broken.databases.layout("a"), "split");
+});
+
+// `runDatabases` used to read this endpoint twice — once for the names, once for
+// the layouts — so `list()` is now the one reader and `layouts()` goes through
+// it. That also keeps `details[]` on the public method: a caller reaching for
+// `databases.list()` gets the layouts, not a listing with them stripped out.
+test("databases.list() carries details[] and the layout probe shares that one request", async () => {
+	const { fetch, calls } = fetchStub({
+		success: true,
+		data: {
+			databases: ["a", "b"],
+			tenant_ids: ["a", "b"],
+			details: [{ database: "a", type: "unified" }, { database: "b", type: "split" }],
+		},
+	});
+	const sdk = { databases: { list() { throw new Error("the SDK list path must not be used"); } } } as unknown as HydraDBClient;
+	const hydra = new HydraDB({ token: "t", database: "a", baseUrl: "https://api.test", fetchFn: fetch }, sdk);
+
+	const listed = await hydra.databases.list();
+	assert.deepEqual(listed.databases, ["a", "b"]);
+	// Declared keys are still camelCased by the SDK's own response serializer;
+	// `details` rides through beside them.
+	assert.deepEqual(listed.tenantIds, ["a", "b"]);
+	assert.deepEqual(listed.details, [{ database: "a", type: "unified" }, { database: "b", type: "split" }]);
+	assert.equal(calls.length, 1);
+	assert.equal(calls[0]!.url, "https://api.test/databases");
+});
+
+// The probe is memoised, its FAILURE was not: every later defaulted call paid
+// the refused request again, after the server had already said which layout
+// this database has.
+test("a layout learned outside the probe answers without asking again", async () => {
+	const { fetch, calls } = fetchStub({ success: false, error: { message: "down" } }, 503);
+	const hydra = new HydraDB({ token: "t", database: "a", baseUrl: "https://api.test", fetchFn: fetch, maxRetries: 0 }, {} as HydraDBClient);
+
+	assert.equal(await hydra.databases.layout("a"), "split", "a failed probe still reads as the old default");
+	const probes = calls.length;
+
+	hydra.databases.recordLayout("a", "unified");
+	assert.equal(await hydra.databases.layout("a"), "unified");
+	assert.equal(calls.length, probes, "the learned answer costs no request");
+	assert.equal(await hydra.databases.layout("b"), "split", "other databases are untouched");
+
+	// And it is visible to everything that reads the map, not just `layout()`.
+	const working = fetchStub({ success: true, data: { databases: ["a"], details: [{ database: "a", type: "split" }] } });
+	const listed = new HydraDB({ token: "t", database: "a", baseUrl: "https://api.test", fetchFn: working.fetch }, {} as HydraDBClient);
+	assert.equal((await listed.databases.layouts()).get("a"), "split");
+	listed.databases.recordLayout("c", "unified");
+	assert.equal((await listed.databases.layouts()).get("c"), "unified");
+	assert.equal(working.calls.length, 1, "the probe is still asked exactly once");
 });
 
 // The pinned SDK's REQUEST serializers reject `type: "unified"` before anything
