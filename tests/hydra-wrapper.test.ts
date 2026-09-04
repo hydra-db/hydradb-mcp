@@ -850,6 +850,46 @@ test("unified relations carries acl principals and the unified type", async () =
 	assert.equal(new URL(calls[1]!).searchParams.has("acl"), false);
 });
 
+// Greptile on #72: the memoised probe took its FIRST caller's signal, so a
+// later caller who cancelled kept waiting, and a first caller who cancelled
+// failed everyone else's probe (they then read the database as split). The
+// shared request now takes no caller signal; each waiter honours its own.
+test("a cancelled layout waiter rejects alone while the shared probe still serves the others", async () => {
+	let release: (r: Response) => void = () => {};
+	const gate = new Promise<Response>((resolve) => { release = resolve; });
+	let requests = 0;
+	const slow = (() => { requests += 1; return gate; }) as typeof fetch;
+	const hydra = new HydraDB({ token: "t", database: "a", baseUrl: "https://api.test", fetchFn: slow }, {} as HydraDBClient);
+
+	const first = new AbortController();
+	const firstWaiter = hydra.databases.layout("a", first.signal);
+	const secondWaiter = hydra.databases.layout("a");
+	first.abort();
+	await assert.rejects(firstWaiter, (err: unknown) => err instanceof HydraWrapperError && /cancelled by the caller/.test(err.message));
+
+	release(new Response(JSON.stringify({ success: true, data: { databases: ["a"], details: [{ database: "a", type: "unified" }] } }), { status: 200 }));
+	assert.equal(await secondWaiter, "unified", "the other waiter still gets the real layout");
+	assert.equal(requests, 1, "one shared probe, not one per waiter");
+	assert.equal(await hydra.databases.layout("a"), "unified", "and it stays memoised");
+});
+
+test("an abort during retry backoff ends the loop without another request", async () => {
+	let attempts = 0;
+	const controller = new AbortController();
+	const flaky = (() => {
+		attempts += 1;
+		// Cancel while the transport is sleeping before its retry.
+		setTimeout(() => controller.abort(), 10);
+		return Promise.resolve(new Response("upstream", { status: 503 }));
+	}) as typeof fetch;
+	const hydra = new HydraDB({ token: "t", database: "a", baseUrl: "https://api.test", fetchFn: flaky, maxRetries: 3 }, {} as HydraDBClient);
+	await assert.rejects(
+		hydra.databases.layout("a", controller.signal),
+		(err: unknown) => err instanceof HydraWrapperError && /cancelled by the caller/.test(err.message),
+	);
+	assert.equal(attempts, 1, "no request is made for a caller who already cancelled");
+});
+
 test("the raw transport retries 5xx and network failures, never a 4xx", async () => {
 	let attempts = 0;
 	const flaky = ((url: string | URL | Request) => {
