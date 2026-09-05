@@ -52,6 +52,26 @@ function isRetryable(status: number): boolean {
 	return status === 429 || (status >= 500 && status <= 599);
 }
 
+/**
+ * Writes whose outcome cannot be inferred from a failure that carried NO HTTP
+ * status — a timeout, a dropped socket mid-write. The server may well have
+ * applied the request already, so re-sending it creates a second copy rather
+ * than replacing the first: a unified ingest without a caller `context_id` has
+ * nothing for an upsert to key on, and `POST /databases` has no upsert at all.
+ *
+ * A status-CARRYING failure on these paths still retries, because the status
+ * says the server declined before doing work. A status-less one never does.
+ * Reads keep the full budget — replaying one costs nothing but time.
+ *
+ * Matches openclaw-hydradb's REPLAY_UNSAFE_WRITES so the two clients answer a
+ * dying write the same way.
+ */
+const REPLAY_UNSAFE_WRITES = new Set(["/context/ingest", "/databases"]);
+
+function isReplayUnsafe(method: string, path: string): boolean {
+	return method === "POST" && REPLAY_UNSAFE_WRITES.has(path);
+}
+
 /** Send with bounded retries on 429/5xx; the caller's abort ends retrying. */
 export async function sendRaw<T>(
 	t: RawTransport,
@@ -71,6 +91,9 @@ export async function sendRaw<T>(
 			if (opts?.signal?.aborted) throw err;
 			if (attempt === t.maxRetries) break;
 			if (status != null && !isRetryable(status)) break;
+			// No status means the request may already have been applied. Replaying
+			// a write that cannot be keyed for dedup would duplicate it.
+			if (status == null && isReplayUnsafe(method, path)) break;
 			// Exponential backoff. Bounded so a 429 on the last attempt does not
 			// hold the MCP host's tool timeout open for its own sake.
 			const delay = Math.min(250 * 2 ** attempt, 2_000);
