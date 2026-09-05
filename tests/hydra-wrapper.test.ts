@@ -1071,3 +1071,36 @@ test("the raw transport retries 5xx and network failures, never a 4xx", async ()
 	await assert.rejects(() => strict.databases.create({ database: "x", type: "unified" }));
 	assert.equal(rejected, 1, "a 4xx is final");
 });
+
+// A failure that carried NO HTTP status — a dropped socket, a timeout — tells us
+// nothing about whether the server applied the write. Retrying it on a path with
+// no dedup key duplicates the context rather than replacing it. openclaw-hydradb
+// made this call first (REPLAY_UNSAFE_WRITES); this pins the MCP to the same
+// answer, so the two clients cannot diverge on a dying write.
+test("a status-less failure is not replayed on a unified ingest", async () => {
+	let attempts = 0;
+	const dead = (() => {
+		attempts += 1;
+		return Promise.reject(new TypeError("fetch failed"));
+	}) as unknown as typeof fetch;
+	const sdk = { context: { ingest() { throw new Error("SDK path must not be used for unified"); } } } as unknown as HydraDBClient;
+	const hydra = new HydraDB({ token: "t", database: "db_u", baseUrl: "https://api.test", fetchFn: dead, maxRetries: 3 }, sdk);
+
+	await assert.rejects(hydra.context.ingest({ kind: "unified", text: "a note" }));
+	assert.equal(attempts, 1, "a write that may already have been applied must not be re-sent");
+});
+
+test("a status-less failure is still replayed on a read", async () => {
+	let attempts = 0;
+	const flaky = (() => {
+		attempts += 1;
+		if (attempts < 3) return Promise.reject(new TypeError("fetch failed"));
+		return Promise.resolve(
+			new Response(JSON.stringify({ success: true, data: { databases: ["a"], details: [{ database: "a", type: "unified" }] } }), { status: 200 }),
+		);
+	}) as unknown as typeof fetch;
+	const hydra = new HydraDB({ token: "t", database: "a", baseUrl: "https://api.test", fetchFn: flaky, maxRetries: 3 }, {} as HydraDBClient);
+
+	assert.equal(await hydra.databases.layout("a"), "unified");
+	assert.equal(attempts, 3, "replaying a read costs nothing but time, so the budget stands");
+});
