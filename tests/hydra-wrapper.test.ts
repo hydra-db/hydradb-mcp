@@ -1104,3 +1104,14 @@ test("a status-less failure is still replayed on a read", async () => {
 	assert.equal(await hydra.databases.layout("a"), "unified");
 	assert.equal(attempts, 3, "replaying a read costs nothing but time, so the budget stands");
 });
+
+// The guard matches the OPERATION path. A set lookup against the raw request
+// string would miss a query-carrying write and start replaying it again —
+// openclaw-hydradb shipped exactly that bug in its own copy of this guard.
+test("the replay guard survives a query string on the write path", async () => {
+	const { isReplayUnsafeForTest } = await import("../src/hydra/transport.js");
+	assert.equal(isReplayUnsafeForTest("POST", "/context/ingest"), true);
+	assert.equal(isReplayUnsafeForTest("POST", "/context/ingest?database=db_u"), true, "a query param must not defeat the guard");
+	assert.equal(isReplayUnsafeForTest("GET", "/context/ingest"), false, "reads keep the full budget");
+	assert.equal(isReplayUnsafeForTest("POST", "/query"), false, "only the non-idempotent writes are guarded");
+});
