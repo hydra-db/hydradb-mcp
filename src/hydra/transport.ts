@@ -69,7 +69,13 @@ function isRetryable(status: number): boolean {
 const REPLAY_UNSAFE_WRITES = new Set(["/context/ingest", "/databases"]);
 
 function isReplayUnsafe(method: string, path: string): boolean {
-	return method === "POST" && REPLAY_UNSAFE_WRITES.has(path);
+	// Match on the operation path, not the request path. Callers here do build
+	// query-carrying paths (`/context/relations?…`, `/byog/collections?…`), so a
+	// set lookup against the raw string would miss the moment one of these two
+	// endpoints grew a query param, and silently start replaying the write again.
+	// openclaw-hydradb shipped that exact bug in its own copy of this guard.
+	const operation = path.split("?", 1)[0];
+	return method === "POST" && REPLAY_UNSAFE_WRITES.has(operation);
 }
 
 /** Send with bounded retries on 429/5xx; the caller's abort ends retrying. */
@@ -188,3 +194,6 @@ async function attemptRaw<T>(
 		opts?.signal?.removeEventListener("abort", onAbort);
 	}
 }
+
+/** Test seam: the replay guard, so a query-carrying path can be pinned. */
+export const isReplayUnsafeForTest = isReplayUnsafe;
