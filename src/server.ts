@@ -14,6 +14,7 @@ import { COLLECTION_PATTERN, MAX_BODY_BYTES, renderRows } from "./cypher.js";
 import { SERVER_INSTRUCTIONS, TOOL_DESCRIPTIONS } from "./descriptions.js";
 import { assertCollectionAllowed, assertDatabaseAllowed, HydraDB } from "./hydra/index.js";
 import type { ContextKind, QueryKind } from "./hydra/index.js";
+import { HydraWrapperError } from "./hydra/index.js";
 import { logger } from "./logger.js";
 import { ALIAS_REPLACEMENTS, DEPRECATED_TOOL_NAMES, TOOL_NAMES } from "./tool-names.js";
 import type { MemoryResultItem } from "./types.js";
@@ -40,6 +41,44 @@ type ToolResult = {
 	structuredContent?: Record<string, unknown>;
 	isError?: boolean;
 };
+
+/**
+ * The machine-readable code the server sends when a request's `type` is not one
+ * the target database can answer — which on a defaulted kind means the storage
+ * layout is not the one this process assumed (PRO-1618,
+ * hydradb-application#870, `ErrCodeCorpusTypeUnsupported`).
+ *
+ * Deciding whether to retry as `unified` used to rest entirely on a regex over
+ * the server's English message: it changes with copy edits, and it already had
+ * two wordings to match. The code is the stable signal; the prose match
+ * survives only as a fallback, for a server that predates the code and for the
+ * one refusal that still goes out without it (see `refusedForUnified`).
+ */
+const UNIFIED_LAYOUT_ERROR_CODE = "CORPUS_TYPE_UNSUPPORTED";
+
+/**
+ * The error code an API failure body carries, if any.
+ *
+ * Reads the v2 envelope's `error.code` first and the deprecated
+ * `detail.error_code` second — both are written on the same response, and a
+ * client that reads only one is betting on which half a given handler filled
+ * in.
+ */
+function layoutErrorCode(body: unknown): string | undefined {
+	if (body == null || typeof body !== "object") return undefined;
+	const record = body as { error?: unknown; detail?: unknown };
+	const error = record.error;
+	if (error != null && typeof error === "object") {
+		const { code } = error as { code?: unknown };
+		if (typeof code === "string" && code !== "") return code;
+	}
+	const detail = record.detail;
+	if (detail != null && typeof detail === "object") {
+		const legacy = (detail as { error_code?: unknown }).error_code;
+		if (typeof legacy === "string" && legacy !== "") return legacy;
+	}
+	return undefined;
+}
 
 /**
  * A usable title for an entry the caller did not name.
@@ -335,6 +374,110 @@ export function createHydraDBServer(
 
 	// --- Handlers (shared by canonical tools and their deprecated aliases) ---
 
+	/**
+	 * Whether the database a call targets was created with `type: "unified"`
+	 * (PRO-1618). On such a database `memory`/`knowledge` are refused by the
+	 * server, so every host-owned default below switches to `unified` there;
+	 * on a split database (every one created before) nothing changes. One
+	 * memoised `GET /databases` probe answers for the whole process.
+	 */
+	async function isUnifiedDatabase(database?: string, signal?: AbortSignal): Promise<boolean> {
+		const target = database?.trim() || hydra.database;
+		return (await hydra.databases.layout(target, signal)) === "unified";
+	}
+
+	/**
+	 * The server names the rule when a split kind reaches a unified database:
+	 * `type 'memory' is not valid on a unified database`. When the kind was a
+	 * host-owned DEFAULT (not the caller's choice) and the layout probe could
+	 * not tell (it failed, or the database is not in the list it saw), that
+	 * refusal is the missing answer: retry once as `unified` rather than fail
+	 * a valid request over a transient probe. An explicit kind is never
+	 * rewritten.
+	 */
+	function refusedForUnified(err: unknown): boolean {
+		if (!(err instanceof HydraWrapperError) || err.status !== 400) return false;
+		if (layoutErrorCode(err.body) === UNIFIED_LAYOUT_ERROR_CODE) {
+			// The code names the CLASS — "that `type` is not one this request can
+			// use" — and FOUR refusals share it, only one of which this retry
+			// answers. So the code decides that we are looking at a corpus-type
+			// problem, and the line below decides which one. Matching the code
+			// alone would turn the other three into a second, equally refused
+			// request:
+			//   - `invalid type "x": must be 'knowledge', 'memory', …` (unknown value)
+			//   - `invalid type 'all': … an ingest must name the one it writes to`
+			//   - `type "unified" is only valid on a unified database …` — the
+			//     REVERSE direction, where retrying as unified is exactly wrong
+			//   - `items cannot be combined with type=knowledge …`
+			// The siblings are excluded by name rather than the target being
+			// matched by name, so a copy edit to the one wording we do want
+			// still retries. That is the whole reason to prefer the code.
+			//
+			// The `all` refusal ends with layout-aware advice, and on a unified
+			// database that advice contains the sentence "This database is
+			// unified". The prose fallback below matches that phrase — so this
+			// exclusion, keyed on the unchanged `invalid type 'all':` opening,
+			// is the only thing keeping a bad `all` from being retried. Pinned
+			// by test, both advice variants.
+			//
+			// Two of these are unreachable from this client (`all` cannot be
+			// sent to `context.ingest` at all — it exists only on QueryKind —
+			// and the unified body carries no `type`, so items+knowledge cannot
+			// be built either). They are excluded anyway: the same list is
+			// shared across four clients, unreachable-today is one config change
+			// from reachable, and "correct by coincidence" is not worth keeping
+			// when the alternative is one alternation.
+			//
+			// `only SUPPORTED on a unified database` covers one refusal that
+			// does not carry THIS code: `context_category is only supported on a
+			// unified database … This database is split`. It carries its own
+			// `CONTEXT_CATEGORY_UNSUPPORTED` instead, deliberately, because it
+			// refuses a different FIELD — the repair is "stop sending
+			// context_category", not "retry with another type", and filing it
+			// under the corpus code would send a caller round the `type` values
+			// forever.
+			//
+			// So this alternation is belt and braces: that message cannot reach
+			// this branch as things stand. It is kept because if anyone ever did
+			// reuse the corpus code there, the failure would be a SPLIT
+			// database's refusal answered by a retry as unified, in silence.
+			return !/invalid type|only (?:valid|supported) on a unified database|items cannot be combined with/i.test(
+				err.message,
+			);
+		}
+		// No code: fall back to the server's English prose. Both wordings are
+		// covered — `type %q is not valid on a unified database` from the
+		// corpus-type check, and `this database is unified: send the content as
+		// items…` from the ingest handler, which a bare /unified database/
+		// pattern misses because the two words are the other way round. That
+		// second one is still the ONLY refusal here that goes out with no code,
+		// so this is not dead weight against a current server.
+		return /is not valid on a unified database|database is unified/i.test(err.message);
+	}
+
+	async function withUnifiedFallback<K extends string, T>(
+		defaulted: boolean,
+		kind: K,
+		run: (kind: K | "unified") => Promise<T>,
+		database?: string,
+	): Promise<T> {
+		try {
+			return await run(kind);
+		} catch (err) {
+			if (defaulted && kind !== "unified" && refusedForUnified(err)) {
+				logger.warn("kind was defaulted but the database is unified; retrying as unified");
+				const result = await run("unified");
+				// The retry succeeding is the answer the probe could not give.
+				// Record it, or a process whose probe failed pays the same
+				// refused request on every defaulted call for the rest of its
+				// life — the probe is memoised, its failure was not.
+				hydra.databases.recordLayout(database?.trim() || hydra.database, "unified");
+				return result;
+			}
+			throw err;
+		}
+	}
+
 	async function runQuery(args: {
 		query: string;
 		kind?: QueryKind;
@@ -357,13 +500,14 @@ export function createHydraDBServer(
 		// used to pin `kind: "memory"`, which made every ingested knowledge source
 		// unreachable from the MCP — `hydradb_list`/`hydradb_inspect` could browse
 		// knowledge but nothing could search it.
-		const kind = args.kind ?? "all";
+		const kind: QueryKind =
+			args.kind ?? ((await isUnifiedDatabase(args.database, signal)) ? "unified" : "all");
 		logger.debug(`${TOOL_NAMES.QUERY}: "${args.query}" (kind=${kind})`);
 
 		const maxResults = args.max_results ?? 10;
-		const raw = await hydra.context.query({
+		const raw = await withUnifiedFallback(args.kind == null, kind, (kindToSend) => hydra.context.query({
 			query: args.query,
-			kind,
+			kind: kindToSend,
 			maxResults,
 			mode: args.mode ?? "thinking",
 			operator: args.operator,
@@ -388,7 +532,7 @@ export function createHydraDBServer(
 			// current state of X" is a different question from "what matches X",
 			// and only a caller that can raise this can ask the first one.
 			recencyBias: args.recency_bias ?? 0,
-		}, { signal });
+		}, { signal }), args.database);
 		// The renderer reads the SDK payload directly; there is no longer a
 		// snake_case mirror to convert into.
 		const res = raw;
@@ -519,6 +663,7 @@ export function createHydraDBServer(
 		kind?: ContextKind;
 		title?: string;
 		source_id?: string;
+		user_name?: string;
 		infer?: boolean;
 		is_markdown?: boolean;
 		overwrite?: boolean;
@@ -527,7 +672,8 @@ export function createHydraDBServer(
 		database?: string;
 		collection?: string;
 	}, signal?: AbortSignal): Promise<ToolResult> {
-		const kind = args.kind ?? "memory";
+		const kind: ContextKind =
+			args.kind ?? ((await isUnifiedDatabase(args.database, signal)) ? "unified" : "memory");
 		logger.debug(`${TOOL_NAMES.INGEST}: "${args.text.slice(0, 50)}..." (kind=${kind})`);
 
 		// The memory item shape has no counterpart on the knowledge path, which
@@ -535,20 +681,29 @@ export function createHydraDBServer(
 		// where they mean something. The wrapper rejects them on the knowledge
 		// branch rather than dropping them, and passing them here unconditionally
 		// would make every knowledge write fail.
+		//
+		// `is_markdown` is forwarded ONLY as the caller gave it, never defaulted
+		// to false here: the wrapper's memory branch already defaults it, and a
+		// unified database has no field for it at all. Sending a manufactured
+		// `false` would trip the wrapper's unified guard on every ingest that
+		// never asked for markdown — and defaulting it away would silently drop
+		// an explicit `is_markdown: true`, which is what that guard exists to
+		// prevent.
 		const memoryOnly =
-			kind === "memory"
+			kind !== "knowledge"
 				? {
 						sourceId: args.source_id,
+						userName: args.user_name,
 						infer: args.infer ?? true,
-						isMarkdown: args.is_markdown ?? false,
+						isMarkdown: args.is_markdown,
 						customInstructions: INGEST_INSTRUCTIONS,
 						metadata: args.metadata,
 						observationDate: args.observation_date,
 					}
 				: {};
 
-		const raw = await hydra.context.ingest({
-			kind,
+		const raw = await withUnifiedFallback(args.kind == null, kind, (kindToSend) => hydra.context.ingest({
+			kind: kindToSend,
 			text: args.text,
 			title: args.title ?? defaultTitle(args.text),
 			...memoryOnly,
@@ -558,7 +713,7 @@ export function createHydraDBServer(
 			// retried ingest from duplicating — flipping this default would trade a
 			// silent overwrite for a silent duplicate.
 			upsert: args.overwrite ?? true,
-		}, { signal });
+		}, { signal }), args.database);
 		const res = toAddMemoryResponse(raw);
 
 		// Was an 80-char echo of the text the caller had just sent — zero
@@ -585,6 +740,7 @@ export function createHydraDBServer(
 		turns: ConversationTurn[],
 		sourceId: string,
 		opts?: {
+			kind?: ContextKind;
 			userName?: string;
 			infer?: boolean;
 			title?: string;
@@ -595,14 +751,23 @@ export function createHydraDBServer(
 		},
 		signal?: AbortSignal,
 	): Promise<ToolResult> {
+		// The kind was pinned to "memory" here, outside the layout resolution
+		// every sibling handler goes through, so the conversation half of
+		// `hydradb_ingest` answered a unified database with a 400 while the text
+		// half worked — one tool, one of its two input shapes broken. Resolved
+		// and retried exactly as `runStore` does.
+		const kind: ContextKind =
+			opts?.kind ?? ((await isUnifiedDatabase(opts?.database, signal)) ? "unified" : "memory");
 		logger.debug(
-			`${TOOL_NAMES.INGEST}: ${turns.length} turns -> ${sourceId}`,
+			`${TOOL_NAMES.INGEST}: ${turns.length} turns -> ${sourceId} (kind=${kind})`,
 		);
 
-		const raw = await hydra.context.ingest({
-			kind: "memory",
+		const raw = await withUnifiedFallback(opts?.kind == null, kind, (kindToSend) => hydra.context.ingest({
+			kind: kindToSend,
 			pairs: turns,
 			sourceId,
+			// On the unified path this becomes each user turn's `name`, which is
+			// where speaker identity lives there — so it is carried, not dropped.
 			userName: opts?.userName ?? "User",
 			infer: opts?.infer ?? true,
 			title: opts?.title,
@@ -611,7 +776,7 @@ export function createHydraDBServer(
 			upsert: opts?.overwrite ?? true,
 			database: opts?.database,
 			collection: opts?.collection,
-		}, { signal });
+		}, { signal }), opts?.database);
 		const res = toAddMemoryResponse(raw);
 
 		const conversationId = createdId(res) ?? sourceId;
@@ -664,6 +829,67 @@ export function createHydraDBServer(
 		return `${shown} of ${total} (page ${current})${more ? ` — pass page=${current + 1} for more` : ""}`;
 	}
 
+	/**
+	 * `hydradb_list`, with the corpus resolved the way every other tool
+	 * resolves it (PRO-1618).
+	 *
+	 * `kind` is the caller's when they gave one — an explicit kind is never
+	 * rewritten. When they did not, the layout decides: `unified` on a unified
+	 * database (which accepts nothing else), `memory` on a split one, and the
+	 * same one-shot retry the other tools use covers a layout probe that could
+	 * not answer.
+	 */
+	async function runList(args: {
+		kind?: ContextKind;
+		source_ids?: string[];
+		page?: number;
+		page_size?: number;
+		acl?: string[];
+		database?: string;
+		collection?: string;
+	}, signal?: AbortSignal): Promise<ToolResult> {
+		const defaulted = args.kind == null;
+		const kind: ContextKind =
+			args.kind ?? ((await isUnifiedDatabase(args.database, signal)) ? "unified" : "memory");
+		return withUnifiedFallback(defaulted, kind, (kindToSend) =>
+			kindToSend === "memory"
+				? runListMemories(
+						{
+							source_ids: args.source_ids,
+							page: args.page,
+							page_size: args.page_size,
+							acl: args.acl,
+							database: args.database,
+							collection: args.collection,
+						},
+						signal,
+						// Only when the host chose `memory` for them. A caller who
+						// asked for memories already knows knowledge is elsewhere.
+						defaulted,
+					)
+				: runListSources(
+						{
+							kind: kindToSend,
+							source_ids: args.source_ids,
+							page: args.page,
+							page_size: args.page_size,
+							acl: args.acl,
+							database: args.database,
+							collection: args.collection,
+						},
+						signal,
+					),
+			args.database,
+		);
+	}
+
+	/**
+	 * `noteOtherCorpus` appends the one thing a memory-only listing cannot say
+	 * for itself: that it is not the whole store. Without it a caller who asked
+	 * "what does Hydra DB have?" reads a memory page as the complete inventory
+	 * and never learns the knowledge corpus exists — the bug that made `kind`
+	 * required in the first place.
+	 */
 	async function runListMemories(args: {
 		source_ids?: string[];
 		page?: number;
@@ -671,8 +897,12 @@ export function createHydraDBServer(
 		acl?: string[];
 		database?: string;
 		collection?: string;
-	} = {}, signal?: AbortSignal): Promise<ToolResult> {
+	} = {}, signal?: AbortSignal, noteOtherCorpus = false): Promise<ToolResult> {
 		logger.debug(TOOL_NAMES.LIST);
+		const corpusNote = noteOtherCorpus
+			? `\n\nMemories only — knowledge is a separate corpus on this database and is ` +
+				`not listed here. Call ${TOOL_NAMES.LIST} again with kind="knowledge" for it.`
+			: "";
 
 		const raw = await hydra.context.list({
 			kind: "memory",
@@ -690,9 +920,9 @@ export function createHydraDBServer(
 			// content, including this one — a caller branching on `items` should not
 			// have to special-case the empty result.
 			return structuredResult(
-				args.page != null && args.page > 1
+				(args.page != null && args.page > 1
 					? `No memories on page ${args.page}.`
-					: "No memories stored yet.",
+					: "No memories stored yet.") + corpusNote,
 				{
 					kind: "memory",
 					items: [],
@@ -714,7 +944,7 @@ export function createHydraDBServer(
 		});
 
 		return structuredResult(
-			`${coverage(memories.length, page, args.page)} memories:\n\n${lines.join("\n")}`,
+			`${coverage(memories.length, page, args.page)} memories:\n\n${lines.join("\n")}${corpusNote}`,
 			{
 				kind: "memory",
 				// Bounded like the text preview. The structured payload previously
@@ -741,11 +971,18 @@ export function createHydraDBServer(
 		acl?: string[];
 		database?: string;
 		collection?: string;
+		/** `unified` lists every item of a unified database in one page (PRO-1618); the rows have the source shape. */
+		kind?: "knowledge" | "unified";
 	}, signal?: AbortSignal): Promise<ToolResult> {
 		logger.debug(TOOL_NAMES.LIST);
+		// The canonical tool resolves the kind from the layout and always names
+		// one (see `runList`). This default is the deprecated
+		// `hydradb_list_sources` alias's own meaning — that tool IS the knowledge
+		// listing — not a guess standing in for a layout it never checked.
+		const listKind = args.kind ?? "knowledge";
 
 		const raw = await hydra.context.list({
-			kind: "knowledge",
+			kind: listKind,
 			ids: args.source_ids,
 			page: args.page,
 			pageSize: args.page_size,
@@ -761,7 +998,7 @@ export function createHydraDBServer(
 					? `No sources on page ${args.page}.`
 					: "No sources found.",
 				{
-					kind: "knowledge",
+					kind: listKind,
 					items: [],
 					shown: 0,
 					total: page.total ?? 0,
@@ -783,7 +1020,7 @@ export function createHydraDBServer(
 		return structuredResult(
 			`${coverage(sources.length, page, args.page)} sources:\n\n${lines.join("\n")}`,
 			{
-				kind: "knowledge",
+				kind: listKind,
 				items: sources.map((src) => ({
 					id: src.id,
 					...(src.title != null ? { title: src.title } : {}),
@@ -1175,7 +1412,7 @@ export function createHydraDBServer(
 	 * gone when the server just declined to remove it.
 	 */
 	function deleteReport(
-		kind: "memory" | "knowledge",
+		kind: "memory" | "knowledge" | "unified",
 		ids: string[],
 		res: { success?: boolean; message?: string; results?: unknown },
 		removed: boolean,
@@ -1269,7 +1506,7 @@ export function createHydraDBServer(
 		const a = args as {
 			id?: string;
 			ids?: string[];
-			kind?: "memory" | "knowledge";
+			kind?: ContextKind;
 			database?: string;
 			collection?: string;
 		};
@@ -1285,19 +1522,20 @@ export function createHydraDBServer(
 
 	async function runDelete(args: {
 		ids: string[];
-		kind?: "memory" | "knowledge";
+		kind?: ContextKind;
 		database?: string;
 		collection?: string;
 	}, signal?: AbortSignal): Promise<ToolResult> {
-		const kind = args.kind ?? "memory";
+		const kind: ContextKind =
+			args.kind ?? ((await isUnifiedDatabase(args.database, signal)) ? "unified" : "memory");
 		logger.debug(`${TOOL_NAMES.DELETE}: ${kind} ${args.ids.join(", ")}`);
 
-		const res = await hydra.context.delete({
+		const res = await withUnifiedFallback(args.kind == null, kind, (kindToSend) => hydra.context.delete({
 			ids: args.ids,
-			kind,
+			kind: kindToSend,
 			database: args.database,
 			collection: args.collection,
-		}, { signal });
+		}, { signal }), args.database);
 		// `userMemoryDeleted` is a COUNT on the v2 wire — a live delete returned
 		// `{"deletedCount":1,"userMemoryDeleted":1}` — and the SDK types it as a
 		// number. The v1 memory-delete handler returns a boolean for the same
@@ -1336,21 +1574,38 @@ export function createHydraDBServer(
 	 * call: the list IS the answer, and asking the API would only show
 	 * databases the connection is not permitted to use.
 	 */
-	async function runDatabases(): Promise<ToolResult> {
+	async function runDatabases(signal?: AbortSignal): Promise<ToolResult> {
 		const defaultDatabase = hydra.database;
 		let databases: string[];
 		let confined = false;
+		const layouts = new Map<string, string>();
 		if (hydra.allowedDatabases) {
 			databases = [...hydra.allowedDatabases];
 			confined = true;
 		} else {
-			const listed = await hydra.databases.list();
+			// ONE `GET /databases`. The names and the layouts come from the same
+			// response — asking `layouts()` for them separately issued a second,
+			// identical request for a listing already in hand.
+			const listed = await hydra.databases.list(signal);
 			databases = (listed.databases ?? listed.tenantIds ?? []).filter(Boolean);
+			for (const row of listed.details ?? []) {
+				if (row.database) layouts.set(row.database, row.type === "unified" ? "unified" : "split");
+			}
 		}
 		if (!databases.includes(defaultDatabase)) databases.unshift(defaultDatabase);
+		// Storage layout per database (PRO-1618). A unified database takes no
+		// `kind`; naming it here is what lets a caller avoid a refused call. A
+		// confined connection keeps answering without a network call, as
+		// promised above; its per-call defaults still resolve the layout lazily.
+		const types: Record<string, string> = {};
+		if (!confined) {
+			for (const d of databases) types[d] = layouts.get(d) ?? "split";
+		}
 
 		const lines = databases.map(
-			(d) => `  - ${d}${d === defaultDatabase ? "  (default for this connection)" : ""}`,
+			(d) =>
+				`  - ${d}${types[d] === "unified" ? "  [unified: one corpus, kind not needed]" : ""}` +
+				`${d === defaultDatabase ? "  (default for this connection)" : ""}`,
 		);
 		const note = confined
 			? "\nThis connection is confined to the database(s) above; any other name is refused. " +
@@ -1358,7 +1613,7 @@ export function createHydraDBServer(
 			: "\nPass `database` on any tool to work in another one.";
 		return structuredResult(
 			`${databases.length} database(s):\n${lines.join("\n")}${note}`,
-			{ databases, default: defaultDatabase, confined },
+			{ databases, default: defaultDatabase, confined, ...(confined ? {} : { types }) },
 		);
 	}
 
@@ -1727,7 +1982,7 @@ export function createHydraDBServer(
 	const querySchema = {
 		query: z.string().describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.query),
 		kind: z
-			.enum(["memory", "knowledge", "all"])
+			.enum(["memory", "knowledge", "all", "unified"])
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.kind),
 		max_results: z
@@ -1850,7 +2105,7 @@ export function createHydraDBServer(
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.text),
 		kind: z
-			.enum(["memory", "knowledge"])
+			.enum(["memory", "knowledge", "unified"])
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.kind),
 		turns: z
@@ -1887,12 +2142,20 @@ export function createHydraDBServer(
 	};
 
 	const listSchema = {
-		// Required, not defaulted. `hydradb_list({})` used to return memories only
-		// and read as the complete inventory, so a caller asking "what does Hydra
-		// DB have?" never saw the knowledge corpus — which hydradb_query searches
-		// by default. Same class of bug as the query `kind` pin, on the list path.
+		// Optional, because a UNIFIED database has no kind to choose (PRO-1618):
+		// requiring one there means the caller either guesses and eats a refused
+		// request, or is told to name a corpus that does not exist. The host
+		// resolves it from the layout instead, exactly as query/ingest/delete do.
+		//
+		// It was made required to fix a real bug — `hydradb_list({})` returned
+		// memories only and read as the complete inventory, so a caller asking
+		// "what does Hydra DB have?" never saw the knowledge corpus. That fix is
+		// kept without the requirement: on a SPLIT database an omitted kind still
+		// lists memories, and the listing now says in as many words that
+		// knowledge is a separate corpus it did not cover.
 		kind: z
-			.enum(["memory", "knowledge"])
+			.enum(["memory", "knowledge", "unified"])
+			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.LIST].params.kind),
 		ids: z
 			.array(z.string())
@@ -2023,7 +2286,7 @@ export function createHydraDBServer(
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.DELETE].params.id),
 		kind: z
-			.enum(["memory", "knowledge"])
+			.enum(["memory", "knowledge", "unified"])
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.DELETE].params.kind),
 		...scopeSchema,
@@ -2033,7 +2296,7 @@ export function createHydraDBServer(
 	// Query stays prose: its payload IS text, and forcing it into fields would
 	// duplicate the rendered context rather than replace it.
 	const listOutputSchema = {
-		kind: z.enum(["memory", "knowledge"]),
+		kind: z.enum(["memory", "knowledge", "unified"]),
 		items: z.array(
 			z.object({
 				id: z.string(),
@@ -2057,7 +2320,7 @@ export function createHydraDBServer(
 
 	const deleteOutputSchema = {
 		ids: z.array(z.string()),
-		kind: z.enum(["memory", "knowledge"]),
+		kind: z.enum(["memory", "knowledge", "unified"]),
 		deleted: z.boolean(),
 		/** Absent when the server confirmed a removal without saying how many. */
 		deleted_count: z.number().optional(),
@@ -2265,6 +2528,10 @@ export function createHydraDBServer(
 				a.turns,
 				sourceId,
 				{
+					// Forwarded like every other option on this path: the kind
+					// was dropped here, so an explicit one was silently replaced
+					// by the pinned "memory" the handler used to send.
+					kind: a.kind,
 					userName: a.user_name,
 					infer: a.infer,
 					title: a.title,
@@ -2283,6 +2550,13 @@ export function createHydraDBServer(
 					kind: a.kind,
 					title: a.title,
 					source_id: a.source_id,
+					// Forwarded, not dropped. The schema accepts `user_name` on
+					// every non-knowledge ingest, and the memory item shape has a
+					// field for it — but the text path used to hand it to nobody,
+					// so a caller naming the speaker on a note was answered
+					// "success: 1" and had it discarded. On a unified database it
+					// has nowhere to go (see the wrapper) and is now refused.
+					user_name: a.user_name,
 					infer: a.infer,
 					is_markdown: a.is_markdown,
 					overwrite: a.overwrite,
@@ -2307,7 +2581,7 @@ export function createHydraDBServer(
 		listSchema,
 		(args, extra) => {
 			const a = args as {
-				kind?: "memory" | "knowledge";
+				kind?: "memory" | "knowledge" | "unified";
 				ids?: string[];
 				source_ids?: string[];
 				page?: number;
@@ -2340,21 +2614,9 @@ export function createHydraDBServer(
 				);
 			}
 			const ids = a.ids ?? a.source_ids;
-			if (a.kind === "knowledge") {
-				return runListSources(
-					{
-						source_ids: ids,
-						page: a.page,
-						page_size: a.page_size,
-						acl: a.acl,
-						database: a.database,
-						collection: a.collection,
-					},
-					extra?.signal,
-				);
-			}
-			return runListMemories(
+			return runList(
 				{
+					kind: a.kind,
 					source_ids: ids,
 					page: a.page,
 					page_size: a.page_size,
@@ -2402,7 +2664,7 @@ export function createHydraDBServer(
 	// there does an agent need a way to see it. Registering this for API-key
 	// connections too would change their tool list, which must stay identical.
 	if (options.oauthTools) {
-		register(TOOL_NAMES.DATABASES, {}, () => runDatabases(), readOnly);
+		register(TOOL_NAMES.DATABASES, {}, (_args, extra) => runDatabases(extra?.signal), readOnly);
 	}
 
 	// --- BYOG graph tools (PRO-1681) ---

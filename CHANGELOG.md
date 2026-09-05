@@ -37,6 +37,46 @@ Temporal retrieval (`temporal_now` / `temporal_facts`) remains unreachable: the
 fields are live in the API but absent from the OpenAPI spec, so `@hydradb/sdk`
 does not generate them. Blocked on the spec, not on this server.
 
+### Added — unified databases (PRO-1618)
+
+A database created with `type: "unified"` keeps knowledge and memory in ONE
+corpus. On it the server accepts only `kind: "unified"` (its default) and
+refuses `memory`/`knowledge`, so the server's host-owned defaults now follow
+the database's layout: `hydradb_query` defaults to `unified` there (still
+`all` on a split database), `hydradb_ingest` and `hydradb_delete` default to
+`unified` there (still `memory` on split), and `hydradb_list` defaults to
+`unified` there too, listing every item in one page. `hydradb_databases` names
+each database's layout. The layout comes from one memoised `GET /databases`
+probe (`details[].type`); a probe that fails reads as split, so nothing
+changes for any existing database, and a layout the server reveals by refusing
+a defaulted kind is remembered rather than relearned on every call.
+
+Both of `hydradb_ingest`'s input shapes follow the layout. The conversation
+path (`turns`) pinned `memory` outside the resolution the text path went
+through, so it answered a unified database with a 400 while the text path
+worked; it now resolves and retries the same way, and an explicit `kind` is
+carried there instead of being replaced.
+
+`hydradb_list`'s `kind` is optional again as a result. On a split database an
+omitted `kind` still lists memories, and now says so: knowledge is a separate
+corpus there and the listing names what it did not cover, so it cannot be read
+as the whole store.
+
+`is_markdown` and `user_name` are carried onto a unified item rather than
+dropped — both are fields on the server's ingest item. `user_name` goes on the
+item for a text ingest and stays on the turn for a conversation, because a
+turn's `name` is the finer-grained statement of the same fact and the server
+reads it first; sending both would risk one day discarding the per-turn
+speaker identity that anchoring depends on. `user_name` is also no longer
+discarded on a text ingest, which lost it on every layout.
+
+Unified ingest sends the `items[]` body (text or a role/content conversation
+per item) and `hydradb_databases` can create a unified database through
+`type`. The pinned SDK predates both, so those calls and the layout probe go
+over the wrapper's shared raw v2 transport (`src/hydra/transport.ts`, the
+same one the BYOG and subgraph paths use) with the same envelope unwrap and
+error translation; they move back onto the SDK once it is regenerated.
+
 ## [1.3.0] - 2026-08-28
 
 ### Added — OAuth resource server ("Sign in with HydraDB")

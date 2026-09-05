@@ -680,3 +680,438 @@ test("an omitted acl stays undefined rather than becoming an empty list", async 
 	assert.equal(seen.query.acl, undefined);
 	assert.equal(seen.list.acl, undefined);
 });
+
+
+// PRO-1618: a database created with `type: "unified"` has one corpus. The
+// pinned SDK cannot send `items`, `type` on create, or read `details[]`, so
+// those three go over a hand-rolled v2 transport; these pin the wire shape.
+function fetchStub(body: unknown, status = 200): { fetch: typeof fetch; calls: { url: string; init: RequestInit }[] } {
+	const calls: { url: string; init: RequestInit }[] = [];
+	const impl = ((url: string | URL | Request, init?: RequestInit) => {
+		calls.push({ url: String(url), init: init ?? {} });
+		return Promise.resolve(new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } }));
+	}) as typeof fetch;
+	return { fetch: impl, calls };
+}
+
+test("unified ingest posts items[] as a JSON body, not the multipart memories field", async () => {
+	const { fetch, calls } = fetchStub({ success: true, data: { success: true, success_count: 1, failed_count: 0 } });
+	const sdk = { context: { ingest() { throw new Error("SDK path must not be used for unified"); } } } as unknown as HydraDBClient;
+	const hydra = new HydraDB({ token: "t", database: "db_u", collection: "c1", baseUrl: "https://api.test", fetchFn: fetch }, sdk);
+
+	await hydra.context.ingest({
+		kind: "unified",
+		pairs: [{ user: "I prefer dark mode", assistant: "Noted" }],
+		sourceId: "chat-1",
+		userName: "Ada",
+		infer: true,
+		customInstructions: "focus",
+		metadata: { topic: "ui" },
+		observationDate: "2026-09-01",
+		upsert: true,
+	});
+
+	assert.equal(calls.length, 1);
+	assert.equal(calls[0]!.url, "https://api.test/context/ingest");
+	assert.equal(calls[0]!.init.method, "POST");
+	assert.equal((calls[0]!.init.headers as Record<string, string>)["API-Version"], "2");
+	const body = JSON.parse(String(calls[0]!.init.body));
+	assert.deepEqual(body, {
+		database: "db_u",
+		collection: "c1",
+		upsert: true,
+		items: [
+			{
+				conversation: [
+					{ role: "user", content: "I prefer dark mode", name: "Ada" },
+					{ role: "assistant", content: "Noted" },
+				],
+				context_id: "chat-1",
+				enrich: true,
+				custom_instructions: "focus",
+				attributes: { topic: "ui" },
+				happened_at: "2026-09-01",
+			},
+		],
+	});
+});
+
+// `IngestItem` carries `is_markdown` and `user_name` (hydradb-application#870),
+// so these map onto the unified item instead of being refused. Refusing what
+// the plugin already sends would be the cross-client divergence these PRs exist
+// to close.
+test("unified ingest maps is_markdown, and puts user_name where the server reads it", async () => {
+	const stub = () => fetchStub({ success: true, data: { success: true, success_count: 1, failed_count: 0 } });
+	const sdk = { context: { ingest() { throw new Error("SDK path must not be used for unified"); } } } as unknown as HydraDBClient;
+	const build = (fetch: typeof globalThis.fetch) =>
+		new HydraDB({ token: "t", database: "db_u", collection: "c1", baseUrl: "https://api.test", fetchFn: fetch }, sdk);
+	const itemOf = (calls: { init: RequestInit }[]) =>
+		(JSON.parse(String(calls[0]!.init.body)) as { items: Record<string, unknown>[] }).items[0]!;
+
+	// A TEXT item: user_name has no turn to ride on, so it goes on the item.
+	const text = stub();
+	await build(text.fetch).context.ingest({ kind: "unified", text: "a note", isMarkdown: true, userName: "Ada" });
+	const textItem = itemOf(text.calls);
+	assert.equal(textItem.is_markdown, true);
+	assert.equal(textItem.user_name, "Ada");
+
+	// A CONVERSATION: the per-turn `name` is the finer-grained statement of the
+	// same fact and the server reads it FIRST, so the item-level field is not
+	// sent alongside it. Sending both risks a client one day letting the
+	// item-level value win, which would discard per-turn speaker identity.
+	const convo = stub();
+	await build(convo.fetch).context.ingest({
+		kind: "unified",
+		pairs: [{ user: "hi", assistant: "hello" }],
+		userName: "Ada",
+	});
+	const convoItem = itemOf(convo.calls) as { conversation: { name?: string }[]; user_name?: string };
+	assert.equal(convoItem.conversation[0]!.name, "Ada");
+	assert.equal(convoItem.user_name, undefined, "per-turn name is authoritative; do not send both");
+
+	// Omitted stays omitted: the server's is_markdown is a plain bool, so an
+	// absent field and `false` mean the same thing and the smaller body wins.
+	const bare = stub();
+	await build(bare.fetch).context.ingest({ kind: "unified", text: "a note" });
+	const bareItem = itemOf(bare.calls);
+	assert.equal("is_markdown" in bareItem, false);
+	assert.equal("user_name" in bareItem, false);
+});
+
+test("database create with a layout posts type, plain create keeps the SDK path", async () => {
+	const { fetch, calls } = fetchStub({ success: true, data: { success: true } });
+	let sdkCreates = 0;
+	const sdk = {
+		databases: {
+			create() {
+				sdkCreates += 1;
+				return Promise.resolve({ success: true, data: { success: true } });
+			},
+		},
+	} as unknown as HydraDBClient;
+	const hydra = new HydraDB({ token: "t", database: "db", baseUrl: "https://api.test", fetchFn: fetch }, sdk);
+
+	await hydra.databases.create({ database: "new-db", type: "unified" });
+	assert.equal(calls.length, 1);
+	assert.equal(calls[0]!.url, "https://api.test/databases");
+	assert.deepEqual(JSON.parse(String(calls[0]!.init.body)), { database: "new-db", type: "unified" });
+
+	await hydra.databases.create({ database: "old-db" });
+	assert.equal(sdkCreates, 1, "a create without a layout must stay on the SDK");
+	assert.equal(calls.length, 1);
+});
+
+test("layout() reads GET /databases details once and falls back to split", async () => {
+	const { fetch, calls } = fetchStub({
+		success: true,
+		data: { databases: ["a", "b"], details: [{ database: "a", type: "unified" }, { database: "b", type: "split" }] },
+	});
+	const hydra = new HydraDB({ token: "t", database: "a", baseUrl: "https://api.test", fetchFn: fetch }, {} as HydraDBClient);
+
+	assert.equal(await hydra.databases.layout("a"), "unified");
+	assert.equal(await hydra.databases.layout("b"), "split");
+	assert.equal(await hydra.databases.layout("never-listed"), "split");
+	assert.equal(calls.length, 1, "the probe is memoised for the process");
+	assert.equal(calls[0]!.init.method, "GET");
+
+	const failing = fetchStub({ success: false, error: { message: "nope" } }, 500);
+	const broken = new HydraDB({ token: "t", database: "a", baseUrl: "https://api.test", fetchFn: failing.fetch }, {} as HydraDBClient);
+	assert.equal(await broken.databases.layout("a"), "split");
+});
+
+// `runDatabases` used to read this endpoint twice — once for the names, once for
+// the layouts — so `list()` is now the one reader and `layouts()` goes through
+// it. That also keeps `details[]` on the public method: a caller reaching for
+// `databases.list()` gets the layouts, not a listing with them stripped out.
+test("databases.list() carries details[] and the layout probe shares that one request", async () => {
+	const { fetch, calls } = fetchStub({
+		success: true,
+		data: {
+			databases: ["a", "b"],
+			tenant_ids: ["a", "b"],
+			details: [{ database: "a", type: "unified" }, { database: "b", type: "split" }],
+		},
+	});
+	const sdk = { databases: { list() { throw new Error("the SDK list path must not be used"); } } } as unknown as HydraDBClient;
+	const hydra = new HydraDB({ token: "t", database: "a", baseUrl: "https://api.test", fetchFn: fetch }, sdk);
+
+	const listed = await hydra.databases.list();
+	assert.deepEqual(listed.databases, ["a", "b"]);
+	// Declared keys are still camelCased by the SDK's own response serializer;
+	// `details` rides through beside them.
+	assert.deepEqual(listed.tenantIds, ["a", "b"]);
+	assert.deepEqual(listed.details, [{ database: "a", type: "unified" }, { database: "b", type: "split" }]);
+	assert.equal(calls.length, 1);
+	assert.equal(calls[0]!.url, "https://api.test/databases");
+});
+
+// The probe is memoised, its FAILURE was not: every later defaulted call paid
+// the refused request again, after the server had already said which layout
+// this database has.
+test("a layout learned outside the probe answers without asking again", async () => {
+	const { fetch, calls } = fetchStub({ success: false, error: { message: "down" } }, 503);
+	const hydra = new HydraDB({ token: "t", database: "a", baseUrl: "https://api.test", fetchFn: fetch, maxRetries: 0 }, {} as HydraDBClient);
+
+	assert.equal(await hydra.databases.layout("a"), "split", "a failed probe still reads as the old default");
+	const probes = calls.length;
+
+	hydra.databases.recordLayout("a", "unified");
+	assert.equal(await hydra.databases.layout("a"), "unified");
+	assert.equal(calls.length, probes, "the learned answer costs no request");
+	assert.equal(await hydra.databases.layout("b"), "split", "other databases are untouched");
+
+	// And it is visible to everything that reads the map, not just `layout()`.
+	const working = fetchStub({ success: true, data: { databases: ["a"], details: [{ database: "a", type: "split" }] } });
+	const listed = new HydraDB({ token: "t", database: "a", baseUrl: "https://api.test", fetchFn: working.fetch }, {} as HydraDBClient);
+	assert.equal((await listed.databases.layouts()).get("a"), "split");
+	listed.databases.recordLayout("c", "unified");
+	assert.equal((await listed.databases.layouts()).get("c"), "unified");
+	assert.equal(working.calls.length, 1, "the probe is still asked exactly once");
+});
+
+// The pinned SDK's REQUEST serializers reject `type: "unified"` before anything
+// is sent, so every read and delete that names that kind is built by hand and
+// its result is parsed with the SDK's own response serializer: callers get the
+// same camelCase object either way.
+test("unified query, list and delete bypass the SDK request serializers and return SDK-shaped results", async () => {
+	const answers: Record<string, unknown> = {
+		"/query": { chunks: [{ chunk_uuid: "c1", id: "s1", chunk_content: "body", relevancy_score: 0.9 }], sources: [] },
+		"/context/list": { sources: [{ id: "s1", title: "T" }], total: 1 },
+		"/context": { success: true, deleted_count: 2, user_memory_deleted: 2, results: [] },
+	};
+	const calls: { url: string; init: RequestInit }[] = [];
+	const fetchImpl = ((url: string | URL | Request, init?: RequestInit) => {
+		const path = new URL(String(url)).pathname;
+		calls.push({ url: String(url), init: init ?? {} });
+		return Promise.resolve(
+			new Response(JSON.stringify({ success: true, data: answers[path] }), { status: 200, headers: { "content-type": "application/json" } }),
+		);
+	}) as typeof fetch;
+	const sdk = {
+		query() { throw new Error("SDK query must not be used for unified"); },
+		context: {
+			list() { throw new Error("SDK list must not be used for unified"); },
+			delete() { throw new Error("SDK delete must not be used for unified"); },
+		},
+	} as unknown as HydraDBClient;
+	const hydra = new HydraDB({ token: "t", database: "db_u", collection: "c1", baseUrl: "https://api.test", fetchFn: fetchImpl }, sdk);
+
+	const q = await hydra.context.query({ query: "acme", kind: "unified", maxResults: 5, operator: "and" });
+	assert.equal(q.chunks?.[0]?.chunkContent, "body", "query result is parsed to the SDK's camelCase");
+	assert.equal(q.chunks?.[0]?.relevancyScore, 0.9);
+	assert.deepEqual(JSON.parse(String(calls[0]!.init.body)), {
+		database: "db_u", collection: "c1", query: "acme", type: "unified", operator: "and", query_by: "text", max_results: 5,
+	});
+
+	const l = await hydra.context.list({ kind: "unified", page: 2, pageSize: 10 });
+	assert.equal((l as unknown as { sources: { id: string }[] }).sources[0]?.id, "s1");
+	assert.deepEqual(JSON.parse(String(calls[1]!.init.body)), { database: "db_u", collection: "c1", type: "unified", page: 2, page_size: 10 });
+
+	const d = await hydra.context.delete({ ids: ["a", "b"], kind: "unified" });
+	assert.equal(d.deletedCount, 2, "delete result is parsed to the SDK's camelCase");
+	assert.equal(calls[2]!.init.method, "DELETE");
+	assert.deepEqual(JSON.parse(String(calls[2]!.init.body)), { database: "db_u", collection: "c1", ids: ["a", "b"], type: "unified" });
+});
+
+// PRO-1684 on PRO-1618: a unified database enforces document ACLs like a
+// split one, so the hand-built relations request has to carry the principals
+// in the same repeated form the SDK path sends. Dropping them would make
+// "view as" silently widen to everything on this layout.
+test("unified relations carries acl principals and the unified type", async () => {
+	const calls: string[] = [];
+	const fetchImpl = ((url: string | URL | Request) => {
+		calls.push(String(url));
+		return Promise.resolve(
+			new Response(JSON.stringify({ success: true, data: { relations: [], total: 0 } }), { status: 200, headers: { "content-type": "application/json" } }),
+		);
+	}) as typeof fetch;
+	const sdk = { context: { relations() { throw new Error("SDK relations must not be used for unified"); } } } as unknown as HydraDBClient;
+	const hydra = new HydraDB({ token: "t", database: "db_u", collection: "c1", baseUrl: "https://api.test", fetchFn: fetchImpl }, sdk);
+
+	await hydra.context.relations({ kind: "unified", id: "s1", limit: 3, acl: ["alice@acme.com", "group:slack:C1"] });
+	const sent = new URL(calls[0]!);
+	assert.equal(sent.pathname, "/context/relations");
+	assert.equal(sent.searchParams.get("type"), "unified");
+	assert.equal(sent.searchParams.get("id"), "s1");
+	assert.equal(sent.searchParams.get("limit"), "3");
+	assert.deepEqual(sent.searchParams.getAll("acl"), ["alice@acme.com", "group:slack:C1"]);
+
+	// No principals means no acl parameter at all: absent and [] are the same
+	// to the API, and the request should say what the caller said.
+	await hydra.context.relations({ kind: "unified", id: "s1" });
+	assert.equal(new URL(calls[1]!).searchParams.has("acl"), false);
+});
+
+// Greptile on #72: the memoised probe took its FIRST caller's signal, so a
+// later caller who cancelled kept waiting, and a first caller who cancelled
+// failed everyone else's probe (they then read the database as split). The
+// shared request now takes no caller signal; each waiter honours its own.
+// A waiter that arrives ALREADY cancelled walks away without attaching a
+// handler to the shared probe. The probe is allowed to fail, and a failure
+// nobody observes is an unhandled rejection — which Node answers by killing the
+// process. So one host cancelling one tool call, against a database whose probe
+// happens to be down, could take the whole MCP server with it.
+test("an already-cancelled waiter does not orphan the shared probe's rejection", async () => {
+	const unhandled: unknown[] = [];
+	const onUnhandled = (reason: unknown) => unhandled.push(reason);
+	process.on("unhandledRejection", onUnhandled);
+	try {
+		const failing = fetchStub({ success: false, error: { message: "down" } }, 503);
+		const hydra = new HydraDB(
+			{ token: "t", database: "a", baseUrl: "https://api.test", fetchFn: failing.fetch, maxRetries: 0 },
+			{} as HydraDBClient,
+		);
+		const controller = new AbortController();
+		controller.abort();
+
+		await assert.rejects(
+			hydra.databases.layout("a", controller.signal),
+			(err: unknown) => err instanceof HydraWrapperError && /cancelled by the caller/.test(err.message),
+			"the cancelled caller still gets told it was cancelled",
+		);
+
+		// Rejections are reported a turn after they settle, so give the loop one.
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		assert.deepEqual(unhandled, [], "a cancelled waiter must not leave the probe's failure unobserved");
+	} finally {
+		process.off("unhandledRejection", onUnhandled);
+	}
+});
+
+test("a cancelled layout waiter rejects alone while the shared probe still serves the others", async () => {
+	let release: (r: Response) => void = () => {};
+	const gate = new Promise<Response>((resolve) => { release = resolve; });
+	let requests = 0;
+	const slow = (() => { requests += 1; return gate; }) as typeof fetch;
+	const hydra = new HydraDB({ token: "t", database: "a", baseUrl: "https://api.test", fetchFn: slow }, {} as HydraDBClient);
+
+	const first = new AbortController();
+	const firstWaiter = hydra.databases.layout("a", first.signal);
+	const secondWaiter = hydra.databases.layout("a");
+	first.abort();
+	await assert.rejects(firstWaiter, (err: unknown) => err instanceof HydraWrapperError && /cancelled by the caller/.test(err.message));
+
+	release(new Response(JSON.stringify({ success: true, data: { databases: ["a"], details: [{ database: "a", type: "unified" }] } }), { status: 200 }));
+	assert.equal(await secondWaiter, "unified", "the other waiter still gets the real layout");
+	assert.equal(requests, 1, "one shared probe, not one per waiter");
+	assert.equal(await hydra.databases.layout("a"), "unified", "and it stays memoised");
+});
+
+test("an abort during retry backoff ends the loop without another request", async () => {
+	let attempts = 0;
+	const controller = new AbortController();
+	const flaky = (() => {
+		attempts += 1;
+		// Cancel while the transport is sleeping before its retry.
+		setTimeout(() => controller.abort(), 10);
+		return Promise.resolve(new Response("upstream", { status: 503 }));
+	}) as typeof fetch;
+	const hydra = new HydraDB({ token: "t", database: "a", baseUrl: "https://api.test", fetchFn: flaky, maxRetries: 3 }, {} as HydraDBClient);
+	await assert.rejects(
+		hydra.databases.layout("a", controller.signal),
+		(err: unknown) => err instanceof HydraWrapperError && /cancelled by the caller/.test(err.message),
+	);
+	assert.equal(attempts, 1, "no request is made for a caller who already cancelled");
+});
+
+// The sibling test above goes through `layout()`, which wraps the probe in
+// `abortable` — so it rejects the moment the signal fires and asserts the count
+// while the backoff is still sleeping. That passes whether or not the transport
+// rechecks after the sleep, so it does NOT cover the recheck. Verified by
+// deleting the recheck and watching it stay green.
+//
+// This one takes a path with no `abortable` in it (a unified ingest goes
+// straight to sendRaw), and waits for the backoff to elapse before asserting.
+// A cancelled non-idempotent WRITE reaching the server after the caller gave up
+// is the failure being guarded here, so it is worth a test that can see it.
+test("a cancel during backoff stops the retry loop before it writes again", async () => {
+	let attempts = 0;
+	const controller = new AbortController();
+	const flaky = (() => {
+		attempts += 1;
+		// Cancel while the transport is sleeping before its retry.
+		setTimeout(() => controller.abort(), 10);
+		return Promise.resolve(new Response("upstream", { status: 503 }));
+	}) as typeof fetch;
+	const sdk = { context: { ingest() { throw new Error("SDK path must not be used for unified"); } } } as unknown as HydraDBClient;
+	const hydra = new HydraDB(
+		{ token: "t", database: "db_u", baseUrl: "https://api.test", fetchFn: flaky, maxRetries: 3 },
+		sdk,
+	);
+
+	await assert.rejects(
+		hydra.context.ingest({ kind: "unified", text: "a note" }, { signal: controller.signal }),
+		(err: unknown) => err instanceof HydraWrapperError && /cancelled by the caller/.test(err.message),
+	);
+	// Outlast the 250ms first backoff: without the post-sleep recheck the loop
+	// wakes up here and sends the write a second time.
+	await new Promise((resolve) => setTimeout(resolve, 600));
+	assert.equal(attempts, 1, "a cancelled write must not be replayed after the backoff");
+});
+
+test("the raw transport retries 5xx and network failures, never a 4xx", async () => {
+	let attempts = 0;
+	const flaky = ((url: string | URL | Request) => {
+		attempts += 1;
+		if (attempts < 3) return Promise.resolve(new Response("upstream", { status: 503 }));
+		return Promise.resolve(
+			new Response(JSON.stringify({ success: true, data: { databases: ["a"], details: [{ database: "a", type: "unified" }] } }), { status: 200 }),
+		);
+	}) as typeof fetch;
+	const hydra = new HydraDB({ token: "t", database: "a", baseUrl: "https://api.test", fetchFn: flaky, maxRetries: 2 }, {} as HydraDBClient);
+	assert.equal(await hydra.databases.layout("a"), "unified");
+	assert.equal(attempts, 3);
+
+	let rejected = 0;
+	const refusing = (() => {
+		rejected += 1;
+		return Promise.resolve(new Response(JSON.stringify({ success: false, error: { message: "no" } }), { status: 400 }));
+	}) as typeof fetch;
+	const strict = new HydraDB({ token: "t", database: "a", baseUrl: "https://api.test", fetchFn: refusing, maxRetries: 2 }, {} as HydraDBClient);
+	await assert.rejects(() => strict.databases.create({ database: "x", type: "unified" }));
+	assert.equal(rejected, 1, "a 4xx is final");
+});
+
+// A failure that carried NO HTTP status — a dropped socket, a timeout — tells us
+// nothing about whether the server applied the write. Retrying it on a path with
+// no dedup key duplicates the context rather than replacing it. openclaw-hydradb
+// made this call first (REPLAY_UNSAFE_WRITES); this pins the MCP to the same
+// answer, so the two clients cannot diverge on a dying write.
+test("a status-less failure is not replayed on a unified ingest", async () => {
+	let attempts = 0;
+	const dead = (() => {
+		attempts += 1;
+		return Promise.reject(new TypeError("fetch failed"));
+	}) as unknown as typeof fetch;
+	const sdk = { context: { ingest() { throw new Error("SDK path must not be used for unified"); } } } as unknown as HydraDBClient;
+	const hydra = new HydraDB({ token: "t", database: "db_u", baseUrl: "https://api.test", fetchFn: dead, maxRetries: 3 }, sdk);
+
+	await assert.rejects(hydra.context.ingest({ kind: "unified", text: "a note" }));
+	assert.equal(attempts, 1, "a write that may already have been applied must not be re-sent");
+});
+
+test("a status-less failure is still replayed on a read", async () => {
+	let attempts = 0;
+	const flaky = (() => {
+		attempts += 1;
+		if (attempts < 3) return Promise.reject(new TypeError("fetch failed"));
+		return Promise.resolve(
+			new Response(JSON.stringify({ success: true, data: { databases: ["a"], details: [{ database: "a", type: "unified" }] } }), { status: 200 }),
+		);
+	}) as unknown as typeof fetch;
+	const hydra = new HydraDB({ token: "t", database: "a", baseUrl: "https://api.test", fetchFn: flaky, maxRetries: 3 }, {} as HydraDBClient);
+
+	assert.equal(await hydra.databases.layout("a"), "unified");
+	assert.equal(attempts, 3, "replaying a read costs nothing but time, so the budget stands");
+});
+
+// The guard matches the OPERATION path. A set lookup against the raw request
+// string would miss a query-carrying write and start replaying it again —
+// openclaw-hydradb shipped exactly that bug in its own copy of this guard.
+test("the replay guard survives a query string on the write path", async () => {
+	const { isReplayUnsafeForTest } = await import("../src/hydra/transport.js");
+	assert.equal(isReplayUnsafeForTest("POST", "/context/ingest"), true);
+	assert.equal(isReplayUnsafeForTest("POST", "/context/ingest?database=db_u"), true, "a query param must not defeat the guard");
+	assert.equal(isReplayUnsafeForTest("GET", "/context/ingest"), false, "reads keep the full budget");
+	assert.equal(isReplayUnsafeForTest("POST", "/query"), false, "only the non-idempotent writes are guarded");
+});

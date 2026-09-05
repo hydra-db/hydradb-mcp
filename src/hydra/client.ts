@@ -22,8 +22,34 @@ import { unwrap } from "./envelope.js";
 import { newRawTransport, type RawTransport, sendRaw } from "./transport.js";
 import { HydraWrapperError, translateError } from "./errors.js";
 import { GraphResource } from "./graph.js";
+import { serialization } from "@hydradb/sdk";
 
-export type ContextKind = "memory" | "knowledge";
+/** Storage layout of a database (PRO-1618): fixed at creation, never changed. */
+export type Layout = "split" | "unified";
+
+/** One `GET /databases` `details[]` row: a database and its storage layout. */
+export interface DatabaseDetail {
+	database?: string;
+	type?: string;
+}
+
+/**
+ * `GET /databases`, with the `details[]` the pinned SDK's response model does
+ * not declare (PRO-1618). Declared here rather than left to `unknown` so a
+ * caller reading the layout is type-checked against the shape the server sends.
+ */
+export type DatabaseListing = SDK.TenantsTenantIdsResponse & {
+	details?: DatabaseDetail[];
+};
+
+/**
+ * `unified` (PRO-1618) names the ONE corpus of a database created with
+ * `type: "unified"`, where knowledge and memory are not separate. On such a
+ * database it is the only accepted value (and the server default); on a split
+ * database it is refused, exactly as `memory`/`knowledge` are refused on a
+ * unified one. `databases.layout()` tells the two apart.
+ */
+export type ContextKind = "memory" | "knowledge" | "unified";
 
 /**
  * Sized to fit inside a typical MCP host's tool timeout rather than outlast it,
@@ -106,7 +132,7 @@ export interface HydraConfig {
 	timeoutSeconds?: number;
 	/** Retries per call. The SDK defaults to 2; set explicitly so it is a choice. */
 	maxRetries?: number;
-	/** Test seam for the hand-rolled HTTP path; production never sets it. */
+	/** Test seam for the hand-rolled HTTP path (see ./transport.ts); production never sets it. */
 	fetchFn?: typeof fetch;
 }
 
@@ -354,6 +380,8 @@ export interface DeleteParams {
 
 export interface CreateDatabaseParams {
 	database: string;
+	/** Storage layout (PRO-1618). Omitted means `split`, the layout every existing database has. */
+	type?: Layout;
 	databaseMetadataSchema?: SDK.TenantsCustomPropertyDefinition[];
 	embeddingsDimension?: number;
 }
@@ -418,7 +446,100 @@ export function assertCollectionAllowed(
 	}
 }
 
+/** The options the generated client itself passes to every response parser. */
+type SdkParseOptions = NonNullable<
+	Parameters<typeof serialization.SearchV2RetrievalResult.parseOrThrow>[1]
+>;
+const SDK_PARSE_OPTS: SdkParseOptions = {
+	unrecognizedObjectKeys: "passthrough",
+	allowUnrecognizedUnionMembers: true,
+	allowUnrecognizedEnumValues: true,
+	skipValidation: true,
+	breadcrumbsPrefix: ["response"],
+};
+
+/** Drop undefined values so a hand-built wire body carries only what was said. */
+function compact(record: Record<string, unknown>): Record<string, unknown> {
+	const out: Record<string, unknown> = {};
+	for (const [k, v] of Object.entries(record)) if (v !== undefined) out[k] = v;
+	return out;
+}
+
+/** `?a=b&c=d` from a record, skipping undefined values. */
+function queryString(record: Record<string, string | number | undefined>): string {
+	const params = new URLSearchParams();
+	for (const [k, v] of Object.entries(record)) if (v !== undefined) params.set(k, String(v));
+	const encoded = params.toString();
+	return encoded === "" ? "" : `?${encoded}`;
+}
+
+/**
+ * A view of a shared promise that rejects as soon as THIS caller's signal
+ * aborts, without cancelling the shared work for anyone else. Used for the
+ * memoised layout probe: many tool calls can be waiting on one request, and a
+ * host cancelling one of them must not keep it waiting, nor fail the rest.
+ */
+function abortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+	if (!signal) return promise;
+	const cancelled = () =>
+		new HydraWrapperError("Hydra DB /databases → ERR: request cancelled by the caller", "/databases");
+	if (signal.aborted) {
+		// Take the rejection off `promise` before walking away from it.
+		//
+		// This waiter is gone, so nothing below ever attaches a handler — and
+		// `promise` is the SHARED layout probe, which is allowed to fail. An
+		// unrejected failure with no observer is an unhandled rejection, and
+		// Node's default for those is to terminate the process. So one host
+		// cancelling one tool call, against a database whose probe happens to
+		// be failing, could take the whole MCP server down with it.
+		//
+		// Swallowing here loses nothing: every waiter that still cares gets the
+		// same rejection through its own `promise.then` below, and `layout()`
+		// turns it into the `split` default.
+		void promise.catch(() => {});
+		return Promise.reject(cancelled());
+	}
+	return new Promise<T>((resolve, reject) => {
+		const onAbort = () => reject(cancelled());
+		signal.addEventListener("abort", onAbort, { once: true });
+		promise.then(
+			(value) => {
+				signal.removeEventListener("abort", onAbort);
+				resolve(value);
+			},
+			(err) => {
+				signal.removeEventListener("abort", onAbort);
+				reject(err);
+			},
+		);
+	});
+}
+
 abstract class Resource {
+	/**
+	 * A raw v2 call whose wire result is run through the SDK's OWN response
+	 * serializer, so the caller gets the same camelCase object the SDK path
+	 * returns. Used for `kind: "unified"` (PRO-1618): the pinned SDK's REQUEST
+	 * serializers reject that enum value before anything is sent, so the
+	 * request is built by hand, but nothing downstream has to know — and for
+	 * `GET /databases`, whose `details[]` the pinned RESPONSE model does not
+	 * declare.
+	 */
+	protected async rawTyped<T>(
+		what: string,
+		method: "GET" | "POST" | "DELETE",
+		path: string,
+		body: unknown,
+		parse: (raw: unknown, opts?: SdkParseOptions) => T,
+		signal?: AbortSignal,
+	): Promise<T> {
+		if (!this.raw) {
+			throw new Error(`${what} needs the v2 transport, which this HydraDB instance was built without`);
+		}
+		const wire = await sendRaw<unknown>(this.raw, path, method, body, signal ? { signal } : undefined);
+		return parse(wire, SDK_PARSE_OPTS);
+	}
+
 	protected constructor(
 		protected readonly sdk: HydraDBClient,
 		private readonly database: string,
@@ -559,11 +680,43 @@ export class ContextResource extends Resource {
 				? this.multiScope(params.collections, params.database)
 				: this.scope(params.collection, params.database);
 
+		// `unified` is refused by the pinned SDK's request serializer before
+		// anything is sent, so that kind is built by hand and its result parsed
+		// with the SDK's own response serializer (PRO-1618).
+		if (params.kind === "unified") {
+			return this.call("/query", () =>
+				this.rawTyped(
+					"unified query",
+					"POST",
+					"/query",
+					compact({
+						...scope,
+						query: params.query,
+						type: "unified",
+						operator: params.operator,
+						query_by: queryBy,
+						max_results: params.maxResults,
+						mode: params.mode,
+						graph_context: params.graphContext,
+						alpha: params.alpha,
+						recency_bias: params.recencyBias,
+						query_apps: params.queryApps,
+						ids: params.ids,
+						metadata_filters: params.metadataFilters,
+						num_related_chunks: params.numRelatedChunks,
+						acl: params.acl,
+					}),
+					serialization.SearchV2RetrievalResult.parseOrThrow,
+					opts?.signal,
+				),
+			);
+		}
+
 		return this.call("/query", () =>
 			this.sdk.query({
 				...scope,
 				query: params.query,
-				type: params.kind,
+				type: params.kind as SDK.SearchSourceType | undefined,
 				operator: params.operator,
 				queryBy,
 				maxResults: params.maxResults,
@@ -591,9 +744,10 @@ export class ContextResource extends Resource {
 		params: IngestParams,
 		opts?: RequestOptions,
 	): Promise<SDK.IngestionV2IngestResponse> {
+		if (params.kind === "unified") return this.ingestUnified(params, opts);
 		const request: SDK.IngestContextRequest = {
 			...this.scope(params.collection, params.database),
-			type: params.kind,
+			type: params.kind as SDK.IngestContextRequestType,
 		};
 		if (params.upsert != null) {
 			request.upsert = String(params.upsert);
@@ -671,15 +825,94 @@ export class ContextResource extends Resource {
 		);
 	}
 
+	/**
+	 * The unified ingest shape (PRO-1618): one `items[]` array, each item text or
+	 * a conversation, no corpus selector. Sent as the JSON body of
+	 * `POST /context/ingest`; the memory-item fields map onto the item names the
+	 * redesign settled on. On a split database the items land in its memory
+	 * corpus, so nothing changes for a caller that has not created a unified one.
+	 */
+	private ingestUnified(
+		params: IngestParams,
+		opts?: RequestOptions,
+	): Promise<SDK.IngestionV2IngestResponse> {
+		const item: Record<string, unknown> = {};
+		if (params.text != null) item.text = params.text;
+		if (params.pairs != null) {
+			item.conversation = params.pairs.flatMap((turn) => [
+				{ role: "user", content: turn.user, ...(params.userName ? { name: params.userName } : {}) },
+				{ role: "assistant", content: turn.assistant },
+			]);
+		}
+		// `is_markdown` is sent only when the caller said something. The server's
+		// field is a plain bool, so omitting it and sending `false` are the same
+		// thing, and every other field on this item is conditional too.
+		if (params.isMarkdown != null) item.is_markdown = params.isMarkdown;
+		// Speaker identity has TWO homes on a unified item and the server reads
+		// the finer-grained one first: a conversation names its speaker per turn
+		// (set above), and the item-level `user_name` fills in only when the
+		// turns supplied none. So it goes on the item for a TEXT item only —
+		// sending both would be redundant on the wire, and a client that let the
+		// item-level value win would silently discard the per-turn identity that
+		// speaker anchoring depends on.
+		if (params.pairs == null && params.userName != null) item.user_name = params.userName;
+		if (params.sourceId != null) item.context_id = params.sourceId;
+		if (params.title != null) item.title = params.title;
+		item.enrich = params.infer ?? true;
+		if (item.enrich && params.customInstructions != null) {
+			item.custom_instructions = params.customInstructions;
+		}
+		if (params.metadata != null) item.attributes = params.metadata;
+		if (params.additionalMetadata != null) item.custom_attributes = params.additionalMetadata;
+		if (params.observationDate != null) item.happened_at = params.observationDate;
+		const body = {
+			...this.scope(params.collection, params.database),
+			items: [item],
+			...(params.upsert != null ? { upsert: params.upsert } : {}),
+		};
+		return this.call("/context/ingest", () =>
+			this.rawTyped(
+				"unified ingest",
+				"POST",
+				"/context/ingest",
+				body,
+				serialization.IngestionV2IngestResponse.parseOrThrow,
+				opts?.signal,
+			),
+		);
+	}
+
 	/** List memories or knowledge sources (SDK `context.list`). */
 	list(
 		params: ListParams = {},
 		opts?: RequestOptions,
 	): Promise<SDK.ListV2ListResponse> {
+		// `unified` is refused by the pinned SDK's request serializer, so that
+		// kind is built by hand and parsed with the SDK's own response
+		// serializer (PRO-1618).
+		if (params.kind === "unified") {
+			return this.call("/context/list", () =>
+				this.rawTyped(
+					"unified list",
+					"POST",
+					"/context/list",
+					compact({
+						...this.scope(params.collection, params.database),
+						type: "unified",
+						ids: params.ids,
+						page: params.page,
+						page_size: params.pageSize,
+						acl: params.acl,
+					}),
+					serialization.ListV2ListResponse.parseOrThrow,
+					opts?.signal,
+				),
+			);
+		}
 		return this.call("/context/list", () =>
 			this.sdk.context.list({
 				...this.scope(params.collection, params.database),
-				type: params.kind,
+				type: params.kind as SDK.ListV2ListContentRequestType | undefined,
 				ids: params.ids,
 				page: params.page,
 				pageSize: params.pageSize,
@@ -764,11 +997,38 @@ export class ContextResource extends Resource {
 	relations(
 		params: RelationsParams = {},
 	): Promise<SDK.GraphGraphRelationsResponse> {
+		if (params.kind === "unified") {
+			const scope = this.scope(params.collection, params.database);
+			const query = new URLSearchParams();
+			for (const [k, v] of Object.entries({
+				database: scope.database,
+				collection: scope.collection,
+				id: params.id,
+				type: "unified",
+				limit: params.limit,
+				cursor: params.cursor,
+			}))
+				if (v !== undefined) query.set(k, String(v));
+			// Same repeated form the SDK path and `subgraph` send (PRO-1684):
+			// a unified database enforces document ACLs like any other, so the
+			// raw path has to carry the principals or "view as" silently
+			// widens to everything on this layout.
+			for (const principal of params.acl ?? []) query.append("acl", principal);
+			return this.call("/context/relations", () =>
+				this.rawTyped(
+					"unified relations",
+					"GET",
+					`/context/relations?${query.toString()}`,
+					undefined,
+					serialization.GraphGraphRelationsResponse.parseOrThrow,
+				),
+			);
+		}
 		return this.call("/context/relations", () =>
 			this.sdk.context.relations({
 				...this.scope(params.collection, params.database),
 				id: params.id,
-				type: params.kind,
+				type: params.kind as SDK.RelationsContextRequestType | undefined,
 				limit: params.limit,
 				cursor: params.cursor,
 				acl: params.acl,
@@ -781,11 +1041,27 @@ export class ContextResource extends Resource {
 		params: DeleteParams,
 		opts?: RequestOptions,
 	): Promise<SDK.SourcesMemoryDeleteResponse> {
+		if (params.kind === "unified") {
+			return this.call("/context", () =>
+				this.rawTyped(
+					"unified delete",
+					"DELETE",
+					"/context",
+					compact({
+						...this.scope(params.collection, params.database),
+						ids: params.ids,
+						type: "unified",
+					}),
+					serialization.SourcesMemoryDeleteResponse.parseOrThrow,
+					opts?.signal,
+				),
+			);
+		}
 		return this.call("/context", () =>
 			this.sdk.context.delete({
 				...this.scope(params.collection, params.database),
 				ids: params.ids,
-				type: params.kind,
+				type: params.kind as SDK.SourcesV2SourceDeleteRequestType,
 			}, req(opts)),
 		);
 	}
@@ -801,13 +1077,39 @@ export class DatabasesResource extends Resource {
 		collection?: string,
 		allowedDatabases?: readonly string[],
 		allowedCollections?: readonly string[],
+		// The shared raw transport. `create` with a layout and the layout probe
+		// both need it: the pinned SDK has neither `type` on create nor
+		// `details[]` on the list (PRO-1618).
+		raw?: RawTransport,
 	) {
-		super(sdk, database, collection, allowedDatabases, allowedCollections);
+		super(sdk, database, collection, allowedDatabases, allowedCollections, raw);
 	}
 
 	create(
 		params: CreateDatabaseParams,
 	): Promise<SDK.TenantsTenantCreateAcceptedResponse> {
+		if (params.type != null) {
+			// The pinned SDK's create request has no `type`; the generated
+			// serializer would drop it and provision a split database in silence.
+			return this.call("/databases", () =>
+				this.rawTyped(
+					"database create with a layout",
+					"POST",
+					"/databases",
+					{
+						database: params.database,
+						type: params.type,
+						...(params.databaseMetadataSchema != null
+							? { database_metadata_schema: params.databaseMetadataSchema }
+							: {}),
+						...(params.embeddingsDimension != null
+							? { embeddings_dimension: params.embeddingsDimension }
+							: {}),
+					},
+					serialization.TenantsTenantCreateAcceptedResponse.parseOrThrow,
+				),
+			);
+		}
 		return this.call("/databases", () =>
 			this.sdk.databases.create({
 				database: params.database,
@@ -821,8 +1123,114 @@ export class DatabasesResource extends Resource {
 		return this.call("/databases", () => this.sdk.databases.delete({ database }));
 	}
 
-	list(): Promise<SDK.TenantsTenantIdsResponse> {
-		return this.call("/databases", () => this.sdk.databases.list());
+	/**
+	 * Every database this key can see (`GET /databases`), INCLUDING the
+	 * `details[]` rows that carry each one's storage layout (PRO-1618).
+	 *
+	 * Hand-rolled rather than the SDK call, and it is the ONE reader of this
+	 * endpoint: `layouts()` below goes through it rather than issuing a second,
+	 * identical request, so listing databases and reading their layouts is one
+	 * round trip instead of two. The wire result is still run through the SDK's
+	 * own response serializer, so callers get the same camelCase object the SDK
+	 * path returned (`tenantIds`), with `details[]` — a key the pinned model
+	 * does not declare — passed through beside it.
+	 *
+	 * The raw path is not a downgrade here: `sendRaw` retries 429/5xx with
+	 * bounded backoff, exactly as the SDK does, and translates failures into
+	 * the same `HydraWrapperError`.
+	 */
+	list(signal?: AbortSignal): Promise<DatabaseListing> {
+		return this.call("/databases", () =>
+			this.rawTyped(
+				"database list",
+				"GET",
+				"/databases",
+				undefined,
+				serialization.TenantsTenantIdsResponse.parseOrThrow,
+				signal,
+			),
+		);
+	}
+
+	private layoutCache?: Promise<Map<string, Layout>>;
+
+	/**
+	 * Layouts learned outside the probe: a defaulted kind the server refused,
+	 * which the caller's `unified` retry then satisfied. That answer is as
+	 * authoritative as the probe's — the server just told us — and without
+	 * recording it a process whose probe failed pays the refused request again
+	 * on every defaulted call for the life of the process.
+	 */
+	private readonly learnedLayouts = new Map<string, Layout>();
+
+	/**
+	 * Record a layout the probe did not supply. See `learnedLayouts`.
+	 *
+	 * Kept in its own map rather than written into `layoutCache`: that cache is
+	 * a promise that clears itself on failure, so a write into it races the
+	 * clear and can be discarded exactly when it is most needed.
+	 */
+	recordLayout(database: string, layout: Layout): void {
+		this.learnedLayouts.set(database, layout);
+	}
+
+	/**
+	 * Every database this key can see, with its storage layout (PRO-1618), read
+	 * from `GET /databases` `details[]`. Memoised for the life of the process:
+	 * a layout is fixed at creation, so it cannot go stale, and the probe is
+	 * what lets the tools pick `unified` as a default without a failed request.
+	 */
+	layouts(signal?: AbortSignal): Promise<Map<string, Layout>> {
+		let cache = this.layoutCache;
+		if (!cache) {
+			// The shared probe deliberately takes NO caller signal: it is
+			// bounded by the transport's own deadline, and it serves every
+			// tool call that arrives while it is in flight. Binding it to the
+			// first caller would let that caller's cancellation fail everyone
+			// else's, and the others would then read the database as split.
+			// Each caller's own cancellation is honoured below, per waiter.
+			cache = this.list().then((listed) => {
+				const map = new Map<string, Layout>();
+				for (const row of listed.details ?? []) {
+					if (row.database) map.set(row.database, row.type === "unified" ? "unified" : "split");
+				}
+				return map;
+			}).catch((err) => {
+				// A failed probe must not poison every later call: forget it so
+				// the next tool call asks again.
+				this.layoutCache = undefined;
+				throw err;
+			});
+			this.layoutCache = cache;
+		}
+		// Merged at READ time, not when the probe resolved: a layout learned
+		// after the cache was built still has to be visible here.
+		const probed = cache.then((map) =>
+			this.learnedLayouts.size === 0 ? map : new Map([...map, ...this.learnedLayouts]),
+		);
+		return abortable(probed, signal);
+	}
+
+	/**
+	 * The layout of one database. A database the probe does not list (or a
+	 * probe that fails) reads as `split`, which is what every database created
+	 * before PRO-1618 is; the worst case is the old default, never a wrong
+	 * unified call.
+	 */
+	async layout(database: string, signal?: AbortSignal): Promise<Layout> {
+		// A learned layout answers before the probe is consulted at all, so a
+		// process whose probe keeps failing still stops guessing after the
+		// first refusal.
+		const learned = this.learnedLayouts.get(database);
+		if (learned != null) return learned;
+		try {
+			return (await this.layouts(signal)).get(database) ?? "split";
+		} catch (err) {
+			// A cancelled probe is the caller's decision; propagate it so the
+			// tool call ends now rather than running on with a guessed layout.
+			if (signal?.aborted) throw err;
+			return "split";
+		}
 	}
 
 	collections(database: string): Promise<SDK.TenantsSubTenantIdsResponse> {
@@ -905,6 +1313,7 @@ export class HydraDB {
 			config.collection,
 			config.allowedDatabases,
 			config.allowedCollections,
+			raw,
 		);
 		this.graph = new GraphResource({
 			token: config.token,

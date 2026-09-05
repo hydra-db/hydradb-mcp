@@ -85,7 +85,7 @@ chunks with their source id, a relevance score, and knowledge-graph context.
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `query` | string | Yes | What you want to know, as a question or topic |
-| `kind` | string | No | `memory`, `knowledge`, or `all` (default: `all`) |
+| `kind` | string | No | `memory`, `knowledge`, or `all` (default: `all`); `unified` on a unified database (the default there) |
 | `max_results` | number | No | Maximum chunks to return (1-50, default: 10) |
 | `mode` | string | No | `fast`, `thinking` (default), or `auto` |
 | `detail` | string | No | `compact` (default) trims each chunk; `full` returns them whole |
@@ -107,7 +107,7 @@ or `turns`.
 |-----------|------|----------|-------------|
 | `text` | string | No\* | A note, fact, decision, or document body |
 | `turns` | array | No\* | Conversation turns, each with `user` and `assistant` |
-| `kind` | string | No | `memory` (default) or `knowledge` for a document |
+| `kind` | string | No | `memory` (default) or `knowledge` for a document; `unified` on a unified database (chosen automatically) |
 | `title` | string | No | Label shown in later search results — always set it |
 | `source_id` | string | No | Identifier for this entry. **Reusing one REPLACES what is stored under it** |
 | `overwrite` | boolean | No | Allow that replacement (default: true) |
@@ -129,7 +129,7 @@ tells you nothing about which knowledge sources exist.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `kind` | string | **Yes** | `memory` or `knowledge` |
+| `kind` | string | No | `memory` or `knowledge` — always set it on a split database, since one listing never covers both; omitting it lists memories and says so. On a unified database omit it, or pass `unified`, and one page covers everything |
 | `ids` | array | No | Restrict to these ids |
 | `source_ids` | array | No | Deprecated alias for `ids` |
 | `page` | number | No | Page to return, 1-indexed (default: 1) |
@@ -188,7 +188,7 @@ Removes items by id. Irreversible.
 |-----------|------|----------|-------------|
 | `ids` | array | No\* | The ids to delete — accepts several at once |
 | `id` | string | No\* | A single id |
-| `kind` | string | No | `memory` (default) or `knowledge` |
+| `kind` | string | No | `memory` (default) or `knowledge`; `unified` on a unified database (the default there) |
 
 \* Provide one of them.
 

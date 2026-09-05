@@ -20,7 +20,8 @@ const PARAM = {
 	query_kind:
 		"Which context family to search: 'memory' for stored user memories, " +
 		"'knowledge' for ingested documents and sources, or 'all' for both " +
-		"(default: 'all'). Leave unset unless you specifically want to exclude one family.",
+		"(default: 'all'). On a UNIFIED database (see hydradb_databases) there is one " +
+		"family only: leave unset or pass 'unified'; 'memory'/'knowledge' are refused there.",
 	max_results:
 		"Maximum CHUNKS to return (1-50, default: 10). Chunks, not whole memories or " +
 		"documents — several chunks often come from one source. Raise to 20-30 for broad " +
@@ -89,8 +90,10 @@ const PARAM = {
 	ingest_kind:
 		"What to write: 'memory' for a personal fact, preference or conversation " +
 		"(default), or 'knowledge' to store a document as a searchable source. " +
+		"On a UNIFIED database leave unset (or pass 'unified'): everything is one family there. " +
 		"Memory-only options (turns, source_id, infer, is_markdown, user_name) do not " +
-		"apply to knowledge and are rejected rather than ignored.",
+		"apply to knowledge and are rejected rather than ignored. A unified database " +
+		"takes all of them.",
 	title:
 		"A short, specific label — always set it. This is the ONLY label shown next to " +
 		"this entry in later hydradb_query results, so 'Deployment rollback policy' is " +
@@ -134,8 +137,11 @@ const PARAM = {
 		"rather than about an anonymous participant. Applies to `turns` only.",
 	kind:
 		"Which family to list: 'memory' (stored memories) or 'knowledge' (ingested " +
-		"sources). REQUIRED — these are separate corpora with different output, and no " +
-		"single listing covers both. Call this twice to see everything.",
+		"sources). ALWAYS SET IT on a split database — these are separate corpora with " +
+		"different output, and no single listing covers both, so call this twice to see " +
+		"everything; omitting it lists memories only and says so. " +
+		"On a UNIFIED database there is one corpus: leave it unset (or pass 'unified') " +
+		"and one page covers everything.",
 	source_ids:
 		"Optional array of specific source IDs to filter by. If omitted, lists all sources.",
 	page:
@@ -178,7 +184,8 @@ const PARAM = {
 		"one call, not N. Each is reported separately, and the response says how many " +
 		"were actually removed. This is irreversible.",
 	delete_kind:
-		"Which context family the ID belongs to: 'memory' or 'knowledge' (default: 'memory')",
+		"Which context family the ID belongs to: 'memory' or 'knowledge' (default: 'memory'). " +
+		"On a UNIFIED database leave unset or pass 'unified'.",
 	memory_id: "The ID of the memory to delete",
 	database:
 		"Database (tenant) to target for this request. Defaults to the database this " +

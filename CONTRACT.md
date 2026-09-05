@@ -60,6 +60,7 @@ recorded as such, not treated as drift for the other group to catch up on.
 | **context** | the stored-unit family (memory + knowledge) | — |
 | **memory** | a context item of kind `memory` | user memory, preference |
 | **knowledge** | a context item of kind `knowledge` | document, file, source-as-kind |
+| **unified** | the one kind of a database created with `type: "unified"` (PRO-1618); the only kind such a database accepts, and its default. Clients read the layout from `GET /databases` `details[]` and default to it there | — |
 | **source** | one ingested item; its identifier field is `id` | source_id, file_id, doc_id |
 | **chunk** | one retrieved fragment of a source | — |
 
@@ -152,7 +153,8 @@ Rules every wrapper obeys:
 3. **Own env/config.** Both SDKs read zero environment variables; the wrapper supplies `token`,
    `base_url`, database, collection from config per §1.
 4. **Translate errors** back into the host client's existing error type/shape. Do not let raw SDK
-   exception types leak to surfaces that previously saw the client's own error.
+   exception types leak to surfaces that previously saw the client's own error. An error's
+   **message** and its **path** are part of that shape — see *Errors are interface* below.
 5. **Preserve host behaviour** the SDK does not provide (redaction, silent-failure, retries capped
    under hook budgets, defaults, output shapes). These are listed per-client in the plan.
 6. **Send `API-Version: 2`.** (The SDK does this; a client that previously sent no version header is
@@ -163,6 +165,35 @@ Rules every wrapper obeys:
    translated error type. A caller must not be able to tell which methods went through the SDK.
    When the SDK grows the resource, only that one file changes. This does not weaken rule 1 — an
    endpoint the SDK does not expose has no generated name to be insulated from.
+
+### Errors are interface, not diagnostics
+
+An agent tool propagates a failed call, so an error's **message** reaches the model, and a client
+that recovers from a failure branches on its **path**. Both are interface. Changing either is a
+client-visible change that needs a test — never a copy edit, on the server side or the client side.
+
+Two things about this are counter-intuitive, and both cost us a round when we met them:
+
+- **An error code is not automatically the discriminator.** `CORPUS_TYPE_UNSUPPORTED` covers six
+  refusals that point in different directions: two mean "retry as unified", four mean the caller
+  must change something else, and retrying one of those four pins a split database to the wrong
+  corpus for the life of the process. The code narrows to the family; the **message** decides which
+  member. So the message text is load-bearing precisely *because* the code is not sufficient.
+- **A value that varies per request cannot be matched on.** A GET carries its scope in the query
+  string, so the request URL differs every call. The **operation path** (`/context/relations`) and
+  the request URL must stay separate: the transport sends the URL, the error reports the operation
+  path. Otherwise anything branching on `path` silently stops working for those calls only — and
+  the varying URL leaks database, collection and item ids to the model as a bonus.
+
+Four instances so far. Each is now held by a test rather than by convention, on both sides of the
+wire where a server string is involved:
+
+| The string | Held by |
+|---|---|
+| The layout-refusal wording (six messages, two directions) | server `TestCorpusRefusalWordingIsAClientContract`; client tables over the same six verbatim |
+| The layout-aware `all`-on-ingest advice, which puts "This database is unified" inside a refusal that must **not** be retried | the same client tables — siblings are excluded *before* the code is read |
+| The error prefix (`Hydra <path> → …`, not the MCP wrapper's `Hydra DB …`) | client test pinning both raw branches |
+| The error path (operation path, never the request URL) | client test asserting the stable path and that the wire call still sends the real scope |
 
 ---
 
