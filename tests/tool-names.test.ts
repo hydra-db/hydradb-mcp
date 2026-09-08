@@ -70,6 +70,21 @@ test("server instructions direct proactive recall and proactive save", () => {
 	assert.match(text, /never invent one/);
 });
 
+test("server instructions explain permission-aware search and HYDRADB_ACL", () => {
+	const text = SERVER_INSTRUCTIONS;
+	assert.match(text, /permission-aware/);
+	assert.match(text, /HYDRADB_ACL/);
+	assert.match(text, /empty list is not "nobody"/i);
+	assert.match(
+		TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].description,
+		/HYDRADB_ACL/,
+	);
+	assert.match(
+		TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].description,
+		/"acl": \["alice@corp.com"\]/,
+	);
+});
+
 test("tool descriptions carry worked examples", () => {
 	for (const name of [TOOL_NAMES.QUERY, TOOL_NAMES.INGEST]) {
 		const description = TOOL_DESCRIPTIONS[name].description;

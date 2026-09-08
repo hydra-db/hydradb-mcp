@@ -29,7 +29,10 @@ type Responses = Partial<
 	Record<"query" | "ingest" | "list" | "inspect" | "delete", unknown>
 >;
 
-function mockHydra(responses: Responses = {}): {
+function mockHydra(
+	responses: Responses = {},
+	extra: { acl?: string[] } = {},
+): {
 	hydra: HydraDB;
 	calls: RecordedCall[];
 } {
@@ -56,7 +59,12 @@ function mockHydra(responses: Responses = {}): {
 	} as unknown as HydraDBClient;
 
 	const hydra = new HydraDB(
-		{ token: "t", database: "db_test", collection: "col_test" },
+		{
+			token: "t",
+			database: "db_test",
+			collection: "col_test",
+			...(extra.acl != null ? { acl: extra.acl } : {}),
+		},
 		sdk,
 	);
 	// The subgraph read takes the raw HTTP path, not the SDK, so it is stubbed
@@ -2828,6 +2836,33 @@ test("hydradb_subgraph forwards acl principals through dispatch", async () => {
 	const call = calls.find((c) => c.method === "subgraph");
 	assert.ok(call, "wrapper should have called subgraph");
 	assert.deepEqual(call.args.acl, ["carol@corp.com"]);
+	await client.close();
+});
+
+test("hydradb_query omitted acl uses the connection default", async () => {
+	const { hydra, calls } = mockHydra({}, { acl: ["alice@corp.com"] });
+	const client = await connect(hydra);
+
+	await client.callTool({ name: "hydradb_query", arguments: { query: "roadmap" } });
+
+	const call = calls.find((c) => c.method === "query");
+	assert.ok(call, "wrapper should have called query");
+	assert.deepEqual(call.args.acl, ["alice@corp.com"]);
+	await client.close();
+});
+
+test("hydradb_query tool acl wins over the connection default", async () => {
+	const { hydra, calls } = mockHydra({}, { acl: ["alice@corp.com"] });
+	const client = await connect(hydra);
+
+	await client.callTool({
+		name: "hydradb_query",
+		arguments: { query: "roadmap", acl: ["bob@corp.com"] },
+	});
+
+	const call = calls.find((c) => c.method === "query");
+	assert.ok(call, "wrapper should have called query");
+	assert.deepEqual(call.args.acl, ["bob@corp.com"]);
 	await client.close();
 });
 

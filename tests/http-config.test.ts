@@ -141,6 +141,26 @@ test("an authenticated request with no database is a 400, not a 401", () => {
 	assert.match(result.message, /X-HydraDB-Database/);
 });
 
+test("HYDRADB_ACL is an operator env default, never from headers", () => {
+	const selfHost = resolveRequestCredentials(
+		{},
+		{
+			HYDRADB_API_KEY: "env-key",
+			HYDRADB_DATABASE: "env-db",
+			HYDRADB_ACL: "alice@corp.com, group:google:eng@corp.com",
+		},
+	);
+	assert.ok(selfHost.ok);
+	assert.deepEqual(selfHost.credentials.acl, ["alice@corp.com", "group:google:eng@corp.com"]);
+
+	const unset = resolveRequestCredentials(
+		{},
+		{ HYDRADB_API_KEY: "env-key", HYDRADB_DATABASE: "env-db" },
+	);
+	assert.ok(unset.ok);
+	assert.equal(unset.credentials.acl, undefined);
+});
+
 test("baseUrl/timeout/retries are operator env only, never from headers", () => {
 	const result = resolveRequestCredentials(
 		{

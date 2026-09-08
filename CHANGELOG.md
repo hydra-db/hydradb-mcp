@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — `HYDRADB_ACL` default principals when a tool omits `acl`
+
+MCP agents routinely omit `acl`, so permission-aware search over connector
+knowledge was silently fail-open (the whole tenant corpus). Set `HYDRADB_ACL`
+to the end-user's email (or `group:<provider>:<id>` principals, comma or
+whitespace separated) and query/list/inspect/subgraph use those principals
+when the tool call does not pass `acl`. A tool-supplied `acl` still wins.
+An empty list is not "nobody" — it is treated like omitting the field.
+
 ## [1.4.0] - 2026-09-01
 
 ### Added — `recency_bias`, `query_apps` and multi-collection scope on `hydradb_query`

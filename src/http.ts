@@ -322,6 +322,7 @@ export function createHttpApp(config: HttpServerConfig): Express {
 					? { timeoutSeconds: creds.timeoutSeconds }
 					: {}),
 				...(creds.maxRetries != null ? { maxRetries: creds.maxRetries } : {}),
+				...(creds.acl != null ? { acl: creds.acl } : {}),
 			});
 			const server = createHydraDBServer(hydra, creds.graph, { oauthTools: identity != null });
 

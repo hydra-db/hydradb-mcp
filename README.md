@@ -214,6 +214,7 @@ Checks whether ingested sources have finished indexing.
 | `HYDRADB_API_KEY`    | Your Hydra DB API key                | *Required*                |
 | `HYDRADB_DATABASE`   | Your Hydra DB database (tenant scope) | *Required*                |
 | `HYDRADB_COLLECTION` | Collection (sub-tenant) for partitioning | `hydra-db-mcp`        |
+| `HYDRADB_ACL`        | Default principals for permission-aware search when a tool omits `acl` (comma or whitespace separated emails / `group:<provider>:<id>`) | *unset (unrestricted)* |
 | `HYDRADB_BASE_URL`   | Base URL override                    | `https://api.hydradb.com` |
 | `HYDRADB_LOG_LEVEL`  | Log level: DEBUG, INFO, WARN, ERROR  | `ERROR`                   |
 | `HYDRADB_TIMEOUT_SECONDS` | Per-attempt request timeout     | `30`                      |
@@ -227,6 +228,12 @@ A graph database is a **different namespace** from the memory database: the same
 name can exist as both, and Cypher aimed at the wrong one reads an empty graph
 rather than failing. Every graph tool also takes `database` and `collection`
 per call, overriding these defaults.
+
+`HYDRADB_ACL` is the default for permission-aware search when a tool omits
+`acl`. Knowledge from connectors is scoped only when principals are supplied
+(the end-user's email, or `group:<provider>:<id>`). Omitting both `acl` and
+`HYDRADB_ACL` returns everything the API key can reach. An empty list is not
+"nobody".
 
 The legacy `HYDRA_DB_*` names — `HYDRA_DB_API_KEY`, `HYDRA_DB_TENANT_ID`,
 `HYDRA_DB_SUB_TENANT_ID`, `HYDRA_DB_BASE_URL`, `HYDRA_DB_LOG_LEVEL` — remain

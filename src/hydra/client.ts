@@ -79,6 +79,22 @@ function req(opts?: RequestOptions): { abortSignal?: AbortSignal } | undefined {
 	return opts?.signal ? { abortSignal: opts.signal } : undefined;
 }
 
+/**
+ * Per-call `acl` wins when it names principals. An omitted or empty list
+ * falls back to the connection default. Never returns `[]`: the API treats
+ * that as unrestricted, same as omitting the field, so sending it would
+ * only look like a restriction.
+ */
+function resolveAcl(
+	override: string[] | undefined,
+	fallback: readonly string[] | undefined,
+): string[] | undefined {
+	const named = override?.map((p) => p.trim()).filter((p) => p.length > 0);
+	if (named != null && named.length > 0) return named;
+	if (fallback != null && fallback.length > 0) return [...fallback];
+	return undefined;
+}
+
 export interface HydraConfig {
 	/** Bearer token (the HydraDB API key). */
 	token: string;
@@ -106,6 +122,12 @@ export interface HydraConfig {
 	timeoutSeconds?: number;
 	/** Retries per call. The SDK defaults to 2; set explicitly so it is a choice. */
 	maxRetries?: number;
+	/**
+	 * Default principals for permission-aware search. Used when a call omits
+	 * `acl` or passes an empty list. Per-call `acl` wins when it names
+	 * principals. Empty here is treated as unset (unrestricted).
+	 */
+	acl?: string[];
 	/** Test seam for the hand-rolled HTTP path; production never sets it. */
 	fetchFn?: typeof fetch;
 }
@@ -140,11 +162,13 @@ export interface QueryParams {
 	 * `domain:<host>`, or a `group:<provider>:<id>`. Results are restricted to
 	 * documents whose access list admits at least one of them.
 	 *
-	 * Omitted means NO ACL scoping — every document this key can reach. An empty
-	 * array is treated the SAME as omitted by the API (verified against staging:
-	 * `acl: []` and no `acl` both returned 134 sources where an unknown
-	 * principal returned 130), so it is not a way to ask for "nobody"; the
-	 * design doc's rule is that absent and `[]` alike mean unrestricted.
+	 * Omitted (and an empty array) mean NO ACL scoping — every document this
+	 * key can reach — unless the connection was constructed with a default
+	 * `acl`, which is used when the call names none. An empty array is treated
+	 * the SAME as omitted by the API (verified against staging: `acl: []` and
+	 * no `acl` both returned 134 sources where an unknown principal returned
+	 * 130), so it is not a way to ask for "nobody"; the design doc's rule is
+	 * that absent and `[]` alike mean unrestricted. Never send `[]`.
 	 *
 	 * A principal the deployment does not know fails CLOSED: it matches only
 	 * documents carrying no access list of their own, never a restricted one.
@@ -499,7 +523,6 @@ abstract class Resource {
 export class ContextResource extends Resource {
 	// The base constructor is `protected`, so this one is what makes the class
 	// instantiable from outside the file. Removing it fails with TS2674.
-	// biome-ignore lint/complexity/noUselessConstructor: widens visibility
 	constructor(
 		sdk: HydraDBClient,
 		database: string,
@@ -507,8 +530,13 @@ export class ContextResource extends Resource {
 		allowedDatabases?: readonly string[],
 		allowedCollections?: readonly string[],
 		raw?: RawTransport,
+		private readonly defaultAcl?: readonly string[],
 	) {
 		super(sdk, database, collection, allowedDatabases, allowedCollections, raw);
+	}
+
+	private acl(override?: string[]): string[] | undefined {
+		return resolveAcl(override, this.defaultAcl);
 	}
 
 	/**
@@ -575,7 +603,7 @@ export class ContextResource extends Resource {
 				ids: params.ids,
 				metadataFilters: params.metadataFilters,
 				numRelatedChunks: params.numRelatedChunks,
-				acl: params.acl,
+				acl: this.acl(params.acl),
 			}, req(opts)),
 		);
 	}
@@ -683,7 +711,7 @@ export class ContextResource extends Resource {
 				ids: params.ids,
 				page: params.page,
 				pageSize: params.pageSize,
-				acl: params.acl,
+				acl: this.acl(params.acl),
 			}, req(opts)),
 		);
 	}
@@ -699,7 +727,7 @@ export class ContextResource extends Resource {
 				id: params.id,
 				mode: params.mode,
 				expirySeconds: params.expirySeconds,
-				acl: params.acl,
+				acl: this.acl(params.acl),
 			}, req(opts)),
 		);
 	}
@@ -754,8 +782,9 @@ export class ContextResource extends Resource {
 		// Repeated params, like the dashboard and the CLI: the API reads both
 		// repeated (acl=a&acl=b) and comma-separated forms. An empty array is
 		// the same as omitted server-side, so sending nothing keeps the
-		// request faithful to what the caller said.
-		for (const principal of params.acl ?? []) query.append("acl", principal);
+		// request faithful to what the caller said (or to the connection
+		// default, when the call named none).
+		for (const principal of this.acl(params.acl) ?? []) query.append("acl", principal);
 		const path = `/context/${encodeURIComponent(params.id)}/subgraph?${query.toString()}`;
 		return sendRaw<SubgraphResult>(this.raw, path, "GET", undefined, opts);
 	}
@@ -771,7 +800,7 @@ export class ContextResource extends Resource {
 				type: params.kind,
 				limit: params.limit,
 				cursor: params.cursor,
-				acl: params.acl,
+				acl: this.acl(params.acl),
 			}),
 		);
 	}
@@ -898,6 +927,7 @@ export class HydraDB {
 			config.allowedDatabases,
 			config.allowedCollections,
 			raw,
+			config.acl != null && config.acl.length > 0 ? config.acl : undefined,
 		);
 		this.databases = new DatabasesResource(
 			client,
