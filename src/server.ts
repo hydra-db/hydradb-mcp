@@ -1451,6 +1451,34 @@ export function createHydraDBServer(
 	 * database is. `drop_collection` makes an unchecked override destructive,
 	 * so confinement covers both axes or it covers nothing.
 	 */
+	/**
+	 * The irreversible graph-admin actions, on a connection that has nothing to
+	 * scope them to.
+	 *
+	 * "Destroy only within your own collection" is the rule the other guards
+	 * enforce, and it needs a collection to name. A confined connection that
+	 * has neither a collection allow-list NOR a collection of its own has none,
+	 * so every check downstream silently passes and the narrowest grant on the
+	 * consent screen ends up permitting the broadest deletions in its database.
+	 *
+	 * That combination only became reachable when a blank collection started
+	 * meaning "the workspace's own" instead of a hardcoded literal: before, a
+	 * grant always carried a collection, so this branch could not occur. Refuse
+	 * it rather than let an unanswerable check read as approval.
+	 */
+	function assertDestructiveScopeExists(action: string): void {
+		if (!hydra.allowedDatabases) return;
+		if (hydra.allowedCollections || hydra.collection) return;
+		throw new Error(
+			`This connection is confined to database ${hydra.allowedDatabases
+				.map((d) => `"${d}"`)
+				.join(", ")} and names no collection of its own, so "${action}" has no ` +
+			"boundary to respect and would delete data it was never granted. Nothing " +
+			"was deleted. Reconnect naming the collection this app should use, or " +
+			"without the database confinement.",
+		);
+	}
+
 	function graphCollection(override?: string): string {
 		const collection = override?.trim() || graphConfig.collection;
 		if (collection && collection !== hydra.collection) {
@@ -1648,6 +1676,7 @@ export function createHydraDBServer(
 			// the confinement check has to be stated here as well. It is the one
 			// place an unchecked collection would be irreversible.
 			if (collection !== hydra.collection) {
+				assertDestructiveScopeExists("drop_collection");
 				assertCollectionAllowed(collection, hydra.allowedCollections);
 			}
 			await hydra.graph.dropCollection({ database, collection }, { signal });
@@ -1670,6 +1699,7 @@ export function createHydraDBServer(
 			// this one, because the call names no collection at all. Refuse the
 			// action outright rather than let the broadest destructive operation
 			// be the way around the narrowest grant.
+			assertDestructiveScopeExists("drop_database");
 			if (hydra.allowedCollections) {
 				throw new Error(
 					`This connection is confined to collection ${hydra.allowedCollections
