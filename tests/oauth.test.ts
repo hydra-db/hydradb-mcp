@@ -663,6 +663,37 @@ test("a collection-confined connection cannot drop a whole database", async () =
 	assert.match(r.content[0].text, /Nothing was deleted/);
 });
 
+test("a database confinement with no collection at all refuses both irreversible actions", async () => {
+	// The consent screen's blank collection means "the workspace's own", which
+	// the API resolves from the key: the connection never learns its name. So a
+	// database-confined grant with a blank collection has NOTHING to scope a
+	// deletion to, and every downstream check passes vacuously. Picking the
+	// strictest option on the screen must not be the way to the widest delete.
+	__resetIntrospectionCache();
+	introspectAnswer = () => ({
+		status: 200,
+		body: active({ database: "personal", databases: ["personal"], collection: undefined, collections: null }),
+	});
+	const call = async (args: Record<string, unknown>) => {
+		const res = await request(
+			"POST",
+			"/",
+			{ host: `127.0.0.1:${port}`, ...JSON_HEADERS, authorization: "Bearer hmat_nocol" },
+			JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "hydradb_graph_admin", arguments: args } }),
+		);
+		return JSON.parse(res.body).result;
+	};
+
+	const dropDb = await call({ action: "drop_database", database: "personal" });
+	assert.equal(dropDb.isError, true);
+	assert.match(dropDb.content[0].text, /no boundary to respect/);
+	assert.match(dropDb.content[0].text, /Nothing was deleted/);
+
+	const dropCol = await call({ action: "drop_collection", database: "personal", collection: "someone-elses" });
+	assert.equal(dropCol.isError, true);
+	assert.match(dropCol.content[0].text, /no boundary to respect/);
+});
+
 test("a database-only confinement still permits drop_database inside its list", async () => {
 	// Confined to databases but not collections: drop_database is in scope for
 	// an allowed database, and still refused for any other.
