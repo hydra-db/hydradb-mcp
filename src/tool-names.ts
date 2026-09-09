@@ -22,6 +22,8 @@ export const TOOL_NAMES = {
 	// agent working across several databases can find their names without
 	// asking the user, and so a confined connection can see its own limits.
 	DATABASES: "hydradb_databases",
+	LIST_COLLECTIONS: "hydradb_list_collections",
+	DELETE_COLLECTION: "hydradb_delete_collection",
 
 	// BYOG graph tools (PRO-1681). A separate family with its own prefix: these
 	// address graph collections the user models and writes in Cypher, which are
@@ -53,6 +55,8 @@ export const CANONICAL_TOOL_NAMES = [
 	TOOL_NAMES.DELETE,
 	TOOL_NAMES.STATUS,
 	TOOL_NAMES.SUBGRAPH,
+	TOOL_NAMES.LIST_COLLECTIONS,
+	TOOL_NAMES.DELETE_COLLECTION,
 ] as const;
 
 /**

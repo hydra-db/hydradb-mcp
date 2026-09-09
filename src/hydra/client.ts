@@ -358,6 +358,11 @@ export interface CreateDatabaseParams {
 	embeddingsDimension?: number;
 }
 
+export interface DeleteCollectionParams {
+	database: string;
+	collection: string;
+}
+
 type ScopeFields = { database: string; collection?: string };
 
 type MultiScopeFields = {
@@ -801,8 +806,9 @@ export class DatabasesResource extends Resource {
 		collection?: string,
 		allowedDatabases?: readonly string[],
 		allowedCollections?: readonly string[],
+		raw?: RawTransport,
 	) {
-		super(sdk, database, collection, allowedDatabases, allowedCollections);
+		super(sdk, database, collection, allowedDatabases, allowedCollections, raw);
 	}
 
 	create(
@@ -842,6 +848,56 @@ export class DatabasesResource extends Resource {
 		return this.call("/databases/status", () =>
 			this.sdk.databases.status({ database }),
 		);
+	}
+
+	/**
+	 * Permanently delete one collection and all of its data
+	 * (`DELETE /databases/collections`). Not yet on the pinned SDK, so this
+	 * is a hand-rolled path matching GraphResource.
+	 */
+	async deleteCollection(
+		params: DeleteCollectionParams,
+		opts?: RequestOptions,
+	): Promise<{
+		database?: string;
+		collection?: string;
+		status?: string;
+		message?: string;
+	}> {
+		// Hand-rolled for the same reason `context.subgraph` is (CONTRACT §2
+		// rule 7): the pinned SDK has no `databases.delete_collection`. It goes
+		// through the same raw transport, so it shares the retry, envelope
+		// unwrap and error type of every other call here.
+		if (!this.raw) {
+			throw new HydraWrapperError(
+				"Hydra DB /databases/collections → ERR: no HTTP transport configured",
+				"/databases/collections",
+			);
+		}
+		// A caller who already cancelled is not waiting for the request to go
+		// out: reject a pre-aborted signal rather than send and then unwind.
+		if (opts?.signal?.aborted) {
+			throw translateError(
+				"/databases/collections",
+				opts.signal.reason ?? new Error("aborted"),
+			);
+		}
+		if (params.collection.trim() === "") {
+			throw new HydraWrapperError(
+				"Hydra DB /databases/collections → ERR: collection must not be empty",
+				"/databases/collections",
+			);
+		}
+		// scope() resolves the default database, enforces any confinement, and
+		// returns the canonical `database`/`collection` names the API expects.
+		const query = new URLSearchParams(this.scope(params.collection, params.database));
+		const path = `/databases/collections?${query.toString()}`;
+		return sendRaw<{
+			database?: string;
+			collection?: string;
+			status?: string;
+			message?: string;
+		}>(this.raw, path, "DELETE", undefined, opts);
 	}
 }
 
@@ -905,6 +961,7 @@ export class HydraDB {
 			config.collection,
 			config.allowedDatabases,
 			config.allowedCollections,
+			raw,
 		);
 		this.graph = new GraphResource({
 			token: config.token,
