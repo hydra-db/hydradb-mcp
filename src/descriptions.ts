@@ -236,7 +236,7 @@ CALL THIS BEFORE ANSWERING whenever the answer could depend on the user's histor
 
 Searches both families by default. Every result carries \`[id: …]\` — pass it to hydradb_inspect for the full source, or to hydradb_delete to remove it.
 
-Knowledge from connectors is permission-aware only when \`acl\` is passed (the end-user's email, or \`group:<provider>:<id>\`). Omitting \`acl\` returns everything this API key can reach. If \`HYDRADB_ACL\` is set on the server, it is the default when this tool omits \`acl\`. An empty list is not "nobody".
+Knowledge from connectors is permission-aware only when \`acl\` is passed (the end-user's email, a \`domain:<host>\`, or \`group:<provider>:<id>\`). Omitting \`acl\` returns everything this API key can reach. If \`HYDRADB_ACL\` is set on the server, it is the default when this tool omits \`acl\`. An empty list is not "nobody".
 
 Examples:
   {"query": "how does the user prefer code review feedback"}
@@ -638,7 +638,7 @@ Ids flow between these: ${TOOL_NAMES.QUERY}, ${TOOL_NAMES.LIST} and ${TOOL_NAMES
 
 PERMISSION-AWARE SEARCH
 
-Knowledge from connectors is permission-aware only when \`acl\` is passed (the end-user's email, or \`group:<provider>:<id>\`). Omitting \`acl\` returns everything this API key can reach. If \`HYDRADB_ACL\` is set on the server, it is the default when a tool omits \`acl\`. An empty list is not "nobody".
+Knowledge from connectors is permission-aware only when \`acl\` is passed (the end-user's email, a \`domain:<host>\`, or \`group:<provider>:<id>\`). Omitting \`acl\` returns everything this API key can reach. If \`HYDRADB_ACL\` is set on the server, it is the default when a tool omits \`acl\`. An empty list is not "nobody".
 
 THE GRAPH TOOLS (a separate product surface)
 

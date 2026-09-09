@@ -75,9 +75,15 @@ test("server instructions explain permission-aware search and HYDRADB_ACL", () =
 	assert.match(text, /permission-aware/);
 	assert.match(text, /HYDRADB_ACL/);
 	assert.match(text, /empty list is not "nobody"/i);
+	assert.match(text, /domain:<host>/);
+	assert.match(text, /group:<provider>:<id>/);
 	assert.match(
 		TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].description,
 		/HYDRADB_ACL/,
+	);
+	assert.match(
+		TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].description,
+		/domain:<host>/,
 	);
 	assert.match(
 		TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].description,
