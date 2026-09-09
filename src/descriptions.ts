@@ -11,7 +11,7 @@ import { ALIAS_REPLACEMENTS, TOOL_NAMES } from "./tool-names.js";
 
 // Shared parameter blurbs, reused across canonical tools and their aliases.
 const PARAM = {
-	acl: "Principals to answer as, for permission-aware search (RBAC). Each entry is an email, a `domain:<host>`, or a `group:<provider>:<id>`; results are limited to documents whose access list admits at least one of them. Omit it to search everything this API key can reach. An EMPTY list is treated exactly like omitting it, so it is not a way to ask for \"nobody\" — to restrict, name real principals. Pass the principals of the end user you are answering for; a principal the deployment does not recognise fails closed, matching only documents that carry no access list of their own. This scopes results, it does not authenticate anyone: whoever holds the key can name any principal.",
+	acl: "Principals to answer as, for permission-aware search (RBAC). Each entry is an email, a `domain:<host>`, or a `group:<provider>:<id>`; results are limited to documents whose access list admits at least one of them. Omit it to search everything this API key can reach — or, if `HYDRADB_ACL` is set on this server, to search as those default principals. An EMPTY list is treated exactly like omitting it, so it is not a way to ask for \"nobody\" — to restrict, name real principals. Pass the principals of the end user you are answering for; a principal the deployment does not recognise fails closed, matching only documents that carry no access list of their own. This scopes results, it does not authenticate anyone: whoever holds the key can name any principal.",
 	query:
 		"What you want to know, as a natural-language question or topic — this is semantic " +
 		"search, so a full question beats keywords. Search for the CONCEPT, not the words " +
@@ -236,8 +236,11 @@ CALL THIS BEFORE ANSWERING whenever the answer could depend on the user's histor
 
 Searches both families by default. Every result carries \`[id: …]\` — pass it to hydradb_inspect for the full source, or to hydradb_delete to remove it.
 
+Knowledge from connectors is permission-aware only when \`acl\` is passed (the end-user's email, a \`domain:<host>\`, or \`group:<provider>:<id>\`). Omitting \`acl\` returns everything this API key can reach. If \`HYDRADB_ACL\` is set on the server, it is the default when this tool omits \`acl\`. An empty list is not "nobody".
+
 Examples:
   {"query": "how does the user prefer code review feedback"}
+  {"query": "Q3 roadmap", "acl": ["alice@corp.com"]}
   {"query": "postgres connection pooling decision", "kind": "knowledge"}
   {"query": "deploy checklist", "mode": "fast", "max_results": 5}`;
 
@@ -632,6 +635,10 @@ THE TOOLS
 - ${TOOL_NAMES.DATABASES} — which databases this connection can address, with the default marked. Every tool takes an optional \`database\`; call this before naming one, or when a call was refused because the user confined this connection to a single database.
 
 Ids flow between these: ${TOOL_NAMES.QUERY}, ${TOOL_NAMES.LIST} and ${TOOL_NAMES.SUBGRAPH} emit them; ${TOOL_NAMES.INSPECT}, ${TOOL_NAMES.DELETE}, ${TOOL_NAMES.STATUS} and ${TOOL_NAMES.SUBGRAPH} accept them. Never invent one.
+
+PERMISSION-AWARE SEARCH
+
+Knowledge from connectors is permission-aware only when \`acl\` is passed (the end-user's email, a \`domain:<host>\`, or \`group:<provider>:<id>\`). Omitting \`acl\` returns everything this API key can reach. If \`HYDRADB_ACL\` is set on the server, it is the default when a tool omits \`acl\`. An empty list is not "nobody".
 
 THE GRAPH TOOLS (a separate product surface)
 

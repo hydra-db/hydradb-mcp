@@ -28,6 +28,7 @@ import {
 	type EnvSource,
 	type GraphConfig,
 	nonNegativeInt,
+	parseAclPrincipals,
 	positiveInt,
 	readEnv,
 	resolveGraphConfig,
@@ -166,11 +167,13 @@ export type RequestHeaders = Record<string, string | string[] | undefined>;
 /**
  * Everything needed to construct a scoped {@link HydraDB} for one request.
  *
- * `baseUrl`, `timeoutSeconds` and `maxRetries` are deliberately absent from the
- * header surface: they are OPERATOR knobs read from the environment, not caller
- * ones. Letting a caller set `baseUrl` per request would point this server's
- * outbound calls at a host of the caller's choosing, which is a request-forgery
- * primitive the tenant selection has no reason to hand out.
+ * `baseUrl`, `timeoutSeconds`, `maxRetries` and `acl` are deliberately absent
+ * from the header surface: they are OPERATOR knobs read from the environment,
+ * not caller ones. Letting a caller set `baseUrl` per request would point this
+ * server's outbound calls at a host of the caller's choosing, which is a
+ * request-forgery primitive the tenant selection has no reason to hand out.
+ * `acl` is the server-wide default for permission-aware search (`HYDRADB_ACL`);
+ * a caller who wants different principals passes them on the tool call.
  */
 export interface RequestCredentials {
 	apiKey: string;
@@ -183,6 +186,8 @@ export interface RequestCredentials {
 	baseUrl?: string;
 	timeoutSeconds?: number;
 	maxRetries?: number;
+	/** Default principals when a tool omits `acl`. From `HYDRADB_ACL`. */
+	acl?: string[];
 	graph: GraphConfig;
 }
 
@@ -238,8 +243,9 @@ function bearerToken(authorization: string | undefined): string | undefined {
  *
  * Resolving field-by-field instead would let a caller's key pair with the
  * operator's database (or graph namespace), mixing two identities into one
- * request. `baseUrl`/`timeoutSeconds`/`maxRetries` are read from the environment
- * only — they are the operator's, not the caller's (see {@link RequestCredentials}).
+ * request. `baseUrl`/`timeoutSeconds`/`maxRetries`/`acl` are read from the
+ * environment only — they are the operator's, not the caller's
+ * (see {@link RequestCredentials}).
  */
 /**
  * An identity established BEFORE the headers are read: what an OAuth access
@@ -320,6 +326,7 @@ export function resolveRequestCredentials(
 	const baseUrl = readEnv(env, "HYDRADB_BASE_URL", "HYDRA_DB_BASE_URL", noopWarn);
 	const timeoutSeconds = positiveInt(env.HYDRADB_TIMEOUT_SECONDS);
 	const maxRetries = nonNegativeInt(env.HYDRADB_MAX_RETRIES);
+	const acl = parseAclPrincipals(env.HYDRADB_ACL);
 
 	return {
 		ok: true,
@@ -334,6 +341,7 @@ export function resolveRequestCredentials(
 			...(baseUrl != null ? { baseUrl } : {}),
 			...(timeoutSeconds != null ? { timeoutSeconds } : {}),
 			...(maxRetries != null ? { maxRetries } : {}),
+			...(acl != null ? { acl } : {}),
 			graph: resolveRequestGraphConfig(
 				// Same rule for the graph namespace: an OAuth connection's graph scope
 				// derives from the approved database, never from a header.

@@ -326,6 +326,7 @@ export function createHydraDBServer(
 				? { timeoutSeconds: config.timeoutSeconds }
 				: {}),
 			...(config.maxRetries != null ? { maxRetries: config.maxRetries } : {}),
+			...(config.acl != null ? { acl: config.acl } : {}),
 		});
 		graphConfig = { ...config.graph, ...graphOverride };
 		logger.info(

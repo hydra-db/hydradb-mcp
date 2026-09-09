@@ -151,6 +151,47 @@ test("timeout and retry overrides are read when set", () => {
 	assert.deepEqual(messages, []);
 });
 
+test("HYDRADB_ACL parses comma or whitespace separated principals", () => {
+	const { warn, messages } = collect();
+	const comma = resolveConfig(
+		{
+			HYDRADB_API_KEY: "key",
+			HYDRADB_DATABASE: "db",
+			HYDRADB_ACL: "alice@corp.com, group:google:eng@corp.com",
+		},
+		warn,
+	);
+	assert.deepEqual(comma.acl, ["alice@corp.com", "group:google:eng@corp.com"]);
+
+	const whitespace = resolveConfig(
+		{
+			HYDRADB_API_KEY: "key",
+			HYDRADB_DATABASE: "db",
+			HYDRADB_ACL: "alice@corp.com   bob@corp.com",
+		},
+		warn,
+	);
+	assert.deepEqual(whitespace.acl, ["alice@corp.com", "bob@corp.com"]);
+	assert.deepEqual(messages, []);
+});
+
+test("HYDRADB_ACL empty or unset is omitted, never an empty list", () => {
+	const { warn } = collect();
+	const unset = resolveConfig(
+		{ HYDRADB_API_KEY: "key", HYDRADB_DATABASE: "db" },
+		warn,
+	);
+	assert.equal(unset.acl, undefined);
+
+	for (const empty of ["", "  ", ",", " , , "]) {
+		const config = resolveConfig(
+			{ HYDRADB_API_KEY: "key", HYDRADB_DATABASE: "db", HYDRADB_ACL: empty },
+			warn,
+		);
+		assert.equal(config.acl, undefined, `"${empty}" should be unrestricted, not []`);
+	}
+});
+
 // A typo'd number should not stop the server from starting. Falling back to the
 // built-in default keeps it running; exiting 1 over a cosmetic env var is worse
 // than the misconfiguration itself.

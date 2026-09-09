@@ -15,6 +15,12 @@ export interface HydraDBConfig {
 	baseUrl?: string;
 	timeoutSeconds?: number;
 	maxRetries?: number;
+	/**
+	 * Default principals for permission-aware search (`HYDRADB_ACL`). Applied
+	 * when a tool omits `acl` or passes an empty list. Unset means unrestricted,
+	 * matching the API's fail-open default. Never `[]`.
+	 */
+	acl?: string[];
 	graph: GraphConfig;
 }
 
@@ -129,6 +135,7 @@ export function resolveConfig(
 	// environment said rather than carrying a row of undefined knobs.
 	const timeoutSeconds = positiveInt(env.HYDRADB_TIMEOUT_SECONDS);
 	const maxRetries = nonNegativeInt(env.HYDRADB_MAX_RETRIES);
+	const acl = parseAclPrincipals(env.HYDRADB_ACL);
 
 	return {
 		apiKey,
@@ -137,8 +144,26 @@ export function resolveConfig(
 		baseUrl,
 		...(timeoutSeconds != null ? { timeoutSeconds } : {}),
 		...(maxRetries != null ? { maxRetries } : {}),
+		...(acl != null ? { acl } : {}),
 		graph: resolveGraphConfig(env, database),
 	};
+}
+
+/**
+ * Principals from `HYDRADB_ACL`: comma or whitespace separated emails /
+ * prefixed principals (`group:<provider>:<id>`, `domain:<host>`).
+ *
+ * Empty or unset is `undefined` (unrestricted), never `[]` — the API treats
+ * an empty list exactly like omitting the field, so it is not a way to ask
+ * for "nobody".
+ */
+export function parseAclPrincipals(raw: string | undefined): string[] | undefined {
+	if (raw == null || raw.trim() === "") return undefined;
+	const principals = raw
+		.split(/[,\s]+/)
+		.map((p) => p.trim())
+		.filter((p) => p.length > 0);
+	return principals.length > 0 ? principals : undefined;
 }
 
 /**

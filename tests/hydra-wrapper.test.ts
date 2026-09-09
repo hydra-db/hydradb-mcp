@@ -642,9 +642,14 @@ function captureSdk(seen: Record<string, unknown>) {
 	} as unknown as HydraDBClient;
 }
 
-function wrapperFor(seen: Record<string, unknown>) {
+function wrapperFor(seen: Record<string, unknown>, acl?: string[]) {
 	return new HydraDB(
-		{ token: "t", database: "db_test", collection: "col_test" },
+		{
+			token: "t",
+			database: "db_test",
+			collection: "col_test",
+			...(acl != null ? { acl } : {}),
+		},
 		captureSdk(seen),
 	);
 }
@@ -679,4 +684,69 @@ test("an omitted acl stays undefined rather than becoming an empty list", async 
 	await hydra.context.list({});
 	assert.equal(seen.query.acl, undefined);
 	assert.equal(seen.list.acl, undefined);
+});
+
+test("query without tool acl uses the connection default", async () => {
+	const seen: Record<string, { acl?: string[] }> = {};
+	await wrapperFor(seen, ["alice@corp.com", "group:google:eng@corp.com"]).context.query({
+		query: "roadmap",
+	});
+	assert.deepEqual(seen.query.acl, ["alice@corp.com", "group:google:eng@corp.com"]);
+});
+
+test("query with tool acl does not use the connection default", async () => {
+	const seen: Record<string, { acl?: string[] }> = {};
+	await wrapperFor(seen, ["alice@corp.com"]).context.query({
+		query: "roadmap",
+		acl: ["bob@corp.com"],
+	});
+	assert.deepEqual(seen.query.acl, ["bob@corp.com"]);
+});
+
+test("an empty tool acl falls back to the connection default rather than sending []", async () => {
+	const seen: Record<string, { acl?: string[] }> = {};
+	await wrapperFor(seen, ["alice@corp.com"]).context.query({
+		query: "roadmap",
+		acl: [],
+	});
+	assert.deepEqual(seen.query.acl, ["alice@corp.com"]);
+});
+
+test("an empty tool acl with no connection default sends no acl field", async () => {
+	const seen: Record<string, { acl?: string[] }> = {};
+	await wrapperFor(seen).context.query({ query: "roadmap", acl: [] });
+	assert.equal(seen.query.acl, undefined);
+});
+
+test("list, inspect and relations omit-acl uses the connection default", async () => {
+	const seen: Record<string, { acl?: string[] }> = {};
+	const hydra = wrapperFor(seen, ["alice@corp.com"]);
+	await hydra.context.list({});
+	await hydra.context.inspect({ id: "s1" });
+	await hydra.context.relations({ id: "s1" });
+	assert.deepEqual(seen.list.acl, ["alice@corp.com"]);
+	assert.deepEqual(seen.inspect.acl, ["alice@corp.com"]);
+	assert.deepEqual(seen.relations.acl, ["alice@corp.com"]);
+});
+
+test("context.subgraph omitted acl uses the connection default", async () => {
+	const { fetchFn, calls } = fakeRawFetch(() => ({
+		status: 200,
+		body: { data: { seed_source_id: "s1", sources: [], relations: [], auxiliary_relations: [], is_truncated: false, auxiliary_truncated: false, max_depth_reached: 0, success: true, message: "ok" }, success: true },
+	}));
+	const hydra = new HydraDB(
+		{
+			token: "tok",
+			database: "db_test",
+			baseUrl: "https://h.test",
+			fetchFn,
+			acl: ["alice@corp.com"],
+		},
+		{} as unknown as HydraDBClient,
+	);
+	await hydra.context.subgraph({ id: "s1" });
+	assert.deepEqual(new URL(calls[0]!.url).searchParams.getAll("acl"), ["alice@corp.com"]);
+
+	await hydra.context.subgraph({ id: "s1", acl: ["bob@corp.com"] });
+	assert.deepEqual(new URL(calls[1]!.url).searchParams.getAll("acl"), ["bob@corp.com"]);
 });
