@@ -186,8 +186,11 @@ const PARAM = {
 		"databases; hydradb_databases lists them. A connection the user confined to one " +
 		"database refuses any other name.",
 	collection:
-		"Collection (sub-tenant) to target for this request. Defaults to the server's configured " +
-		"collection (or 'hydra-db-mcp'). Pass explicitly to switch collection scope per request.",
+		"Collection (sub-tenant) to target. Defaults to the collection chosen for " +
+		"this connection, if any. When the connection has NO default collection, " +
+		"the workspace's own is used unless you name one — call " +
+		"hydradb_list_collections to see the options and pass `collection` " +
+		"(or `collections` on hydradb_query to search several at once) to be explicit.",
 } as const;
 
 /** Parameter blurbs for the BYOG graph tools. */
@@ -235,6 +238,8 @@ const SEARCH_BODY = `Search Hydra DB for anything the user has stored: memories 
 CALL THIS BEFORE ANSWERING whenever the answer could depend on the user's history, preferences, prior decisions, project details, or a document they have ingested — including when you are merely unsure. A query that returns nothing costs one call; answering from a blank slate costs the user a correction.
 
 Searches both families by default. Every result carries \`[id: …]\` — pass it to hydradb_inspect for the full source, or to hydradb_delete to remove it.
+
+Collections partition the database by use case. This connection's default (if it has one) is shown by hydradb_list_collections; when there is none, a search without \`collection\` runs in the workspace's default — pass \`collection\`, or \`collections\` to search several at once, to aim the search where the answer should live.
 
 Examples:
   {"query": "how does the user prefer code review feedback"}
@@ -472,8 +477,10 @@ Take the id from hydradb_query or hydradb_list — never guess one. Confirm with
 	[TOOL_NAMES.LIST_COLLECTIONS]: {
 		title: "List collections",
 		description:
-			"List collection (sub-tenant) IDs inside a database. Collections are created " +
-			"implicitly when data is ingested under a new collection name. Use this before " +
+			"List the collections (sub-tenants) inside a database, with this connection's default marked and the database's corpus sizes. Collections partition a database by use case and are created implicitly when data is first ingested under a new name — so this is how you find out where to look or where to write.\n\n" +
+			"When the connection has a default, calls use it unless you pass `collection`; an empty search result can still mean the data lives in another collection. When it has NO default, YOU decide the scope per request: pick the collection whose purpose matches the question, and on " +
+			`${TOOL_NAMES.QUERY} pass \`collections\` to search several at once when the answer could ` +
+			"live in more than one. Call it once when you need it; there is no need to call it before every request. Also use it before " +
 			`${TOOL_NAMES.DELETE_COLLECTION} so you delete a name that actually exists.`,
 		params: {
 			database: PARAM.database,
@@ -654,10 +661,19 @@ THE TOOLS
 - ${TOOL_NAMES.STATUS} — whether an ingested source has finished indexing. Ingestion is asynchronous, so a query issued straight after a save can legitimately return nothing.
 - ${TOOL_NAMES.SUBGRAPH} — everything connected to one item you already have an id for: the rest of its thread, its replies, its parents and children, the items it links to. Reach for it when one result is not enough and you need what surrounds it.
 - ${TOOL_NAMES.DATABASES} — which databases this connection can address, with the default marked. Every tool takes an optional \`database\`; call this before naming one, or when a call was refused because the user confined this connection to a single database.
-- ${TOOL_NAMES.LIST_COLLECTIONS} — the collection (sub-tenant) names inside a database.
+- ${TOOL_NAMES.LIST_COLLECTIONS} — the collections inside a database, with this connection's default marked. Call it before choosing a collection when the connection has no default.
 - ${TOOL_NAMES.DELETE_COLLECTION} — irreversible removal of one collection and everything in it. Confirm first. Take the name from ${TOOL_NAMES.LIST_COLLECTIONS}.
 
 Ids flow between these: ${TOOL_NAMES.QUERY}, ${TOOL_NAMES.LIST} and ${TOOL_NAMES.SUBGRAPH} emit them; ${TOOL_NAMES.INSPECT}, ${TOOL_NAMES.DELETE}, ${TOOL_NAMES.STATUS} and ${TOOL_NAMES.SUBGRAPH} accept them. Never invent one.
+
+COLLECTIONS — WHO DECIDES THE SCOPE
+
+Collections partition each database by use case, and a call sees only the collection it names. This connection either has a default collection or it does not, and the two behave differently:
+
+- With a default: every call uses it unless you pass \`collection\`. An empty result can still mean the data lives in ANOTHER collection — ${TOOL_NAMES.LIST_COLLECTIONS} lists them.
+- Without a default (the user chose "no specific collection"): YOU pick the scope from the question. Call ${TOOL_NAMES.LIST_COLLECTIONS} once, choose the collection whose purpose matches, and pass \`collection\` — or \`collections\` on ${TOOL_NAMES.QUERY} to search several at once. A call that names none runs in the workspace's default, which works as a broad first cast but is noisier than the right partition. For WRITES always pass \`collection\` explicitly, so data lands where you intend.
+
+Never guess a collection name you have not seen — list first, then name one.
 
 THE GRAPH TOOLS (a separate product surface)
 

@@ -831,15 +831,18 @@ export class DatabasesResource extends Resource {
 		return this.call("/databases", () => this.sdk.databases.list());
 	}
 
-	collections(database: string): Promise<SDK.TenantsSubTenantIdsResponse> {
+	collections(
+		database: string,
+		opts?: RequestOptions,
+	): Promise<SDK.TenantsSubTenantIdsResponse> {
 		return this.call("/databases/collections", () =>
-			this.sdk.databases.collections({ database }),
+			this.sdk.databases.collections({ database }, req(opts)),
 		);
 	}
 
-	stats(database: string): Promise<SDK.TenantsTenantStatsResponse> {
+	stats(database: string, opts?: RequestOptions): Promise<SDK.TenantsTenantStatsResponse> {
 		return this.call("/databases/stats", () =>
-			this.sdk.databases.stats({ database }),
+			this.sdk.databases.stats({ database }, req(opts)),
 		);
 	}
 

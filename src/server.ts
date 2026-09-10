@@ -291,6 +291,19 @@ export interface ServerOptions {
 	oauthTools?: boolean;
 }
 
+
+/**
+ * How long hydradb_list_collections waits for the optional database-wide row
+ * counts before returning the listing without them. Stats has been observed to
+ * hang on some deployments, and a discovery tool must not.
+ */
+let listCollectionsStatsTimeoutMs = 5000;
+
+/** Test hook: shorten the stats wait so the abort path runs in milliseconds. */
+export function __setListCollectionsStatsTimeoutForTests(ms: number): void {
+	listCollectionsStatsTimeoutMs = ms;
+}
+
 export function createHydraDBServer(
 	hydraOverride?: HydraDB,
 	/**
@@ -401,7 +414,32 @@ export function createHydraDBServer(
 		}
 
 		if (!res.chunks || res.chunks.length === 0) {
-			return textResult(`No relevant ${resultNoun(kind)} found in Hydra DB.`);
+			// Name WHERE nothing was found. "No results" is ambiguous the moment a
+			// database has more than one collection: a pinned collection can be the
+			// wrong partition, and the caller has no way to tell an empty collection
+			// from an empty database unless the result says which it searched.
+			// Point at the discovery tool rather than letting the model conclude
+			// the data does not exist.
+			const database = args.database ?? hydra.database;
+			// A bare `collections` (several at once) is also an explicit scope;
+			// do not report it as though the connection's default was searched.
+			const scope =
+				args.collection ??
+				(args.collections != null
+					? Array.isArray(args.collections)
+						? args.collections.join(", ")
+						: Object.keys(args.collections).join(", ")
+					: hydra.collection);
+			return textResult(
+				scope != null
+					? `No relevant ${resultNoun(kind)} found in collection "${scope}" of database "${database}". ` +
+						`The data may live in another collection — call ${TOOL_NAMES.LIST_COLLECTIONS} to list them, ` +
+						`then pass \`collection\` (or \`collections\` to search several at once).`
+					: `No relevant ${resultNoun(kind)} found in database "${database}" — with no collection ` +
+						`named, the search ran in this connection's workspace default. If the data could live ` +
+						`elsewhere, call ${TOOL_NAMES.LIST_COLLECTIONS} and pass \`collection\` (or \`collections\` ` +
+						`to search several at once).`,
+			);
 		}
 
 		// No separate summary block. It listed the first 10 chunks truncated to 150
@@ -1364,10 +1402,15 @@ export function createHydraDBServer(
 
 	async function runListCollections(
 		args: { database?: string },
-		_signal?: AbortSignal,
+		signal?: AbortSignal,
 	): Promise<ToolResult> {
 		const database = args.database?.trim() || hydra.database;
-		const res = await hydra.databases.collections(database);
+		// Scoped like every other per-database tool. Both calls below go straight
+		// to the SDK, beneath the resource layer's own confinement check, so
+		// without this a database-confined grant could enumerate the collection
+		// names and row counts of a database the user never approved.
+		assertDatabaseAllowed(database, hydra.allowedDatabases);
+		const res = await hydra.databases.collections(database, { signal });
 		const raw = res as {
 			collections?: string[];
 			subTenantIds?: string[];
@@ -1381,17 +1424,85 @@ export function createHydraDBServer(
 			);
 		}
 		const collections = listed;
-		if (collections.length === 0) {
-			return structuredResult(`No collections in ${database}.`, {
-				database,
-				collections: [],
-				count: 0,
+
+		// Database-wide corpus sizes. Informative, not essential — the listing
+		// stands alone if stats is slow or unavailable (it has been observed to
+		// hang on some deployments, and a discovery tool must not).
+		let knowledgeRows: number | undefined;
+		let memoryRows: number | undefined;
+		// A bare Promise.race only bounded how long we WAITED: the losing request
+		// kept running through its own timeout and retries, and repeated discovery
+		// against a hanging deployment piled them up. Abort it instead, and chain
+		// the caller's cancellation so a cancelled tool call stops it too.
+		const statsAbort = new AbortController();
+		const onCallerAbort = () => statsAbort.abort(signal?.reason);
+		if (signal?.aborted) statsAbort.abort(signal.reason);
+		else signal?.addEventListener("abort", onCallerAbort, { once: true });
+		const timer = setTimeout(
+			() => statsAbort.abort(new Error("stats timed out")),
+			listCollectionsStatsTimeoutMs,
+		);
+		// Bounds the wait even if a transport ignored the signal.
+		const aborted = new Promise<never>((_, reject) => {
+			statsAbort.signal.addEventListener("abort", () => reject(statsAbort.signal.reason), {
+				once: true,
 			});
+		});
+		aborted.catch(() => {});
+		try {
+			const stats = await Promise.race([
+				hydra.databases.stats(database, { signal: statsAbort.signal }),
+				aborted,
+			]);
+			knowledgeRows = stats.knowledgeCollection?.rowCount;
+			memoryRows = stats.memoryCollection?.rowCount;
+		} catch {
+			/* sizes are decoration; never fail the listing on them */
+		} finally {
+			clearTimeout(timer);
+			signal?.removeEventListener("abort", onCallerAbort);
 		}
+
+		// The whole point of this tool's output: which collection calls use when
+		// the caller names none, and what to do when the answer is "nothing".
+		const def = hydra.collection ?? null;
+		const size =
+			knowledgeRows != null || memoryRows != null
+				? ` Database-wide: ${knowledgeRows ?? "?"} knowledge row(s), ${memoryRows ?? "?"} memory row(s).`
+				: "";
+		const guidance =
+			def != null
+				? `Default for this connection: "${def}" — calls use it unless \`collection\` is passed.`
+				: "This connection has no default collection. Decide the scope per request: " +
+					"choose the collection whose purpose matches the question and pass `collection` — " +
+					`or \`collections\` on ${TOOL_NAMES.QUERY} to search several at once. A call that ` +
+					"names none runs in the workspace's default.";
+
+		if (collections.length === 0) {
+			return structuredResult(
+				`No collections in ${database}. A collection is created by its first ` +
+					`ingest, so pass any name as \`collection\` to start one — or leave it ` +
+					`unset and the workspace's default is used.`,
+				{ database, default: def, collections: [], count: 0 },
+			);
+		}
+
+		const lines = collections.map(
+			(id) => `- ${id}${id === def ? "  (default for this connection)" : ""}`,
+		);
 		return structuredResult(
 			`${collections.length} collection${collections.length === 1 ? "" : "s"} in ${database}:\n` +
-				collections.map((id) => `- ${id}`).join("\n"),
-			{ database, collections, count: collections.length },
+				lines.join("\n") +
+				size +
+				`\n${guidance}`,
+			{
+				database,
+				default: def,
+				collections,
+				count: collections.length,
+				...(knowledgeRows != null ? { knowledge_rows: knowledgeRows } : {}),
+				...(memoryRows != null ? { memory_rows: memoryRows } : {}),
+			},
 		);
 	}
 
@@ -2509,8 +2620,13 @@ export function createHydraDBServer(
 		readOnly,
 		{
 			database: z.string(),
+			// The connection's default collection, or null when the user chose
+			// "no specific collection" — the marker hosts branch on.
+			default: z.string().nullable(),
 			collections: z.array(z.string()),
 			count: z.number(),
+			knowledge_rows: z.number().optional(),
+			memory_rows: z.number().optional(),
 		},
 	);
 

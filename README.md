@@ -213,7 +213,7 @@ Checks whether ingested sources have finished indexing.
 | -------------------- | ------------------------------------ | ------------------------- |
 | `HYDRADB_API_KEY`    | Your Hydra DB API key                | *Required*                |
 | `HYDRADB_DATABASE`   | Your Hydra DB database (tenant scope) | *Required*                |
-| `HYDRADB_COLLECTION` | Collection (sub-tenant) for partitioning | `hydra-db-mcp`        |
+| `HYDRADB_COLLECTION` | Collection (sub-tenant) for partitioning | *none* — unset means the workspace's own collection; the model can also name one per call via `collection`/`collections` (see `hydradb_list_collections`) |
 | `HYDRADB_BASE_URL`   | Base URL override                    | `https://api.hydradb.com` |
 | `HYDRADB_LOG_LEVEL`  | Log level: DEBUG, INFO, WARN, ERROR  | `ERROR`                   |
 | `HYDRADB_TIMEOUT_SECONDS` | Per-attempt request timeout     | `30`                      |
@@ -349,7 +349,7 @@ number of independent users. The headers a request may send:
 | --- | --- | --- |
 | `Authorization: Bearer <key>` | Hydra DB API key (`X-HydraDB-Api-Key` also accepted) | Yes\* |
 | `X-HydraDB-Database` | Default database (tenant scope) | Yes\* |
-| `X-HydraDB-Collection` | Default collection (sub-tenant); defaults to `hydra-db-mcp` | No |
+| `X-HydraDB-Collection` | Default collection (sub-tenant); unset means the workspace's own collection | No |
 | `X-HydraDB-Graph-Database` | Default graph database for the Cypher tools; defaults to the request's database | No |
 | `X-HydraDB-Graph-Collection` | Default graph collection; defaults to `default` | No |
 

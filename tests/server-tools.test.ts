@@ -12,7 +12,7 @@ import {
 	__resetShutdown,
 	beginShutdown,
 	awaitInFlight,
-	createHydraDBServer,
+	__setListCollectionsStatsTimeoutForTests, createHydraDBServer,
 	inFlightCount,
 	legacyToolsEnabled,
 } from "../src/server.js";
@@ -26,20 +26,32 @@ type RecordedCall = { method: string; args: Record<string, unknown> };
 
 /** Per-method response overrides, for tests that care what the API returned. */
 type Responses = Partial<
-	Record<"query" | "ingest" | "list" | "inspect" | "delete", unknown>
+	Record<
+		"query" | "ingest" | "list" | "inspect" | "delete" | "collections" | "stats",
+		unknown
+	>
 >;
 
-function mockHydra(responses: Responses = {}): {
+function mockHydra(
+	responses: Responses = {},
+	opts: { collection?: string | null; allowedDatabases?: string[] } = {},
+): {
 	hydra: HydraDB;
 	calls: RecordedCall[];
 } {
 	const calls: RecordedCall[] = [];
 	const record =
-		(method: string, fallback: unknown) => (args?: Record<string, unknown>) => {
+		(method: string, fallback: unknown) =>
+		(args?: Record<string, unknown>, requestOptions?: { abortSignal?: AbortSignal }) => {
 			calls.push({ method, args: args ?? {} });
 			const data = method in responses
 				? responses[method as keyof Responses]
 				: fallback;
+			// A function response takes over the call, for tests that need the
+			// request's abort signal or a response that never arrives.
+			if (typeof data === "function") {
+				return (data as (a: unknown, ro: unknown) => Promise<unknown>)(args, requestOptions);
+			}
 			return Promise.resolve({ data, success: true });
 		};
 
@@ -55,11 +67,25 @@ function mockHydra(responses: Responses = {}): {
 		},
 		databases: {
 			collections: record("collections", { collections: ["engineering", "sales"] }),
+			stats: record("stats", {
+				knowledgeCollection: { rowCount: 265 },
+				memoryCollection: { rowCount: 1 },
+			}),
 		},
 	} as unknown as HydraDBClient;
 
 	const hydra = new HydraDB(
-		{ token: "t", database: "db_test", collection: "col_test" },
+		{
+			token: "t",
+			database: "db_test",
+			// `null` deliberately omits the field: the consent screen's
+			// "no specific collection" state, under which the model must
+			// discover and choose collections itself.
+			...(opts.collection === null
+				? {}
+				: { collection: opts.collection ?? "col_test" }),
+			...(opts.allowedDatabases ? { allowedDatabases: opts.allowedDatabases } : {}),
+		},
 		sdk,
 	);
 	// The subgraph read takes the raw HTTP path, not the SDK, so it is stubbed
@@ -201,7 +227,7 @@ test("deprecated alias warns exactly once per process, across two server instanc
 	await clientB.close();
 });
 
-test("canonical hydradb_query still renders the empty-result message", async () => {
+test("empty query result names the collection that was searched and points at discovery", async () => {
 	const { hydra } = mockHydra();
 	const client = await connect(hydra);
 
@@ -210,7 +236,26 @@ test("canonical hydradb_query still renders the empty-result message", async () 
 		arguments: { query: "anything" },
 	});
 	const text = (result.content as { type: string; text: string }[])[0]!.text;
-	assert.equal(text, "No relevant context items found in Hydra DB.");
+	// mockHydra pins collection "col_test": the message must say WHICH partition
+	// came back empty and how to look elsewhere, not a bare "nothing found"
+	// that reads as "the data does not exist".
+	assert.match(text, /collection "col_test" of database "db_test"/);
+	assert.match(text, /hydradb_list_collections/);
+
+	await client.close();
+});
+
+test("empty query result with no default collection says the workspace default ran", async () => {
+	const { hydra } = mockHydra({}, { collection: null });
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_query",
+		arguments: { query: "anything" },
+	});
+	const text = (result.content as { type: string; text: string }[])[0]!.text;
+	assert.match(text, /workspace default/);
+	assert.match(text, /hydradb_list_collections/);
 
 	await client.close();
 });
@@ -2433,9 +2478,65 @@ test("hydradb_list_collections lists collection ids", async () => {
 	const text = (result.content as { type: string; text: string }[])[0]!.text;
 	assert.match(text, /engineering/);
 	assert.match(text, /sales/);
+	// The connection's default is named, and the sizes make the listing a
+	// basis for choosing, not just a name list.
+	assert.match(text, /Default for this connection: "col_test"/);
+	assert.match(text, /265 knowledge row\(s\), 1 memory row\(s\)/);
 	const listed = calls.find((c) => c.method === "collections");
 	assert.ok(listed);
 	assert.equal(listed.args.database, "db_test");
+
+	await client.close();
+});
+
+test("hydradb_list_collections with no default tells the model it must choose the scope", async () => {
+	const { hydra } = mockHydra({}, { collection: null });
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_list_collections",
+		arguments: {},
+	});
+	const text = (result.content as { type: string; text: string }[])[0]!.text;
+	assert.match(text, /no default collection/);
+	assert.match(text, /pass `collection`/);
+	// The structured shape carries the same facts for hosts that parse it:
+	// the names as strings (unchanged contract) plus the default marker.
+	const structured = (result as { structuredContent?: Record<string, unknown> })
+		.structuredContent;
+	assert.equal(structured?.default, null);
+	assert.deepEqual(structured?.collections, ["engineering", "sales"]);
+
+	await client.close();
+});
+
+test("hydradb_list_collections survives a failing stats call — the listing stands alone", async () => {
+	const { hydra } = mockHydra({ stats: undefined });
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_list_collections",
+		arguments: {},
+	});
+	assert.notEqual(result.isError, true);
+	const text = (result.content as { type: string; text: string }[])[0]!.text;
+	assert.match(text, /engineering/);
+	assert.doesNotMatch(text, /knowledge row/);
+
+	await client.close();
+});
+
+test("hydradb_list_collections on a database with no collections says how one starts", async () => {
+	const { hydra } = mockHydra({ collections: { collections: [] } });
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_list_collections",
+		arguments: {},
+	});
+	const text = (result.content as { type: string; text: string }[])[0]!.text;
+	assert.match(text, /No collections in db_test/);
+	assert.match(text, /first\s+ingest/);
 
 	await client.close();
 });
@@ -2972,4 +3073,68 @@ test("every tool that advertises acl actually forwards it", async () => {
 		await c.close();
 	}
 	await client.close();
+});
+
+// Greptile P1 on #77: discovery forwarded the caller's database straight to the
+// SDK, beneath the resource layer's confinement check, so a database-confined
+// grant could enumerate another database's collection names and row counts.
+test("hydradb_list_collections refuses a database the connection is confined away from", async () => {
+	const { hydra, calls } = mockHydra({}, { allowedDatabases: ["db_test"] });
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_list_collections",
+		arguments: { database: "someone-else" },
+	});
+	assert.equal(result.isError, true);
+	const text = (result.content as { type: string; text: string }[])[0]!.text;
+	assert.match(text, /cannot use database "someone-else"/);
+	assert.equal(
+		calls.some((c) => c.method === "collections" || c.method === "stats"),
+		false,
+		"neither discovery nor stats may reach the API for an unapproved database",
+	);
+
+	await client.close();
+});
+
+test("hydradb_list_collections still lists the approved database on a confined connection", async () => {
+	const { hydra, calls } = mockHydra({}, { allowedDatabases: ["db_test"] });
+	const client = await connect(hydra);
+
+	const result = await client.callTool({ name: "hydradb_list_collections", arguments: {} });
+	assert.notEqual(result.isError, true);
+	assert.ok(calls.some((c) => c.method === "collections"));
+
+	await client.close();
+});
+
+// Greptile P2 on #77: the race bounded only the wait; the losing stats request
+// kept running. It must now be aborted, and the listing still returned.
+test("hydradb_list_collections aborts a stats call that outlives its wait", async () => {
+	__setListCollectionsStatsTimeoutForTests(20);
+	let seen: AbortSignal | undefined;
+	const { hydra } = mockHydra({
+		stats: (_args: unknown, ro: { abortSignal?: AbortSignal } | undefined) => {
+			seen = ro?.abortSignal;
+			return new Promise((_resolve, reject) => {
+				ro?.abortSignal?.addEventListener("abort", () => reject(new Error("aborted")), {
+					once: true,
+				});
+			});
+		},
+	});
+	try {
+		const client = await connect(hydra);
+		const result = await client.callTool({ name: "hydradb_list_collections", arguments: {} });
+		assert.notEqual(result.isError, true);
+		const text = (result.content as { type: string; text: string }[])[0]!.text;
+		assert.match(text, /engineering/);
+		assert.doesNotMatch(text, /Database-wide/);
+		assert.ok(seen, "stats must receive an abort signal");
+		assert.equal(seen!.aborted, true, "the losing stats request must be aborted, not left running");
+		await client.close();
+	} finally {
+		__setListCollectionsStatsTimeoutForTests(5000);
+	}
 });
