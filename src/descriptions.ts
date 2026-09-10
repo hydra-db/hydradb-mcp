@@ -239,7 +239,7 @@ CALL THIS BEFORE ANSWERING whenever the answer could depend on the user's histor
 
 Searches both families by default. Every result carries \`[id: …]\` — pass it to hydradb_inspect for the full source, or to hydradb_delete to remove it.
 
-Collections partition the database by use case. This connection's default (if it has one) is shown by hydradb_list_collections; when there is none, a search without \`collection\` runs in the workspace's default — pass \`collection\`, or \`collections\` to search several at once, to aim the search where the answer should live.
+Collections partition the database by use case. This connection's default (if it has one) is shown by hydradb_list_collections; when there is none, a search without \`collection\` covers every collection in the database (up to 10). Pass \`collection\`, or \`collections\` for several, to aim it where the answer should live.
 
 Examples:
   {"query": "how does the user prefer code review feedback"}
@@ -671,7 +671,7 @@ COLLECTIONS — WHO DECIDES THE SCOPE
 Collections partition each database by use case, and a call sees only the collection it names. This connection either has a default collection or it does not, and the two behave differently:
 
 - With a default: every call uses it unless you pass \`collection\`. An empty result can still mean the data lives in ANOTHER collection — ${TOOL_NAMES.LIST_COLLECTIONS} lists them.
-- Without a default (the user chose "no specific collection"): YOU pick the scope from the question. Call ${TOOL_NAMES.LIST_COLLECTIONS} once, choose the collection whose purpose matches, and pass \`collection\` — or \`collections\` on ${TOOL_NAMES.QUERY} to search several at once. A call that names none runs in the workspace's default, which works as a broad first cast but is noisier than the right partition. For WRITES always pass \`collection\` explicitly, so data lands where you intend.
+- Without a default (the user chose "All collections"): a search that names no collection covers every collection in the database, up to 10; past that it runs in the workspace default and says so. Narrow it when the question clearly belongs to one: call ${TOOL_NAMES.LIST_COLLECTIONS} once, choose the collection whose purpose matches, and pass \`collection\`, or \`collections\` on ${TOOL_NAMES.QUERY} for several. For WRITES always pass \`collection\` explicitly, so data lands where you intend.
 
 Never guess a collection name you have not seen — list first, then name one.
 
