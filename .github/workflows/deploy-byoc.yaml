@@ -51,6 +51,16 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
 
+      # Name the image after the commit that was actually checked out. The
+      # metadata action's {{sha}} is github.sha, the commit the WORKFLOW ran
+      # from; dispatched from main with ref=<branch> it stamped the branch's
+      # code with main's sha, silently overwriting whatever image a customer
+      # pins under that tag.
+      - name: Resolve the built commit
+        run: |
+          echo "BUILD_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          echo "BUILD_SHA_SHORT=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_ENV"
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
         with:
@@ -66,9 +76,11 @@ jobs:
         uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
         with:
           images: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}
+          labels: |
+            org.opencontainers.image.revision=${{ env.BUILD_SHA }}
           tags: |
             type=raw,value=${{ env.IMAGE_TAG_PREFIX }}-latest
-            type=raw,value=${{ env.IMAGE_TAG_PREFIX }}-{{sha}}
+            type=raw,value=${{ env.IMAGE_TAG_PREFIX }}-${{ env.BUILD_SHA_SHORT }}
             type=raw,value=${{ env.IMAGE_TAG_PREFIX }}-{{date 'YYYYMMDD-HHmmss'}}
 
       - name: Set up Docker Buildx
@@ -93,5 +105,5 @@ jobs:
           echo 'Pin this in `gitops/<deployment-id>/values/hydradb-mcp-values.yaml` under `image.tag`:' >> "$GITHUB_STEP_SUMMARY"
           echo '' >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
-          echo "${{ env.IMAGE_TAG_PREFIX }}-${{ github.sha }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "${{ env.IMAGE_TAG_PREFIX }}-${{ env.BUILD_SHA_SHORT }}" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
