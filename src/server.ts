@@ -449,6 +449,13 @@ export function createHydraDBServer(
 		// connection reported "nothing found" over real data, because data
 		// routed into named collections never lands there. Search every
 		// collection instead, when there are few enough to do it in one wave.
+		//
+		// This never loses the default partition. The listing is the API's
+		// distinct sub_tenant_id over stored sources (TenantHandler.SubTenantIDs
+		// -> GetUniqueSubTenantIDs), and a bare ingest stamps the default
+		// partition's id on its source row like any other. So the default is
+		// listed exactly when it holds data, and searched with the rest; when it
+		// is absent from the listing it is empty and nothing is left out.
 		// Trimmed, with the connection's database as the fallback: the same
 		// value the query client resolves, so every message names the database
 		// that was actually searched.
