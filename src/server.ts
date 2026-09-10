@@ -304,6 +304,33 @@ export function __setListCollectionsStatsTimeoutForTests(ms: number): void {
 	listCollectionsStatsTimeoutMs = ms;
 }
 
+/**
+ * The most collections a query with no collection named searches at once. The
+ * API runs one full retrieval per collection, ten in parallel, so ten is one
+ * wave; past that, latency and cost grow with every collection added, and the
+ * model is better served by being told to choose.
+ */
+const QUERY_FANOUT_MAX_COLLECTIONS = 10;
+/**
+ * How long a query waits for the collection listing before searching the
+ * default scope as it always did. The listing has been observed to hang on
+ * some deployments, and it must never be the reason a search stalls.
+ */
+let fanoutListTimeoutMs = 3000;
+
+/** Test hook: shorten the listing wait so the timeout path runs in milliseconds. */
+export function __setFanoutListTimeoutForTests(ms: number): void {
+	fanoutListTimeoutMs = ms;
+}
+
+/** Collection names from a listing payload, or null when it is malformed. */
+function collectionNamesOf(res: unknown): string[] | null {
+	const raw = res as { collections?: unknown; subTenantIds?: unknown; sub_tenant_ids?: unknown } | null;
+	const listed = raw?.collections ?? raw?.subTenantIds ?? raw?.sub_tenant_ids;
+	if (!Array.isArray(listed) || listed.some((id) => typeof id !== "string")) return null;
+	return listed as string[];
+}
+
 export function createHydraDBServer(
 	hydraOverride?: HydraDB,
 	/**
@@ -348,6 +375,48 @@ export function createHydraDBServer(
 
 	// --- Handlers (shared by canonical tools and their deprecated aliases) ---
 
+	/**
+	 * A database's collections, or null when they cannot be listed within
+	 * fanoutListTimeoutMs. Never throws: a query must not fail because the
+	 * optional widening could not be worked out.
+	 *
+	 * Listed fresh on every bare query, deliberately. The HTTP server is built
+	 * per request and discarded with it, so nothing here could outlive one call
+	 * anyway; a cache would only have bought stdio a minute of stale listings,
+	 * during which a collection this same session had just written to would
+	 * be missed. One extra round-trip, bounded below, is the honest price.
+	 */
+	async function collectionNamesBounded(
+		database: string,
+		signal?: AbortSignal,
+	): Promise<string[] | null> {
+		if (signal?.aborted) return null;
+		const ctl = new AbortController();
+		const onCallerAbort = () => ctl.abort(signal?.reason);
+		signal?.addEventListener("abort", onCallerAbort, { once: true });
+		const timer = setTimeout(
+			() => ctl.abort(new Error("collections listing timed out")),
+			fanoutListTimeoutMs,
+		);
+		// Bounds the wait even if a transport ignored the signal.
+		const aborted = new Promise<never>((_, reject) => {
+			ctl.signal.addEventListener("abort", () => reject(ctl.signal.reason), { once: true });
+		});
+		aborted.catch(() => {});
+		try {
+			const res = await Promise.race([
+				hydra.databases.collections(database, { signal: ctl.signal }),
+				aborted,
+			]);
+			return collectionNamesOf(res);
+		} catch {
+			return null;
+		} finally {
+			clearTimeout(timer);
+			signal?.removeEventListener("abort", onCallerAbort);
+		}
+	}
+
 	async function runQuery(args: {
 		query: string;
 		kind?: QueryKind;
@@ -374,7 +443,45 @@ export function createHydraDBServer(
 		logger.debug(`${TOOL_NAMES.QUERY}: "${args.query}" (kind=${kind})`);
 
 		const maxResults = args.max_results ?? 10;
-		const raw = await hydra.context.query({
+
+		// No collection anywhere: none pinned on the connection, none named on
+		// the call. Searching only the database's default partition is how a
+		// connection reported "nothing found" over real data, because data
+		// routed into named collections never lands there. Search every
+		// collection instead, when there are few enough to do it in one wave.
+		//
+		// This never loses the default partition. The listing is the API's
+		// distinct sub_tenant_id over stored sources (TenantHandler.SubTenantIDs
+		// -> GetUniqueSubTenantIDs), and a bare ingest stamps the default
+		// partition's id on its source row like any other. So the default is
+		// listed exactly when it holds data, and searched with the rest; when it
+		// is absent from the listing it is empty and nothing is left out.
+		// Trimmed, with the connection's database as the fallback: the same
+		// value the query client resolves, so every message names the database
+		// that was actually searched.
+		const database = args.database?.trim() || hydra.database;
+		let scopeCollection = args.collection;
+		let scopeCollections = args.collections;
+		let widened: string[] | undefined;
+		let tooManyToWiden: number | undefined;
+		if (hydra.collection == null && args.collection == null && args.collections == null) {
+			// Listing is discovery: confined like it, before anything is sent.
+			assertDatabaseAllowed(database, hydra.allowedDatabases);
+			const names = await collectionNamesBounded(database, signal);
+			const allowed = hydra.allowedCollections;
+			const usable = (names ?? []).filter((n) => !allowed || allowed.includes(n));
+			if (usable.length > QUERY_FANOUT_MAX_COLLECTIONS) {
+				tooManyToWiden = usable.length;
+			} else if (usable.length === 1) {
+				widened = usable;
+				scopeCollection = usable[0];
+			} else if (usable.length > 1) {
+				widened = usable;
+				scopeCollections = usable;
+			}
+		}
+
+		const send = () => hydra.context.query({
 			query: args.query,
 			kind,
 			maxResults,
@@ -387,8 +494,8 @@ export function createHydraDBServer(
 			graphContext: args.graph_context ?? true,
 			queryApps: args.query_apps,
 			database: args.database,
-			collection: args.collection,
-			collections: args.collections,
+			collection: scopeCollection,
+			collections: scopeCollections,
 			// Host-owned default (CONTRACT §2 rule 5), but only where it means
 			// something: alpha balances dense against sparse retrieval in HYBRID
 			// mode, and an `operator` switches the query to text retrieval (see
@@ -402,6 +509,20 @@ export function createHydraDBServer(
 			// and only a caller that can raise this can ask the first one.
 			recencyBias: args.recency_bias ?? 0,
 		}, { signal });
+		let raw: Awaited<ReturnType<typeof send>>;
+		try {
+			raw = await send();
+		} catch (err) {
+			const refused = (err as { name?: string } | null)?.name === "ScopeNotAllowedError";
+			if (widened == null || refused || signal?.aborted) throw err;
+			// A multi-collection search fails outright when any ONE collection's
+			// branch fails. The widening is an improvement, never a new way to
+			// fail: search the default scope, exactly as before it existed.
+			widened = undefined;
+			scopeCollection = undefined;
+			scopeCollections = undefined;
+			raw = await send();
+		}
 		// The renderer reads the SDK payload directly; there is no longer a
 		// snake_case mirror to convert into.
 		const res = raw;
@@ -420,16 +541,26 @@ export function createHydraDBServer(
 			// from an empty database unless the result says which it searched.
 			// Point at the discovery tool rather than letting the model conclude
 			// the data does not exist.
-			const database = args.database ?? hydra.database;
+			if (widened != null && widened.length > 1) {
+				return textResult(
+					`No relevant ${resultNoun(kind)} found in any of the ${widened.length} collections of database ` +
+						`"${database}" (${widened.join(", ")}). Try rephrasing the question, or pass \`collection\` ` +
+						`to search one collection with its full result budget.`,
+				);
+			}
 			// A bare `collections` (several at once) is also an explicit scope;
 			// do not report it as though the connection's default was searched.
 			const scope =
-				args.collection ??
-				(args.collections != null
-					? Array.isArray(args.collections)
-						? args.collections.join(", ")
-						: Object.keys(args.collections).join(", ")
+				scopeCollection ??
+				(scopeCollections != null
+					? Array.isArray(scopeCollections)
+						? scopeCollections.join(", ")
+						: Object.keys(scopeCollections).join(", ")
 					: hydra.collection);
+			const tooMany =
+				tooManyToWiden != null
+					? ` This database has ${tooManyToWiden} collections, more than the ${QUERY_FANOUT_MAX_COLLECTIONS} searched automatically.`
+					: "";
 			return textResult(
 				scope != null
 					? `No relevant ${resultNoun(kind)} found in collection "${scope}" of database "${database}". ` +
@@ -438,7 +569,7 @@ export function createHydraDBServer(
 					: `No relevant ${resultNoun(kind)} found in database "${database}" — with no collection ` +
 						`named, the search ran in this connection's workspace default. If the data could live ` +
 						`elsewhere, call ${TOOL_NAMES.LIST_COLLECTIONS} and pass \`collection\` (or \`collections\` ` +
-						`to search several at once).`,
+						`to search several at once).${tooMany}`,
 			);
 		}
 
@@ -730,7 +861,7 @@ export function createHydraDBServer(
 			return structuredResult(
 				args.page != null && args.page > 1
 					? `No memories on page ${args.page}.`
-					: "No memories stored yet.",
+					: emptyListText("memories", args.database, args.collection),
 				{
 					kind: "memory",
 					items: [],
@@ -772,6 +903,20 @@ export function createHydraDBServer(
 		);
 	}
 
+	/**
+	 * An empty listing with no collection named says WHERE it looked. The
+	 * default partition is empty whenever data lives in named collections, so
+	 * a bare "none found" there read as "this database is empty".
+	 */
+	function emptyListText(noun: "sources" | "memories", database?: string, collection?: string): string {
+		const base = noun === "sources" ? "No sources found." : "No memories stored yet.";
+		if (collection != null || hydra.collection != null) return base;
+		return (
+			`No ${noun} found in the workspace default of database "${database ?? hydra.database}". ` +
+			`Data may live in a named collection: call ${TOOL_NAMES.LIST_COLLECTIONS}, then pass \`collection\`.`
+		);
+	}
+
 	async function runListSources(args: {
 		source_ids?: string[];
 		page?: number;
@@ -797,7 +942,7 @@ export function createHydraDBServer(
 			return structuredResult(
 				args.page != null && args.page > 1
 					? `No sources on page ${args.page}.`
-					: "No sources found.",
+					: emptyListText("sources", args.database, args.collection),
 				{
 					kind: "knowledge",
 					items: [],
@@ -1411,14 +1556,8 @@ export function createHydraDBServer(
 		// names and row counts of a database the user never approved.
 		assertDatabaseAllowed(database, hydra.allowedDatabases);
 		const res = await hydra.databases.collections(database, { signal });
-		const raw = res as {
-			collections?: string[];
-			subTenantIds?: string[];
-			sub_tenant_ids?: string[];
-		};
-		const listed =
-			raw.collections ?? raw.subTenantIds ?? raw.sub_tenant_ids;
-		if (!Array.isArray(listed) || listed.some((id) => typeof id !== "string")) {
+		const listed = collectionNamesOf(res);
+		if (listed == null) {
 			throw new Error(
 				`${TOOL_NAMES.LIST_COLLECTIONS} received a malformed collections payload from the server.`,
 			);
@@ -1473,10 +1612,9 @@ export function createHydraDBServer(
 		const guidance =
 			def != null
 				? `Default for this connection: "${def}" — calls use it unless \`collection\` is passed.`
-				: "This connection has no default collection. Decide the scope per request: " +
-					"choose the collection whose purpose matches the question and pass `collection` — " +
-					`or \`collections\` on ${TOOL_NAMES.QUERY} to search several at once. A call that ` +
-					"names none runs in the workspace's default.";
+				: "This connection has no default collection. Decide the scope per request: a search that " +
+					"names none covers every collection listed here (up to 10); pass `collection` to aim at the " +
+					"one whose purpose matches the question, and always name one on writes.";
 
 		if (collections.length === 0) {
 			return structuredResult(

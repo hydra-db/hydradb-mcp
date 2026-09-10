@@ -12,7 +12,7 @@ import {
 	__resetShutdown,
 	beginShutdown,
 	awaitInFlight,
-	__setListCollectionsStatsTimeoutForTests, createHydraDBServer,
+	__setFanoutListTimeoutForTests, __setListCollectionsStatsTimeoutForTests, createHydraDBServer,
 	inFlightCount,
 	legacyToolsEnabled,
 } from "../src/server.js";
@@ -34,7 +34,7 @@ type Responses = Partial<
 
 function mockHydra(
 	responses: Responses = {},
-	opts: { collection?: string | null; allowedDatabases?: string[] } = {},
+	opts: { collection?: string | null; allowedDatabases?: string[]; allowedCollections?: string[] } = {},
 ): {
 	hydra: HydraDB;
 	calls: RecordedCall[];
@@ -85,6 +85,7 @@ function mockHydra(
 				? {}
 				: { collection: opts.collection ?? "col_test" }),
 			...(opts.allowedDatabases ? { allowedDatabases: opts.allowedDatabases } : {}),
+			...(opts.allowedCollections ? { allowedCollections: opts.allowedCollections } : {}),
 		},
 		sdk,
 	);
@@ -246,7 +247,8 @@ test("empty query result names the collection that was searched and points at di
 });
 
 test("empty query result with no default collection says the workspace default ran", async () => {
-	const { hydra } = mockHydra({}, { collection: null });
+	// No collections exist, so there is nothing to widen to and the default ran.
+	const { hydra } = mockHydra({ collections: { collections: [] } }, { collection: null });
 	const client = await connect(hydra);
 
 	const result = await client.callTool({
@@ -3137,4 +3139,154 @@ test("hydradb_list_collections aborts a stats call that outlives its wait", asyn
 	} finally {
 		__setListCollectionsStatsTimeoutForTests(5000);
 	}
+});
+
+// ---- PRO-1942: a query with no collection anywhere searches every collection ----
+const queryCall = (calls: RecordedCall[]) => calls.filter((c) => c.method === "query");
+const firstText = (r: unknown) => ((r as { content: { text: string }[] }).content[0]!.text);
+
+test("every bare query lists collections afresh, so a collection written moments ago is searched", async () => {
+	const { hydra, calls } = mockHydra({}, { collection: null });
+	const client = await connect(hydra);
+	await client.callTool({ name: "hydradb_query", arguments: { query: "one" } });
+	await client.callTool({ name: "hydradb_query", arguments: { query: "two" } });
+	assert.equal(calls.filter((c) => c.method === "collections").length, 2);
+	await client.close();
+});
+
+test("a query with no collection anywhere searches every collection of the database", async () => {
+	const { hydra, calls } = mockHydra({}, { collection: null });
+	const client = await connect(hydra);
+	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
+	assert.deepEqual(queryCall(calls)[0]!.args.collections, ["engineering", "sales"]);
+	assert.match(firstText(result), /any of the 2 collections of database "db_test" \(engineering, sales\)/);
+	await client.close();
+});
+
+test("a connection with a default collection never widens", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+	await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
+	assert.equal(calls.some((c) => c.method === "collections"), false);
+	assert.equal(queryCall(calls)[0]!.args.collections, undefined);
+	await client.close();
+});
+
+test("an explicitly named collection is searched alone, not widened", async () => {
+	const { hydra, calls } = mockHydra({}, { collection: null });
+	const client = await connect(hydra);
+	await client.callTool({ name: "hydradb_query", arguments: { query: "q", collection: "sales" } });
+	assert.equal(calls.some((c) => c.method === "collections"), false);
+	assert.equal(queryCall(calls)[0]!.args.collections, undefined);
+	await client.close();
+});
+
+test("a database with one collection is searched as that collection", async () => {
+	const { hydra, calls } = mockHydra({ collections: { collections: ["only"] } }, { collection: null });
+	const client = await connect(hydra);
+	await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
+	assert.equal(queryCall(calls)[0]!.args.collection, "only");
+	assert.equal(queryCall(calls)[0]!.args.collections, undefined);
+	await client.close();
+});
+
+test("more collections than the cap keeps the default scope, and says how many there are", async () => {
+	const many = Array.from({ length: 12 }, (_, i) => `c${i}`);
+	const { hydra, calls } = mockHydra({ collections: { collections: many } }, { collection: null });
+	const client = await connect(hydra);
+	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
+	assert.equal(queryCall(calls)[0]!.args.collections, undefined);
+	assert.match(firstText(result), /12 collections, more than the 10 searched automatically/);
+	await client.close();
+});
+
+test("a failed collection listing searches exactly as before", async () => {
+	const { hydra, calls } = mockHydra(
+		{ collections: () => Promise.reject(new Error("listing down")) },
+		{ collection: null },
+	);
+	const client = await connect(hydra);
+	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
+	assert.notEqual(result.isError, true);
+	assert.equal(queryCall(calls)[0]!.args.collections, undefined);
+	await client.close();
+});
+
+test("a hanging collection listing does not stall the query", async () => {
+	__setFanoutListTimeoutForTests(20);
+	const { hydra, calls } = mockHydra(
+		{
+			collections: (_a: unknown, ro: { abortSignal?: AbortSignal } | undefined) =>
+				new Promise((_resolve, reject) => {
+					ro?.abortSignal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+				}),
+		},
+		{ collection: null },
+	);
+	try {
+		const client = await connect(hydra);
+		const result = await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
+		assert.notEqual(result.isError, true);
+		assert.equal(queryCall(calls)[0]!.args.collections, undefined);
+		await client.close();
+	} finally {
+		__setFanoutListTimeoutForTests(3000);
+	}
+});
+
+test("a failed multi-collection search falls back to the default scope instead of erroring", async () => {
+	const { hydra, calls } = mockHydra(
+		{
+			query: (args: { collections?: unknown }) =>
+				args?.collections != null
+					? Promise.reject(new Error('sub_tenant_id "sales" query failed'))
+					: Promise.resolve({ data: { chunks: [] }, success: true }),
+		},
+		{ collection: null },
+	);
+	const client = await connect(hydra);
+	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
+	assert.notEqual(result.isError, true);
+	const qs = queryCall(calls);
+	assert.equal(qs.length, 2);
+	assert.deepEqual(qs[0]!.args.collections, ["engineering", "sales"]);
+	assert.equal(qs[1]!.args.collections, undefined);
+	await client.close();
+});
+
+
+test("widening stays inside a collection confinement", async () => {
+	const { hydra, calls } = mockHydra({}, { collection: null, allowedCollections: ["sales"] });
+	const client = await connect(hydra);
+	await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
+	assert.equal(queryCall(calls)[0]!.args.collection, "sales");
+	assert.equal(queryCall(calls)[0]!.args.collections, undefined);
+	await client.close();
+});
+
+test("an unapproved database is refused before any collection listing", async () => {
+	const { hydra, calls } = mockHydra({}, { collection: null, allowedDatabases: ["db_test"] });
+	const client = await connect(hydra);
+	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "q", database: "other" } });
+	assert.equal(result.isError, true);
+	assert.match(firstText(result), /cannot use database "other"/);
+	assert.equal(calls.some((c) => c.method === "collections"), false);
+	await client.close();
+});
+
+test("an empty bare listing says where it looked and points at collections", async () => {
+	const { hydra } = mockHydra({}, { collection: null });
+	const client = await connect(hydra);
+	const result = await client.callTool({ name: "hydradb_list", arguments: { kind: "knowledge" } });
+	assert.match(firstText(result), /workspace default of database "db_test"/);
+	assert.match(firstText(result), /hydradb_list_collections/);
+	await client.close();
+});
+
+test("widened empty-result message names the trimmed database, not the raw argument", async () => {
+	const { hydra } = mockHydra({}, { collection: null });
+	const client = await connect(hydra);
+	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "q", database: "  db_test  " } });
+	assert.match(firstText(result), /database "db_test"/);
+	await client.close();
 });
