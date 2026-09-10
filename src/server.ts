@@ -291,6 +291,19 @@ export interface ServerOptions {
 	oauthTools?: boolean;
 }
 
+
+/**
+ * How long hydradb_list_collections waits for the optional database-wide row
+ * counts before returning the listing without them. Stats has been observed to
+ * hang on some deployments, and a discovery tool must not.
+ */
+let listCollectionsStatsTimeoutMs = 5000;
+
+/** Test hook: shorten the stats wait so the abort path runs in milliseconds. */
+export function __setListCollectionsStatsTimeoutForTests(ms: number): void {
+	listCollectionsStatsTimeoutMs = ms;
+}
+
 export function createHydraDBServer(
 	hydraOverride?: HydraDB,
 	/**
@@ -1389,10 +1402,15 @@ export function createHydraDBServer(
 
 	async function runListCollections(
 		args: { database?: string },
-		_signal?: AbortSignal,
+		signal?: AbortSignal,
 	): Promise<ToolResult> {
 		const database = args.database?.trim() || hydra.database;
-		const res = await hydra.databases.collections(database);
+		// Scoped like every other per-database tool. Both calls below go straight
+		// to the SDK, beneath the resource layer's own confinement check, so
+		// without this a database-confined grant could enumerate the collection
+		// names and row counts of a database the user never approved.
+		assertDatabaseAllowed(database, hydra.allowedDatabases);
+		const res = await hydra.databases.collections(database, { signal });
 		const raw = res as {
 			collections?: string[];
 			subTenantIds?: string[];
@@ -1412,17 +1430,37 @@ export function createHydraDBServer(
 		// hang on some deployments, and a discovery tool must not).
 		let knowledgeRows: number | undefined;
 		let memoryRows: number | undefined;
+		// A bare Promise.race only bounded how long we WAITED: the losing request
+		// kept running through its own timeout and retries, and repeated discovery
+		// against a hanging deployment piled them up. Abort it instead, and chain
+		// the caller's cancellation so a cancelled tool call stops it too.
+		const statsAbort = new AbortController();
+		const onCallerAbort = () => statsAbort.abort(signal?.reason);
+		if (signal?.aborted) statsAbort.abort(signal.reason);
+		else signal?.addEventListener("abort", onCallerAbort, { once: true });
+		const timer = setTimeout(
+			() => statsAbort.abort(new Error("stats timed out")),
+			listCollectionsStatsTimeoutMs,
+		);
+		// Bounds the wait even if a transport ignored the signal.
+		const aborted = new Promise<never>((_, reject) => {
+			statsAbort.signal.addEventListener("abort", () => reject(statsAbort.signal.reason), {
+				once: true,
+			});
+		});
+		aborted.catch(() => {});
 		try {
 			const stats = await Promise.race([
-				hydra.databases.stats(database),
-				new Promise<null>((resolve) => setTimeout(() => resolve(null), 5000)),
+				hydra.databases.stats(database, { signal: statsAbort.signal }),
+				aborted,
 			]);
-			if (stats) {
-				knowledgeRows = stats.knowledgeCollection?.rowCount;
-				memoryRows = stats.memoryCollection?.rowCount;
-			}
+			knowledgeRows = stats.knowledgeCollection?.rowCount;
+			memoryRows = stats.memoryCollection?.rowCount;
 		} catch {
 			/* sizes are decoration; never fail the listing on them */
+		} finally {
+			clearTimeout(timer);
+			signal?.removeEventListener("abort", onCallerAbort);
 		}
 
 		// The whole point of this tool's output: which collection calls use when

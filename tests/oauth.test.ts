@@ -739,3 +739,26 @@ test("a database-only confinement still permits drop_database inside its list", 
 	const allowed = await call("personal");
 	assert.doesNotMatch(allowed.content[0].text, /This connection is confined to/);
 });
+
+test("a database-confined OAuth connection cannot enumerate another database's collections", async () => {
+	__resetIntrospectionCache();
+	introspectAnswer = () => ({
+		status: 200,
+		body: active({ database: "personal", databases: ["personal"], collection: undefined, collections: null }),
+	});
+	const res = await request(
+		"POST",
+		"/",
+		{ host: `127.0.0.1:${port}`, ...JSON_HEADERS, authorization: "Bearer hmat_lc_confined" },
+		JSON.stringify({
+			jsonrpc: "2.0",
+			id: 1,
+			method: "tools/call",
+			params: { name: "hydradb_list_collections", arguments: { database: "work" } },
+		}),
+	);
+	assert.equal(res.status, 200, res.body);
+	const r = JSON.parse(res.body).result;
+	assert.equal(r.isError, true);
+	assert.match(r.content[0].text, /cannot use database "work"/);
+});

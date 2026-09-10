@@ -12,7 +12,7 @@ import {
 	__resetShutdown,
 	beginShutdown,
 	awaitInFlight,
-	createHydraDBServer,
+	__setListCollectionsStatsTimeoutForTests, createHydraDBServer,
 	inFlightCount,
 	legacyToolsEnabled,
 } from "../src/server.js";
@@ -34,18 +34,24 @@ type Responses = Partial<
 
 function mockHydra(
 	responses: Responses = {},
-	opts: { collection?: string | null } = {},
+	opts: { collection?: string | null; allowedDatabases?: string[] } = {},
 ): {
 	hydra: HydraDB;
 	calls: RecordedCall[];
 } {
 	const calls: RecordedCall[] = [];
 	const record =
-		(method: string, fallback: unknown) => (args?: Record<string, unknown>) => {
+		(method: string, fallback: unknown) =>
+		(args?: Record<string, unknown>, requestOptions?: { abortSignal?: AbortSignal }) => {
 			calls.push({ method, args: args ?? {} });
 			const data = method in responses
 				? responses[method as keyof Responses]
 				: fallback;
+			// A function response takes over the call, for tests that need the
+			// request's abort signal or a response that never arrives.
+			if (typeof data === "function") {
+				return (data as (a: unknown, ro: unknown) => Promise<unknown>)(args, requestOptions);
+			}
 			return Promise.resolve({ data, success: true });
 		};
 
@@ -78,6 +84,7 @@ function mockHydra(
 			...(opts.collection === null
 				? {}
 				: { collection: opts.collection ?? "col_test" }),
+			...(opts.allowedDatabases ? { allowedDatabases: opts.allowedDatabases } : {}),
 		},
 		sdk,
 	);
@@ -3066,4 +3073,68 @@ test("every tool that advertises acl actually forwards it", async () => {
 		await c.close();
 	}
 	await client.close();
+});
+
+// Greptile P1 on #77: discovery forwarded the caller's database straight to the
+// SDK, beneath the resource layer's confinement check, so a database-confined
+// grant could enumerate another database's collection names and row counts.
+test("hydradb_list_collections refuses a database the connection is confined away from", async () => {
+	const { hydra, calls } = mockHydra({}, { allowedDatabases: ["db_test"] });
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_list_collections",
+		arguments: { database: "someone-else" },
+	});
+	assert.equal(result.isError, true);
+	const text = (result.content as { type: string; text: string }[])[0]!.text;
+	assert.match(text, /cannot use database "someone-else"/);
+	assert.equal(
+		calls.some((c) => c.method === "collections" || c.method === "stats"),
+		false,
+		"neither discovery nor stats may reach the API for an unapproved database",
+	);
+
+	await client.close();
+});
+
+test("hydradb_list_collections still lists the approved database on a confined connection", async () => {
+	const { hydra, calls } = mockHydra({}, { allowedDatabases: ["db_test"] });
+	const client = await connect(hydra);
+
+	const result = await client.callTool({ name: "hydradb_list_collections", arguments: {} });
+	assert.notEqual(result.isError, true);
+	assert.ok(calls.some((c) => c.method === "collections"));
+
+	await client.close();
+});
+
+// Greptile P2 on #77: the race bounded only the wait; the losing stats request
+// kept running. It must now be aborted, and the listing still returned.
+test("hydradb_list_collections aborts a stats call that outlives its wait", async () => {
+	__setListCollectionsStatsTimeoutForTests(20);
+	let seen: AbortSignal | undefined;
+	const { hydra } = mockHydra({
+		stats: (_args: unknown, ro: { abortSignal?: AbortSignal } | undefined) => {
+			seen = ro?.abortSignal;
+			return new Promise((_resolve, reject) => {
+				ro?.abortSignal?.addEventListener("abort", () => reject(new Error("aborted")), {
+					once: true,
+				});
+			});
+		},
+	});
+	try {
+		const client = await connect(hydra);
+		const result = await client.callTool({ name: "hydradb_list_collections", arguments: {} });
+		assert.notEqual(result.isError, true);
+		const text = (result.content as { type: string; text: string }[])[0]!.text;
+		assert.match(text, /engineering/);
+		assert.doesNotMatch(text, /Database-wide/);
+		assert.ok(seen, "stats must receive an abort signal");
+		assert.equal(seen!.aborted, true, "the losing stats request must be aborted, not left running");
+		await client.close();
+	} finally {
+		__setListCollectionsStatsTimeoutForTests(5000);
+	}
 });
