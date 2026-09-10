@@ -449,12 +449,15 @@ export function createHydraDBServer(
 		// connection reported "nothing found" over real data, because data
 		// routed into named collections never lands there. Search every
 		// collection instead, when there are few enough to do it in one wave.
+		// Trimmed, with the connection's database as the fallback: the same
+		// value the query client resolves, so every message names the database
+		// that was actually searched.
+		const database = args.database?.trim() || hydra.database;
 		let scopeCollection = args.collection;
 		let scopeCollections = args.collections;
 		let widened: string[] | undefined;
 		let tooManyToWiden: number | undefined;
 		if (hydra.collection == null && args.collection == null && args.collections == null) {
-			const database = args.database?.trim() || hydra.database;
 			// Listing is discovery: confined like it, before anything is sent.
 			assertDatabaseAllowed(database, hydra.allowedDatabases);
 			const names = await collectionNamesBounded(database, signal);
@@ -531,7 +534,6 @@ export function createHydraDBServer(
 			// from an empty database unless the result says which it searched.
 			// Point at the discovery tool rather than letting the model conclude
 			// the data does not exist.
-			const database = args.database ?? hydra.database;
 			if (widened != null && widened.length > 1) {
 				return textResult(
 					`No relevant ${resultNoun(kind)} found in any of the ${widened.length} collections of database ` +

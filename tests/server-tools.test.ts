@@ -3282,3 +3282,11 @@ test("an empty bare listing says where it looked and points at collections", asy
 	assert.match(firstText(result), /hydradb_list_collections/);
 	await client.close();
 });
+
+test("widened empty-result message names the trimmed database, not the raw argument", async () => {
+	const { hydra } = mockHydra({}, { collection: null });
+	const client = await connect(hydra);
+	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "q", database: "  db_test  " } });
+	assert.match(firstText(result), /database "db_test"/);
+	await client.close();
+});
