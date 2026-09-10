@@ -3145,6 +3145,15 @@ test("hydradb_list_collections aborts a stats call that outlives its wait", asyn
 const queryCall = (calls: RecordedCall[]) => calls.filter((c) => c.method === "query");
 const firstText = (r: unknown) => ((r as { content: { text: string }[] }).content[0]!.text);
 
+test("every bare query lists collections afresh, so a collection written moments ago is searched", async () => {
+	const { hydra, calls } = mockHydra({}, { collection: null });
+	const client = await connect(hydra);
+	await client.callTool({ name: "hydradb_query", arguments: { query: "one" } });
+	await client.callTool({ name: "hydradb_query", arguments: { query: "two" } });
+	assert.equal(calls.filter((c) => c.method === "collections").length, 2);
+	await client.close();
+});
+
 test("a query with no collection anywhere searches every collection of the database", async () => {
 	const { hydra, calls } = mockHydra({}, { collection: null });
 	const client = await connect(hydra);
@@ -3245,14 +3254,6 @@ test("a failed multi-collection search falls back to the default scope instead o
 	await client.close();
 });
 
-test("the collection listing is reused across queries on one connection", async () => {
-	const { hydra, calls } = mockHydra({}, { collection: null });
-	const client = await connect(hydra);
-	await client.callTool({ name: "hydradb_query", arguments: { query: "one" } });
-	await client.callTool({ name: "hydradb_query", arguments: { query: "two" } });
-	assert.equal(calls.filter((c) => c.method === "collections").length, 1);
-	await client.close();
-});
 
 test("widening stays inside a collection confinement", async () => {
 	const { hydra, calls } = mockHydra({}, { collection: null, allowedCollections: ["sales"] });

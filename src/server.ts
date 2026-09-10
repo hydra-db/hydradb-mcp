@@ -311,8 +311,6 @@ export function __setListCollectionsStatsTimeoutForTests(ms: number): void {
  * model is better served by being told to choose.
  */
 const QUERY_FANOUT_MAX_COLLECTIONS = 10;
-/** Collections appear on first write; a minute of staleness only delays a brand-new one. */
-const COLLECTIONS_CACHE_TTL_MS = 60_000;
 /**
  * How long a query waits for the collection listing before searching the
  * default scope as it always did. The listing has been observed to hang on
@@ -377,21 +375,21 @@ export function createHydraDBServer(
 
 	// --- Handlers (shared by canonical tools and their deprecated aliases) ---
 
-	// Collection names per database, shared by the query fallback and
-	// hydradb_list_collections. Per server instance, so per connection.
-	const collectionsCache = new Map<string, { names: string[]; at: number }>();
-
 	/**
 	 * A database's collections, or null when they cannot be listed within
 	 * fanoutListTimeoutMs. Never throws: a query must not fail because the
 	 * optional widening could not be worked out.
+	 *
+	 * Listed fresh on every bare query, deliberately. The HTTP server is built
+	 * per request and discarded with it, so nothing here could outlive one call
+	 * anyway; a cache would only have bought stdio a minute of stale listings,
+	 * during which a collection this same session had just written to would
+	 * be missed. One extra round-trip, bounded below, is the honest price.
 	 */
 	async function collectionNamesBounded(
 		database: string,
 		signal?: AbortSignal,
 	): Promise<string[] | null> {
-		const hit = collectionsCache.get(database);
-		if (hit && Date.now() - hit.at < COLLECTIONS_CACHE_TTL_MS) return hit.names;
 		if (signal?.aborted) return null;
 		const ctl = new AbortController();
 		const onCallerAbort = () => ctl.abort(signal?.reason);
@@ -410,9 +408,7 @@ export function createHydraDBServer(
 				hydra.databases.collections(database, { signal: ctl.signal }),
 				aborted,
 			]);
-			const names = collectionNamesOf(res);
-			if (names != null) collectionsCache.set(database, { names, at: Date.now() });
-			return names;
+			return collectionNamesOf(res);
 		} catch {
 			return null;
 		} finally {
@@ -1558,7 +1554,6 @@ export function createHydraDBServer(
 			);
 		}
 		const collections = listed;
-		collectionsCache.set(database, { names: collections, at: Date.now() });
 
 		// Database-wide corpus sizes. Informative, not essential — the listing
 		// stands alone if stats is slow or unavailable (it has been observed to
