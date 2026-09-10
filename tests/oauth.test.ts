@@ -3,14 +3,14 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { after, before, test } from "node:test";
 
-import { createHttpApp } from "../src/http.js";
 import { buildAllowedHosts, resolveRequestCredentials } from "../src/http-config.js";
+import { createHttpApp } from "../src/http.js";
 import {
+	type OAuthConfig,
 	__resetIntrospectionCache,
 	introspect,
 	isAccessToken,
 	metadataUrl,
-	type OAuthConfig,
 	protectedResourceMetadata,
 	resolveOAuthConfig,
 	wwwAuthenticate,
@@ -140,6 +140,21 @@ test("introspection sends the secret and the token as a form, and maps the answe
 	const headers = calls[0].init.headers as Record<string, string>;
 	assert.equal(headers.Authorization, "Bearer s3cret");
 	assert.equal(calls[0].init.body, "token=hmat_tok1");
+});
+
+test("empty allowlists from the issuer are absent, not confine-to-nothing", async () => {
+	__resetIntrospectionCache();
+	// A confined grant that chose "no specific collection" must not parse as an
+	// EMPTY allowlist: that would refuse every per-call collection override
+	// for a grant whose user never picked a collection to allow.
+	const { fetchFn } = fakeFetch(() => ({
+		status: 200,
+		body: active({ databases: [], collections: [], collection: undefined }),
+	}));
+	const result = await introspect({ ...CONFIG, fetchFn, now: () => NOW }, "hmat_lists");
+	assert.ok(result.ok);
+	assert.equal(result.token.allowedDatabases, undefined);
+	assert.equal(result.token.allowedCollections, undefined);
 });
 
 test("a token for another resource is refused even though the issuer says it is active", async () => {
