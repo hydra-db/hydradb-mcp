@@ -947,8 +947,8 @@ export class HydraDB {
 		this.allowedDatabases = config.allowedDatabases;
 		this.allowedCollections = config.allowedCollections;
 		const raw = newRawTransport(config, {
-			timeoutSeconds: DEFAULT_TIMEOUT_SECONDS,
-			maxRetries: DEFAULT_MAX_RETRIES,
+			timeoutSeconds: config.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS,
+			maxRetries: config.maxRetries ?? DEFAULT_MAX_RETRIES,
 		});
 		this.context = new ContextResource(
 			client,
