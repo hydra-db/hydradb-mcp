@@ -184,7 +184,9 @@ export function translateError(path: string, err: unknown): HydraWrapperError {
 		// redundant can leak into the template. Every error that has a status or a
 		// body is untouched.
 		const detail =
-			status == null && err.body == null ? err.message : bodyToString(err.body);
+			status == null && err.body == null
+				? bodyToString(err.message)
+				: bodyToString(err.body);
 		return new HydraWrapperError(
 			`Hydra DB ${path} → ${statusText}: ${detail}`,
 			path,

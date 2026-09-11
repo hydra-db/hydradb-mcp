@@ -927,6 +927,14 @@ export class HydraDB {
 	readonly graph: GraphResource;
 
 	constructor(config: HydraConfig, sdk?: HydraDBClient) {
+		const timeoutInSeconds =
+			config.timeoutSeconds != null && config.timeoutSeconds > 0
+				? config.timeoutSeconds
+				: DEFAULT_TIMEOUT_SECONDS;
+		const maxRetries =
+			config.maxRetries != null && config.maxRetries >= 0
+				? config.maxRetries
+				: DEFAULT_MAX_RETRIES;
 		const client =
 			sdk ??
 			new HydraDBClient({
@@ -935,8 +943,8 @@ export class HydraDB {
 				// Both are stated rather than inherited. The SDK's defaults (60s,
 				// 2 retries) were never chosen by this server, and their product is
 				// a ~3 minute worst case on the slowest tool it exposes.
-				timeoutInSeconds: config.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS,
-				maxRetries: config.maxRetries ?? DEFAULT_MAX_RETRIES,
+				timeoutInSeconds,
+				maxRetries,
 				// Never inherit the SDK's console logger: it writes to stdout, which
 				// on stdio transport is the JSON-RPC channel. Only the sink is
 				// overridden — level and silencing keep the SDK's own defaults.
@@ -947,8 +955,8 @@ export class HydraDB {
 		this.allowedDatabases = config.allowedDatabases;
 		this.allowedCollections = config.allowedCollections;
 		const raw = newRawTransport(config, {
-			timeoutSeconds: config.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS,
-			maxRetries: config.maxRetries ?? DEFAULT_MAX_RETRIES,
+			timeoutSeconds: timeoutInSeconds,
+			maxRetries,
 		});
 		this.context = new ContextResource(
 			client,

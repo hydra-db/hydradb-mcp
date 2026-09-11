@@ -65,6 +65,45 @@ test("the fallback does not disturb errors that carry a status", () => {
 	);
 });
 
+test("statusless SDK error message is sanitized, strips markup and redacts credentials", () => {
+	const translated = translateError(
+		"/query",
+		new HydraDBError({
+			message: "Failed with Bearer secret-token-12345678",
+		}),
+	);
+	assert.ok(!translated.message.includes("secret-token-12345678"));
+	assert.ok(translated.message.includes("Bearer [redacted]"));
+
+	const markupErr = translateError(
+		"/query",
+		new HydraDBError({
+			message: "<html><title>504 Gateway</title><body>Timed out</body></html>",
+		}),
+	);
+	assert.ok(!markupErr.message.includes("<html>"));
+	assert.ok(markupErr.message.includes("504 Gateway"));
+
+	const longErr = translateError(
+		"/query",
+		new HydraDBError({ message: "x".repeat(600) }),
+	);
+	assert.ok(longErr.message.includes("truncated"));
+});
+
+test("HydraDB and GraphResource fall back to defaults when timeout or retries are invalid", () => {
+	const hydra = new HydraDB({
+		token: "t",
+		database: "d",
+		timeoutSeconds: -10,
+		maxRetries: -1,
+	});
+	assert.ok(hydra);
+
+	const graph = hydra.graph;
+	assert.ok(graph);
+});
+
 test("wrapper catches SDK errors and rethrows the byte-identical message", async () => {
 	const failingSdk = {
 		query() {
