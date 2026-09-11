@@ -18,6 +18,7 @@ Run it two ways, same tools either way:
 | `hydradb_delete` | Remove one or more items by id, irreversibly |
 | `hydradb_status` | Check whether an ingested source has finished indexing |
 | `hydradb_subgraph` | Everything connected to one item — its thread, replies, parents, children, links |
+| `hydradb_feedback` | Report whether a query's results were useful, by its `request_id` |
 
 Ids flow between these: `hydradb_query`, `hydradb_list` and `hydradb_subgraph` emit them;
 `hydradb_inspect`, `hydradb_delete`, `hydradb_status` and `hydradb_subgraph` accept them.
@@ -153,6 +154,34 @@ Fetches one source's full content by id.
 
 Long sources come back in slices, and binary sources are never inlined — you get
 their type and size, and `mode: "url"` returns a download link.
+
+### **hydradb_feedback**
+
+Records whether a query's results were actually useful. Correlated to that query
+by its `request_id`, which `hydradb_query` prints at the end of its output — copy
+it verbatim, it cannot be guessed or reconstructed.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `request_id` | string | Yes | The id `hydradb_query` printed for the query being rated |
+| `feedback` | string | No | What was wrong, missing or good, in plain words (max 8000) |
+| `rating` | string | No | `positive`, `negative` or `neutral` |
+| `ground_truth_answer` | string | No | The answer a correct system would have given |
+| `ground_truth_source_ids` | string[] | No | Sources that actually contain the answer (max 100) |
+| `metadata` | object | No | Your own string labels, e.g. an eval run name (max 20) |
+| `database`, `collection` | string | No | Scope overrides |
+
+Send text, ground truth, or both — a submission with neither records nothing and
+is refused. Ground truth is worth far more than prose because it is
+machine-checkable: `source_ids` turns one submission into a retrieval judgement
+(did the query surface these, at what rank, at all?), which is recall measured on
+real traffic rather than on a benchmark that stops resembling production the day
+it is written.
+
+Feedback never changes the result of the query it describes and never alters
+stored data. Rows are labelled `source: agent`, because everything reaching this
+server came from a model — agent feedback is a different population from human
+feedback and is separated at write time.
 
 ### **hydradb_subgraph**
 
