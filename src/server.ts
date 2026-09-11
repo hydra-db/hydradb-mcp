@@ -234,22 +234,22 @@ export function __resetShutdown(): void {
 	shuttingDown = false;
 }
 
-function trackInFlight<T>(work: () => Promise<T>): Promise<T> {
+export async function trackInFlight<T>(work: () => Promise<T>): Promise<T> {
 	if (shuttingDown) {
-		return Promise.reject(
-			new Error(
-				"Hydra DB MCP server is shutting down and is not accepting new requests. " +
-				"Retry once it has restarted.",
-			),
+		throw new Error(
+			"Hydra DB MCP server is shutting down and is not accepting new requests. " +
+			"Retry once it has restarted.",
 		);
 	}
 	inFlight++;
-	return work().finally(() => {
+	try {
+		return await work();
+	} finally {
 		inFlight--;
 		if (inFlight === 0) {
 			while (idleWaiters.length > 0) idleWaiters.pop()?.();
 		}
-	});
+	}
 }
 
 /** Resolves once no tool call is running, or immediately if none is. */

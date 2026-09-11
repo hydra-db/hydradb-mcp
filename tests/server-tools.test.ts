@@ -15,6 +15,7 @@ import {
 	__setFanoutListTimeoutForTests, __setListCollectionsStatsTimeoutForTests, createHydraDBServer,
 	inFlightCount,
 	legacyToolsEnabled,
+	trackInFlight,
 } from "../src/server.js";
 import {
 	CANONICAL_TOOL_NAMES,
@@ -1344,6 +1345,30 @@ test("a failing tool call still decrements the in-flight count", async () => {
 		"a thrown handler must not leave the process permanently undrainable",
 	);
 	await client.close();
+});
+
+test("trackInFlight decrements in-flight count when work throws synchronously", async () => {
+	assert.equal(inFlightCount(), 0, "initial in-flight count should be zero");
+
+	await assert.rejects(
+		() =>
+			trackInFlight(() => {
+				throw new Error("synchronous throw inside work");
+			}),
+		/synchronous throw inside work/,
+	);
+
+	assert.equal(
+		inFlightCount(),
+		0,
+		"a synchronous throw in work must not leak the in-flight counter",
+	);
+
+	let drained = false;
+	await awaitInFlight().then(() => {
+		drained = true;
+	});
+	assert.equal(drained, true, "awaitInFlight must resolve cleanly after a synchronous failure");
 });
 
 // Greptile, PR #47: the binary branch appended the server's summary without
