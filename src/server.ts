@@ -1477,9 +1477,22 @@ export function createHydraDBServer(
 		removed: boolean,
 		/** How many were removed, when the server said. `undefined` means unknown. */
 		removedCount?: number,
+		/** True when `kind` was defaulted rather than chosen by the caller. */
+		kindAssumed = false,
 	): ToolResult {
 		const noun = kind === "knowledge" ? "source" : "memory";
 		const id = ids.join(", ");
+		// A delete that finds nothing has two causes that read identically: the id
+		// does not exist, or it exists in the OTHER family and we never looked.
+		// When the caller did not pick a family we cannot tell them apart, so the
+		// message must name the assumption instead of asserting the id is wrong.
+		const otherKind = kind === "memory" ? "knowledge" : "memory";
+		const otherNoun = otherKind === "knowledge" ? "knowledge source" : "memory";
+		const assumedHint = kindAssumed
+			? ` \`kind\` was not given, so this looked in ${kind} only. If ` +
+				`${ids.length > 1 ? "these ids are" : "this id is"} a ${otherNoun}, ` +
+				`re-run with kind: "${otherKind}".`
+			: "";
 
 		if (removed) {
 			// Three outcomes, and the third is "we were not told".
@@ -1519,17 +1532,25 @@ export function createHydraDBServer(
 		if (res.success === false) {
 			const reason = deleteFailureReason(res);
 
+			// A refusal that is ITSELF a not-found carries the same ambiguity as the
+			// success-removed-nothing branch below. Any other refusal ("still
+			// processing") is about this family and the hint would misdirect.
+			const refusalIsNotFound =
+				reason != null && /not found|does not exist|no such/i.test(reason);
+
 			return {
 				...structuredResult(
 					`Could NOT delete ${noun} ${id} — the server refused the request` +
 						`${reason ? `: ${reason}` : " and gave no reason"}. ` +
-						`The ${noun} has not been removed.`,
+						`The ${noun} has not been removed.` +
+						(refusalIsNotFound ? assumedHint : ""),
 					{
 						ids,
 						kind,
 						deleted: false,
 						deleted_count: 0,
 						...(reason ? { reason } : {}),
+						...(kindAssumed ? { kind_assumed: true } : {}),
 					},
 				),
 				isError: true,
@@ -1543,9 +1564,18 @@ export function createHydraDBServer(
 		// until recently nothing emitted one — reads it as confirmation and tells
 		// the user their data is gone.
 		return structuredResult(
-			`No ${noun} with id ${id} exists in this database — nothing was deleted. ` +
-			`Ids come from ${TOOL_NAMES.QUERY} or ${TOOL_NAMES.LIST}; check the id rather than retrying.`,
-			{ ids, kind, deleted: false, deleted_count: 0, reason: "not found" },
+			`No ${noun} with id ${id} exists in this database — nothing was deleted.` +
+			assumedHint +
+			` Ids come from ${TOOL_NAMES.QUERY} or ${TOOL_NAMES.LIST}` +
+			(kindAssumed ? "." : "; check the id rather than retrying."),
+			{
+				ids,
+				kind,
+				deleted: false,
+				deleted_count: 0,
+				reason: "not found",
+				...(kindAssumed ? { kind_assumed: true } : {}),
+			},
 		);
 	}
 
@@ -1595,8 +1625,12 @@ export function createHydraDBServer(
 		database?: string;
 		collection?: string;
 	}, signal?: AbortSignal): Promise<ToolResult> {
+		// Whether the caller CHOSE memory, or merely got it. A wrong-family delete
+		// is silent — the server removes nothing and says so in the vocabulary of
+		// the family we asked about — so the report has to know which happened.
+		const kindAssumed = args.kind == null;
 		const kind = args.kind ?? "memory";
-		logger.debug(`${TOOL_NAMES.DELETE}: ${kind} ${args.ids.join(", ")}`);
+		logger.debug(`${TOOL_NAMES.DELETE}: ${kind}${kindAssumed ? " (assumed)" : ""} ${args.ids.join(", ")}`);
 
 		const res = await hydra.context.delete({
 			ids: args.ids,
@@ -1636,7 +1670,7 @@ export function createHydraDBServer(
 			);
 		}
 
-		return deleteReport(kind, args.ids, res, removed, removedCount);
+		return deleteReport(kind, args.ids, res, removed, removedCount, kindAssumed);
 	}
 
 	/**

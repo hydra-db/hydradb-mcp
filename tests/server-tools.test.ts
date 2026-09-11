@@ -3664,3 +3664,68 @@ test("feedback: the recorded id is echoed back, read with the wire's spelling", 
 
 	assert.match(JSON.stringify(res), /fb_from_wire/, "the feedback id must reach the caller");
 });
+
+// `kind` defaults to "memory", so a knowledge-source id sent without one is
+// looked up in the wrong family and comes back empty. Found driving the real
+// MCP server against staging: deleting an ingested knowledge source without
+// `kind` answered "Could NOT delete memory <id> … Memory not found", which
+// reads as "your id is wrong" when the id was right and the family was not.
+// The old not-found wording made it worse by advising "check the id rather
+// than retrying" — steering away from the one thing that would have worked.
+test("hydradb_delete names the assumed kind when nothing was found", async () => {
+	const text = await deleteText({ success: true, deletedCount: 0 }, { id: "src-1" });
+
+	assert.match(text, /`kind` was not given/);
+	assert.match(text, /kind: "knowledge"/);
+	assert.doesNotMatch(
+		text,
+		/check the id rather than retrying/,
+		"must not steer away from the retry that would actually work",
+	);
+});
+
+test("hydradb_delete does not second-guess a kind the caller chose", async () => {
+	const text = await deleteText(
+		{ success: true, deletedCount: 0 },
+		{ id: "mem-1", kind: "memory" },
+	);
+
+	assert.doesNotMatch(text, /`kind` was not given/);
+	assert.match(text, /check the id rather than retrying/);
+});
+
+// The refusal path carries the same ambiguity when the refusal IS a not-found.
+// This body is what staging returned for a knowledge id sent as a memory.
+test("hydradb_delete explains an assumed kind behind a not-found refusal", async () => {
+	const text = await deleteText(
+		{
+			success: false,
+			message: "Memory not found or already deleted",
+			deletedCount: 0,
+		},
+		{ id: "src-1" },
+	);
+
+	assert.match(text, /could NOT delete/i);
+	assert.match(text, /kind: "knowledge"/);
+});
+
+// ...but only then. "Still processing" is about the family we asked for, so
+// pointing at the other one would be actively wrong advice.
+test("hydradb_delete stays quiet about kind when the refusal is not a not-found", async () => {
+	const text = await deleteText(
+		{
+			success: false,
+			message: "Source is still processing; retry deletion after ingestion completes",
+			deletedCount: 0,
+		},
+		{ id: "src-1" },
+	);
+
+	assert.match(text, /still processing/);
+	assert.doesNotMatch(
+		text,
+		/kind: "knowledge"/,
+		"a processing refusal is not a wrong-family miss",
+	);
+});
