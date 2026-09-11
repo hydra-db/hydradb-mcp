@@ -1346,6 +1346,31 @@ test("a failing tool call still decrements the in-flight count", async () => {
 	await client.close();
 });
 
+test("a tool call that throws synchronously still decrements the in-flight count", async () => {
+	const sdk = {
+		query: () => {
+			throw new Error("synchronous throw");
+		},
+	} as unknown as HydraDBClient;
+	const client = await connect(new HydraDB({ token: "t", database: "db" }, sdk));
+
+	await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
+
+	assert.equal(
+		inFlightCount(),
+		0,
+		"a synchronously thrown handler must not leave the process permanently undrainable",
+	);
+
+	let drained = false;
+	await awaitInFlight().then(() => {
+		drained = true;
+	});
+	assert.equal(drained, true, "awaitInFlight must resolve cleanly after a synchronous failure");
+
+	await client.close();
+});
+
 // Greptile, PR #47: the binary branch appended the server's summary without
 // applying the budget, so the path that exists to keep this response small
 // became its own way of blowing past it.
