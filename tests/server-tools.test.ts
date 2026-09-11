@@ -104,11 +104,14 @@ function mockHydra(
 		maxRetries: 0,
 		fetchFn: async (_url: unknown, init?: { body?: string }) => {
 			calls.push({ method: "feedback", args: JSON.parse(init?.body ?? "{}") });
+			// snake_case, because that is what POST /feedback returns and the raw
+			// transport does not rename keys. A camelCase fixture here agreed with
+			// a wrong assumption in FeedbackResult and hid the id being dropped.
 			const body = {
 				data: {
 					recorded: true,
-					feedbackId: "fb_1",
-					requestId: "r1",
+					feedback_id: "fb_1",
+					request_id: "r1",
 					...((responses as Record<string, unknown>).feedback as object ?? {}),
 				},
 				success: true,
@@ -3471,4 +3474,18 @@ test("feedback: over 100 DISTINCT source ids is refused locally", async () => {
 	});
 	assert.equal((res as { isError?: boolean }).isError, true);
 	assert.equal(calls.filter((c) => c.method === "feedback").length, 0);
+});
+
+// The id is the caller's handle on the row they just wrote. It went missing in
+// production for a while: FeedbackResult was written for the SDK path, which
+// camel-cases, then the call moved to the raw path, which does not rename keys —
+// so res.feedback_id read as undefined and this line silently vanished.
+test("feedback: the recorded id is echoed back, read with the wire's spelling", async () => {
+	const { hydra } = mockHydra({ feedback: { recorded: true, feedback_id: "fb_from_wire" } });
+	const client = await connect(hydra);
+	const res = await client.callTool({
+		name: "hydradb_feedback",
+		arguments: { request_id: "8f1c0e8a-0000-4000-8000-000000000009", feedback: "useful" },
+	});
+	assert.match(JSON.stringify(res), /fb_from_wire/, "the feedback id must reach the caller");
 });

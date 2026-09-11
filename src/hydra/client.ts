@@ -984,12 +984,22 @@ export interface FeedbackParams {
 	metadata?: Record<string, string>;
 }
 
+/**
+ * The response exactly as POST /feedback returns it.
+ *
+ * snake_case because this endpoint takes the raw HTTP path: sendRaw unwraps the
+ * envelope without renaming anything, so the keys here are the wire's keys. The
+ * SDK would have camel-cased them, and this type was originally written for that
+ * path — which made `feedback_id` read as undefined and quietly dropped the id
+ * from the tool's output. `SubgraphResult` above declares the same way, for the
+ * same reason.
+ */
 export interface FeedbackResult {
 	recorded?: boolean;
-	feedbackId?: string;
-	requestId?: string;
+	feedback_id?: string;
+	request_id?: string;
 	message?: string;
-	createdAt?: string;
+	created_at?: string;
 }
 
 /**

@@ -2096,7 +2096,7 @@ export function createHydraDBServer(
 			);
 		}
 		const parts = [`Feedback recorded for request ${requestId}.`];
-		if (res.feedbackId) parts.push(`Feedback id: ${res.feedbackId}.`);
+		if (res.feedback_id) parts.push(`Feedback id: ${res.feedback_id}.`);
 		if (groundTruth?.sourceIds?.length) {
 			parts.push(
 				`${groundTruth.sourceIds.length} ground-truth source id(s) recorded — these are ` +
