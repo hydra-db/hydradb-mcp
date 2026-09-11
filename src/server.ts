@@ -234,7 +234,7 @@ export function __resetShutdown(): void {
 	shuttingDown = false;
 }
 
-async function trackInFlight<T>(work: () => Promise<T>): Promise<T> {
+export async function trackInFlight<T>(work: () => Promise<T>): Promise<T> {
 	if (shuttingDown) {
 		throw new Error(
 			"Hydra DB MCP server is shutting down and is not accepting new requests. " +
