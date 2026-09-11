@@ -17,6 +17,7 @@
 import { Buffer } from "node:buffer";
 import { HydraDBClient } from "@hydradb/sdk";
 import type { HydraDB as SDK } from "@hydradb/sdk";
+import { z } from "zod";
 
 import { unwrap } from "./envelope.js";
 import { HydraWrapperError, translateError } from "./errors.js";
@@ -31,6 +32,7 @@ export type ContextKind = "memory" | "knowledge";
  * instead of a generic host-side timeout carrying no information.
  */
 export const DEFAULT_TIMEOUT_SECONDS = 30;
+
 export const DEFAULT_MAX_RETRIES = 2;
 
 /**
@@ -448,13 +450,23 @@ export function assertCollectionAllowed(
  * transport path. A reader that knows only one of them works on some calls and
  * silently returns undefined on the rest.
  */
-function readRequestId(value: unknown): string | undefined {
-	if (value == null || typeof value !== "object") return undefined;
-	const meta = (value as { meta?: unknown }).meta;
-	if (meta == null || typeof meta !== "object") return undefined;
-	const m = meta as { requestId?: unknown; request_id?: unknown };
-	const id = typeof m.requestId === "string" ? m.requestId : m.request_id;
-	return typeof id === "string" && id !== "" ? id : undefined;
+const requestMetaEnvelopeSchema = z.object({
+	meta: z
+		.object({
+			requestId: z.string().optional(),
+			request_id: z.string().optional(),
+		})
+		.optional(),
+});
+
+function readRequestId<T>(value: T): string | undefined {
+	const parsed = requestMetaEnvelopeSchema.safeParse(value);
+
+	if (!parsed.success) return undefined;
+
+	const id = parsed.data.meta?.requestId ?? parsed.data.meta?.request_id;
+
+	return id !== "" ? id : undefined;
 }
 
 abstract class Resource {
@@ -474,13 +486,16 @@ abstract class Resource {
 
 	protected scope(override?: string, dbOverride?: string): ScopeFields {
 		const database = dbOverride?.trim() || this.database;
+
 		// Enforced HERE, on the one path every per-call scope takes, so no tool
 		// can forget to check. The configured defaults are always allowed.
 		if (database !== this.database) assertDatabaseAllowed(database, this.allowedDatabases);
 		const collection = override?.trim() || this.collection;
+
 		if (collection && collection !== this.collection) {
 			assertCollectionAllowed(collection, this.allowedCollections);
 		}
+
 		return collection != null && collection !== ""
 			? { database, collection }
 			: { database };
@@ -504,33 +519,39 @@ abstract class Resource {
 		dbOverride?: string,
 	): MultiScopeFields {
 		const database = dbOverride?.trim() || this.database;
+
 		if (database !== this.database) assertDatabaseAllowed(database, this.allowedDatabases);
 
 		const names = Array.isArray(collections)
 			? collections
 			: Object.keys(collections);
+
 		if (names.length === 0) {
 			throw new Error(
 				"collections was empty — pass at least one collection name, or omit " +
 				"collections to search the connection's default scope.",
 			);
 		}
+
 		for (const name of names) {
 			if (name !== this.collection) {
 				assertCollectionAllowed(name, this.allowedCollections);
 			}
 		}
+
 		return { database, collections };
 	}
 
-	protected async call<T>(
+	protected async call<T, Response>(
 		path: string,
-		fn: () => Promise<unknown>,
+		fn: () => Promise<Response>,
 		onMeta?: (meta: { requestId?: string }) => void,
 	): Promise<T> {
 		try {
 			const raw = await fn();
+
 			if (onMeta) onMeta({ requestId: readRequestId(raw) });
+
 			return unwrap<T>(raw);
 		} catch (err) {
 			// A refused database is a decision the user made, not a transport
@@ -585,6 +606,7 @@ export class ContextResource extends Resource {
 				`hybrid retrieval, or pass queryBy "text" to match on the terms.`,
 			);
 		}
+
 		const queryBy =
 			params.queryBy ?? (params.operator != null ? "text" : undefined);
 
@@ -599,6 +621,7 @@ export class ContextResource extends Resource {
 				"both. Hydra DB refuses a request carrying both selectors.",
 			);
 		}
+
 		const scope =
 			params.collections != null
 				? this.multiScope(params.collections, params.database)
@@ -641,6 +664,7 @@ export class ContextResource extends Resource {
 			...this.scope(params.collection, params.database),
 			type: params.kind,
 		};
+
 		if (params.upsert != null) {
 			request.upsert = String(params.upsert);
 		}
@@ -648,25 +672,35 @@ export class ContextResource extends Resource {
 		if (params.kind === "memory") {
 			const infer = params.infer ?? true;
 			const item: Record<string, unknown> = {};
+
 			if (params.pairs != null) item.user_assistant_pairs = params.pairs;
+
 			if (params.text != null) item.text = params.text;
 			item.infer = infer;
 			item.is_markdown = params.isMarkdown ?? false;
+
 			// Preserve the v1 omission behaviour: custom_instructions is only
 			// attached when inference is enabled.
 			if (infer && params.customInstructions != null) {
 				item.custom_instructions = params.customInstructions;
 			}
+
 			if (params.sourceId != null) item.source_id = params.sourceId;
+
 			if (params.title != null) item.title = params.title;
+
 			if (params.userName != null) item.user_name = params.userName;
+
 			if (params.metadata != null) item.metadata = params.metadata;
+
 			if (params.additionalMetadata != null) {
 				item.additional_metadata = params.additionalMetadata;
 			}
+
 			if (params.observationDate != null) {
 				item.observation_date = params.observationDate;
 			}
+
 			request.memories = JSON.stringify([item]);
 		} else {
 			// The knowledge path can only carry the document itself and its
@@ -783,6 +817,7 @@ export class ContextResource extends Resource {
 				"/context/{id}/subgraph",
 			);
 		}
+
 		// Blank is the one id the wrapper rejects locally: it would build
 		// "/context//subgraph" and fail as a remote routing error instead of a
 		// legible one. Everything else goes out byte for byte — ingest stores a
@@ -793,16 +828,22 @@ export class ContextResource extends Resource {
 				"/context/{id}/subgraph",
 			);
 		}
+
 		const query = new URLSearchParams(this.scope(params.collection, params.database));
+
 		if (params.kind) query.set("type", params.kind);
+
 		if (params.depth != null) query.set("depth", String(params.depth));
+
 		if (params.maxSources != null) query.set("max_sources", String(params.maxSources));
+
 		// Repeated params, like the dashboard and the CLI: the API reads both
 		// repeated (acl=a&acl=b) and comma-separated forms. An empty array is
 		// the same as omitted server-side, so sending nothing keeps the
 		// request faithful to what the caller said.
 		for (const principal of params.acl ?? []) query.append("acl", principal);
 		const path = `/context/${encodeURIComponent(params.id)}/subgraph?${query.toString()}`;
+
 		return sendRaw<SubgraphResult>(this.raw, path, "GET", undefined, opts);
 	}
 
@@ -918,6 +959,7 @@ export class DatabasesResource extends Resource {
 				"/databases/collections",
 			);
 		}
+
 		// A caller who already cancelled is not waiting for the request to go
 		// out: reject a pre-aborted signal rather than send and then unwind.
 		if (opts?.signal?.aborted) {
@@ -926,16 +968,19 @@ export class DatabasesResource extends Resource {
 				opts.signal.reason ?? new Error("aborted"),
 			);
 		}
+
 		if (params.collection.trim() === "") {
 			throw new HydraWrapperError(
 				"Hydra DB /databases/collections → ERR: collection must not be empty",
 				"/databases/collections",
 			);
 		}
+
 		// scope() resolves the default database, enforces any confinement, and
 		// returns the canonical `database`/`collection` names the API expects.
 		const query = new URLSearchParams(this.scope(params.collection, params.database));
 		const path = `/databases/collections?${query.toString()}`;
+
 		return sendRaw<{
 			database?: string;
 			collection?: string;
@@ -950,8 +995,10 @@ export class DatabasesResource extends Resource {
  * pass an existing `HydraDBClient` as the second argument to inject a mocked
  * SDK transport (used by the conformance runner).
  */
+const feedbackRatingSchema = z.enum(["positive", "negative", "neutral"]);
+
 /** Ratings POST /feedback accepts. Absent is its own state: prose with no rating. */
-export type FeedbackRating = "positive" | "negative" | "neutral";
+export type FeedbackRating = z.infer<typeof feedbackRatingSchema>;
 
 /**
  * Who authored the feedback. The server defaults this to "user"; this wrapper
@@ -960,29 +1007,88 @@ export type FeedbackRating = "positive" | "negative" | "neutral";
  * voluminous and fails systematically rather than subjectively — so guessing
  * wrong here poisons the analysis it exists to feed.
  */
-export type FeedbackSource = "user" | "agent";
+const feedbackSourceSchema = z.enum(["user", "agent"]);
+
+export type FeedbackSource = z.infer<typeof feedbackSourceSchema>;
 
 /** The server's cap, applied to the DE-DUPLICATED list (internal/domain/feedback). */
 export const MAX_GROUND_TRUTH_SOURCE_IDS = 100;
 
-export interface FeedbackGroundTruth {
-	/** The answer a correct system would have produced. */
-	answer?: string;
-	/** Source ids that actually contain the answer — a recall judgement. */
-	sourceIds?: string[];
-}
+const normalizedGroundTruthSchema = z.object({
+	answer: z.string().optional(),
+	source_ids: z.array(z.string()).optional(),
+});
 
-export interface FeedbackParams {
-	/** The `request_id` of the query being rated (from its meta). */
-	requestId: string;
-	feedback?: string;
-	rating?: FeedbackRating;
-	source?: FeedbackSource;
-	groundTruth?: FeedbackGroundTruth;
-	database?: string;
-	collection?: string;
-	metadata?: Record<string, string>;
-}
+type NormalizedGroundTruth = z.infer<typeof normalizedGroundTruthSchema>;
+
+const feedbackGroundTruthSchema = z
+	.object({
+		/** The answer a correct system would have produced. */
+		answer: z.string().optional(),
+		/** Source ids that actually contain the answer — a recall judgement. */
+		sourceIds: z.array(z.string()).optional(),
+	})
+	.transform((groundTruth): NormalizedGroundTruth | undefined => {
+		const answer = groundTruth.answer?.trim() ?? "";
+
+		const sourceIds = Array.from(
+			new Set(
+				(groundTruth.sourceIds ?? [])
+					.map((sourceId) => sourceId.trim())
+					.filter((sourceId) => sourceId !== ""),
+			),
+		);
+
+		if (answer === "" && sourceIds.length === 0) return undefined;
+
+		return normalizedGroundTruthSchema.parse({
+			answer: answer || undefined,
+			source_ids: sourceIds.length > 0 ? sourceIds : undefined,
+		});
+	});
+
+export type FeedbackGroundTruth = z.input<typeof feedbackGroundTruthSchema>;
+
+const feedbackParamsSchema = z
+	.object({
+		requestId: z.string().trim().min(1, {
+			message:
+				"requestId is required: it is the request_id of the query this feedback is about, " +
+				"returned in that query's response meta.",
+		}),
+		feedback: z.string().transform((feedback) => feedback.trim()).optional(),
+		rating: feedbackRatingSchema.optional(),
+		source: feedbackSourceSchema.optional(),
+		groundTruth: feedbackGroundTruthSchema.optional(),
+		database: z.string().optional(),
+		collection: z.string().optional(),
+		metadata: z.record(z.string()).optional(),
+	})
+	.superRefine((params, context) => {
+		const sourceIds = params.groundTruth?.source_ids ?? [];
+
+		// This limit intentionally runs after the ground-truth transform has
+		// trimmed and de-duplicated IDs. A raw `.max(100)` would reject 150 inputs
+		// that normalize to 80 distinct sources even though the API accepts them.
+		if (sourceIds.length > MAX_GROUND_TRUTH_SOURCE_IDS) {
+			context.addIssue({
+				code: z.ZodIssueCode.custom,
+				path: ["groundTruth", "sourceIds"],
+				message:
+					`ground_truth.source_ids has ${sourceIds.length} distinct ids, over the limit of ` +
+					`${MAX_GROUND_TRUTH_SOURCE_IDS}. Narrow it to the sources that actually carry the answer.`,
+			});
+		}
+
+		if ((params.feedback ?? "") === "" && params.groundTruth == null) {
+			context.addIssue({
+				code: z.ZodIssueCode.custom,
+				message: "send feedback text, ground_truth, or both — a submission with neither records nothing.",
+			});
+		}
+	});
+
+export type FeedbackParams = z.input<typeof feedbackParamsSchema>;
 
 /**
  * The response exactly as POST /feedback returns it.
@@ -994,13 +1100,26 @@ export interface FeedbackParams {
  * from the tool's output. `SubgraphResult` above declares the same way, for the
  * same reason.
  */
-export interface FeedbackResult {
-	recorded?: boolean;
-	feedback_id?: string;
-	request_id?: string;
-	message?: string;
-	created_at?: string;
-}
+const feedbackResultSchema = z.object({
+	recorded: z.boolean().optional(),
+	feedback_id: z.string().optional(),
+	request_id: z.string().optional(),
+	message: z.string().optional(),
+	created_at: z.string().optional(),
+});
+
+export type FeedbackResult = z.infer<typeof feedbackResultSchema>;
+
+const feedbackRequestBodySchema = z.object({
+	request_id: z.string(),
+	feedback: z.string().optional(),
+	rating: feedbackRatingSchema.optional(),
+	source: feedbackSourceSchema,
+	ground_truth: normalizedGroundTruthSchema.optional(),
+	database: z.string().optional(),
+	collection: z.string().optional(),
+	metadata: z.record(z.string()).optional(),
+});
 
 /**
  * POST /feedback — a signal about a query that ALREADY ran.
@@ -1025,46 +1144,15 @@ export class FeedbackResource extends Resource {
 	}
 
 	async submit(params: FeedbackParams, opts?: RequestOptions): Promise<FeedbackResult> {
-		const requestId = params.requestId?.trim() ?? "";
-		if (requestId === "") {
-			throw new Error(
-				"requestId is required: it is the request_id of the query this feedback is " +
-				"about, returned in that query's response meta.",
-			);
-		}
-		const feedback = params.feedback?.trim() ?? "";
-		const groundTruth = normalizeGroundTruth(params.groundTruth);
-		// Checked after de-duplication, because that is when the server checks it:
-		// 150 ids that collapse to 80 are valid, so refusing on the raw count would
-		// reject a request the API accepts.
-		if (
-			groundTruth?.source_ids != null &&
-			groundTruth.source_ids.length > MAX_GROUND_TRUTH_SOURCE_IDS
-		) {
-			throw new Error(
-				`ground_truth.source_ids has ${groundTruth.source_ids.length} distinct ids, over ` +
-				`the limit of ${MAX_GROUND_TRUTH_SOURCE_IDS}. A question answered by that many ` +
-				"documents is not specific enough to grade retrieval against — narrow it to the " +
-				"ones that actually carry the answer.",
-			);
-		}
-		// The server refuses a submission carrying neither, and would do so after a
-		// round trip. Refusing here says the same thing without one, and says it
-		// where the caller can still fix it.
-		if (feedback === "" && groundTruth == null) {
-			throw new Error(
-				"send feedback text, ground_truth, or both — a submission with neither " +
-				"records nothing.",
-			);
-		}
+		const validated = feedbackParamsSchema.parse(params);
 
 		// Scope is optional on /feedback, but a collection cannot be resolved
 		// without its database (the server 400s on collection-alone), so this goes
 		// through the same scope path every other call takes — which is also what
 		// enforces an OAuth connection's confinement.
 		const scope =
-			params.database != null || params.collection != null
-				? this.scope(params.collection, params.database)
+			validated.database != null || validated.collection != null
+				? this.scope(validated.collection, validated.database)
 				: {};
 
 		// The SDK cannot express this request. Its generated model for
@@ -1083,47 +1171,30 @@ export class FeedbackResource extends Resource {
 				"/feedback",
 			);
 		}
-		return sendRaw<FeedbackResult>(
+
+		const body = feedbackRequestBodySchema.parse({
+			request_id: validated.requestId,
+			feedback: validated.feedback || undefined,
+			rating: validated.rating,
+			source: validated.source ?? "agent",
+			ground_truth: validated.groundTruth,
+			metadata:
+				validated.metadata != null && Object.keys(validated.metadata).length > 0
+					? validated.metadata
+					: undefined,
+			...scope,
+		});
+
+		const result = await sendRaw<z.input<typeof feedbackResultSchema>>(
 			this.raw,
 			"/feedback",
 			"POST",
-			{
-				request_id: requestId,
-				...(feedback !== "" ? { feedback } : {}),
-				...(params.rating ? { rating: params.rating } : {}),
-				source: params.source ?? "agent",
-				...(groundTruth ? { ground_truth: groundTruth } : {}),
-				...scope,
-				...(params.metadata && Object.keys(params.metadata).length > 0
-					? { metadata: params.metadata }
-					: {}),
-			},
+			body,
 			opts,
 		);
-	}
-}
 
-/**
- * Trim, drop blanks, de-duplicate ids, and treat an object that normalises to
- * nothing as absent. The server does all of this too; doing it here means
- * `ground_truth: {}` — a caller who built the object and forgot to fill it —
- * produces the "send one or the other" error rather than a confusing per-entry
- * one. Ids are de-duplicated because they are SCORED: the same document listed
- * twice would weight one piece of evidence as two.
- */
-function normalizeGroundTruth(
-	gt?: FeedbackGroundTruth,
-): { answer?: string; source_ids?: string[] } | undefined {
-	if (gt == null) return undefined;
-	const answer = gt.answer?.trim() ?? "";
-	const ids = Array.from(
-		new Set((gt.sourceIds ?? []).map((id) => id.trim()).filter((id) => id !== "")),
-	);
-	if (answer === "" && ids.length === 0) return undefined;
-	return {
-		...(answer !== "" ? { answer } : {}),
-		...(ids.length > 0 ? { source_ids: ids } : {}),
-	};
+		return feedbackResultSchema.parse(result);
+	}
 }
 
 export class HydraDB {
@@ -1145,7 +1216,7 @@ export class HydraDB {
 	 */
 	readonly graph: GraphResource;
 
-	constructor(config: HydraConfig, sdk?: HydraDBClient) {
+	constructor(config: HydraConfig, sdk?: HydraDBClient, rawOverride?: RawTransport) {
 		const client =
 			sdk ??
 			new HydraDBClient({
@@ -1161,14 +1232,19 @@ export class HydraDB {
 				// overridden — level and silencing keep the SDK's own defaults.
 				logging: { logger: STDERR_LOGGER },
 			});
+
 		this.database = config.database;
 		this.collection = config.collection;
 		this.allowedDatabases = config.allowedDatabases;
 		this.allowedCollections = config.allowedCollections;
-		const raw = newRawTransport(config, {
-			timeoutSeconds: DEFAULT_TIMEOUT_SECONDS,
-			maxRetries: DEFAULT_MAX_RETRIES,
-		});
+
+		const raw =
+			rawOverride ??
+			newRawTransport(config, {
+				timeoutSeconds: DEFAULT_TIMEOUT_SECONDS,
+				maxRetries: DEFAULT_MAX_RETRIES,
+			});
+
 		this.context = new ContextResource(
 			client,
 			config.database,
