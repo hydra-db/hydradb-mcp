@@ -10,9 +10,11 @@ export {
 	HydraDB,
 	ContextResource,
 	DatabasesResource,
+	FeedbackResource,
 	DEFAULT_TIMEOUT_SECONDS,
 	DEFAULT_MAX_RETRIES,
 } from "./client.js";
+
 export type {
 	HydraConfig,
 	ContextKind,
@@ -31,21 +33,33 @@ export type {
 	DeleteParams,
 	CreateDatabaseParams,
 	DeleteCollectionParams,
+	FeedbackParams,
+	FeedbackResult,
+	FeedbackRating,
+	FeedbackSource,
+	FeedbackGroundTruth,
 } from "./client.js";
+
 export { GraphResource } from "./graph.js";
+
 export type {
 	GraphConfig,
 	GraphQueryParams,
 	GraphScopeParams,
 	GraphRow,
 } from "./graph.js";
+
 export { HydraWrapperError, responseError, translateError } from "./errors.js";
+
 export {
 	assertCollectionAllowed,
 	assertDatabaseAllowed,
 	DatabaseNotAllowedError,
 	ScopeNotAllowedError,
 } from "./client.js";
+
 export { unwrap } from "./envelope.js";
+
 export { DEFAULT_BASE_URL, newRawTransport, sendRaw } from "./transport.js";
+
 export type { RawTransport } from "./transport.js";

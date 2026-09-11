@@ -29,7 +29,9 @@
     "smoke": "node scripts/smoke-dist.mjs",
     "smoke:http": "node scripts/smoke-http.mjs",
     "check-pack": "node scripts/assert-pack-contents.mjs",
-    "lint": "biome lint src tests conformance scripts"
+    "lint": "biome lint src tests conformance scripts",
+    "lint:anti-slop": "node scripts/lint-anti-slop-changed.mjs",
+    "lint:anti-slop:all": "oxlint --config oxlint.config.ts"
   },
   "dependencies": {
     "@hydradb/sdk": "2.1.4",
@@ -40,9 +42,11 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",
+    "@oxlint/plugins": "1.78.0",
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
     "@types/node": "^20",
+    "oxlint": "1.78.0",
     "tsx": "^4.19.4",
     "typescript": "^5.9.3"
   },
