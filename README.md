@@ -92,6 +92,7 @@ chunks with their source id, a relevance score, and knowledge-graph context.
 | `graph_context` | boolean | No | Include knowledge-graph relations (default: true) |
 | `operator` | string | No | `or`, `and`, or `phrase`. Switches the query to keyword retrieval (`query_by=text`), which is the only mode Hydra DB accepts an operator on — semantic matching is off for that query. Unset (the default) is hybrid semantic search |
 | `source_ids` | array | No | Restrict the search to these sources |
+| `titles` | array | No | Restrict to exact document titles (case-insensitive); resolved to source IDs before normal search |
 | `metadata_filters` | object | No | Exact-match filters over stored metadata |
 | `num_related_chunks` | number | No | Adjacent chunks to attach per match (0-5, default: 0) |
 | `recency_bias` | number | No | Favour recently-updated sources when ranking, 0-1 (default: 0). Re-ranks only; it never excludes older sources |

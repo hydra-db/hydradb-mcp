@@ -426,6 +426,7 @@ export function createHydraDBServer(
 		detail?: "compact" | "full";
 		operator?: "or" | "and" | "phrase";
 		source_ids?: string[];
+		titles?: string[];
 		metadata_filters?: Record<string, unknown>;
 		num_related_chunks?: number;
 		recency_bias?: number;
@@ -488,6 +489,7 @@ export function createHydraDBServer(
 			mode: args.mode ?? "thinking",
 			operator: args.operator,
 			ids: args.source_ids,
+			titles: args.titles,
 			metadataFilters: args.metadata_filters,
 			acl: args.acl,
 			numRelatedChunks: args.num_related_chunks,
@@ -2097,6 +2099,12 @@ export function createHydraDBServer(
 			.min(1)
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.source_ids),
+		titles: z
+			.array(z.string().trim().min(1))
+			.min(1)
+			.max(200)
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.titles),
 		metadata_filters: z
 			.record(z.unknown())
 			.optional()

@@ -2197,6 +2197,26 @@ test("hydradb_query forwards source_ids as a retrieval filter", async () => {
 	await client.close();
 });
 
+test("hydradb_query forwards exact titles as a retrieval filter", async () => {
+	const { hydra, calls } = mockHydra();
+	(hydra.context as unknown as { query: (args: Record<string, unknown>) => Promise<unknown> }).query =
+		(args) => {
+			calls.push({ method: "query", args });
+			return Promise.resolve({ chunks: [] });
+		};
+	const client = await connect(hydra);
+	await client.callTool({
+		name: "hydradb_query",
+		arguments: { query: "auth flow", titles: ["Smith, John", "Q3 Roadmap.md"] },
+	});
+
+	assert.deepEqual(calls.find((c) => c.method === "query")?.args.titles, [
+		"Smith, John",
+		"Q3 Roadmap.md",
+	]);
+	await client.close();
+});
+
 test("hydradb_query forwards metadata filters and related-chunk count", async () => {
 	const { hydra, calls } = mockHydra();
 	const client = await connect(hydra);
