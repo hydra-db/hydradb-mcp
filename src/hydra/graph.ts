@@ -86,7 +86,18 @@ export class GraphResource {
 	private readonly transport: RawTransport;
 
 	constructor(config: GraphConfig) {
-		this.transport = newRawTransport(config, { timeoutSeconds: 30, maxRetries: 2 });
+		const timeoutSeconds =
+			config.timeoutSeconds != null && config.timeoutSeconds > 0
+				? config.timeoutSeconds
+				: 30;
+		const maxRetries =
+			config.maxRetries != null && config.maxRetries >= 0
+				? config.maxRetries
+				: 2;
+		this.transport = newRawTransport(config, {
+			timeoutSeconds,
+			maxRetries,
+		});
 	}
 
 	/**
