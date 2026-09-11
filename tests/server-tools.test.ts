@@ -27,7 +27,7 @@ type RecordedCall = { method: string; args: Record<string, unknown> };
 /** Per-method response overrides, for tests that care what the API returned. */
 type Responses = Partial<
 	Record<
-		"query" | "ingest" | "list" | "inspect" | "delete" | "collections" | "stats",
+		"query" | "ingest" | "list" | "inspect" | "delete" | "collections" | "stats" | "feedback",
 		unknown
 	>
 >;
@@ -52,7 +52,10 @@ function mockHydra(
 			if (typeof data === "function") {
 				return (data as (a: unknown, ro: unknown) => Promise<unknown>)(args, requestOptions);
 			}
-			return Promise.resolve({ data, success: true });
+			// Envelope carries meta: request_id is what POST /feedback correlates
+			// on, and unwrap() drops it, so the onMeta channel is what a test of
+			// that path actually exercises.
+			return Promise.resolve({ data, success: true, meta: { request_id: "req-from-meta" } });
 		};
 
 	const sdk = {
@@ -64,6 +67,9 @@ function mockHydra(
 			delete: record("delete", { success: true, userMemoryDeleted: 1 }),
 			relations: record("relations", {}),
 			status: record("status", {}),
+		},
+		feedback: {
+			submit: record("feedback", { recorded: true, feedbackId: "fb_1", requestId: "r1" }),
 		},
 		databases: {
 			collections: record("collections", { collections: ["engineering", "sales"] }),
@@ -3289,4 +3295,100 @@ test("widened empty-result message names the trimmed database, not the raw argum
 	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "q", database: "  db_test  " } });
 	assert.match(firstText(result), /database "db_test"/);
 	await client.close();
+});
+
+// --- hydradb_feedback (POST /feedback) ---
+
+test("feedback: sends the request id, and labels the row as agent-authored", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+	await client.callTool({
+		name: "hydradb_feedback",
+		arguments: {
+			request_id: "8f1c0e8a-0000-4000-8000-000000000001",
+			feedback: "top chunks were about onboarding, not billing",
+			rating: "negative",
+		},
+	});
+	const call = calls.find((c) => c.method === "feedback");
+	assert.ok(call, "feedback should reach the SDK");
+	assert.equal(call.args.request_id, "8f1c0e8a-0000-4000-8000-000000000001");
+	assert.equal(call.args.rating, "negative");
+	// Everything reaching this server came from a model. Letting the server
+	// default it to "user" would mix agent volume into the human population.
+	assert.equal(call.args.source, "agent");
+});
+
+test("feedback: ground truth is normalised — trimmed, de-duplicated, snake_case", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+	await client.callTool({
+		name: "hydradb_feedback",
+		arguments: {
+			request_id: "8f1c0e8a-0000-4000-8000-000000000002",
+			ground_truth_answer: "  the billing cycle is monthly  ",
+			ground_truth_source_ids: ["s1", " s1 ", "s2", ""],
+		},
+	});
+	const call = calls.find((c) => c.method === "feedback");
+	assert.ok(call);
+	const gt = call.args.ground_truth as { answer?: string; source_ids?: string[] };
+	assert.equal(gt.answer, "the billing cycle is monthly");
+	// De-duplicated because these are SCORED: the same document twice would
+	// weight one piece of evidence as two.
+	assert.deepEqual(gt.source_ids, ["s1", "s2"]);
+});
+
+test("feedback: a submission carrying neither text nor ground truth is refused locally", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+	const res = await client.callTool({
+		name: "hydradb_feedback",
+		arguments: { request_id: "8f1c0e8a-0000-4000-8000-000000000003" },
+	});
+	assert.equal((res as { isError?: boolean }).isError, true);
+	// Refused before the wire: the server would 400 on this too, and saying so
+	// without a round trip puts the message where the caller can still act.
+	assert.equal(calls.filter((c) => c.method === "feedback").length, 0);
+});
+
+test("feedback: a blank request_id names the tool that prints it", async () => {
+	const { hydra } = mockHydra();
+	const client = await connect(hydra);
+	const res = await client.callTool({
+		name: "hydradb_feedback",
+		arguments: { request_id: "  ", feedback: "wrong" },
+	});
+	assert.equal((res as { isError?: boolean }).isError, true);
+	const text = JSON.stringify(res);
+	assert.match(text, /hydradb_query/, "should point at where the id comes from");
+});
+
+test("feedback: recorded:false is reported as not stored, not as success", async () => {
+	const { hydra } = mockHydra({
+		feedback: { recorded: false, message: "storage unavailable" },
+	});
+	const client = await connect(hydra);
+	const res = await client.callTool({
+		name: "hydradb_feedback",
+		arguments: { request_id: "8f1c0e8a-0000-4000-8000-000000000004", feedback: "x" },
+	});
+	const text = JSON.stringify(res);
+	assert.match(text, /not durably stored/);
+});
+
+test("query: prints the request id so feedback has something to attach to", async () => {
+	const { hydra } = mockHydra({
+		query: { chunks: [{ chunk_id: "c1", source_id: "s1", chunk_content: "hello" }] },
+	});
+	const client = await connect(hydra);
+	const res = await client.callTool({
+		name: "hydradb_query",
+		arguments: { query: "anything" },
+	});
+	const text = JSON.stringify(res);
+	// unwrap() keeps only `data`, so without the onMeta channel this id never
+	// reaches the agent and the feedback tool is unusable.
+	assert.match(text, /request_id: req-from-meta/);
+	assert.match(text, /hydradb_feedback/);
 });

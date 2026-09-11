@@ -500,6 +500,41 @@ Confirm with the user before deleting a collection they did not name. Take the c
 		},
 	},
 
+	[TOOL_NAMES.FEEDBACK]: {
+		title: "Send feedback about a query",
+		description:
+			"Record whether a hydradb_query result was actually useful. Correlated to that " +
+			"query by its `request_id`, which hydradb_query prints at the end of its output — " +
+			"copy it verbatim; it cannot be guessed or reconstructed.\n\n" +
+			"Send this when a result was wrong, incomplete, or notably good, and when you know " +
+			"what the right answer was: `ground_truth.answer` is the response a correct system " +
+			"would have given, and `ground_truth.source_ids` are the sources that actually " +
+			"contain it. Those are machine-checkable, so they are worth far more than prose — " +
+			"they turn one submission into a retrieval judgement (did the query surface these, " +
+			"at what rank, at all?).\n\n" +
+			"Feedback never changes the result of the query it describes, and never alters " +
+			"stored data. Send text, ground truth, or both — a submission with neither records " +
+			"nothing and is refused.",
+		params: {
+			request_id: "The `request_id` of the query being rated, exactly as hydradb_query " +
+				"printed it. A UUID. Required — feedback with no request to attach to is refused.",
+			feedback: "What was wrong, missing, or good, in plain words. Be specific: \"the " +
+				"top three chunks were about onboarding, not billing\" is actionable, \"bad " +
+				"results\" is not. Up to 8000 characters.",
+			rating: "Coarse signal alongside the text: positive, negative, or neutral. Optional " +
+				"— leaving it off is its own state (prose with no rating) and is not the same as " +
+				"rating it neutral.",
+			ground_truth_answer: "The answer a correct system would have produced from the " +
+				"retrieved context. Up to 8000 characters.",
+			ground_truth_source_ids: "Ids of the sources that actually contain the answer — the " +
+				"[id: …] values from query results. Up to 100; duplicates are dropped.",
+			metadata: "Small string map of your own labels for later filtering, e.g. an eval run " +
+				"name. Up to 20 entries.",
+			database: PARAM.database,
+			collection: PARAM.collection,
+		},
+	},
+
 	[TOOL_NAMES.STATUS]: {
 		title: "Check Hydra DB Indexing Status",
 		description:
@@ -649,6 +684,7 @@ WHEN TO USE IT
 - Before answering anything that could depend on the user's history, preferences, prior decisions, project details, or a document they have ingested, call ${TOOL_NAMES.QUERY} FIRST — including when you are merely unsure. One query at the start of a task is cheap; answering from a blank slate costs the user a correction. Never ask the user to repeat something Hydra DB may already hold.
 - After the user states a preference, makes a decision, corrects you, or reveals a durable fact about themselves or their work, call ${TOOL_NAMES.INGEST} to save it without being asked. Save the distilled fact, not the transcript: "prefers pnpm over npm in every repo", not "user said maybe we should try pnpm".
 - Never store secrets, credentials, one-off task chatter, or anything the user asked you not to keep.
+- When a query's results were wrong or missed something you later found — and when the user tells you the answer was wrong — call ${TOOL_NAMES.FEEDBACK} with that query's request_id. This is how retrieval gets measured against real traffic rather than a benchmark; a wrong answer nobody reports is a wrong answer that stays.
 - "Remember this" maps to ${TOOL_NAMES.INGEST}, "forget that" to ${TOOL_NAMES.DELETE}, and "what do you know about me" to ${TOOL_NAMES.QUERY} — do not answer that last one from the current conversation alone.
 
 THE TOOLS
@@ -662,6 +698,7 @@ THE TOOLS
 - ${TOOL_NAMES.SUBGRAPH} — everything connected to one item you already have an id for: the rest of its thread, its replies, its parents and children, the items it links to. Reach for it when one result is not enough and you need what surrounds it.
 - ${TOOL_NAMES.DATABASES} — which databases this connection can address, with the default marked. Every tool takes an optional \`database\`; call this before naming one, or when a call was refused because the user confined this connection to a single database.
 - ${TOOL_NAMES.LIST_COLLECTIONS} — the collections inside a database, with this connection's default marked. Call it before choosing a collection when the connection has no default.
+- ${TOOL_NAMES.FEEDBACK} — report whether a query's results were actually useful, using the request_id that query printed. Say what the right answer was (\`ground_truth_answer\`) or which sources held it (\`ground_truth_source_ids\`) when you know — that is machine-checkable and worth far more than prose. It records a signal; it never changes the query's result or the stored data.
 - ${TOOL_NAMES.DELETE_COLLECTION} — irreversible removal of one collection and everything in it. Confirm first. Take the name from ${TOOL_NAMES.LIST_COLLECTIONS}.
 
 Ids flow between these: ${TOOL_NAMES.QUERY}, ${TOOL_NAMES.LIST} and ${TOOL_NAMES.SUBGRAPH} emit them; ${TOOL_NAMES.INSPECT}, ${TOOL_NAMES.DELETE}, ${TOOL_NAMES.STATUS} and ${TOOL_NAMES.SUBGRAPH} accept them. Never invent one.

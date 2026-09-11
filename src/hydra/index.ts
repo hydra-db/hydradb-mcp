@@ -10,6 +10,7 @@ export {
 	HydraDB,
 	ContextResource,
 	DatabasesResource,
+	FeedbackResource,
 	DEFAULT_TIMEOUT_SECONDS,
 	DEFAULT_MAX_RETRIES,
 } from "./client.js";
@@ -31,6 +32,11 @@ export type {
 	DeleteParams,
 	CreateDatabaseParams,
 	DeleteCollectionParams,
+	FeedbackParams,
+	FeedbackResult,
+	FeedbackRating,
+	FeedbackSource,
+	FeedbackGroundTruth,
 } from "./client.js";
 export { GraphResource } from "./graph.js";
 export type {

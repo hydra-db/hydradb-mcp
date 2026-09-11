@@ -12,7 +12,7 @@ import type { GraphConfig } from "./config.js";
 import { renderRecalledContext } from "./context.js";
 import { COLLECTION_PATTERN, MAX_BODY_BYTES, renderRows } from "./cypher.js";
 import { SERVER_INSTRUCTIONS, TOOL_DESCRIPTIONS } from "./descriptions.js";
-import { assertCollectionAllowed, assertDatabaseAllowed, HydraDB } from "./hydra/index.js";
+import { HydraDB, assertCollectionAllowed, assertDatabaseAllowed } from "./hydra/index.js";
 import type { ContextKind, QueryKind } from "./hydra/index.js";
 import { logger } from "./logger.js";
 import { ALIAS_REPLACEMENTS, DEPRECATED_TOOL_NAMES, TOOL_NAMES } from "./tool-names.js";
@@ -481,6 +481,9 @@ export function createHydraDBServer(
 			}
 		}
 
+		// Captured per call, not stored on the resource: two tools can be in
+		// flight at once and a shared slot would hand one the other's id.
+		let requestId: string | undefined;
 		const send = () => hydra.context.query({
 			query: args.query,
 			kind,
@@ -508,7 +511,12 @@ export function createHydraDBServer(
 			// current state of X" is a different question from "what matches X",
 			// and only a caller that can raise this can ask the first one.
 			recencyBias: args.recency_bias ?? 0,
-		}, { signal });
+		}, {
+			signal,
+			onMeta: (meta) => {
+				requestId = meta.requestId;
+			},
+		});
 		let raw: Awaited<ReturnType<typeof send>>;
 		try {
 			raw = await send();
@@ -588,9 +596,17 @@ export function createHydraDBServer(
 		// Adding framing after the ceiling had been applied put the finished
 		// response over the documented limit — the same mistake as leaving the
 		// entity-path prefix out of the accounting, one layer up.
+		// The request id is the ONLY key POST /feedback correlates on, and it
+		// cannot be reconstructed later — if it is not printed here, the feedback
+		// tool has nothing to attach a submission to. Rendered on its own line so
+		// a model copies it verbatim rather than reformatting it.
+		const feedbackLine = requestId
+			? `\nWas this useful? Report it with ${TOOL_NAMES.FEEDBACK} using request_id: ${requestId}`
+			: "";
 		const legend =
 			`\n\n---\nEach [id: …] is a source id: pass one to ${TOOL_NAMES.INSPECT} for that ` +
-			`source's full content, or to ${TOOL_NAMES.DELETE} to remove it.`;
+			`source's full content, or to ${TOOL_NAMES.DELETE} to remove it.` +
+			feedbackLine;
 		const headerAllowance = 120;
 
 		const { text: contextStr, shown } = renderRecalledContext(res, {
@@ -2007,6 +2023,78 @@ export function createHydraDBServer(
 		);
 	}
 
+	// --- Feedback ---
+
+	const FEEDBACK_PARAMS = TOOL_DESCRIPTIONS[TOOL_NAMES.FEEDBACK].params;
+
+	async function runFeedback(
+		args: {
+			request_id?: string;
+			feedback?: string;
+			rating?: "positive" | "negative" | "neutral";
+			ground_truth_answer?: string;
+			ground_truth_source_ids?: string[];
+			metadata?: Record<string, string>;
+			database?: string;
+			collection?: string;
+		},
+		signal?: AbortSignal,
+	): Promise<ToolResult> {
+		const requestId = args.request_id?.trim() ?? "";
+		if (requestId === "") {
+			throw new Error(
+				`${TOOL_NAMES.FEEDBACK} requires \`request_id\` — the value ` +
+				`${TOOL_NAMES.QUERY} prints at the end of its results. It cannot be ` +
+				`guessed or reconstructed: run the query again and copy it.`,
+			);
+		}
+		logger.debug(`${TOOL_NAMES.FEEDBACK}: ${requestId}`);
+
+		const groundTruth =
+			args.ground_truth_answer != null || args.ground_truth_source_ids != null
+				? {
+						answer: args.ground_truth_answer,
+						sourceIds: args.ground_truth_source_ids,
+					}
+				: undefined;
+
+		const res = await hydra.feedback.submit(
+			{
+				requestId,
+				feedback: args.feedback,
+				rating: args.rating,
+				// Everything reaching this server came from a model, so the row is
+				// labelled agent rather than taking the server's "user" default.
+				source: "agent",
+				groundTruth,
+				metadata: args.metadata,
+				database: args.database,
+				collection: args.collection,
+			},
+			{ signal },
+		);
+
+		// `recorded: false` is a real outcome, not an error: the submission was
+		// accepted and not durably stored. Saying "recorded" either way would
+		// tell an eval harness its run was captured when it was not.
+		if (res.recorded === false) {
+			return textResult(
+				`Feedback for ${requestId} was accepted but not durably stored` +
+				(res.message ? `: ${res.message}` : ".") +
+				`\nIt will not appear in retrieval-quality analysis; re-send it if that matters.`,
+			);
+		}
+		const parts = [`Feedback recorded for request ${requestId}.`];
+		if (res.feedbackId) parts.push(`Feedback id: ${res.feedbackId}.`);
+		if (groundTruth?.sourceIds?.length) {
+			parts.push(
+				`${groundTruth.sourceIds.length} ground-truth source id(s) recorded — these are ` +
+				`scored as a retrieval judgement against that query.`,
+			);
+		}
+		return textResult(parts.join(" "));
+	}
+
 	// --- Registration helper ---
 
 	function register(
@@ -2729,6 +2817,35 @@ export function createHydraDBServer(
 		(args, extra) => runDelete(toDeleteArgs(args), extra?.signal),
 		destructive,
 		deleteOutputSchema,
+	);
+
+	const feedbackSchema = {
+		request_id: z.string().min(1).describe(FEEDBACK_PARAMS.request_id),
+		feedback: z.string().optional().describe(FEEDBACK_PARAMS.feedback),
+		rating: z
+			.enum(["positive", "negative", "neutral"])
+			.optional()
+			.describe(FEEDBACK_PARAMS.rating),
+		ground_truth_answer: z
+			.string()
+			.optional()
+			.describe(FEEDBACK_PARAMS.ground_truth_answer),
+		ground_truth_source_ids: z
+			.array(z.string())
+			.optional()
+			.describe(FEEDBACK_PARAMS.ground_truth_source_ids),
+		metadata: z.record(z.string()).optional().describe(FEEDBACK_PARAMS.metadata),
+		...scopeSchema,
+	};
+
+	// Not readOnly: it writes a row. Not destructive either — it adds a signal
+	// and removes nothing, and re-sending it records a second row rather than
+	// overwriting the first, so it is neither idempotent nor safe to retry blindly.
+	register(
+		TOOL_NAMES.FEEDBACK,
+		feedbackSchema,
+		(args, extra) => runFeedback(args as Parameters<typeof runFeedback>[0], extra?.signal),
+		additiveWrite,
 	);
 
 	register(

@@ -19,9 +19,9 @@ import { HydraDBClient } from "@hydradb/sdk";
 import type { HydraDB as SDK } from "@hydradb/sdk";
 
 import { unwrap } from "./envelope.js";
-import { newRawTransport, type RawTransport, sendRaw } from "./transport.js";
 import { HydraWrapperError, translateError } from "./errors.js";
 import { GraphResource } from "./graph.js";
+import { type RawTransport, newRawTransport, sendRaw } from "./transport.js";
 
 export type ContextKind = "memory" | "knowledge";
 
@@ -42,6 +42,20 @@ export const DEFAULT_MAX_RETRIES = 2;
  */
 export interface RequestOptions {
 	signal?: AbortSignal;
+	/**
+	 * Receives the envelope's `meta` for this one call.
+	 *
+	 * `unwrap` keeps only `data`, which is right for every caller that just wants
+	 * the payload — but it drops `request_id`, and that is the ONLY key
+	 * POST /feedback accepts to correlate a submission with the query it is
+	 * about. Without it an agent can run a query and then have nothing to say
+	 * feedback ON.
+	 *
+	 * A per-call callback rather than a field on the resource: two tool calls can
+	 * be in flight at once, and a `lastRequestId` would hand one of them the
+	 * other's id. Opt-in, so no existing caller changes.
+	 */
+	onMeta?: (meta: { requestId?: string }) => void;
 }
 
 /**
@@ -423,6 +437,19 @@ export function assertCollectionAllowed(
 	}
 }
 
+/**
+ * Pull `meta.request_id` out of an envelope, or undefined when the response is
+ * not enveloped (several SDK methods return bare objects — see envelope.ts).
+ * Snake_case on the wire; the SDK does not camel-case `meta`.
+ */
+function readRequestId(value: unknown): string | undefined {
+	if (value == null || typeof value !== "object") return undefined;
+	const meta = (value as { meta?: unknown }).meta;
+	if (meta == null || typeof meta !== "object") return undefined;
+	const id = (meta as { request_id?: unknown }).request_id;
+	return typeof id === "string" && id !== "" ? id : undefined;
+}
+
 abstract class Resource {
 	protected constructor(
 		protected readonly sdk: HydraDBClient,
@@ -489,9 +516,15 @@ abstract class Resource {
 		return { database, collections };
 	}
 
-	protected async call<T>(path: string, fn: () => Promise<unknown>): Promise<T> {
+	protected async call<T>(
+		path: string,
+		fn: () => Promise<unknown>,
+		onMeta?: (meta: { requestId?: string }) => void,
+	): Promise<T> {
 		try {
-			return unwrap<T>(await fn());
+			const raw = await fn();
+			if (onMeta) onMeta({ requestId: readRequestId(raw) });
+			return unwrap<T>(raw);
 		} catch (err) {
 			// A refused database is a decision the user made, not a transport
 			// failure from `path`; it keeps its own type and message.
@@ -582,6 +615,7 @@ export class ContextResource extends Resource {
 				numRelatedChunks: params.numRelatedChunks,
 				acl: params.acl,
 			}, req(opts)),
+			opts?.onMeta,
 		);
 	}
 
@@ -909,9 +943,143 @@ export class DatabasesResource extends Resource {
  * pass an existing `HydraDBClient` as the second argument to inject a mocked
  * SDK transport (used by the conformance runner).
  */
+/** Ratings POST /feedback accepts. Absent is its own state: prose with no rating. */
+export type FeedbackRating = "positive" | "negative" | "neutral";
+
+/**
+ * Who authored the feedback. The server defaults this to "user"; this wrapper
+ * sends "agent" instead, because everything reaching it came from a model. The
+ * two populations are separated at write time — agent feedback is far more
+ * voluminous and fails systematically rather than subjectively — so guessing
+ * wrong here poisons the analysis it exists to feed.
+ */
+export type FeedbackSource = "user" | "agent";
+
+export interface FeedbackGroundTruth {
+	/** The answer a correct system would have produced. */
+	answer?: string;
+	/** Source ids that actually contain the answer — a recall judgement. */
+	sourceIds?: string[];
+}
+
+export interface FeedbackParams {
+	/** The `request_id` of the query being rated (from its meta). */
+	requestId: string;
+	feedback?: string;
+	rating?: FeedbackRating;
+	source?: FeedbackSource;
+	groundTruth?: FeedbackGroundTruth;
+	database?: string;
+	collection?: string;
+	metadata?: Record<string, string>;
+}
+
+export interface FeedbackResult {
+	recorded?: boolean;
+	feedbackId?: string;
+	requestId?: string;
+	message?: string;
+	createdAt?: string;
+}
+
+/**
+ * POST /feedback — a signal about a query that ALREADY ran.
+ *
+ * Correlated only by `request_id`; nothing about the original query is re-sent,
+ * so nothing about it has to be trusted from the client. Recording feedback
+ * never changes the result of the query it describes.
+ */
+export class FeedbackResource extends Resource {
+	// The base constructor is `protected`, so this one is what makes the class
+	// instantiable from outside the file. Removing it fails with TS2674.
+	// biome-ignore lint/complexity/noUselessConstructor: widens visibility
+	constructor(
+		sdk: HydraDBClient,
+		database: string,
+		collection?: string,
+		allowedDatabases?: readonly string[],
+		allowedCollections?: readonly string[],
+		raw?: RawTransport,
+	) {
+		super(sdk, database, collection, allowedDatabases, allowedCollections, raw);
+	}
+
+	async submit(params: FeedbackParams, opts?: RequestOptions): Promise<FeedbackResult> {
+		const requestId = params.requestId?.trim() ?? "";
+		if (requestId === "") {
+			throw new Error(
+				"requestId is required: it is the request_id of the query this feedback is " +
+				"about, returned in that query's response meta.",
+			);
+		}
+		const feedback = params.feedback?.trim() ?? "";
+		const groundTruth = normalizeGroundTruth(params.groundTruth);
+		// The server refuses a submission carrying neither, and would do so after a
+		// round trip. Refusing here says the same thing without one, and says it
+		// where the caller can still fix it.
+		if (feedback === "" && groundTruth == null) {
+			throw new Error(
+				"send feedback text, ground_truth, or both — a submission with neither " +
+				"records nothing.",
+			);
+		}
+
+		// Scope is optional on /feedback, but a collection cannot be resolved
+		// without its database (the server 400s on collection-alone), so this goes
+		// through the same scope path every other call takes — which is also what
+		// enforces an OAuth connection's confinement.
+		const scope =
+			params.database != null || params.collection != null
+				? this.scope(params.collection, params.database)
+				: {};
+
+		return this.call("/feedback", () =>
+			this.sdk.feedback.submit(
+				{
+					request_id: requestId,
+					...(feedback !== "" ? { feedback } : {}),
+					...(params.rating ? { rating: params.rating } : {}),
+					source: params.source ?? "agent",
+					...(groundTruth ? { ground_truth: groundTruth } : {}),
+					...scope,
+					...(params.metadata && Object.keys(params.metadata).length > 0
+						? { metadata: params.metadata }
+						: {}),
+				} as never,
+				req(opts),
+			),
+		);
+	}
+}
+
+/**
+ * Trim, drop blanks, de-duplicate ids, and treat an object that normalises to
+ * nothing as absent. The server does all of this too; doing it here means
+ * `ground_truth: {}` — a caller who built the object and forgot to fill it —
+ * produces the "send one or the other" error rather than a confusing per-entry
+ * one. Ids are de-duplicated because they are SCORED: the same document listed
+ * twice would weight one piece of evidence as two.
+ */
+function normalizeGroundTruth(
+	gt?: FeedbackGroundTruth,
+): { answer?: string; source_ids?: string[] } | undefined {
+	if (gt == null) return undefined;
+	const answer = gt.answer?.trim() ?? "";
+	const ids = Array.from(
+		new Set((gt.sourceIds ?? []).map((id) => id.trim()).filter((id) => id !== "")),
+	);
+	if (answer === "" && ids.length === 0) return undefined;
+	return {
+		...(answer !== "" ? { answer } : {}),
+		...(ids.length > 0 ? { source_ids: ids } : {}),
+	};
+}
+
 export class HydraDB {
 	readonly context: ContextResource;
 	readonly databases: DatabasesResource;
+	/** Feedback about a query that already ran (POST /feedback). */
+	readonly feedback: FeedbackResource;
 	/** The default database every unscoped call uses. */
 	readonly database: string;
 	/** Databases a per-call override may name; undefined means any. */
@@ -951,6 +1119,14 @@ export class HydraDB {
 			maxRetries: DEFAULT_MAX_RETRIES,
 		});
 		this.context = new ContextResource(
+			client,
+			config.database,
+			config.collection,
+			config.allowedDatabases,
+			config.allowedCollections,
+			raw,
+		);
+		this.feedback = new FeedbackResource(
 			client,
 			config.database,
 			config.collection,
