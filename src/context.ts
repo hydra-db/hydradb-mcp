@@ -287,26 +287,35 @@ function render(
 	// triplet.chunk_id scan, so any relation the server linked ONLY via
 	// source_chunk_ids was silently dropped from the output.
 	const directRelations: Record<string, [string, ScoredPath][]> = {};
-	// Fallback chunk → relation links derived from triplet relation chunk_ids.
-	// Pre-indexed here to avoid an O(chunks × relations) scan in the fallback path.
-	const tripletRelations: Record<string, [string, ScoredPath][]> = {};
 	for (const [groupId, relation] of Object.entries(relationIndex)) {
 		for (const chunkId of relation.sourceChunkIds ?? []) {
 			const bucket = directRelations[chunkId];
 			if (bucket) bucket.push([groupId, relation]);
 			else directRelations[chunkId] = [[groupId, relation]];
 		}
-		const seenChunksForGroup = new Set<string>();
-		for (const triplet of (relation.triplets ?? []) as PathTriplet[]) {
-			const chunkId = triplet.relation?.chunk_id;
-			if (typeof chunkId === "string" && !seenChunksForGroup.has(chunkId)) {
-				seenChunksForGroup.add(chunkId);
-				const bucket = tripletRelations[chunkId];
-				if (bucket) bucket.push([groupId, relation]);
-				else tripletRelations[chunkId] = [[groupId, relation]];
+	}
+
+	// Fallback chunk → relation links derived from triplet relation chunk_ids.
+	// Lazily built on the first chunk that reaches the fallback path to avoid
+	// traversing triplets and allocating sets when all chunks resolve directly.
+	let tripletRelations: Record<string, [string, ScoredPath][]> | undefined;
+	const getTripletRelations = (): Record<string, [string, ScoredPath][]> => {
+		if (tripletRelations) return tripletRelations;
+		tripletRelations = {};
+		for (const [groupId, relation] of Object.entries(relationIndex)) {
+			const seenChunksForGroup = new Set<string>();
+			for (const triplet of (relation.triplets ?? []) as PathTriplet[]) {
+				const chunkId = triplet.relation?.chunk_id;
+				if (typeof chunkId === "string" && !seenChunksForGroup.has(chunkId)) {
+					seenChunksForGroup.add(chunkId);
+					const bucket = tripletRelations[chunkId];
+					if (bucket) bucket.push([groupId, relation]);
+					else tripletRelations[chunkId] = [[groupId, relation]];
+				}
 			}
 		}
-	}
+		return tripletRelations;
+	};
 
 	const chunkToGroupIds = graphCtx.chunkIdToGroupIds ?? {};
 	const consumedExtraIds = new Set<string>();
@@ -423,7 +432,7 @@ function render(
 			!hasLinkedGroups &&
 			direct.length === 0
 		) {
-			const fallback = tripletRelations[chunkUuid] ?? [];
+			const fallback = getTripletRelations()[chunkUuid] ?? [];
 			for (const [gid, rel] of fallback) {
 				take(gid, rel);
 			}
