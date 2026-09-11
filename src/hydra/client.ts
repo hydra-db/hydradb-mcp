@@ -962,6 +962,9 @@ export type FeedbackRating = "positive" | "negative" | "neutral";
  */
 export type FeedbackSource = "user" | "agent";
 
+/** The server's cap, applied to the DE-DUPLICATED list (internal/domain/feedback). */
+export const MAX_GROUND_TRUTH_SOURCE_IDS = 100;
+
 export interface FeedbackGroundTruth {
 	/** The answer a correct system would have produced. */
 	answer?: string;
@@ -1021,6 +1024,20 @@ export class FeedbackResource extends Resource {
 		}
 		const feedback = params.feedback?.trim() ?? "";
 		const groundTruth = normalizeGroundTruth(params.groundTruth);
+		// Checked after de-duplication, because that is when the server checks it:
+		// 150 ids that collapse to 80 are valid, so refusing on the raw count would
+		// reject a request the API accepts.
+		if (
+			groundTruth?.source_ids != null &&
+			groundTruth.source_ids.length > MAX_GROUND_TRUTH_SOURCE_IDS
+		) {
+			throw new Error(
+				`ground_truth.source_ids has ${groundTruth.source_ids.length} distinct ids, over ` +
+				`the limit of ${MAX_GROUND_TRUTH_SOURCE_IDS}. A question answered by that many ` +
+				"documents is not specific enough to grade retrieval against — narrow it to the " +
+				"ones that actually carry the answer.",
+			);
+		}
 		// The server refuses a submission carrying neither, and would do so after a
 		// round trip. Refusing here says the same thing without one, and says it
 		// where the caller can still fix it.

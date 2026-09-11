@@ -1,18 +1,18 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { HydraDBError } from "@hydradb/sdk";
 import type { HydraDBClient } from "@hydradb/sdk";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
 import { HydraDB } from "../src/hydra/index.js";
 import {
 	__resetAliasWarnings,
 	__resetShutdown,
-	beginShutdown,
+	__setFanoutListTimeoutForTests, __setListCollectionsStatsTimeoutForTests, 
 	awaitInFlight,
-	__setFanoutListTimeoutForTests, __setListCollectionsStatsTimeoutForTests, createHydraDBServer,
+	beginShutdown,createHydraDBServer,
 	inFlightCount,
 	legacyToolsEnabled,
 } from "../src/server.js";
@@ -3416,4 +3416,59 @@ test("query: prints the request id so feedback has something to attach to", asyn
 	// reaches the agent and the feedback tool is unusable.
 	assert.match(text, /request_id: req-from-meta/);
 	assert.match(text, /hydradb_feedback/);
+});
+
+test("feedback: over-long prose is refused locally, not after a round trip", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+	const res = await client.callTool({
+		name: "hydradb_feedback",
+		arguments: {
+			request_id: "8f1c0e8a-0000-4000-8000-000000000005",
+			feedback: "x".repeat(8001),
+		},
+	});
+	assert.equal((res as { isError?: boolean }).isError, true);
+	assert.equal(calls.filter((c) => c.method === "feedback").length, 0, "never reached the wire");
+});
+
+test("feedback: more than 20 metadata entries is refused locally", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+	const metadata: Record<string, string> = {};
+	for (let i = 0; i < 21; i++) metadata[`k${i}`] = "v";
+	const res = await client.callTool({
+		name: "hydradb_feedback",
+		arguments: { request_id: "8f1c0e8a-0000-4000-8000-000000000006", feedback: "x", metadata },
+	});
+	assert.equal((res as { isError?: boolean }).isError, true);
+	assert.equal(calls.filter((c) => c.method === "feedback").length, 0);
+});
+
+// The server caps the DE-DUPLICATED list, so the raw array length is the wrong
+// thing to refuse on: this request is valid and must reach the wire.
+test("feedback: 150 source ids that collapse under 100 are accepted", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+	const ids = Array.from({ length: 150 }, (_, i) => `s${i % 80}`); // 80 distinct
+	const res = await client.callTool({
+		name: "hydradb_feedback",
+		arguments: { request_id: "8f1c0e8a-0000-4000-8000-000000000007", ground_truth_source_ids: ids },
+	});
+	assert.notEqual((res as { isError?: boolean }).isError, true);
+	const call = calls.find((c) => c.method === "feedback");
+	assert.ok(call);
+	assert.equal((call.args.ground_truth as { source_ids: string[] }).source_ids.length, 80);
+});
+
+test("feedback: over 100 DISTINCT source ids is refused locally", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+	const ids = Array.from({ length: 101 }, (_, i) => `s${i}`);
+	const res = await client.callTool({
+		name: "hydradb_feedback",
+		arguments: { request_id: "8f1c0e8a-0000-4000-8000-000000000008", ground_truth_source_ids: ids },
+	});
+	assert.equal((res as { isError?: boolean }).isError, true);
+	assert.equal(calls.filter((c) => c.method === "feedback").length, 0);
 });

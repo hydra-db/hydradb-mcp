@@ -145,6 +145,17 @@ function resultNoun(kind: QueryKind, count?: number): string {
  *
  * Sized well above any realistic memory or document this tool is asked to store.
  */
+// POST /feedback's documented bounds (internal/domain/feedback). Encoded here so
+// an over-long comment is refused where the caller can still shorten it, rather
+// than after a round trip — the same reason MAX_TURN_CHARS below is stated.
+const MAX_FEEDBACK_CHARS = 8_000;
+const MAX_GROUND_TRUTH_ANSWER_CHARS = 8_000;
+const MAX_GROUND_TRUTH_SOURCE_IDS = 100;
+const MAX_GROUND_TRUTH_SOURCE_ID_CHARS = 256;
+const MAX_FEEDBACK_METADATA_ENTRIES = 20;
+const MAX_FEEDBACK_METADATA_KEY_CHARS = 64;
+const MAX_FEEDBACK_METADATA_VALUE_CHARS = 512;
+
 const MAX_TEXT_CHARS = 1_000_000;
 const MAX_TURNS = 500;
 const MAX_TURN_CHARS = 100_000;
@@ -2821,20 +2832,51 @@ export function createHydraDBServer(
 
 	const feedbackSchema = {
 		request_id: z.string().min(1).describe(FEEDBACK_PARAMS.request_id),
-		feedback: z.string().optional().describe(FEEDBACK_PARAMS.feedback),
+		feedback: z
+			.string()
+			.max(MAX_FEEDBACK_CHARS, {
+				message: `feedback must be at most ${MAX_FEEDBACK_CHARS} characters`,
+			})
+			.optional()
+			.describe(FEEDBACK_PARAMS.feedback),
 		rating: z
 			.enum(["positive", "negative", "neutral"])
 			.optional()
 			.describe(FEEDBACK_PARAMS.rating),
 		ground_truth_answer: z
 			.string()
+			.max(MAX_GROUND_TRUTH_ANSWER_CHARS, {
+				message: `ground_truth_answer must be at most ${MAX_GROUND_TRUTH_ANSWER_CHARS} characters`,
+			})
 			.optional()
 			.describe(FEEDBACK_PARAMS.ground_truth_answer),
+		// Each id is bounded here, but the COUNT is not: the server applies its
+		// 100-id cap after de-duplicating, so a list of 150 ids that collapses to
+		// 80 is valid. Capping the raw array would refuse a request the server
+		// accepts, which is worse than the round trip this is avoiding. The count
+		// is checked in FeedbackResource.submit, where the de-duplication happens.
 		ground_truth_source_ids: z
-			.array(z.string())
+			.array(
+				z.string().max(MAX_GROUND_TRUTH_SOURCE_ID_CHARS, {
+					message: `each source id must be at most ${MAX_GROUND_TRUTH_SOURCE_ID_CHARS} characters`,
+				}),
+			)
 			.optional()
 			.describe(FEEDBACK_PARAMS.ground_truth_source_ids),
-		metadata: z.record(z.string()).optional().describe(FEEDBACK_PARAMS.metadata),
+		metadata: z
+			.record(
+				z.string().max(MAX_FEEDBACK_METADATA_KEY_CHARS, {
+					message: `each metadata key must be at most ${MAX_FEEDBACK_METADATA_KEY_CHARS} characters`,
+				}),
+				z.string().max(MAX_FEEDBACK_METADATA_VALUE_CHARS, {
+					message: `each metadata value must be at most ${MAX_FEEDBACK_METADATA_VALUE_CHARS} characters`,
+				}),
+			)
+			.refine((m) => Object.keys(m).length <= MAX_FEEDBACK_METADATA_ENTRIES, {
+				message: `metadata must have at most ${MAX_FEEDBACK_METADATA_ENTRIES} entries`,
+			})
+			.optional()
+			.describe(FEEDBACK_PARAMS.metadata),
 		...scopeSchema,
 	};
 
