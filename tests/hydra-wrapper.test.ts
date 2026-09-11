@@ -358,6 +358,43 @@ test("operator with an explicit hybrid retrieval is rejected, not sent", async (
 	assert.equal(calls.length, 0, "a request that cannot succeed must not reach the wire");
 });
 
+test("title-filtered queries use the SDK passthrough until its serializer exposes titles", async () => {
+	const calls: Record<string, unknown>[] = [];
+	let body: Record<string, unknown> | undefined;
+	const sdk = {
+		query(request: Record<string, unknown>) {
+			calls.push(request);
+			return Promise.resolve({ data: { chunks: [] }, success: true });
+		},
+		fetch(_input: Request | string | URL, init?: RequestInit) {
+			body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+			return Promise.resolve(
+				new Response(JSON.stringify({ success: true, data: { chunks: [] } }), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				}),
+			);
+		},
+	} as unknown as HydraDBClient;
+	const hydra = new HydraDB({
+		token: "t",
+		database: "db_test",
+		collection: "docs",
+	}, sdk);
+
+	await hydra.context.query({
+		query: "who owns this?",
+		titles: ["Smith, John", "Q3 Roadmap.md"],
+		ids: ["source-1"],
+	});
+
+	assert.equal(calls.length, 0, "the old SDK serializer would drop titles");
+	assert.deepEqual(body?.titles, ["Smith, John", "Q3 Roadmap.md"]);
+	assert.deepEqual(body?.ids, ["source-1"]);
+	assert.equal(body?.database, "db_test");
+	assert.equal(body?.collection, "docs");
+});
+
 // --- Database confinement ---
 
 import { assertDatabaseAllowed, ScopeNotAllowedError } from "../src/hydra/index.js";

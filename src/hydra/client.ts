@@ -15,7 +15,7 @@
  */
 
 import { Buffer } from "node:buffer";
-import { HydraDBClient } from "@hydradb/sdk";
+import { HydraDBClient, HydraDBError } from "@hydradb/sdk";
 import type { HydraDB as SDK } from "@hydradb/sdk";
 import { z } from "zod";
 
@@ -149,6 +149,12 @@ export interface QueryParams {
 	 * returns nothing rather than widening when none match.
 	 */
 	ids?: string[];
+	/**
+	 * Restrict retrieval to sources whose complete title equals one of these
+	 * values, case-insensitively. The API resolves them to source ids before
+	 * running the normal query pipeline.
+	 */
+	titles?: string[];
 	/** Exact-match filters over stored metadata. No ranges, no partial matches. */
 	metadataFilters?: Record<string, unknown>;
 	/**
@@ -627,26 +633,82 @@ export class ContextResource extends Resource {
 				? this.multiScope(params.collections, params.database)
 				: this.scope(params.collection, params.database);
 
-		return this.call("/query", () =>
-			this.sdk.query({
-				...scope,
-				query: params.query,
-				type: params.kind,
-				operator: params.operator,
-				queryBy,
-				maxResults: params.maxResults,
-				mode: params.mode,
-				graphContext: params.graphContext,
-				alpha: params.alpha,
-				recencyBias: params.recencyBias,
-				queryApps: params.queryApps,
-				ids: params.ids,
-				metadataFilters: params.metadataFilters,
-				numRelatedChunks: params.numRelatedChunks,
-				acl: params.acl,
-			}, req(opts)),
-			opts?.onMeta,
-		);
+		const request = {
+			...scope,
+			query: params.query,
+			type: params.kind,
+			operator: params.operator,
+			queryBy,
+			maxResults: params.maxResults,
+			mode: params.mode,
+			graphContext: params.graphContext,
+			alpha: params.alpha,
+			recencyBias: params.recencyBias,
+			queryApps: params.queryApps,
+			ids: params.ids,
+			metadataFilters: params.metadataFilters,
+			numRelatedChunks: params.numRelatedChunks,
+			acl: params.acl,
+		};
+
+		// @hydradb/sdk 2.1.4 predates the titles request field and its generated
+		// serializer drops unknown properties. Its authenticated passthrough still
+		// supplies the SDK's auth, retry, timeout and fetch configuration, including
+		// for a ContextResource constructed directly without our RawTransport. Once
+		// the generated request exposes titles this can collapse back into sdk.query.
+		if (params.titles != null && params.titles.length > 0) {
+			return this.call(
+				"/query",
+				async () => {
+				const response = await this.sdk.fetch(
+					"/query",
+					{
+						method: "POST",
+						headers: { "API-Version": "2", "Content-Type": "application/json" },
+						body: JSON.stringify({
+							...scope,
+							query: params.query,
+							type: params.kind,
+							operator: params.operator,
+							query_by: queryBy,
+							max_results: params.maxResults,
+							mode: params.mode,
+							graph_context: params.graphContext,
+							alpha: params.alpha,
+							recency_bias: params.recencyBias,
+							query_apps: params.queryApps,
+							ids: params.ids,
+							titles: params.titles,
+							metadata_filters: params.metadataFilters,
+							num_related_chunks: params.numRelatedChunks,
+							acl: params.acl,
+						}),
+					},
+					req(opts),
+				);
+				const text = await response.text();
+				let body: unknown = text;
+				try {
+					body = text === "" ? null : JSON.parse(text);
+				} catch {
+					// Preserve a non-JSON proxy response for the shared error formatter.
+				}
+				if (!response.ok) {
+					throw new HydraDBError({ statusCode: response.status, body });
+				}
+					return body;
+				},
+				// The request id has to survive this path too. A query that used
+				// `titles` would otherwise print no id, and hydradb_feedback would
+				// have nothing to attach to for exactly the queries a title filter
+				// was used on. readRequestId reads both spellings, so the raw
+				// envelope's snake_case `meta.request_id` resolves here the same way
+				// the SDK's camelCase does.
+				opts?.onMeta,
+			);
+		}
+
+		return this.call("/query", () => this.sdk.query(request, req(opts)), opts?.onMeta);
 	}
 
 	/**

@@ -36,6 +36,13 @@ const PARAM = {
 		"Restrict the search to these source IDs, taken from hydradb_query or " +
 		"hydradb_list. Turns a search into 'search inside these documents'. This is a " +
 		"hard filter: if none of them match, the result is empty rather than widened.",
+	query_titles:
+		"Restrict the search to documents whose COMPLETE title exactly matches any value, " +
+		"ignoring case. Use this when you know document names but not their source IDs. " +
+		"The titles are resolved to source IDs first, then the normal semantic or keyword " +
+		"query runs inside those sources. Repeat values in the array for several titles; " +
+		"punctuation such as commas is part of the title. With source_ids, both filters " +
+		"must match. No title match returns an empty result rather than widening.",
 	metadata_filters:
 		"Exact-match filters over stored metadata, as {key: value}. Exact match only — " +
 		"no ranges, no partial matches, no dates-since. Only useful for keys you know " +
@@ -371,6 +378,7 @@ export const TOOL_DESCRIPTIONS = {
 			detail: PARAM.detail,
 			operator: PARAM.operator,
 			source_ids: PARAM.query_source_ids,
+			titles: PARAM.query_titles,
 			metadata_filters: PARAM.metadata_filters,
 			num_related_chunks: PARAM.num_related_chunks,
 			recency_bias: PARAM.recency_bias,
