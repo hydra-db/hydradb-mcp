@@ -299,6 +299,50 @@ test("buildRecalledContext capped primary groups do not trigger fallback", () =>
 	);
 });
 
+test("buildRecalledContext fallback path scales efficiently without O(n^2) relation scan", () => {
+	const chunks = Array.from({ length: 100 }, (_, i) => ({
+		chunkUuid: `c_${i}`,
+		id: `s_${i}`,
+		chunkContent: `Chunk ${i} content`,
+	}));
+
+	const chunkRelations = Array.from({ length: 500 }, (_, i) => ({
+		relevancyScore: 0.9,
+		groupId: `g_${i}`,
+		triplets: [
+			{
+				source: { name: `Entity_${i}`, type: "concept", entity_id: `e_${i}` },
+				relation: {
+					canonical_predicate: "relates_to",
+					raw_predicate: "relates to",
+					context: "",
+					relationship_id: `r_${i}`,
+					chunk_id: `c_${i % 100}`,
+				},
+				target: { name: `Target_${i}`, type: "concept", entity_id: `t_${i}` },
+			},
+		],
+	}));
+
+	const response = {
+		chunks,
+		graphContext: {
+			queryPaths: [],
+			chunkRelations,
+			chunkIdToGroupIds: {},
+		},
+	};
+
+	const start = Date.now();
+	const result = buildRecalledContext(response);
+	const durationMs = Date.now() - start;
+
+	assert.ok(durationMs < 500, `buildRecalledContext took too long: ${durationMs}ms`);
+	assert.ok(result.includes("Chunk 1"));
+	assert.ok(result.includes("Entity_0"));
+	assert.ok(result.includes("Entity_99"));
+});
+
 test("buildRecalledContext filters low-score relations by default", () => {
 	const response = {
 		chunks: [

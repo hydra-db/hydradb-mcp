@@ -287,11 +287,24 @@ function render(
 	// triplet.chunk_id scan, so any relation the server linked ONLY via
 	// source_chunk_ids was silently dropped from the output.
 	const directRelations: Record<string, [string, ScoredPath][]> = {};
+	// Fallback chunk → relation links derived from triplet relation chunk_ids.
+	// Pre-indexed here to avoid an O(chunks × relations) scan in the fallback path.
+	const tripletRelations: Record<string, [string, ScoredPath][]> = {};
 	for (const [groupId, relation] of Object.entries(relationIndex)) {
 		for (const chunkId of relation.sourceChunkIds ?? []) {
 			const bucket = directRelations[chunkId];
 			if (bucket) bucket.push([groupId, relation]);
 			else directRelations[chunkId] = [[groupId, relation]];
+		}
+		const seenChunksForGroup = new Set<string>();
+		for (const triplet of (relation.triplets ?? []) as PathTriplet[]) {
+			const chunkId = triplet.relation?.chunk_id;
+			if (typeof chunkId === "string" && !seenChunksForGroup.has(chunkId)) {
+				seenChunksForGroup.add(chunkId);
+				const bucket = tripletRelations[chunkId];
+				if (bucket) bucket.push([groupId, relation]);
+				else tripletRelations[chunkId] = [[groupId, relation]];
+			}
 		}
 	}
 
@@ -410,21 +423,9 @@ function render(
 			!hasLinkedGroups &&
 			direct.length === 0
 		) {
-			for (const [gid, rel] of Object.entries(relationIndex)) {
-				const triplets = rel.triplets ?? [];
-				const hasChunk = triplets.some(
-					(t) => t.relation?.chunk_id === chunkUuid,
-				);
-				if (hasChunk) {
-					const occurrences = groupOccurrenceCounts[gid] ?? 0;
-					if (
-						maxGroupOccurrences == null ||
-						occurrences < maxGroupOccurrences
-					) {
-						matchedRelations.push(rel);
-						groupOccurrenceCounts[gid] = occurrences + 1;
-					}
-				}
+			const fallback = tripletRelations[chunkUuid] ?? [];
+			for (const [gid, rel] of fallback) {
+				take(gid, rel);
 			}
 		}
 
