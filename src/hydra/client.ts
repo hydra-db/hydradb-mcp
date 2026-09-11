@@ -15,7 +15,7 @@
  */
 
 import { Buffer } from "node:buffer";
-import { HydraDBClient } from "@hydradb/sdk";
+import { HydraDBClient, HydraDBError } from "@hydradb/sdk";
 import type { HydraDB as SDK } from "@hydradb/sdk";
 
 import { unwrap } from "./envelope.js";
@@ -589,31 +589,50 @@ export class ContextResource extends Resource {
 		};
 
 		// @hydradb/sdk 2.1.4 predates the titles request field and its generated
-		// serializer drops unknown properties. Keep ordinary queries on the SDK,
-		// but use the wrapper's equivalent transport when titles are present. Once
-		// the SDK exposes titles this branch can collapse back into sdk.query.
+		// serializer drops unknown properties. Its authenticated passthrough still
+		// supplies the SDK's auth, retry, timeout and fetch configuration, including
+		// for a ContextResource constructed directly without our RawTransport. Once
+		// the generated request exposes titles this can collapse back into sdk.query.
 		if (params.titles != null && params.titles.length > 0) {
-			if (!this.raw) {
-				throw new Error("title-filtered queries require the Hydra DB HTTP transport");
-			}
-			return sendRaw<SDK.SearchV2RetrievalResult>(this.raw, "/query", "POST", {
-				...scope,
-				query: params.query,
-				type: params.kind,
-				operator: params.operator,
-				query_by: queryBy,
-				max_results: params.maxResults,
-				mode: params.mode,
-				graph_context: params.graphContext,
-				alpha: params.alpha,
-				recency_bias: params.recencyBias,
-				query_apps: params.queryApps,
-				ids: params.ids,
-				titles: params.titles,
-				metadata_filters: params.metadataFilters,
-				num_related_chunks: params.numRelatedChunks,
-				acl: params.acl,
-			}, opts);
+			return this.call("/query", async () => {
+				const response = await this.sdk.fetch(
+					"/query",
+					{
+						method: "POST",
+						headers: { "API-Version": "2", "Content-Type": "application/json" },
+						body: JSON.stringify({
+							...scope,
+							query: params.query,
+							type: params.kind,
+							operator: params.operator,
+							query_by: queryBy,
+							max_results: params.maxResults,
+							mode: params.mode,
+							graph_context: params.graphContext,
+							alpha: params.alpha,
+							recency_bias: params.recencyBias,
+							query_apps: params.queryApps,
+							ids: params.ids,
+							titles: params.titles,
+							metadata_filters: params.metadataFilters,
+							num_related_chunks: params.numRelatedChunks,
+							acl: params.acl,
+						}),
+					},
+					req(opts),
+				);
+				const text = await response.text();
+				let body: unknown = text;
+				try {
+					body = text === "" ? null : JSON.parse(text);
+				} catch {
+					// Preserve a non-JSON proxy response for the shared error formatter.
+				}
+				if (!response.ok) {
+					throw new HydraDBError({ statusCode: response.status, body });
+				}
+				return body;
+			});
 		}
 
 		return this.call("/query", () => this.sdk.query(request, req(opts)));

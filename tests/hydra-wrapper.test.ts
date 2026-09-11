@@ -358,22 +358,28 @@ test("operator with an explicit hybrid retrieval is rejected, not sent", async (
 	assert.equal(calls.length, 0, "a request that cannot succeed must not reach the wire");
 });
 
-test("title-filtered queries use the raw v2 request until the SDK exposes titles", async () => {
-	const { sdk, calls } = querySdk();
+test("title-filtered queries use the SDK passthrough until its serializer exposes titles", async () => {
+	const calls: Record<string, unknown>[] = [];
 	let body: Record<string, unknown> | undefined;
+	const sdk = {
+		query(request: Record<string, unknown>) {
+			calls.push(request);
+			return Promise.resolve({ data: { chunks: [] }, success: true });
+		},
+		fetch(_input: Request | string | URL, init?: RequestInit) {
+			body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+			return Promise.resolve(
+				new Response(JSON.stringify({ success: true, data: { chunks: [] } }), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				}),
+			);
+		},
+	} as unknown as HydraDBClient;
 	const hydra = new HydraDB({
 		token: "t",
 		database: "db_test",
 		collection: "docs",
-		baseUrl: "https://api.example.test",
-		maxRetries: 0,
-		fetchFn: async (_input, init) => {
-			body = JSON.parse(String(init?.body)) as Record<string, unknown>;
-			return new Response(JSON.stringify({ success: true, data: { chunks: [] } }), {
-				status: 200,
-				headers: { "content-type": "application/json" },
-			});
-		},
 	}, sdk);
 
 	await hydra.context.query({

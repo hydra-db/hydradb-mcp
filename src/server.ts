@@ -2102,7 +2102,6 @@ export function createHydraDBServer(
 		titles: z
 			.array(z.string().trim().min(1))
 			.min(1)
-			.max(200)
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.titles),
 		metadata_filters: z
