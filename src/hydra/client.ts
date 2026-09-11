@@ -438,15 +438,22 @@ export function assertCollectionAllowed(
 }
 
 /**
- * Pull `meta.request_id` out of an envelope, or undefined when the response is
- * not enveloped (several SDK methods return bare objects — see envelope.ts).
- * Snake_case on the wire; the SDK does not camel-case `meta`.
+ * Pull the request id out of an envelope, or undefined when the response is not
+ * enveloped (several SDK methods return bare objects — see envelope.ts).
+ *
+ * BOTH spellings are read, and that is not defensiveness. The wire is
+ * snake_case, but the SDK camel-cases `meta` on the way through, so an SDK call
+ * yields `requestId` while anything read straight off the HTTP response yields
+ * `request_id` — which is the spelling errors.ts already handles for the raw
+ * transport path. A reader that knows only one of them works on some calls and
+ * silently returns undefined on the rest.
  */
 function readRequestId(value: unknown): string | undefined {
 	if (value == null || typeof value !== "object") return undefined;
 	const meta = (value as { meta?: unknown }).meta;
 	if (meta == null || typeof meta !== "object") return undefined;
-	const id = (meta as { request_id?: unknown }).request_id;
+	const m = meta as { requestId?: unknown; request_id?: unknown };
+	const id = typeof m.requestId === "string" ? m.requestId : m.request_id;
 	return typeof id === "string" && id !== "" ? id : undefined;
 }
 
@@ -1033,21 +1040,38 @@ export class FeedbackResource extends Resource {
 				? this.scope(params.collection, params.database)
 				: {};
 
-		return this.call("/feedback", () =>
-			this.sdk.feedback.submit(
-				{
-					request_id: requestId,
-					...(feedback !== "" ? { feedback } : {}),
-					...(params.rating ? { rating: params.rating } : {}),
-					source: params.source ?? "agent",
-					...(groundTruth ? { ground_truth: groundTruth } : {}),
-					...scope,
-					...(params.metadata && Object.keys(params.metadata).length > 0
-						? { metadata: params.metadata }
-						: {}),
-				} as never,
-				req(opts),
-			),
+		// The SDK cannot express this request. Its generated model for
+		// POST /feedback is an undiscriminated union of `{ feedback }` and
+		// `{ groundTruth }` — the anyOf in the spec collapsed to the two
+		// alternatives and lost every field they share — so its serializer
+		// STRIPS request_id, and the server rejects the call it produces:
+		//   Hydra DB /feedback -> 400: INVALID_INPUT: request_id is required
+		// Verified against prod. So this takes the hand-rolled HTTP path, which
+		// exists for exactly this (CONTRACT §2 rule 7), and sends the documented
+		// snake_case body. Move back to the SDK once its model carries the whole
+		// request.
+		if (!this.raw) {
+			throw new HydraWrapperError(
+				"Hydra DB /feedback → ERR: no HTTP transport configured",
+				"/feedback",
+			);
+		}
+		return sendRaw<FeedbackResult>(
+			this.raw,
+			"/feedback",
+			"POST",
+			{
+				request_id: requestId,
+				...(feedback !== "" ? { feedback } : {}),
+				...(params.rating ? { rating: params.rating } : {}),
+				source: params.source ?? "agent",
+				...(groundTruth ? { ground_truth: groundTruth } : {}),
+				...scope,
+				...(params.metadata && Object.keys(params.metadata).length > 0
+					? { metadata: params.metadata }
+					: {}),
+			},
+			opts,
 		);
 	}
 }

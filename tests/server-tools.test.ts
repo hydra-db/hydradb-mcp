@@ -52,10 +52,10 @@ function mockHydra(
 			if (typeof data === "function") {
 				return (data as (a: unknown, ro: unknown) => Promise<unknown>)(args, requestOptions);
 			}
-			// Envelope carries meta: request_id is what POST /feedback correlates
-			// on, and unwrap() drops it, so the onMeta channel is what a test of
-			// that path actually exercises.
-			return Promise.resolve({ data, success: true, meta: { request_id: "req-from-meta" } });
+			// camelCase because that is what the SDK actually returns — verified
+			// against prod, where an earlier snake_case mock here agreed with a
+			// wrong assumption in the reader and hid the bug from this suite.
+			return Promise.resolve({ data, success: true, meta: { requestId: "req-from-meta" } });
 		};
 
 	const sdk = {
@@ -67,9 +67,6 @@ function mockHydra(
 			delete: record("delete", { success: true, userMemoryDeleted: 1 }),
 			relations: record("relations", {}),
 			status: record("status", {}),
-		},
-		feedback: {
-			submit: record("feedback", { recorded: true, feedbackId: "fb_1", requestId: "r1" }),
 		},
 		databases: {
 			collections: record("collections", { collections: ["engineering", "sales"] }),
@@ -95,6 +92,34 @@ function mockHydra(
 		},
 		sdk,
 	);
+	// Feedback POSTs over the hand-rolled HTTP path, not the SDK (its generated
+	// model strips request_id — see FeedbackResource.submit). Only the wire is
+	// faked, through the transport's injectable fetchFn, so the REAL submit runs:
+	// stubbing the method instead would skip the validation and normalisation
+	// that live inside it, and those are most of what is worth testing here.
+	(hydra.feedback as unknown as { raw: Record<string, unknown> }).raw = {
+		token: "t",
+		baseUrl: "https://api.test",
+		timeoutMs: 5000,
+		maxRetries: 0,
+		fetchFn: async (_url: unknown, init?: { body?: string }) => {
+			calls.push({ method: "feedback", args: JSON.parse(init?.body ?? "{}") });
+			const body = {
+				data: {
+					recorded: true,
+					feedbackId: "fb_1",
+					requestId: "r1",
+					...((responses as Record<string, unknown>).feedback as object ?? {}),
+				},
+				success: true,
+			};
+			return new Response(JSON.stringify(body), {
+				status: 201,
+				headers: { "content-type": "application/json" },
+			});
+		},
+	};
+
 	// The subgraph read takes the raw HTTP path, not the SDK, so it is stubbed
 	// on the resource: without this it throws "no HTTP transport configured".
 	// The stub records like every SDK method so dispatch-level tests cover it.
