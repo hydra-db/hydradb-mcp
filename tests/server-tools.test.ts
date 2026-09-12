@@ -2414,6 +2414,27 @@ test("hydradb_ingest sends metadata and observation_date", async () => {
 	await client.close();
 });
 
+test("hydradb_ingest forwards metadata and observation_date with conversation turns", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+	await client.callTool({
+		name: "hydradb_ingest",
+		arguments: {
+			turns: [{ user: "We chose Atlas", assistant: "Noted" }],
+			metadata: { project: "hydradb", kind: "decision" },
+			observation_date: "2026-03-14",
+		},
+	});
+
+	const item = (
+		JSON.parse(String(calls.find((c) => c.method === "ingest")!.args.memories)) as Record<string, unknown>[]
+	)[0]!;
+	assert.deepEqual(item.user_assistant_pairs, [{ user: "We chose Atlas", assistant: "Noted" }]);
+	assert.deepEqual(item.metadata, { project: "hydradb", kind: "decision" });
+	assert.equal(item.observation_date, "2026-03-14");
+	await client.close();
+});
+
 test("metadata keys are omitted entirely when not provided", async () => {
 	const { hydra, calls } = mockHydra();
 	const client = await connect(hydra);
@@ -2423,6 +2444,22 @@ test("metadata keys are omitted entirely when not provided", async () => {
 		JSON.parse(String(calls.find((c) => c.method === "ingest")!.args.memories)) as Record<string, unknown>[]
 	)[0]!;
 
+	assert.ok(!("metadata" in item), "an absent field must not be sent as null");
+	assert.ok(!("observation_date" in item));
+	await client.close();
+});
+
+test("metadata and observation_date are omitted entirely when conversation turns omit them", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+	await client.callTool({
+		name: "hydradb_ingest",
+		arguments: { turns: [{ user: "hi", assistant: "hello" }] },
+	});
+
+	const item = (
+		JSON.parse(String(calls.find((c) => c.method === "ingest")!.args.memories)) as Record<string, unknown>[]
+	)[0]!;
 	assert.ok(!("metadata" in item), "an absent field must not be sent as null");
 	assert.ok(!("observation_date" in item));
 	await client.close();
