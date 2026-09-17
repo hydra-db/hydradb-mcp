@@ -857,7 +857,7 @@ test("context.subgraph carries acl principals to the wire", async () => {
 function captureSdk(seen: Record<string, unknown>) {
 	const grab = (key: string) => (req: unknown) => {
 		seen[key] = req;
-		return Promise.resolve({});
+		return Promise.resolve(key === "query" ? { success: true, data: { chunks: [] } } : {});
 	};
 	return {
 		query: grab("query"),

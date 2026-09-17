@@ -1,5 +1,5 @@
 import { Buffer } from "node:buffer";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -467,6 +467,19 @@ export function createHydraDBServer(
 		}
 	}
 
+	function singleScope(args: { database?: string; collection?: string }) {
+		return {
+			database: args.database?.trim() || hydra.database,
+			collection: args.collection?.trim() || hydra.collection || null,
+		};
+	}
+
+	function scopeText(scope: { database: string; collection?: string | null; collections?: string[] }): string {
+		return `Resolved scope: database ${JSON.stringify(scope.database)}, ` +
+			(scope.collections ? `collections ${JSON.stringify(scope.collections)}` :
+				scope.collection == null ? "workspace default" : `collection ${JSON.stringify(scope.collection)}`) + ".";
+	}
+
 	async function runQuery(args: {
 		query: string;
 		kind?: QueryKind;
@@ -515,16 +528,19 @@ export function createHydraDBServer(
 		let scopeCollections = args.collections;
 		let widened: string[] | undefined;
 		let tooManyToWiden: number | undefined;
+		let scopeWarning: string | undefined;
 
 		if (hydra.collection == null && args.collection == null && args.collections == null) {
 			// Listing is discovery: confined like it, before anything is sent.
 			assertDatabaseAllowed(database, hydra.allowedDatabases);
 			const names = await collectionNamesBounded(database, signal);
+			if (names == null) scopeWarning = "Collection discovery failed; only the workspace default was searched. Named collections may contain additional results.";
 			const allowed = hydra.allowedCollections;
 			const usable = (names ?? []).filter((n) => !allowed || allowed.includes(n));
 
 			if (usable.length > QUERY_FANOUT_MAX_COLLECTIONS) {
 				tooManyToWiden = usable.length;
+				scopeWarning = `Only the workspace default was searched; ${usable.length} discovered collections exceeded the automatic search limit. Choose explicit collections for wider coverage.`;
 			} else if (usable.length === 1) {
 				widened = usable;
 				scopeCollection = usable[0];
@@ -573,26 +589,25 @@ export function createHydraDBServer(
 			},
 		});
 
-		let raw: Awaited<ReturnType<typeof send>>;
-
-		try {
-			raw = await send();
-		} catch (err) {
-			const refused = (err as { name?: string } | null)?.name === "ScopeNotAllowedError";
-
-			if (widened == null || refused || signal?.aborted) throw err;
-			// A multi-collection search fails outright when any ONE collection's
-			// branch fails. The widening is an improvement, never a new way to
-			// fail: search the default scope, exactly as before it existed.
-			widened = undefined;
-			scopeCollection = undefined;
-			scopeCollections = undefined;
-			raw = await send();
-		}
+		// Once the search scope has been chosen, a failed query must remain a
+		// failure. Retrying in the workspace default silently changed the corpus
+		// and could turn malformed responses or inaccessible partitions into an
+		// apparently successful empty/partial answer.
+		const raw = await send();
 
 		// The renderer reads the SDK payload directly; there is no longer a
 		// snake_case mirror to convert into.
 		const res = raw;
+		const searchedCollections = scopeCollections != null
+			? Array.isArray(scopeCollections) ? scopeCollections : Object.keys(scopeCollections)
+			: undefined;
+		const resolvedScope = searchedCollections
+			? { database, collections: searchedCollections }
+			: singleScope({ database, collection: scopeCollection });
+		const queryResult = (text: string, extra: Record<string, unknown> = {}) => structuredResult(scopeWarning ? `${text}\n\nScope warning: ${scopeWarning}` : text, {
+			resolved_scope: resolvedScope, ...(requestId ? { request_id: requestId } : {}), ...extra,
+			...(scopeWarning ? { scope_warning: scopeWarning } : {}),
+		});
 
 		// The server can return more chunks than were asked for — a live call with
 		// max_results=10 came back with 15, and all 15 were rendered. Honour the
@@ -609,7 +624,7 @@ export function createHydraDBServer(
 			// Point at the discovery tool rather than letting the model conclude
 			// the data does not exist.
 			if (widened != null && widened.length > 1) {
-				return textResult(
+				return queryResult(
 					`No relevant ${resultNoun(kind)} found in any of the ${widened.length} collections of database ` +
 						`"${database}" (${widened.join(", ")}). Try rephrasing the question, or pass \`collection\` ` +
 						`to search one collection with its full result budget.`,
@@ -631,7 +646,7 @@ export function createHydraDBServer(
 					? ` This database has ${tooManyToWiden} collections, more than the ${QUERY_FANOUT_MAX_COLLECTIONS} searched automatically.`
 					: "";
 
-			return textResult(
+			return queryResult(
 				scope != null
 					? `No relevant ${resultNoun(kind)} found in collection "${scope}" of database "${database}". ` +
 						`The data may live in another collection — call ${TOOL_NAMES.LIST_COLLECTIONS} to list them, ` +
@@ -669,12 +684,38 @@ export function createHydraDBServer(
 
 		const legend =
 			`\n\n---\nEach [id: …] is a source id: pass one to ${TOOL_NAMES.INSPECT} for that ` +
-			`source's full content, or to ${TOOL_NAMES.DELETE} to remove it.` +
+			`source's content, or to ${TOOL_NAMES.DELETE} to remove it. Keep the resolved database, the source's collection, and your ACL on follow-up calls. ` +
+			`For a multi-collection result without a source collection, resolve that scope before inspecting; do not guess. ` +
+			`Continue inspect slices with next_args until has_more is false; a slice is not the whole document.` +
 			feedbackLine;
 
-		const headerAllowance = 120;
+		const scopeLine = scopeText(resolvedScope);
+		const headerAllowance = 120 + scopeLine.length + (scopeWarning?.length ?? 0) + 20;
+		const sourceRefs = new Map<string, Record<string, unknown>>();
+		const singleCollection = "collection" in resolvedScope
+			? resolvedScope.collection
+			: searchedCollections?.length === 1 ? searchedCollections[0] : undefined;
+		const scopedChunks = (res.chunks ?? []).map((chunk) => {
+			const collection = chunk.collection || singleCollection;
+			// A multi-collection result needs per-source provenance; an id alone
+			// is not unique across partitions. Never remember a shared last scope.
+			const scopeKnown = searchedCollections
+				? typeof collection === "string" && searchedCollections.includes(collection)
+				: "collection" in resolvedScope && collection === resolvedScope.collection;
+			const followScope = { database, ...(collection != null ? { collection } : {}), ...(args.acl != null ? { acl: args.acl } : {}) };
+			const ref = {
+				id: chunk.id, collection: collection ?? null,
+				...(chunk.sourceTitle ? { title: chunk.sourceTitle } : {}),
+				...(scopeKnown ? {
+					inspect_args: { id: chunk.id, ...followScope },
+					...(kind !== "all" ? { list_args: { kind, ids: [chunk.id], ...followScope } } : {}),
+				} : { scope_unresolved: true }),
+			};
+			sourceRefs.set(JSON.stringify([collection, chunk.id]), ref);
+			return { ...chunk, ...(collection != null ? { collection } : {}) };
+		});
 
-		const { text: contextStr, shown } = renderRecalledContext(res, {
+		const { text: contextStr, shown } = renderRecalledContext({ ...res, chunks: scopedChunks }, {
 			// Compact keeps every chunk but trims each body and drops the
 			// extra-context blocks; `full` is the unchanged rendering.
 			...(compact
@@ -683,8 +724,9 @@ export function createHydraDBServer(
 			maxTotalChars: QUERY_CHAR_BUDGET - legend.length - headerAllowance,
 		});
 
-		return textResult(
-			`Found ${shown} ${resultNoun(kind, shown)}:\n\n${contextStr}${legend}`,
+		return queryResult(
+			`Found ${shown} ${resultNoun(kind, shown)}:\n${scopeLine}\n\n${contextStr}${legend}`,
+			{ sources: [...sourceRefs.values()] },
 		);
 	}
 
@@ -946,6 +988,7 @@ export function createHydraDBServer(
 		}, { signal });
 
 		const { memories, page } = toMemoryList(raw);
+		const resolvedScope = singleScope(args);
 
 		if (memories.length === 0) {
 			// Declaring an outputSchema obliges EVERY return path to carry structured
@@ -957,6 +1000,7 @@ export function createHydraDBServer(
 					: emptyListText("memories", args.database, args.collection),
 				{
 					kind: "memory",
+					resolved_scope: resolvedScope,
 					items: [],
 					shown: 0,
 					total: page.total ?? 0,
@@ -978,9 +1022,10 @@ export function createHydraDBServer(
 		});
 
 		return structuredResult(
-			`${coverage(memories.length, page, args.page)} memories:\n\n${lines.join("\n")}`,
+			`${coverage(memories.length, page, args.page)} memories:\n${scopeText(resolvedScope)}\n\n${lines.join("\n")}`,
 			{
 				kind: "memory",
+				resolved_scope: resolvedScope,
 				// Bounded like the text preview. The structured payload previously
 				// carried every memory_content in full, so a host consuming it got
 				// megabytes from a routine inventory call while the prose beside it
@@ -1017,6 +1062,8 @@ export function createHydraDBServer(
 	async function runListSources(args: {
 		source_ids?: string[];
 		external_id?: string;
+		parent_external_id?: string;
+		connector_id?: string;
 		url?: string;
 		provider?: string;
 		page?: number;
@@ -1029,6 +1076,7 @@ export function createHydraDBServer(
 
 		const sourceFields: Record<string, string> = {};
 		if (args.external_id != null) sourceFields.app_external_id = args.external_id;
+		if (args.parent_external_id != null) sourceFields.app_parent_id = args.parent_external_id;
 		if (args.url != null) sourceFields.url = args.url;
 		if (args.provider != null) sourceFields.app_provider = args.provider;
 
@@ -1036,6 +1084,7 @@ export function createHydraDBServer(
 			kind: "knowledge",
 			ids: args.source_ids,
 			sourceFields: Object.keys(sourceFields).length > 0 ? sourceFields : undefined,
+			connectorId: args.connector_id,
 			page: args.page,
 			pageSize: args.page_size,
 			acl: args.acl,
@@ -1044,12 +1093,14 @@ export function createHydraDBServer(
 		}, { signal });
 
 		const { sources, page } = toSourceList(raw);
+		const resolvedScope = singleScope(args);
+		const followScope = { database: resolvedScope.database, ...(resolvedScope.collection != null ? { collection: resolvedScope.collection } : {}), ...(args.acl != null ? { acl: args.acl } : {}) };
 
 		if (sources.length === 0) {
 			const collection = args.collection?.trim() || hydra.collection;
 			const lookupScope = `database ${JSON.stringify(args.database?.trim() || hydra.database)}, ` +
 				(collection == null ? "workspace default" : `collection ${JSON.stringify(collection)}`);
-			const emptyText = Object.keys(sourceFields).length > 0
+			const emptyText = Object.keys(sourceFields).length > 0 || args.connector_id != null
 				? `No visible sources match the supplied source filters on page ${page.page ?? args.page ?? 1} in ${lookupScope}. ` +
 					"This does not prove the document was never ingested. Check the scope, page and exact stored identity; keep the caller's ACL unchanged."
 				: args.page != null && args.page > 1
@@ -1060,6 +1111,7 @@ export function createHydraDBServer(
 				emptyText,
 				{
 					kind: "knowledge",
+					resolved_scope: resolvedScope,
 					items: [],
 					shown: 0,
 					total: page.total ?? 0,
@@ -1073,25 +1125,37 @@ export function createHydraDBServer(
 			const title = s.title ? ` — ${s.title}` : "";
 			const type = s.type ? ` (${s.type})` : "";
 
-			return `${i + 1}. [${s.id}]${title}${type}`;
+			const identity = [s.provider && `provider=${JSON.stringify(s.provider)}`, s.connector_id && `connector_id=${JSON.stringify(s.connector_id)}`, s.external_id && `external_id=${JSON.stringify(s.external_id)}`, s.parent_external_id && `parent_external_id=${JSON.stringify(s.parent_external_id)}`].filter(Boolean).join(", ");
+			return `${i + 1}. [${s.id}]${title}${type}${identity ? ` — ${identity}` : ""}`;
 		});
 
 		// Was `${total} sources:` — the corpus-wide total printed above a single
 		// page of rows, so "412 sources:" sat over 50 lines with no marker and no
 		// way to reach the other 362.
 		return structuredResult(
-			`${coverage(sources.length, page, args.page)} sources:\n\n${lines.join("\n")}`,
+			`${coverage(sources.length, page, args.page)} sources:\n${scopeText(resolvedScope)}\n\n${lines.join("\n")}\n\nKeep this scope and your ACL when inspecting these ids.` +
+				(args.parent_external_id ? " These are indexed direct children, not proof of the complete provider hierarchy. Paginate all results, then traverse each child's external_id explicitly for descendants." : ""),
 			{
 				kind: "knowledge",
+				resolved_scope: resolvedScope,
 				items: sources.map((src) => ({
 					id: src.id,
 					...(src.title != null ? { title: src.title } : {}),
 					...(src.type != null ? { type: src.type } : {}),
+					...(src.external_id != null ? { external_id: src.external_id } : {}),
+					...(src.provider != null ? { provider: src.provider } : {}),
+					...(src.parent_external_id != null ? { parent_external_id: src.parent_external_id } : {}),
+					...(src.connector_id != null ? { connector_id: src.connector_id } : {}),
+					...(src.external_id && src.provider && src.connector_id ? {
+						children_args: { kind: "knowledge", parent_external_id: src.external_id, provider: src.provider, connector_id: src.connector_id, ...followScope },
+					} : {}),
+					inspect_args: { id: src.id, ...followScope },
 				})),
 				shown: sources.length,
 				total: page.total ?? sources.length,
 				page: page.page ?? args.page ?? 1,
 				has_more: hasMore(sources.length, page, args.page),
+				...(hasMore(sources.length, page, args.page) ? { next_args: { ...args, kind: "knowledge", ...followScope, page: (page.page ?? args.page ?? 1) + 1 } } : {}),
 			},
 		);
 	}
@@ -1190,6 +1254,7 @@ export function createHydraDBServer(
 		const start = Math.max(0, offset ?? 0);
 		const budget = Math.min(limit ?? INSPECT_CHAR_BUDGET, INSPECT_CHAR_BUDGET);
 		const total = res.content.length;
+		if (start > total) throw new Error(`Inspect offset ${start} exceeds source length ${total}; restart at offset 0 if the source changed.`);
 
 		if (start === 0 && total <= budget) return res.content;
 
@@ -1421,7 +1486,8 @@ export function createHydraDBServer(
 		}
 
 		const mode = args.mode ?? "content";
-		const parts: string[] = [`Source: ${args.source_id}`];
+		const resolvedScope = singleScope(args);
+		const parts: string[] = [`Source: ${args.source_id}`, scopeText(resolvedScope)];
 
 		// `presignedUrl` was never read, so `mode: "url"` — documented in the
 		// schema and the README — returned "(no text content)" and nothing else.
@@ -1438,7 +1504,31 @@ export function createHydraDBServer(
 			parts.push(inspectBody(res, args.offset, args.limit));
 		}
 
-		return textResult(parts.join("\n\n"));
+		const readsText = mode === "content" || mode === "both";
+		const content = readsText && res.content != null && res.content !== "" ? res.content : undefined;
+		const offset = args.offset ?? 0;
+		const end = content == null ? offset : Math.min(offset + (args.limit ?? INSPECT_CHAR_BUDGET), content.length);
+		const hasMoreContent = content != null && end < content.length;
+		const contentHash = content != null ? createHash("sha256").update(content).digest("hex") : undefined;
+		if (contentHash != null && content != null && (offset > 0 || end < content.length)) {
+			parts.push(`Content SHA-256: ${contentHash}. Each slice re-fetches the source; restart at offset 0 if this changes.`);
+		}
+		return structuredResult(parts.join("\n\n"), {
+			id: args.source_id, resolved_scope: resolvedScope,
+			...(mode !== "content" && res.presignedUrl ? { download_url: res.presignedUrl } : {}),
+			...(readsText ? {
+				content: content?.slice(offset, end) ?? null,
+				offset, end, total_characters: content?.length ?? null,
+				offset_unit: "utf16_code_units",
+				has_more: hasMoreContent,
+				complete: content != null && offset === 0 && end === content.length,
+				...(contentHash != null ? { content_sha256: contentHash } : {}),
+				...(hasMoreContent ? {
+					next_args: { ...args, source_id: undefined, id: args.source_id, database: resolvedScope.database,
+						...(resolvedScope.collection != null ? { collection: resolvedScope.collection } : {}), offset: end },
+				} : {}),
+			} : {}),
+		});
 	}
 
 	async function runStatus(
@@ -2564,6 +2654,12 @@ export function createHydraDBServer(
 			.min(1)
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.LIST].params.external_id),
+		parent_external_id: z
+			.string().trim().min(1).optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.LIST].params.parent_external_id),
+		connector_id: z
+			.string().trim().min(1).optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.LIST].params.connector_id),
 		url: z
 			.string()
 			.trim()
@@ -2708,18 +2804,26 @@ export function createHydraDBServer(
 	// duplicate the rendered context rather than replace it.
 	const listOutputSchema = {
 		kind: z.enum(["memory", "knowledge"]),
+		resolved_scope: z.object({ database: z.string(), collection: z.string().nullable() }).optional(),
 		items: z.array(
 			z.object({
 				id: z.string(),
 				title: z.string().optional(),
 				type: z.string().optional(),
 				content: z.string().optional(),
+				external_id: z.string().optional(),
+				provider: z.string().optional(),
+				parent_external_id: z.string().optional(),
+				connector_id: z.string().optional(),
+				children_args: z.record(z.unknown()).optional(),
+				inspect_args: z.object({ id: z.string(), database: z.string(), collection: z.string().optional(), acl: z.array(z.string()).optional() }).optional(),
 			}),
 		),
 		shown: z.number(),
 		total: z.number(),
 		page: z.number(),
 		has_more: z.boolean(),
+		next_args: z.record(z.unknown()).optional(),
 	};
 
 	const ingestOutputSchema = {
@@ -2994,6 +3098,8 @@ export function createHydraDBServer(
 				ids?: string[];
 				source_ids?: string[];
 				external_id?: string;
+				parent_external_id?: string;
+				connector_id?: string;
 				url?: string;
 				provider?: string;
 				page?: number;
@@ -3039,9 +3145,17 @@ export function createHydraDBServer(
 			// unrelated, unfiltered memory listing.
 			const sourceSelectors = [
 				a.external_id != null ? "external_id" : null,
+				a.parent_external_id != null ? "parent_external_id" : null,
+				a.connector_id != null ? "connector_id" : null,
 				a.url != null ? "url" : null,
 				a.provider != null ? "provider" : null,
 			].filter((s): s is string => s != null);
+			if (a.parent_external_id != null && a.provider == null) {
+				throw new Error(`${TOOL_NAMES.LIST}: parent_external_id requires provider; parent IDs are not unique across providers.`);
+			}
+			if (a.parent_external_id != null && a.connector_id == null) {
+				throw new Error(`${TOOL_NAMES.LIST}: parent_external_id requires connector_id; provider alone does not identify a site/account. Resolve the parent with external_id first and copy its stored connector_id; never guess it.`);
+			}
 			if (a.kind !== "knowledge" && sourceSelectors.length > 0) {
 				throw new Error(
 					`${TOOL_NAMES.LIST}: ${sourceSelectors.join(", ")} ` +
@@ -3056,6 +3170,8 @@ export function createHydraDBServer(
 					{
 						source_ids: ids,
 						external_id: a.external_id,
+						parent_external_id: a.parent_external_id,
+						connector_id: a.connector_id,
 						url: a.url,
 						provider: a.provider,
 						page: a.page,

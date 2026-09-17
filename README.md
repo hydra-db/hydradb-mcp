@@ -100,6 +100,12 @@ chunks with their source id, a relevance score, and knowledge-graph context.
 | `query_apps` | boolean | No | App-aware retrieval over connector sources — exact IDs and actors, thread reconstruction, parent/child expansion (default: false) |
 | `collections` | array | No | Search several collections at once. Pass either this or `collection`, never both |
 
+Results include `resolved_scope` and per-source `inspect_args` when the source's
+collection is known. Copy those arguments, including your ACL, to follow-up calls;
+tools never inherit a previous call's scope. With multiple collections, an ID
+alone is not enough: use the collection attached to that source. If it is missing,
+resolve the collection before inspecting. Explicit scope is never widened.
+
 ### **hydradb_ingest**
 
 Saves information so it outlives the session. Provide **exactly one** of `text`
@@ -135,6 +141,8 @@ tells you nothing about which knowledge sources exist.
 | `ids` | array | No | Restrict to these ids |
 | `source_ids` | array | No | Deprecated alias for `ids` |
 | `external_id` | string | No | Exact originating-system ID, such as a Confluence page ID or Drive file ID; knowledge only |
+| `parent_external_id` | string | No | Exact provider parent ID; returns indexed direct children only. Requires `kind: "knowledge"`, `provider` and `connector_id` |
+| `connector_id` | string | No | Exact originating connector instance from stored `additional_metadata.connector_id`; required for parent lookup, optional for other knowledge lookups |
 | `url` | string | No | Exact original URL stored at ingestion; knowledge only, not a live web fetch |
 | `provider` | string | No | Connector provider, such as `confluence` or `google_drive`; knowledge only |
 | `page` | number | No | Page to return, 1-indexed (default: 1) |
@@ -166,6 +174,18 @@ No visible match in a scope is not proof a document was never ingested. For a
 document known only by name, use `hydradb_query.titles` or ordinary search instead.
 These selectors are rejected for `kind: "memory"`, never silently ignored.
 
+To enumerate indexed children, resolve the parent first, then use `parent_external_id`
+with its provider ID, `provider`, `connector_id`, and the same database, collection
+and ACL. Provider IDs can repeat across sites/accounts; never guess a connector ID.
+Missing connector metadata needs investigation before safely enumerating children.
+Follow `next_args` while
+`has_more` is true. Returned identity fields (`external_id`, `provider`,
+`parent_external_id`, `connector_id`) are included when stored. For descendants, use
+each child's `children_args`, track visited identities, and inspect each
+document separately. This is not a live provider tree: absent/stale parent metadata,
+permissions or incomplete ingestion can omit children. `hydradb_subgraph` includes
+other relationships and bounded traversal; it is not an exhaustive child listing.
+
 ### **hydradb_inspect**
 
 Fetches one source's full content by id.
@@ -181,6 +201,13 @@ Fetches one source's full content by id.
 
 Long sources come back in slices, and binary sources are never inlined — you get
 their type and size, and `mode: "url"` returns a download link.
+
+Text and structured output expose the same bounded slice. Follow `next_args` until
+`has_more` is false, keeping the same scope and ACL. Offsets count UTF-16 code units;
+a 125,000-character source needs seven default-size calls, not three. `complete`
+means the current response contains the whole text. Each slice re-fetches current
+content; compare `content_sha256` and restart if it changes. There is no pinned
+snapshot across calls. Reading a document index does not read every linked document.
 
 ### **hydradb_feedback**
 

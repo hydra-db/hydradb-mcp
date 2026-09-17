@@ -15,7 +15,7 @@
  */
 
 import { Buffer } from "node:buffer";
-import { HydraDBClient, HydraDBEnvironment, HydraDBError } from "@hydradb/sdk";
+import { HydraDBClient, HydraDBEnvironment, HydraDBError, serialization } from "@hydradb/sdk";
 import type { HydraDB as SDK } from "@hydradb/sdk";
 import { z } from "zod";
 
@@ -93,6 +93,20 @@ const STDERR_LOGGER = {
 /** Wrapper options → the SDK's per-request options, omitted when there is nothing to say. */
 function req(opts?: RequestOptions): { abortSignal?: AbortSignal } | undefined {
 	return opts?.signal ? { abortSignal: opts.signal } : undefined;
+}
+
+/** Generated deserialization is deliberately permissive; reject false empties. */
+function validateQueryResponse(response: unknown): void {
+	const successful = z.object({ success: z.literal(true).optional(), error: z.null().optional() });
+	const payload = unwrap<unknown>(response);
+	if (!successful.safeParse(response).success || !successful.extend({
+		chunks: z.array(z.object({ id: z.string().trim().min(1) })),
+	}).safeParse(payload).success) {
+		throw new HydraDBError({ statusCode: 200, body: { error: {
+			code: "INVALID_QUERY_RESPONSE",
+			message: "Invalid successful query response: expected a chunks array with nonempty source IDs and no failure flag.",
+		} } });
+	}
 }
 
 export interface HydraConfig {
@@ -261,6 +275,8 @@ export interface ListParams {
 	 * means no such narrowing.
 	 */
 	sourceFields?: Record<string, string>;
+	/** Exact originating connector instance, stored in additional_metadata. */
+	connectorId?: string;
 }
 
 export interface InspectParams {
@@ -705,7 +721,17 @@ export class ContextResource extends Resource {
 				if (!response.ok) {
 					throw new HydraDBError({ statusCode: response.status, body });
 				}
-					return body;
+					validateQueryResponse(body);
+					// Use the SAME wire-to-SDK conversion as sdk.query, including nested
+					// graph context and metadata. Casting raw JSON loses their contents.
+					const envelope = unwrap<unknown>(body) === body ? { success: true, data: body } : body;
+					return serialization.HandlerEnvelopeSearchV2RetrievalResult.parseOrThrow(envelope, {
+						unrecognizedObjectKeys: "passthrough",
+						allowUnrecognizedUnionMembers: true,
+						allowUnrecognizedEnumValues: true,
+						skipValidation: true,
+						breadcrumbsPrefix: ["response"],
+					});
 				},
 				// The request id has to survive this path too. A query that used
 				// `titles` would otherwise print no id, and hydradb_feedback would
@@ -717,7 +743,11 @@ export class ContextResource extends Resource {
 			);
 		}
 
-		return this.call("/query", () => this.sdk.query(request, req(opts)), opts?.onMeta);
+		return this.call("/query", async () => {
+			const response = await this.sdk.query(request, req(opts));
+			validateQueryResponse(response);
+			return response;
+		}, opts?.onMeta);
 	}
 
 	/**
@@ -836,7 +866,7 @@ export class ContextResource extends Resource {
 		// titles filter hit on /query). Its authenticated passthrough still
 		// supplies auth, retry, timeout and fetch config. Once the generated
 		// request exposes `filters` this can collapse back into sdk.context.list.
-		if (hasSourceFields) {
+		if (hasSourceFields || params.connectorId != null) {
 			const scope = this.scope(params.collection, params.database);
 			return this.call<SDK.ListV2ListResponse, unknown>(
 				"/context/list",
@@ -856,7 +886,10 @@ export class ContextResource extends Resource {
 								page: params.page,
 								page_size: params.pageSize,
 								acl: params.acl,
-								filters: { source_fields: params.sourceFields },
+								filters: {
+									source_fields: params.sourceFields,
+									additional_metadata: params.connectorId != null ? { connector_id: params.connectorId } : undefined,
+								},
 								group_threads: false,
 							}),
 						},

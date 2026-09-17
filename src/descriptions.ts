@@ -154,6 +154,16 @@ const PARAM = {
 		"when known; multiple sites or copies may still match, so inspect the returned candidates. " +
 		"This resolves the Hydra DB source ids you then " +
 		"pass to hydradb_inspect (to read it) or to hydradb_query `source_ids` (to search inside it).",
+	list_parent_external_id:
+		"List indexed DIRECT children of this originating-system parent id (not a Hydra DB source id). " +
+		"Requires kind: knowledge, provider and connector_id to identify the originating site/account. Exact stored app_parent_id match; no live provider fetch. " +
+		"Follow every page, then use each child's external_id as parent_external_id to enumerate descendants. " +
+		"Missing or stale parent metadata means this is not proof of the complete provider hierarchy.",
+	list_connector_id:
+		"Exact connector instance ID stored in additional_metadata.connector_id; knowledge only. " +
+		"Required for parent_external_id because provider IDs can repeat across sites/accounts. " +
+		"Resolve the parent using external_id or url and copy its returned connector_id; never guess it. " +
+		"For existing identity lookups this is optional: omitting it can return candidates from multiple connections.",
 	list_url:
 		"Look up a source by its exact original URL (the `url` stored at ingestion). Exact match " +
 		"only — no prefix or partial. Use it when you have the full canonical link to a document. " +
@@ -175,7 +185,7 @@ const PARAM = {
 		"chunk to its first ~600 characters and omits the surrounding-context blocks — " +
 		"enough to judge relevance and pick a source to inspect. 'full' returns every " +
 		"chunk whole; use it when the snippets are being cut off mid-answer. Either way " +
-		"the response is capped, and hydradb_inspect returns any single source in full.",
+		"the response is capped; hydradb_inspect reads a source in slices of at most 20000 characters.",
 	fetch_source_id: "The source ID to fetch content for",
 	subgraph_id:
 		"The id of the item to start from — the value shown as [id: …] in hydradb_query results " +
@@ -315,7 +325,7 @@ const INSPECT_BODY = `Fetch the full original content of ONE stored item by its 
 
 The id is the value shown as \`[id: …]\` in hydradb_query results and in [brackets] in hydradb_list output. Ids are not guessable — take one from those tools rather than constructing it.
 
-Long sources come back in slices; the response says where it stopped and what offset continues it. Binary sources are never inlined — you get their type and size, and \`mode: "url"\` returns a download link.`;
+Keep the returned database, collection and caller ACL on every follow-up; scope is never inherited from an earlier tool call. Long sources come back in slices of at most 20000 UTF-16 code units. Follow structured \`next_args\` (or the text offset) until \`has_more\` is false; \`complete\` means THIS response contains the whole text, not that earlier slices were read. A 125000-character source needs seven default-size calls. Each call re-fetches current content; compare \`content_sha256\` across slices and restart if it changes. Reading an index does not read the documents it links to. Binary sources are never inlined — you get their type and size, and \`mode: "url"\` returns a download link.`;
 
 /**
  * The dialect notes every graph tool needs to state.
@@ -445,12 +455,16 @@ DIRECT LOOKUP BY PROVIDER ID OR EXACT URL: when the user gives a document's orig
 
 Results are paginated. The response says how many of the total it showed and how to reach the rest; do not treat the first page as the whole store. An empty result for an \`external_id\`/\`url\` lookup means no visible matching source on this page in the resolved database/collection. Check the scope, page and exact stored identity; it does not by itself prove the document was never ingested. Keep the caller's ACL unchanged. A legacy provider-metadata mismatch may need a separate external-id-only diagnostic, but never silently discard a requested filter.
 
+INDEXED DIRECT CHILDREN: pass \`parent_external_id\` (the provider parent ID, NOT its Hydra DB source ID), \`provider\` and \`connector_id\`, with kind: "knowledge". Resolve the parent first and copy its stored connector ID; provider alone does not namespace sites/accounts, and missing connector metadata cannot be guessed. Follow \`next_args\` while \`has_more\` is true, then use each returned child's \`children_args\` to enumerate descendants, tracking visited identities. This reads indexed parent metadata, not a live provider tree; missing/stale metadata or permissions can omit children. Existing external-ID/URL lookups without connector_id may return multiple candidates; never assume uniqueness. Preserve \`resolved_scope\` and caller ACL on every list/query/inspect call; there is no inherited last scope.
+
 Memory rows come back as [id] content. Knowledge rows as [id] — title (type), with no content — pass an id to hydradb_inspect for the text.`,
 		params: {
 			acl: PARAM.acl,
 			kind: PARAM.kind,
 			source_ids: PARAM.source_ids,
 			external_id: PARAM.list_external_id,
+			parent_external_id: PARAM.list_parent_external_id,
+			connector_id: PARAM.list_connector_id,
 			url: PARAM.list_url,
 			provider: PARAM.list_provider,
 			page: PARAM.page,

@@ -88,7 +88,7 @@ function mockHydra(
 			const path = String(typeof input === "object" && "url" in input ? input.url : input);
 			const method = path.split("/").filter(Boolean).pop() ?? "fetch";
 			calls.push({ method: `${method}-fetch`, args: JSON.parse(String(init?.body ?? "{}")) });
-			const data = "list" in responses ? responses.list : { sources: [], total: 0 };
+			const data = method === "query" ? { chunks: [] } : "list" in responses ? responses.list : { sources: [], total: 0 };
 			return new Response(JSON.stringify({ success: true, data }), {
 				status: 200,
 				headers: { "content-type": "application/json" },
@@ -3597,7 +3597,7 @@ test("a hanging collection listing does not stall the query", async () => {
 	}
 });
 
-test("a failed multi-collection search falls back to the default scope instead of erroring", async () => {
+test("a failed multi-collection search stays an error rather than silently changing scope", async () => {
 	const { hydra, calls } = mockHydra(
 		{
 			query: (args: { collections?: unknown }) =>
@@ -3610,11 +3610,10 @@ test("a failed multi-collection search falls back to the default scope instead o
 
 	const client = await connect(hydra);
 	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
-	assert.notEqual(result.isError, true);
+	assert.equal(result.isError, true);
 	const qs = queryCall(calls);
-	assert.equal(qs.length, 2);
+	assert.equal(qs.length, 1);
 	assert.deepEqual(qs[0]!.args.collections, ["engineering", "sales"]);
-	assert.equal(qs[1]!.args.collections, undefined);
 	await client.close();
 });
 
@@ -3744,7 +3743,7 @@ test("feedback: recorded:false is reported as not stored, not as success", async
 
 test("query: prints the request id so feedback has something to attach to", async () => {
 	const { hydra } = mockHydra({
-		query: { chunks: [{ chunk_id: "c1", source_id: "s1", chunk_content: "hello" }] },
+		query: { chunks: [{ chunkUuid: "c1", id: "s1", chunkContent: "hello" }] },
 	});
 
 	const client = await connect(hydra);
