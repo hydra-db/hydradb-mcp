@@ -145,6 +145,24 @@ const PARAM = {
 		"single listing covers both. Call this twice to see everything.",
 	source_ids:
 		"Optional array of specific source IDs to filter by. If omitted, lists all sources.",
+	list_external_id:
+		"Look up a source by the id it has in its ORIGINATING system — a Confluence page id, " +
+		"a Jira issue key, a Google Drive file id, or a GitHub owner/repo:path — rather than Hydra DB's own " +
+		"source id. Use this when a user gives you a link or a provider id (e.g. a Confluence " +
+		"URL ending in /pages/123456/...) and you need the one exact source it maps to. " +
+		"Only valid with kind: knowledge. Exact match, case-sensitive. Pair with `provider` " +
+		"when known; multiple sites or copies may still match, so inspect the returned candidates. " +
+		"This resolves the Hydra DB source ids you then " +
+		"pass to hydradb_inspect (to read it) or to hydradb_query `source_ids` (to search inside it).",
+	list_url:
+		"Look up a source by its exact original URL (the `url` stored at ingestion). Exact match " +
+		"only — no prefix or partial. Use it when you have the full canonical link to a document. " +
+		"Only valid with kind: knowledge. Prefer `external_id` when you have a provider id, " +
+		"since URLs vary in trailing form. This does not open or fetch an arbitrary web URL.",
+	list_provider:
+		"Restrict the listing to one connector provider (e.g. \"confluence\", \"jira\", " +
+		"\"google_drive\", \"github\"). Only valid with kind: knowledge. Most useful paired " +
+		"with `external_id`; provider alone does not identify a unique source or site.",
 	page:
 		"Which page of results to return, 1-indexed (default: 1). The response reports how " +
 		"many of the total it showed; pass the next page to continue rather than assuming " +
@@ -423,13 +441,18 @@ export const TOOL_DESCRIPTIONS = {
 
 Use it for inventory questions ("what do you remember about me?", "which documents are indexed?") and to obtain ids. For "what do you know about X", use hydradb_query instead — listing everything and reading it is far more expensive and loses relevance ranking.
 
-Results are paginated. The response says how many of the total it showed and how to reach the rest; do not treat the first page as the whole store.
+DIRECT LOOKUP BY PROVIDER ID OR EXACT URL: when the user gives a document's originating-system id or its full link (a Confluence page id such as the 123456 in .../pages/123456/..., a Jira key, a Drive file id, or the complete canonical URL), first use kind: "knowledge" with \`external_id\` (or \`url\`) to resolve matching sources, then hydradb_inspect the selected source or pass its id to hydradb_query \`source_ids\` to search within it. Both match EXACTLY: \`external_id\` is the stored provider id, \`url\` is the whole stored URL (no prefix, no partial, no URL normalization or live web fetch). Multiple selectors are combined with AND, not alternatives. Multiple sources may match: inspect the candidates rather than assuming uniqueness. These are identity lookups, not name search — there is no title/name selector here, so a document known only by its human title is still found with hydradb_query (semantic) or its \`titles\` filter, not with this tool.
+
+Results are paginated. The response says how many of the total it showed and how to reach the rest; do not treat the first page as the whole store. An empty result for an \`external_id\`/\`url\` lookup means no visible matching source on this page in the resolved database/collection. Check the scope, page and exact stored identity; it does not by itself prove the document was never ingested. Keep the caller's ACL unchanged. A legacy provider-metadata mismatch may need a separate external-id-only diagnostic, but never silently discard a requested filter.
 
 Memory rows come back as [id] content. Knowledge rows as [id] — title (type), with no content — pass an id to hydradb_inspect for the text.`,
 		params: {
 			acl: PARAM.acl,
 			kind: PARAM.kind,
 			source_ids: PARAM.source_ids,
+			external_id: PARAM.list_external_id,
+			url: PARAM.list_url,
+			provider: PARAM.list_provider,
 			page: PARAM.page,
 			page_size: PARAM.page_size,
 			database: PARAM.database,

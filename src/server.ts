@@ -274,7 +274,14 @@ function trackInFlight<T>(work: () => Promise<T>): Promise<T> {
 
 	inFlight++;
 
-	return work().finally(() => {
+	// `work()` may throw SYNCHRONOUSLY — a tool handler that rejects an argument
+	// combination before it awaits anything (e.g. the list source-selector guard).
+	// A bare `work().finally()` would let that throw escape before `.finally` is
+	// attached, so `inFlight` would be incremented and never decremented, and a
+	// graceful shutdown waiting for it to reach zero would hang forever. Running
+	// `work` inside an async wrapper turns a synchronous throw into a rejected
+	// promise, so the decrement runs on every exit path.
+	return (async () => work())().finally(() => {
 		inFlight--;
 
 		if (inFlight === 0) {
@@ -1009,6 +1016,9 @@ export function createHydraDBServer(
 
 	async function runListSources(args: {
 		source_ids?: string[];
+		external_id?: string;
+		url?: string;
+		provider?: string;
 		page?: number;
 		page_size?: number;
 		acl?: string[];
@@ -1017,9 +1027,15 @@ export function createHydraDBServer(
 	}, signal?: AbortSignal): Promise<ToolResult> {
 		logger.debug(TOOL_NAMES.LIST);
 
+		const sourceFields: Record<string, string> = {};
+		if (args.external_id != null) sourceFields.app_external_id = args.external_id;
+		if (args.url != null) sourceFields.url = args.url;
+		if (args.provider != null) sourceFields.app_provider = args.provider;
+
 		const raw = await hydra.context.list({
 			kind: "knowledge",
 			ids: args.source_ids,
+			sourceFields: Object.keys(sourceFields).length > 0 ? sourceFields : undefined,
 			page: args.page,
 			pageSize: args.page_size,
 			acl: args.acl,
@@ -1030,10 +1046,18 @@ export function createHydraDBServer(
 		const { sources, page } = toSourceList(raw);
 
 		if (sources.length === 0) {
-			return structuredResult(
-				args.page != null && args.page > 1
+			const collection = args.collection?.trim() || hydra.collection;
+			const lookupScope = `database ${JSON.stringify(args.database?.trim() || hydra.database)}, ` +
+				(collection == null ? "workspace default" : `collection ${JSON.stringify(collection)}`);
+			const emptyText = Object.keys(sourceFields).length > 0
+				? `No visible sources match the supplied source filters on page ${page.page ?? args.page ?? 1} in ${lookupScope}. ` +
+					"This does not prove the document was never ingested. Check the scope, page and exact stored identity; keep the caller's ACL unchanged."
+				: args.page != null && args.page > 1
 					? `No sources on page ${args.page}.`
-					: emptyListText("sources", args.database, args.collection),
+					: emptyListText("sources", args.database, args.collection);
+
+			return structuredResult(
+				emptyText,
 				{
 					kind: "knowledge",
 					items: [],
@@ -2534,6 +2558,24 @@ export function createHydraDBServer(
 			.array(z.string())
 			.optional()
 			.describe("Deprecated alias for `ids`."),
+		external_id: z
+			.string()
+			.trim()
+			.min(1)
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.LIST].params.external_id),
+		url: z
+			.string()
+			.trim()
+			.min(1)
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.LIST].params.url),
+		provider: z
+			.string()
+			.trim()
+			.min(1)
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.LIST].params.provider),
 		page: z
 			.number()
 			.int()
@@ -2951,6 +2993,9 @@ export function createHydraDBServer(
 				kind?: "memory" | "knowledge";
 				ids?: string[];
 				source_ids?: string[];
+				external_id?: string;
+				url?: string;
+				provider?: string;
 				page?: number;
 				page_size?: number;
 				acl?: string[];
@@ -2986,10 +3031,33 @@ export function createHydraDBServer(
 
 			const ids = a.ids ?? a.source_ids;
 
+			// external_id/url/provider resolve a source by its originating-system
+			// identity via /context/list source_fields, which only exist on the
+			// knowledge (source) corpus — memories have no provider identity. The
+			// memory handler cannot honour them, so reject the combination loudly
+			// rather than silently dropping the selector and returning an
+			// unrelated, unfiltered memory listing.
+			const sourceSelectors = [
+				a.external_id != null ? "external_id" : null,
+				a.url != null ? "url" : null,
+				a.provider != null ? "provider" : null,
+			].filter((s): s is string => s != null);
+			if (a.kind !== "knowledge" && sourceSelectors.length > 0) {
+				throw new Error(
+					`${TOOL_NAMES.LIST}: ${sourceSelectors.join(", ")} ` +
+					`${sourceSelectors.length === 1 ? "is" : "are"} only valid with ` +
+					`kind: "knowledge" — memories carry no provider identity. ` +
+					`Set kind: "knowledge" to look a source up by its provider id or URL.`,
+				);
+			}
+
 			if (a.kind === "knowledge") {
 				return runListSources(
 					{
 						source_ids: ids,
+						external_id: a.external_id,
+						url: a.url,
+						provider: a.provider,
 						page: a.page,
 						page_size: a.page_size,
 						acl: a.acl,

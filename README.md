@@ -134,10 +134,37 @@ tells you nothing about which knowledge sources exist.
 | `kind` | string | **Yes** | `memory` or `knowledge` |
 | `ids` | array | No | Restrict to these ids |
 | `source_ids` | array | No | Deprecated alias for `ids` |
+| `external_id` | string | No | Exact originating-system ID, such as a Confluence page ID or Drive file ID; knowledge only |
+| `url` | string | No | Exact original URL stored at ingestion; knowledge only, not a live web fetch |
+| `provider` | string | No | Connector provider, such as `confluence` or `google_drive`; knowledge only |
 | `page` | number | No | Page to return, 1-indexed (default: 1) |
 | `page_size` | number | No | Items per page (1-100) |
 
 The response reports how many of the total it showed and how to reach the rest.
+
+For a known document link, resolve its provider ID or exact stored URL first,
+then use the returned HydraDB source ID with `hydradb_inspect` or
+`hydradb_query.source_ids`:
+
+```json
+{
+  "name": "hydradb_list",
+  "arguments": {
+    "kind": "knowledge",
+    "external_id": "123456",
+    "provider": "confluence",
+    "database": "your_database",
+    "collection": "your_collection"
+  }
+}
+```
+
+Supplied selectors are combined with AND and preserve the caller's permissions.
+URL matching does not normalize links, follow redirects or fetch external pages.
+Multiple sites or copies may match an ID; inspect the candidates and pagination.
+No visible match in a scope is not proof a document was never ingested. For a
+document known only by name, use `hydradb_query.titles` or ordinary search instead.
+These selectors are rejected for `kind: "memory"`, never silently ignored.
 
 ### **hydradb_inspect**
 

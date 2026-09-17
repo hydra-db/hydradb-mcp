@@ -395,6 +395,196 @@ test("title-filtered queries use the SDK passthrough until its serializer expose
 	assert.equal(body?.collection, "docs");
 });
 
+test("source-field list filters use the SDK passthrough with filters.source_fields", async () => {
+	const listCalls: Record<string, unknown>[] = [];
+	let body: Record<string, unknown> | undefined;
+	const sdk = {
+		context: {
+			list(request: Record<string, unknown>) {
+				listCalls.push(request);
+				return Promise.resolve({ data: { sources: [], total: 0 }, success: true });
+			},
+		},
+		fetch(_input: Request | string | URL, init?: RequestInit) {
+			body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+			return Promise.resolve(
+				new Response(
+					JSON.stringify({ success: true, data: { sources: [{ id: "s1" }], total: 1 } }),
+					{ status: 200, headers: { "content-type": "application/json" } },
+				),
+			);
+		},
+	} as unknown as HydraDBClient;
+	const hydra = new HydraDB({
+		token: "t",
+		database: "db_test",
+		collection: "docs",
+	}, sdk);
+
+	const data = await hydra.context.list({
+		kind: "knowledge",
+		sourceFields: { app_external_id: "123456", app_provider: "confluence" },
+	});
+
+	assert.equal(listCalls.length, 0, "the SDK serializer would drop filters");
+	assert.deepEqual(body?.filters, {
+		source_fields: { app_external_id: "123456", app_provider: "confluence" },
+	});
+	assert.equal(body?.type, "knowledge");
+	assert.equal(body?.database, "db_test");
+	assert.equal(body?.collection, "docs");
+	assert.deepEqual(data, { sources: [{ id: "s1" }], total: 1 });
+});
+
+test("real SDK passthrough resolves default and custom endpoints with authentication", async (t) => {
+	const calls: { url: string; headers: Headers; body: Record<string, unknown> }[] = [];
+	t.mock.method(globalThis, "fetch", async (input: Request | string | URL, init?: RequestInit) => {
+		const url = new URL(String(input));
+		calls.push({
+			url: url.href,
+			headers: new Headers(init?.headers),
+			body: JSON.parse(String(init?.body)),
+		});
+		const data = url.pathname.endsWith("/query") ? { chunks: [] } : { sources: [], total: 0 };
+		return new Response(JSON.stringify({ success: true, data }), { status: 200 });
+	});
+
+	for (const baseUrl of [undefined, "https://customer.example/api/"]) {
+		// Do not inject a fake SDK: it would hide the SDK passthrough's missing
+		// environment default, which generated context.list supplies itself.
+		const hydra = new HydraDB({ token: "test-token", database: "db_test", baseUrl });
+		await hydra.context.list({
+			kind: "knowledge",
+			sourceFields: { app_external_id: "123456" },
+		});
+		await hydra.context.query({ query: "owner", titles: ["Roadmap"] });
+	}
+
+	assert.deepEqual(calls.map((call) => call.url), [
+		"https://api.hydradb.com/context/list",
+		"https://api.hydradb.com/query",
+		"https://customer.example/api/context/list",
+		"https://customer.example/api/query",
+	]);
+	for (const call of calls) {
+		assert.equal(call.headers.get("authorization"), "Bearer test-token");
+		assert.equal(call.headers.get("api-version"), "2");
+		assert.equal(call.headers.get("content-type"), "application/json");
+		assert.equal(call.body.database, "db_test");
+	}
+	assert.deepEqual(calls[0]?.body.filters, { source_fields: { app_external_id: "123456" } });
+	assert.deepEqual(calls[1]?.body.titles, ["Roadmap"]);
+});
+
+test("real SDK source lookup forwards caller cancellation to fetch", async (t) => {
+	let signal: AbortSignal | null | undefined;
+	let started!: () => void;
+	const didStart = new Promise<void>((resolve) => { started = resolve; });
+	t.mock.method(globalThis, "fetch", async (_input: Request | string | URL, init?: RequestInit) => {
+		signal = init?.signal;
+		assert.ok(signal);
+		return new Promise<Response>((_resolve, reject) => {
+			signal?.addEventListener("abort", () => reject(new Error("lookup cancelled")), { once: true });
+			started();
+		});
+	});
+	const hydra = new HydraDB({
+		token: "test-token", database: "db_test", maxRetries: 0, timeoutSeconds: 0.05,
+	});
+	const controller = new AbortController();
+	const result = hydra.context.list({
+		kind: "knowledge", sourceFields: { app_external_id: "123456" },
+	}, { signal: controller.signal });
+	await didStart;
+	controller.abort();
+	await assert.rejects(result, /lookup cancelled/);
+	assert.equal(signal?.aborted, true);
+});
+
+test("source lookup rejects invalid successful bodies instead of reporting an empty list", async () => {
+	for (const body of [
+		"<html><title>Login required</title></html>", "", "null", "[]", "{}",
+		JSON.stringify({ success: true, data: {} }),
+		JSON.stringify({ sources: null }),
+		JSON.stringify({ sources: [null] }),
+		JSON.stringify({ sources: [{}] }),
+		JSON.stringify({ sources: [{ id: "" }] }),
+		JSON.stringify({ sources: [{ source_id: " " }] }),
+		JSON.stringify({ sources: [{ id: "", source_id: "s1" }] }),
+		JSON.stringify({ success: false, sources: [] }),
+		JSON.stringify({ success: false, data: { sources: [] } }),
+		JSON.stringify({ success: true, data: { success: false, inner: { sources: [] } } }),
+		JSON.stringify({ success: true, data: { inner: { success: false, sources: [] } } }),
+	]) {
+		const sdk = { fetch: async () => new Response(body, { status: 200 }) } as unknown as HydraDBClient;
+		const hydra = new HydraDB({ token: "t", database: "db_test" }, sdk);
+		await assert.rejects(
+			() => hydra.context.list({ kind: "knowledge", sourceFields: { app_external_id: "1" } }),
+			/Invalid successful list response: expected a sources array/,
+		);
+	}
+});
+
+test("source lookup accepts bare, enveloped and historical inner list payloads", async () => {
+	for (const payload of [
+		{ sources: [], total: 0 },
+		{ sources: [{ id: "s1", title: "Page" }], total: 1 },
+		{ sources: [{ source_id: "s1", source_type: "app" }], total: 1 },
+		{ inner: { sources: [], total: 0 } },
+		{ inner: { sources: [{ source_id: "s1" }], total: 1 } },
+	]) {
+		for (const body of [payload, { success: true, data: payload }]) {
+			const sdk = {
+				fetch: async () => new Response(JSON.stringify(body), { status: 200 }),
+			} as unknown as HydraDBClient;
+			const hydra = new HydraDB({ token: "t", database: "db_test" }, sdk);
+			assert.deepEqual(
+				await hydra.context.list({ kind: "knowledge", sourceFields: { app_external_id: "1" } }),
+				payload,
+			);
+		}
+	}
+});
+
+test("source lookup preserves HTTP errors before validating the list payload", async () => {
+	for (const { body, status, message } of [
+		{
+			body: JSON.stringify({ error: { code: "FORBIDDEN", message: "Denied" }, meta: { request_id: "req-1" } }),
+			status: 403, message: /403: FORBIDDEN: Denied \(request_id: req-1\)/,
+		},
+		{ body: "<html><title>Gateway unavailable</title></html>", status: 502, message: /502: Gateway unavailable/ },
+	]) {
+		const sdk = { fetch: async () => new Response(body, { status }) } as unknown as HydraDBClient;
+		const hydra = new HydraDB({ token: "t", database: "db_test" }, sdk);
+		await assert.rejects(
+			() => hydra.context.list({ kind: "knowledge", sourceFields: { app_external_id: "1" } }),
+			message,
+		);
+	}
+});
+
+test("a list with no source fields stays on the SDK list path", async () => {
+	let fetched = false;
+	const sdk = {
+		context: {
+			list() {
+				return Promise.resolve({ data: { sources: [], total: 0 }, success: true });
+			},
+		},
+		fetch() {
+			fetched = true;
+			return Promise.resolve(new Response("{}", { status: 200 }));
+		},
+	} as unknown as HydraDBClient;
+	const hydra = new HydraDB(
+		{ token: "t", database: "db_test", collection: "docs" },
+		sdk,
+	);
+
+	await hydra.context.list({ kind: "knowledge" });
+	assert.equal(fetched, false, "plain list must not take the raw-fetch bypass");
+});
+
 // --- Database confinement ---
 
 import { assertDatabaseAllowed, ScopeNotAllowedError } from "../src/hydra/index.js";
