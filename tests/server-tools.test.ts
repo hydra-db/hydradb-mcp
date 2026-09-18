@@ -80,6 +80,20 @@ function mockHydra(
 				memoryCollection: { rowCount: 1 },
 			}),
 		},
+		// The SDK 2.1.4 serializer drops request fields it predates (titles on
+		// /query, filters on /context/list), so those paths use the SDK's
+		// authenticated raw fetch. Record the parsed body under the endpoint's
+		// last path segment so a boundary test can assert what was actually sent.
+		fetch: async (input: string | URL | Request, init?: RequestInit) => {
+			const path = String(typeof input === "object" && "url" in input ? input.url : input);
+			const method = path.split("/").filter(Boolean).pop() ?? "fetch";
+			calls.push({ method: `${method}-fetch`, args: JSON.parse(String(init?.body ?? "{}")) });
+			const data = method === "query" ? { chunks: [] } : "list" in responses ? responses.list : { sources: [], total: 0 };
+			return new Response(JSON.stringify({ success: true, data }), {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			});
+		},
 	} as unknown as HydraDBClient;
 
 	const feedbackResponseSchema = z.object({
@@ -657,6 +671,127 @@ test("hydradb_list says how much of the corpus a memory page covered", async () 
 	assert.match(text, /2 of 412/, "must not present one page as the whole store");
 	assert.match(text, /page 1/);
 	assert.match(text, /page=2/, "must say how to reach the rest");
+});
+
+// A provider-id/URL selector only means anything on the knowledge corpus. An
+// earlier version dropped it on the memory branch, so `kind:"memory"` with an
+// external_id returned an unrelated, unfiltered memory instead of erroring.
+test("hydradb_list rejects every source selector on the memory corpus before a request", async () => {
+	for (const selector of [
+		{ external_id: "123456" },
+		{ url: "https://example.test/wiki/pages/123456" },
+		{ provider: "confluence" },
+		{ external_id: "123456", provider: "confluence" },
+	]) {
+		const { hydra, calls } = mockHydra({ list: { user_memories: [], total: 0 } });
+		const client = await connect(hydra);
+		try {
+			const result = await client.callTool({
+				name: "hydradb_list",
+				arguments: { kind: "memory", ...selector },
+			});
+			assert.equal(result.isError, true, "must not silently ignore the selector");
+			assert.match((result.content as { text: string }[])[0]!.text, /only valid with kind: "knowledge"/);
+			assert.equal(calls.length, 0, "rejected selectors must not list unrelated memories");
+		} finally {
+			await client.close();
+		}
+	}
+});
+
+test("hydradb_list resolves a knowledge source by provider id through source_fields", async () => {
+	const { hydra, calls } = mockHydra({
+		list: { sources: [{ id: "src-confluence-1", title: "Example Architecture" }], total: 1 },
+	});
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_list",
+		arguments: { kind: "knowledge", external_id: "123456", provider: "confluence" },
+	});
+
+	assert.notEqual(result.isError, true);
+	assert.match((result.content as { text: string }[])[0]!.text, /src-confluence-1/);
+	// filters ride the raw-fetch bypass (SDK serializer drops them), so assert on
+	// the body actually sent to /context/list.
+	const call = calls.find((c) => c.method === "list-fetch");
+	assert.ok(call, "a source-field list must reach /context/list");
+	assert.deepEqual(call.args.filters, {
+		source_fields: { app_external_id: "123456", app_provider: "confluence" },
+	});
+	assert.equal(call.args.type, "knowledge");
+	assert.equal(call.args.database, "db_test");
+	await client.close();
+});
+
+test("hydradb_list combines source selectors without losing scope, ACL, ids or pagination", async () => {
+	const { hydra, calls } = mockHydra({ list: { sources: [], total: 0 } });
+	const client = await connect(hydra);
+	try {
+		const result = await client.callTool({
+			name: "hydradb_list",
+			arguments: {
+				kind: "knowledge", external_id: "page-1", provider: "confluence",
+				url: "https://example.test/wiki/pages/page-1", ids: ["source-1"],
+				database: " customer_db ", collection: " research ", acl: ["user-1"],
+				page: 2, page_size: 10,
+			},
+		});
+		assert.notEqual(result.isError, true);
+		assert.deepEqual(calls.map((call) => call.method), ["list-fetch"], "no unfiltered retry");
+		assert.deepEqual(calls[0]!.args, {
+			database: "customer_db", collection: "research", type: "knowledge",
+			ids: ["source-1"], page: 2, page_size: 10, acl: ["user-1"],
+			filters: { source_fields: {
+				app_external_id: "page-1", url: "https://example.test/wiki/pages/page-1", app_provider: "confluence",
+			} },
+			group_threads: false,
+		});
+		const text = (result.content as { text: string }[])[0]!.text;
+		assert.match(text, /No visible sources.*page 2.*customer_db.*research/);
+		assert.match(text, /does not prove the document was never ingested/);
+		assert.match(text, /ACL unchanged/);
+	} finally {
+		await client.close();
+	}
+});
+
+test("hydradb_list URL-only lookup identifies the default workspace on an empty result", async () => {
+	const { hydra, calls } = mockHydra({ list: { sources: [], total: 0 } }, { collection: null });
+	const client = await connect(hydra);
+	try {
+		const result = await client.callTool({
+			name: "hydradb_list",
+			arguments: { kind: "knowledge", url: "https://example.test/wiki/pages/page-1" },
+		});
+		assert.notEqual(result.isError, true);
+		assert.deepEqual(calls[0]!.args.filters, {
+			source_fields: { url: "https://example.test/wiki/pages/page-1" },
+		});
+		assert.equal(calls[0]!.args.collection, undefined);
+		assert.match((result.content as { text: string }[])[0]!.text, /No visible sources.*db_test.*workspace default/);
+	} finally {
+		await client.close();
+	}
+});
+
+test("hydradb_list source lookups respect database and collection confinement", async () => {
+	for (const override of [{ database: "forbidden" }, { collection: "forbidden" }]) {
+		const { hydra, calls } = mockHydra({}, {
+			allowedDatabases: ["db_test"], allowedCollections: ["col_test"],
+		});
+		const client = await connect(hydra);
+		try {
+			const result = await client.callTool({
+				name: "hydradb_list",
+				arguments: { kind: "knowledge", external_id: "page-1", ...override },
+			});
+			assert.equal(result.isError, true);
+			assert.equal(calls.length, 0, "forbidden scope must fail before any outbound request");
+		} finally {
+			await client.close();
+		}
+	}
 });
 
 test("hydradb_list forwards page and page_size for memories", async () => {
@@ -1416,6 +1551,27 @@ test("a failing tool call still decrements the in-flight count", async () => {
 		inFlightCount(),
 		0,
 		"a thrown handler must not leave the process permanently undrainable",
+	);
+	await client.close();
+});
+
+// A handler that rejects an argument combination BEFORE it awaits anything
+// throws synchronously; trackInFlight must still decrement, or shutdown hangs.
+// The list source-selector guard (kind:"memory" + external_id) is such a path.
+test("a synchronously-rejected tool call still decrements the in-flight count", async () => {
+	const { hydra } = mockHydra({ list: { user_memories: [], total: 0 } });
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_list",
+		arguments: { kind: "memory", external_id: "123456" },
+	});
+
+	assert.equal(result.isError, true, "the guard should reject, not silently pass");
+	assert.equal(
+		inFlightCount(),
+		0,
+		"a synchronous throw must not leave the process permanently undrainable",
 	);
 	await client.close();
 });
@@ -3441,7 +3597,7 @@ test("a hanging collection listing does not stall the query", async () => {
 	}
 });
 
-test("a failed multi-collection search falls back to the default scope instead of erroring", async () => {
+test("a failed multi-collection search stays an error rather than silently changing scope", async () => {
 	const { hydra, calls } = mockHydra(
 		{
 			query: (args: { collections?: unknown }) =>
@@ -3454,11 +3610,10 @@ test("a failed multi-collection search falls back to the default scope instead o
 
 	const client = await connect(hydra);
 	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
-	assert.notEqual(result.isError, true);
+	assert.equal(result.isError, true);
 	const qs = queryCall(calls);
-	assert.equal(qs.length, 2);
+	assert.equal(qs.length, 1);
 	assert.deepEqual(qs[0]!.args.collections, ["engineering", "sales"]);
-	assert.equal(qs[1]!.args.collections, undefined);
 	await client.close();
 });
 
@@ -3588,7 +3743,7 @@ test("feedback: recorded:false is reported as not stored, not as success", async
 
 test("query: prints the request id so feedback has something to attach to", async () => {
 	const { hydra } = mockHydra({
-		query: { chunks: [{ chunk_id: "c1", source_id: "s1", chunk_content: "hello" }] },
+		query: { chunks: [{ chunkUuid: "c1", id: "s1", chunkContent: "hello" }] },
 	});
 
 	const client = await connect(hydra);
