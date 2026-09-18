@@ -274,12 +274,16 @@ export async function introspect(
 		Array.isArray(v)
 			? v.filter((d): d is string => typeof d === "string" && d.length > 0)
 			: undefined;
+	// An empty list is not a confinement to nothing — it is a grant that chose
+	// "no specific collection" and confined the database only. Treating [] as an
+	// allowlist would refuse every per-call collection override for a grant
+	// whose user never picked a collection to allow.
 	const allowed = stringList(body.databases);
 	const allowedCols = stringList(body.collections);
 	const resolved: IntrospectedToken = {
 		apiKey,
-		...(allowed ? { allowedDatabases: allowed } : {}),
-		...(allowedCols ? { allowedCollections: allowedCols } : {}),
+		...(allowed?.length ? { allowedDatabases: allowed } : {}),
+		...(allowedCols?.length ? { allowedCollections: allowedCols } : {}),
 		database: typeof body.database === "string" && body.database ? body.database : undefined,
 		collection:
 			typeof body.collection === "string" && body.collection ? body.collection : undefined,

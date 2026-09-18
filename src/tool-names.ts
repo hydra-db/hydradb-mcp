@@ -23,6 +23,10 @@ export const TOOL_NAMES = {
 	// asking the user, and so a confined connection can see its own limits.
 	DATABASES: "hydradb_databases",
 	LIST_COLLECTIONS: "hydradb_list_collections",
+	// Feedback about a query that already ran (PRO-1805 / POST /feedback). New
+	// capability, so no alias: there is no prior spelling to keep working, the
+	// same position hydradb_subgraph is in.
+	FEEDBACK: "hydradb_feedback",
 	DELETE_COLLECTION: "hydradb_delete_collection",
 
 	// BYOG graph tools (PRO-1681). A separate family with its own prefix: these
@@ -57,6 +61,7 @@ export const CANONICAL_TOOL_NAMES = [
 	TOOL_NAMES.SUBGRAPH,
 	TOOL_NAMES.LIST_COLLECTIONS,
 	TOOL_NAMES.DELETE_COLLECTION,
+	TOOL_NAMES.FEEDBACK,
 ] as const;
 
 /**

@@ -36,6 +36,13 @@ const PARAM = {
 		"Restrict the search to these source IDs, taken from hydradb_query or " +
 		"hydradb_list. Turns a search into 'search inside these documents'. This is a " +
 		"hard filter: if none of them match, the result is empty rather than widened.",
+	query_titles:
+		"Restrict the search to documents whose COMPLETE title exactly matches any value, " +
+		"ignoring case. Use this when you know document names but not their source IDs. " +
+		"The titles are resolved to source IDs first, then the normal semantic or keyword " +
+		"query runs inside those sources. Repeat values in the array for several titles; " +
+		"punctuation such as commas is part of the title. With source_ids, both filters " +
+		"must match. No title match returns an empty result rather than widening.",
 	metadata_filters:
 		"Exact-match filters over stored metadata, as {key: value}. Exact match only — " +
 		"no ranges, no partial matches, no dates-since. Only useful for keys you know " +
@@ -138,6 +145,34 @@ const PARAM = {
 		"single listing covers both. Call this twice to see everything.",
 	source_ids:
 		"Optional array of specific source IDs to filter by. If omitted, lists all sources.",
+	list_external_id:
+		"Look up a source by the id it has in its ORIGINATING system — a Confluence page id, " +
+		"a Jira issue key, a Google Drive file id, or a GitHub owner/repo:path — rather than Hydra DB's own " +
+		"source id. Use this when a user gives you a link or a provider id (e.g. a Confluence " +
+		"URL ending in /pages/123456/...) and you need the one exact source it maps to. " +
+		"Only valid with kind: knowledge. Exact match, case-sensitive. Pair with `provider` " +
+		"when known; multiple sites or copies may still match, so inspect the returned candidates. " +
+		"This resolves the Hydra DB source ids you then " +
+		"pass to hydradb_inspect (to read it) or to hydradb_query `source_ids` (to search inside it).",
+	list_parent_external_id:
+		"List indexed DIRECT children of this originating-system parent id (not a Hydra DB source id). " +
+		"Requires kind: knowledge, provider and connector_id to identify the originating site/account. Exact stored app_parent_id match; no live provider fetch. " +
+		"Follow every page, then use each child's external_id as parent_external_id to enumerate descendants. " +
+		"Missing or stale parent metadata means this is not proof of the complete provider hierarchy.",
+	list_connector_id:
+		"Exact connector instance ID stored in additional_metadata.connector_id; knowledge only. " +
+		"Required for parent_external_id because provider IDs can repeat across sites/accounts. " +
+		"Resolve the parent using external_id or url and copy its returned connector_id; never guess it. " +
+		"For existing identity lookups this is optional: omitting it can return candidates from multiple connections.",
+	list_url:
+		"Look up a source by its exact original URL (the `url` stored at ingestion). Exact match " +
+		"only — no prefix or partial. Use it when you have the full canonical link to a document. " +
+		"Only valid with kind: knowledge. Prefer `external_id` when you have a provider id, " +
+		"since URLs vary in trailing form. This does not open or fetch an arbitrary web URL.",
+	list_provider:
+		"Restrict the listing to one connector provider (e.g. \"confluence\", \"jira\", " +
+		"\"google_drive\", \"github\"). Only valid with kind: knowledge. Most useful paired " +
+		"with `external_id`; provider alone does not identify a unique source or site.",
 	page:
 		"Which page of results to return, 1-indexed (default: 1). The response reports how " +
 		"many of the total it showed; pass the next page to continue rather than assuming " +
@@ -150,7 +185,7 @@ const PARAM = {
 		"chunk to its first ~600 characters and omits the surrounding-context blocks — " +
 		"enough to judge relevance and pick a source to inspect. 'full' returns every " +
 		"chunk whole; use it when the snippets are being cut off mid-answer. Either way " +
-		"the response is capped, and hydradb_inspect returns any single source in full.",
+		"the response is capped; hydradb_inspect reads a source in slices of at most 20000 characters.",
 	fetch_source_id: "The source ID to fetch content for",
 	subgraph_id:
 		"The id of the item to start from — the value shown as [id: …] in hydradb_query results " +
@@ -186,8 +221,11 @@ const PARAM = {
 		"databases; hydradb_databases lists them. A connection the user confined to one " +
 		"database refuses any other name.",
 	collection:
-		"Collection (sub-tenant) to target for this request. Defaults to the server's configured " +
-		"collection (or 'hydra-db-mcp'). Pass explicitly to switch collection scope per request.",
+		"Collection (sub-tenant) to target. Defaults to the collection chosen for " +
+		"this connection, if any. When the connection has NO default collection, " +
+		"the workspace's own is used unless you name one — call " +
+		"hydradb_list_collections to see the options and pass `collection` " +
+		"(or `collections` on hydradb_query to search several at once) to be explicit.",
 } as const;
 
 /** Parameter blurbs for the BYOG graph tools. */
@@ -235,6 +273,8 @@ const SEARCH_BODY = `Search Hydra DB for anything the user has stored: memories 
 CALL THIS BEFORE ANSWERING whenever the answer could depend on the user's history, preferences, prior decisions, project details, or a document they have ingested — including when you are merely unsure. A query that returns nothing costs one call; answering from a blank slate costs the user a correction.
 
 Searches both families by default. Every result carries \`[id: …]\` — pass it to hydradb_inspect for the full source, or to hydradb_delete to remove it.
+
+Collections partition the database by use case. This connection's default (if it has one) is shown by hydradb_list_collections; when there is none, a search without \`collection\` covers every collection in the database (up to 10). Pass \`collection\`, or \`collections\` for several, to aim it where the answer should live.
 
 Examples:
   {"query": "how does the user prefer code review feedback"}
@@ -285,7 +325,7 @@ const INSPECT_BODY = `Fetch the full original content of ONE stored item by its 
 
 The id is the value shown as \`[id: …]\` in hydradb_query results and in [brackets] in hydradb_list output. Ids are not guessable — take one from those tools rather than constructing it.
 
-Long sources come back in slices; the response says where it stopped and what offset continues it. Binary sources are never inlined — you get their type and size, and \`mode: "url"\` returns a download link.`;
+Keep the returned database, collection and caller ACL on every follow-up; scope is never inherited from an earlier tool call. Long sources come back in slices of at most 20000 UTF-16 code units. Follow structured \`next_args\` (or the text offset) until \`has_more\` is false; \`complete\` means THIS response contains the whole text, not that earlier slices were read. A 125000-character source needs seven default-size calls. Each call re-fetches current content; compare \`content_sha256\` across slices and restart if it changes. Reading an index does not read the documents it links to. Binary sources are never inlined — you get their type and size, and \`mode: "url"\` returns a download link.`;
 
 /**
  * The dialect notes every graph tool needs to state.
@@ -366,6 +406,7 @@ export const TOOL_DESCRIPTIONS = {
 			detail: PARAM.detail,
 			operator: PARAM.operator,
 			source_ids: PARAM.query_source_ids,
+			titles: PARAM.query_titles,
 			metadata_filters: PARAM.metadata_filters,
 			num_related_chunks: PARAM.num_related_chunks,
 			recency_bias: PARAM.recency_bias,
@@ -410,13 +451,22 @@ export const TOOL_DESCRIPTIONS = {
 
 Use it for inventory questions ("what do you remember about me?", "which documents are indexed?") and to obtain ids. For "what do you know about X", use hydradb_query instead — listing everything and reading it is far more expensive and loses relevance ranking.
 
-Results are paginated. The response says how many of the total it showed and how to reach the rest; do not treat the first page as the whole store.
+DIRECT LOOKUP BY PROVIDER ID OR EXACT URL: when the user gives a document's originating-system id or its full link (a Confluence page id such as the 123456 in .../pages/123456/..., a Jira key, a Drive file id, or the complete canonical URL), first use kind: "knowledge" with \`external_id\` (or \`url\`) to resolve matching sources, then hydradb_inspect the selected source or pass its id to hydradb_query \`source_ids\` to search within it. Both match EXACTLY: \`external_id\` is the stored provider id, \`url\` is the whole stored URL (no prefix, no partial, no URL normalization or live web fetch). Multiple selectors are combined with AND, not alternatives. Multiple sources may match: inspect the candidates rather than assuming uniqueness. These are identity lookups, not name search — there is no title/name selector here, so a document known only by its human title is still found with hydradb_query (semantic) or its \`titles\` filter, not with this tool.
+
+Results are paginated. The response says how many of the total it showed and how to reach the rest; do not treat the first page as the whole store. An empty result for an \`external_id\`/\`url\` lookup means no visible matching source on this page in the resolved database/collection. Check the scope, page and exact stored identity; it does not by itself prove the document was never ingested. Keep the caller's ACL unchanged. A legacy provider-metadata mismatch may need a separate external-id-only diagnostic, but never silently discard a requested filter.
+
+INDEXED DIRECT CHILDREN: pass \`parent_external_id\` (the provider parent ID, NOT its Hydra DB source ID), \`provider\` and \`connector_id\`, with kind: "knowledge". Resolve the parent first and copy its stored connector ID; provider alone does not namespace sites/accounts, and missing connector metadata cannot be guessed. Follow \`next_args\` while \`has_more\` is true, then use each returned child's \`children_args\` to enumerate descendants, tracking visited identities. This reads indexed parent metadata, not a live provider tree; missing/stale metadata or permissions can omit children. Existing external-ID/URL lookups without connector_id may return multiple candidates; never assume uniqueness. Preserve \`resolved_scope\` and caller ACL on every list/query/inspect call; there is no inherited last scope.
 
 Memory rows come back as [id] content. Knowledge rows as [id] — title (type), with no content — pass an id to hydradb_inspect for the text.`,
 		params: {
 			acl: PARAM.acl,
 			kind: PARAM.kind,
 			source_ids: PARAM.source_ids,
+			external_id: PARAM.list_external_id,
+			parent_external_id: PARAM.list_parent_external_id,
+			connector_id: PARAM.list_connector_id,
+			url: PARAM.list_url,
+			provider: PARAM.list_provider,
 			page: PARAM.page,
 			page_size: PARAM.page_size,
 			database: PARAM.database,
@@ -472,8 +522,10 @@ Take the id from hydradb_query or hydradb_list — never guess one. Confirm with
 	[TOOL_NAMES.LIST_COLLECTIONS]: {
 		title: "List collections",
 		description:
-			"List collection (sub-tenant) IDs inside a database. Collections are created " +
-			"implicitly when data is ingested under a new collection name. Use this before " +
+			"List the collections (sub-tenants) inside a database, with this connection's default marked and the database's corpus sizes. Collections partition a database by use case and are created implicitly when data is first ingested under a new name — so this is how you find out where to look or where to write.\n\n" +
+			"When the connection has a default, calls use it unless you pass `collection`; an empty search result can still mean the data lives in another collection. When it has NO default, YOU decide the scope per request: pick the collection whose purpose matches the question, and on " +
+			`${TOOL_NAMES.QUERY} pass \`collections\` to search several at once when the answer could ` +
+			"live in more than one. Call it once when you need it; there is no need to call it before every request. Also use it before " +
 			`${TOOL_NAMES.DELETE_COLLECTION} so you delete a name that actually exists.`,
 		params: {
 			database: PARAM.database,
@@ -490,6 +542,41 @@ Confirm with the user before deleting a collection they did not name. Take the c
 				"The collection (sub-tenant) to delete. Required. Take it from " +
 				`${TOOL_NAMES.LIST_COLLECTIONS}.`,
 			database: PARAM.database,
+		},
+	},
+
+	[TOOL_NAMES.FEEDBACK]: {
+		title: "Send feedback about a query",
+		description:
+			"Record whether a hydradb_query result was actually useful. Correlated to that " +
+			"query by its `request_id`, which hydradb_query prints at the end of its output — " +
+			"copy it verbatim; it cannot be guessed or reconstructed.\n\n" +
+			"Send this when a result was wrong, incomplete, or notably good, and when you know " +
+			"what the right answer was: `ground_truth.answer` is the response a correct system " +
+			"would have given, and `ground_truth.source_ids` are the sources that actually " +
+			"contain it. Those are machine-checkable, so they are worth far more than prose — " +
+			"they turn one submission into a retrieval judgement (did the query surface these, " +
+			"at what rank, at all?).\n\n" +
+			"Feedback never changes the result of the query it describes, and never alters " +
+			"stored data. Send text, ground truth, or both — a submission with neither records " +
+			"nothing and is refused.",
+		params: {
+			request_id: "The `request_id` of the query being rated, exactly as hydradb_query " +
+				"printed it. A UUID. Required — feedback with no request to attach to is refused.",
+			feedback: "What was wrong, missing, or good, in plain words. Be specific: \"the " +
+				"top three chunks were about onboarding, not billing\" is actionable, \"bad " +
+				"results\" is not. Up to 8000 characters.",
+			rating: "Coarse signal alongside the text: positive, negative, or neutral. Optional " +
+				"— leaving it off is its own state (prose with no rating) and is not the same as " +
+				"rating it neutral.",
+			ground_truth_answer: "The answer a correct system would have produced from the " +
+				"retrieved context. Up to 8000 characters.",
+			ground_truth_source_ids: "Ids of the sources that actually contain the answer — the " +
+				"[id: …] values from query results. Up to 100; duplicates are dropped.",
+			metadata: "Small string map of your own labels for later filtering, e.g. an eval run " +
+				"name. Up to 20 entries.",
+			database: PARAM.database,
+			collection: PARAM.collection,
 		},
 	},
 
@@ -642,6 +729,7 @@ WHEN TO USE IT
 - Before answering anything that could depend on the user's history, preferences, prior decisions, project details, or a document they have ingested, call ${TOOL_NAMES.QUERY} FIRST — including when you are merely unsure. One query at the start of a task is cheap; answering from a blank slate costs the user a correction. Never ask the user to repeat something Hydra DB may already hold.
 - After the user states a preference, makes a decision, corrects you, or reveals a durable fact about themselves or their work, call ${TOOL_NAMES.INGEST} to save it without being asked. Save the distilled fact, not the transcript: "prefers pnpm over npm in every repo", not "user said maybe we should try pnpm".
 - Never store secrets, credentials, one-off task chatter, or anything the user asked you not to keep.
+- When a query's results were wrong or missed something you later found — and when the user tells you the answer was wrong — call ${TOOL_NAMES.FEEDBACK} with that query's request_id. This is how retrieval gets measured against real traffic rather than a benchmark; a wrong answer nobody reports is a wrong answer that stays.
 - "Remember this" maps to ${TOOL_NAMES.INGEST}, "forget that" to ${TOOL_NAMES.DELETE}, and "what do you know about me" to ${TOOL_NAMES.QUERY} — do not answer that last one from the current conversation alone.
 
 THE TOOLS
@@ -654,10 +742,20 @@ THE TOOLS
 - ${TOOL_NAMES.STATUS} — whether an ingested source has finished indexing. Ingestion is asynchronous, so a query issued straight after a save can legitimately return nothing.
 - ${TOOL_NAMES.SUBGRAPH} — everything connected to one item you already have an id for: the rest of its thread, its replies, its parents and children, the items it links to. Reach for it when one result is not enough and you need what surrounds it.
 - ${TOOL_NAMES.DATABASES} — which databases this connection can address, with the default marked. Every tool takes an optional \`database\`; call this before naming one, or when a call was refused because the user confined this connection to a single database.
-- ${TOOL_NAMES.LIST_COLLECTIONS} — the collection (sub-tenant) names inside a database.
+- ${TOOL_NAMES.LIST_COLLECTIONS} — the collections inside a database, with this connection's default marked. Call it before choosing a collection when the connection has no default.
+- ${TOOL_NAMES.FEEDBACK} — report whether a query's results were actually useful, using the request_id that query printed. Say what the right answer was (\`ground_truth_answer\`) or which sources held it (\`ground_truth_source_ids\`) when you know — that is machine-checkable and worth far more than prose. It records a signal; it never changes the query's result or the stored data.
 - ${TOOL_NAMES.DELETE_COLLECTION} — irreversible removal of one collection and everything in it. Confirm first. Take the name from ${TOOL_NAMES.LIST_COLLECTIONS}.
 
 Ids flow between these: ${TOOL_NAMES.QUERY}, ${TOOL_NAMES.LIST} and ${TOOL_NAMES.SUBGRAPH} emit them; ${TOOL_NAMES.INSPECT}, ${TOOL_NAMES.DELETE}, ${TOOL_NAMES.STATUS} and ${TOOL_NAMES.SUBGRAPH} accept them. Never invent one.
+
+COLLECTIONS — WHO DECIDES THE SCOPE
+
+Collections partition each database by use case, and a call sees only the collection it names. This connection either has a default collection or it does not, and the two behave differently:
+
+- With a default: every call uses it unless you pass \`collection\`. An empty result can still mean the data lives in ANOTHER collection — ${TOOL_NAMES.LIST_COLLECTIONS} lists them.
+- Without a default (the user chose "All collections"): a search that names no collection covers every collection in the database, up to 10; past that it runs in the workspace default and says so. Narrow it when the question clearly belongs to one: call ${TOOL_NAMES.LIST_COLLECTIONS} once, choose the collection whose purpose matches, and pass \`collection\`, or \`collections\` on ${TOOL_NAMES.QUERY} for several. For WRITES always pass \`collection\` explicitly, so data lands where you intend.
+
+Never guess a collection name you have not seen — list first, then name one.
 
 THE GRAPH TOOLS (a separate product surface)
 

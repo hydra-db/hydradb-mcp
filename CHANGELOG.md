@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — the model resolves collection scope (PRO-1942)
+
+Wrong-partition retrieval fails silently: `POST /query` against an empty or
+foreign collection returns `200` with zero chunks, indistinguishable from "the
+data does not exist". Two changes make that failure visible and recoverable,
+and teach the model to avoid it:
+
+- **Empty query results now name the partition that was searched.** "No
+  relevant … found in collection 'X' of database 'Y'" — plus, when nothing was
+  pinned, that the workspace default ran — with a pointer to
+  `hydradb_list_collections` so the model widens instead of concluding the
+  corpus is empty.
+- **`hydradb_list_collections` became a decision tool, not a bare listing.** It
+  marks this connection's default collection, shows the database's knowledge
+  and memory row counts (best-effort with a 5s timeout — stats has been
+  observed to hang, and a discovery tool must not), and, when the connection
+  has no default, states the contract in plain words: pick the collection whose
+  purpose matches the question, pass `collection` — or `collections` on
+  `hydradb_query` to search several at once — and name one explicitly on
+  writes. `PARAM.collection` no longer advertises the deleted `hydra-db-mcp`
+  default; the server instructions gained a "COLLECTIONS — who decides the
+  scope" section covering both connection shapes.
+
+Also hardened: an OAuth grant confined to a database but with no chosen
+collection previously could serialise its collection allowlist as an empty
+list, which refused every per-call `collection` override. Empty allowlists
+from the issuer are now treated as absent.
+
 ## [1.4.0] - 2026-09-01
 
 ### Added — `recency_bias`, `query_apps` and multi-collection scope on `hydradb_query`
