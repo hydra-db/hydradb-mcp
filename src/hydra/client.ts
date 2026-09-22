@@ -93,6 +93,131 @@ export interface RequestOptions {
 export type QueryKind = ContextKind | "all";
 
 /**
+ * The label a caller puts on a unified item (PRO-1618). Nothing infers it: a
+ * preference or a decision is sent as TEXT with this label. `auto` is the
+ * server default and is omitted from the item when chosen.
+ */
+export type ContextCategory = "auto" | "user_preference" | "business_knowledge" | "decision_trace";
+
+/**
+ * Caller-declared relations from one unified item to other context ids
+ * (PRO-1618). Wire key `forceful_relations`, ids under `ids`.
+ */
+export interface ForcefulRelations {
+	ids: string[];
+	properties?: Record<string, unknown>;
+}
+
+// --- The unified `POST /query` response (PRO-1618) ---
+//
+// A unified database answers with EXACTLY four keys: `chunks`, `graph`,
+// `relations`, `llm_prompt`. It is not the v2 shape and is never run through
+// the SDK's v2 serializer: that serializer would rename nothing it does not
+// know and drop `llm_prompt` on the floor, and the server-built prompt is the
+// one thing a client is told to surface verbatim. Field names below are the
+// wire names, exactly as CONTRACT.md states them.
+
+export interface UnifiedEnrichment {
+	text?: string;
+	/** The caller's `context_category`; absent when it was `auto`. */
+	kind?: string;
+}
+
+export interface UnifiedTemporal {
+	content?: string;
+	start_date?: string | null;
+	end_date?: string | null;
+}
+
+export interface UnifiedChunk {
+	chunk_id?: string;
+	/** The source id (was `id` on the v2 shape). */
+	context_id?: string;
+	score?: number;
+	/** The chunk's own text; enrichment is not concatenated into it. */
+	content?: string;
+	/** Absent when there is neither text nor kind. */
+	enrichment?: UnifiedEnrichment;
+	/** Present only when the query engaged temporal reasoning. */
+	temporal?: UnifiedTemporal[];
+}
+
+export interface UnifiedEntity {
+	entity_id?: string;
+	name?: string;
+}
+
+export interface UnifiedEdge {
+	predicate?: string;
+	context?: string;
+	temporal_details?: string;
+	relationship_id?: string;
+	chunk_id?: string;
+}
+
+export interface UnifiedTriplet {
+	source?: UnifiedEntity;
+	relation?: UnifiedEdge;
+	target?: UnifiedEntity;
+}
+
+export interface UnifiedGraphPath {
+	triplets?: UnifiedTriplet[];
+	path_summary?: string;
+}
+
+/** A chunk pulled in because its source was declared related at ingest. */
+export interface UnifiedRelation {
+	/** `to` is the returned chunk's own context id; `from` may be "". */
+	via?: { from?: string; to?: string };
+	chunk?: UnifiedChunk;
+}
+
+export interface UnifiedQueryResult {
+	chunks: UnifiedChunk[];
+	/** Query paths first, then chunk expansions; `[]` when graph_context=false. */
+	graph: UnifiedGraphPath[];
+	/** `[]` when nothing was declared related, or follow_forceful_relations=false. */
+	relations: UnifiedRelation[];
+	/** Server-built, with citation labels [1], [R1], [P1]. Surface it verbatim. */
+	llm_prompt: string;
+}
+
+/** What `context.query` resolves to: the v2 shape on a split database, the four-key shape on a unified one. */
+export type QueryResult = SDK.SearchV2RetrievalResult | UnifiedQueryResult;
+
+/**
+ * Whether a `/query` wire body is the unified shape.
+ *
+ * Decided by shape, not by what was requested (CONTRACT rule 4): stored logs
+ * and split databases keep producing the v2 shape, and a server that predates
+ * the unified response answers a unified request with it too. The unified
+ * shape is the one carrying `llm_prompt` or a `graph` ARRAY; the v2 shape
+ * carries `graph_context` and per-chunk `chunk_content` instead, and the
+ * presence of `graph_context` is what settles a body that has both.
+ */
+export function isUnifiedQueryResult(value: unknown): value is UnifiedQueryResult {
+	if (value == null || typeof value !== "object" || Array.isArray(value)) return false;
+	const record = value as Record<string, unknown>;
+	if ("graph_context" in record) return false;
+	return typeof record.llm_prompt === "string" || Array.isArray(record.graph);
+}
+
+/**
+ * The unified body with every array present, so a renderer can index
+ * without null checks. Nothing is renamed and nothing is dropped: the server
+ * sends all four keys, and a key it happened to omit reads as empty.
+ */
+export function toUnifiedQueryResult(wire: UnifiedQueryResult): UnifiedQueryResult {
+	return {
+		chunks: Array.isArray(wire.chunks) ? wire.chunks : [],
+		graph: Array.isArray(wire.graph) ? wire.graph : [],
+		relations: Array.isArray(wire.relations) ? wire.relations : [],
+		llm_prompt: typeof wire.llm_prompt === "string" ? wire.llm_prompt : "",
+	};
+}
+
+/**
  * An SDK logger that cannot corrupt the stdio transport.
  *
  * The SDK's own `ConsoleLogger` implements `debug`/`info` via `console.debug` /
@@ -219,6 +344,14 @@ export interface QueryParams {
 	 * knowledge hybrid queries; the server ignores it elsewhere.
 	 */
 	queryApps?: boolean;
+	/**
+	 * Whether chunks declared related at ingest (`forceful_relations`) are
+	 * pulled into the result (PRO-1618; server default true). A unified-database
+	 * option: the split path goes through the pinned SDK, which knows only the
+	 * deprecated `query_forceful_relations` name, so it is refused there rather
+	 * than sent under the wrong key or dropped.
+	 */
+	followForcefulRelations?: boolean;
 	/** Per-call collection override. */
 	collection?: string;
 	/**
@@ -247,9 +380,19 @@ export interface IngestParams {
 	userName?: string;
 	infer?: boolean;
 	isMarkdown?: boolean;
-	/** Passed through only when `infer` is truthy (host-owned default text). */
+	/**
+	 * Steers enrichment. Passed through only when `infer` is truthy (host-owned
+	 * default text). Wire key `custom_instructions` on a split memory item and
+	 * `instructions` on a unified item.
+	 */
 	customInstructions?: string;
 	upsert?: boolean;
+	/** Unified only (PRO-1618): the caller's label for the item. Refused on a split database. */
+	contextCategory?: ContextCategory;
+	/** Unified only (PRO-1618): declared relations to other context ids. Refused on a split database. */
+	forcefulRelations?: ForcefulRelations;
+	/** Unified only (PRO-1618): principals that may read the item. Refused on a split database. */
+	acl?: string[];
 	/**
 	 * Tenant metadata stored alongside the memory, and matchable later via
 	 * `metadataFilters` on query.
@@ -516,6 +659,41 @@ function compact(record: Record<string, unknown>): Record<string, unknown> {
 	return out;
 }
 
+/**
+ * The unified ingest 202 (PRO-1618), read by hand into the SDK's camelCase
+ * result so the tool layer reports it exactly as it reports a split one.
+ *
+ * Not the SDK serializer: that reads each result's id from a wire `id`, and
+ * the unified response names it `source_id` (the item's context id, as the
+ * contract says to read it). Run through the serializer, every unified ingest
+ * would come back with no id, and the caller could neither inspect nor delete
+ * what it had just written.
+ */
+function parseUnifiedIngestResponse(wire: unknown): SDK.IngestionV2IngestResponse {
+	const record = (wire != null && typeof wire === "object" ? wire : {}) as Record<string, unknown>;
+	const rows = Array.isArray(record.results) ? (record.results as unknown[]) : [];
+	const str = (v: unknown) => (typeof v === "string" ? v : undefined);
+	const num = (v: unknown) => (typeof v === "number" ? v : undefined);
+	const bool = (v: unknown) => (typeof v === "boolean" ? v : undefined);
+	return {
+		success: bool(record.success),
+		message: str(record.message),
+		successCount: num(record.success_count),
+		failedCount: num(record.failed_count),
+		results: rows.map((raw) => {
+			const row = (raw != null && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+			return {
+				id: str(row.source_id) ?? str(row.id),
+				title: str(row.title),
+				status: str(row.status) as SDK.IngestionV2IngestResultItem["status"],
+				infer: bool(row.infer),
+				error: str(row.error),
+				errorCode: str(row.error_code),
+			};
+		}),
+	};
+}
+
 /** `?a=b&c=d` from a record, skipping undefined values. */
 function queryString(record: Record<string, string | number | undefined>): string {
 	const params = new URLSearchParams();
@@ -619,6 +797,24 @@ abstract class Resource {
 		}
 		const wire = await sendRaw<unknown>(this.raw, path, method, body, signal ? { signal } : undefined);
 		return parse(wire, SDK_PARSE_OPTS);
+	}
+
+	/**
+	 * A raw v2 call whose unwrapped wire body is returned AS IS, for the
+	 * unified endpoints (PRO-1618) whose response shape the pinned SDK has no
+	 * serializer for. The caller decides what the body is by looking at it.
+	 */
+	protected async rawWire(
+		what: string,
+		method: "GET" | "POST" | "DELETE",
+		path: string,
+		body: unknown,
+		signal?: AbortSignal,
+	): Promise<unknown> {
+		if (!this.raw) {
+			throw new Error(`${what} needs the v2 transport, which this HydraDB instance was built without`);
+		}
+		return sendRaw<unknown>(this.raw, path, method, body, signal ? { signal } : undefined);
 	}
 
 	protected constructor(
@@ -737,7 +933,17 @@ export class ContextResource extends Resource {
 	async query(
 		params: QueryParams,
 		opts?: RequestOptions,
-	): Promise<SDK.SearchV2RetrievalResult> {
+	): Promise<QueryResult> {
+		// A unified-only option on a split request is refused, not dropped and
+		// not sent under the SDK's deprecated `query_forceful_relations` name:
+		// the caller asked for a specific behaviour, and silence either way
+		// would tell them it was honoured.
+		if (params.followForcefulRelations != null && params.kind !== "unified") {
+			throw new Error(
+				`followForcefulRelations applies to a unified database only (kind "unified"); ` +
+				`this request names kind "${params.kind ?? "all"}". Drop it, or pass kind "unified".`,
+			);
+		}
 		// `operator` is keyword syntax, and the API accepts it only when the
 		// request also asks for keyword retrieval. On hybrid it does not ignore
 		// the field, it refuses the whole call:
@@ -778,26 +984,30 @@ export class ContextResource extends Resource {
 				? this.multiScope(params.collections, params.database)
 				: this.scope(params.collection, params.database);
 
-		// `unified` is refused by the pinned SDK's request serializer before
-		// anything is sent, so that kind is built by hand and its result parsed
-		// with the SDK's own response serializer (PRO-1618). The body is already
-		// hand-written snake_case, so `titles` folds in directly instead of
-		// needing the passthrough below.
+		// A unified database (PRO-1618) takes the v2 request fields with NO
+		// `type` (CONTRACT: never send it there) and answers with the four-key
+		// body. The request is built by hand because the pinned SDK's request
+		// serializer has no way to omit `type` for this kind, and the response
+		// is read by SHAPE: the four-key body is returned untouched, and a v2
+		// body (an older server, or a split database reached with this kind)
+		// still goes through the SDK's own serializer so the v2 renderer can
+		// read it. Nothing about the unified body passes through that
+		// serializer, which knows neither `llm_prompt` nor `context_id`.
 		if (params.kind === "unified") {
-			return this.call("/query", () =>
-				this.rawTyped(
+			return this.call("/query", async () => {
+				const wire = await this.rawWire(
 					"unified query",
 					"POST",
 					"/query",
 					compact({
 						...scope,
 						query: params.query,
-						type: "unified",
 						operator: params.operator,
 						query_by: queryBy,
 						max_results: params.maxResults,
 						mode: params.mode,
 						graph_context: params.graphContext,
+						follow_forceful_relations: params.followForcefulRelations,
 						alpha: params.alpha,
 						recency_bias: params.recencyBias,
 						query_apps: params.queryApps,
@@ -807,11 +1017,12 @@ export class ContextResource extends Resource {
 						num_related_chunks: params.numRelatedChunks,
 						acl: params.acl,
 					}),
-					serialization.SearchV2RetrievalResult.parseOrThrow,
 					opts?.signal,
-				),
-				opts?.onMeta,
-			);
+				);
+				return isUnifiedQueryResult(wire)
+					? toUnifiedQueryResult(wire)
+					: serialization.SearchV2RetrievalResult.parseOrThrow(wire, SDK_PARSE_OPTS);
+			}, opts?.onMeta);
 		}
 
 		const request = {
@@ -918,6 +1129,30 @@ export class ContextResource extends Resource {
 		opts?: RequestOptions,
 	): Promise<SDK.IngestionV2IngestResponse> {
 		if (params.kind === "unified") return this.ingestUnified(params, opts);
+
+		// The unified item's own fields (PRO-1618) have no home on either split
+		// path: the memory item does not carry them and the knowledge path is a
+		// bare document. Refused by name rather than dropped, for the same
+		// reason the knowledge branch below refuses memory-only params: a
+		// caller answered "success: 1" has been told the label, the relations
+		// or the ACL were stored when they were discarded.
+		const unifiedOnly = (
+			[
+				["contextCategory", params.contextCategory],
+				["forcefulRelations", params.forcefulRelations],
+				["acl", params.acl],
+			] as const
+		)
+			.filter(([, value]) => value != null)
+			.map(([name]) => name);
+		if (unifiedOnly.length > 0) {
+			throw new Error(
+				`${unifiedOnly.join(", ")} ${unifiedOnly.length === 1 ? "applies" : "apply"} to a ` +
+				`unified database only (kind "unified"); this request names kind "${params.kind}". ` +
+				`Drop ${unifiedOnly.length === 1 ? "it" : "them"}, or pass kind "unified".`,
+			);
+		}
+
 		const request: SDK.IngestContextRequest = {
 			...this.scope(params.collection, params.database),
 			type: params.kind as SDK.IngestContextRequestType,
@@ -1010,17 +1245,22 @@ export class ContextResource extends Resource {
 	}
 
 	/**
-	 * The unified ingest shape (PRO-1618): one `items[]` array, each item text or
-	 * a conversation, no corpus selector. Sent as the JSON body of
-	 * `POST /context/ingest`; the memory-item fields map onto the item names the
-	 * redesign settled on. On a split database the items land in its memory
-	 * corpus, so nothing changes for a caller that has not created a unified one.
+	 * The unified ingest body (PRO-1618, CONTRACT.md): one `context[]` array,
+	 * each item text or a conversation, no corpus selector. Sent as the JSON
+	 * body of `POST /context/ingest`. The wrapper's memory-item params map onto
+	 * the item names the contract fixes: `sourceId` is `context_id`, `infer` is
+	 * `enrich`, `customInstructions` is `instructions`, `metadata` is
+	 * `attributes`, `additionalMetadata` is `custom_attributes`,
+	 * `observationDate` is `happened_at`. The server accepts the old names as
+	 * aliases; a client sends the documented ones.
 	 */
 	private ingestUnified(
 		params: IngestParams,
 		opts?: RequestOptions,
 	): Promise<SDK.IngestionV2IngestResponse> {
 		const item: Record<string, unknown> = {};
+		if (params.sourceId != null) item.context_id = params.sourceId;
+		if (params.title != null) item.title = params.title;
 		if (params.text != null) item.text = params.text;
 		if (params.pairs != null) {
 			item.conversation = params.pairs.flatMap((turn) => [
@@ -1035,35 +1275,39 @@ export class ContextResource extends Resource {
 		// Speaker identity has TWO homes on a unified item and the server reads
 		// the finer-grained one first: a conversation names its speaker per turn
 		// (set above), and the item-level `user_name` fills in only when the
-		// turns supplied none. So it goes on the item for a TEXT item only —
+		// turns supplied none. So it goes on the item for a TEXT item only:
 		// sending both would be redundant on the wire, and a client that let the
 		// item-level value win would silently discard the per-turn identity that
 		// speaker anchoring depends on.
 		if (params.pairs == null && params.userName != null) item.user_name = params.userName;
-		if (params.sourceId != null) item.context_id = params.sourceId;
-		if (params.title != null) item.title = params.title;
 		item.enrich = params.infer ?? true;
 		if (item.enrich && params.customInstructions != null) {
-			item.custom_instructions = params.customInstructions;
+			item.instructions = params.customInstructions;
 		}
+		if (params.observationDate != null) item.happened_at = params.observationDate;
 		if (params.metadata != null) item.attributes = params.metadata;
 		if (params.additionalMetadata != null) item.custom_attributes = params.additionalMetadata;
-		if (params.observationDate != null) item.happened_at = params.observationDate;
+		// `auto` is the server's default and means "no label"; it is not sent,
+		// so the item says only what the caller decided.
+		if (params.contextCategory != null && params.contextCategory !== "auto") {
+			item.context_category = params.contextCategory;
+		}
+		if (params.forcefulRelations != null) {
+			item.forceful_relations = compact({
+				ids: params.forcefulRelations.ids,
+				properties: params.forcefulRelations.properties,
+			});
+		}
+		if (params.acl != null) item.acl = params.acl;
 		const body = {
 			...this.scope(params.collection, params.database),
-			items: [item],
+			context: [item],
 			...(params.upsert != null ? { upsert: params.upsert } : {}),
 		};
-		return this.call("/context/ingest", () =>
-			this.rawTyped(
-				"unified ingest",
-				"POST",
-				"/context/ingest",
-				body,
-				serialization.IngestionV2IngestResponse.parseOrThrow,
-				opts?.signal,
-			),
-		);
+		return this.call("/context/ingest", async () => {
+			const wire = await this.rawWire("unified ingest", "POST", "/context/ingest", body, opts?.signal);
+			return parseUnifiedIngestResponse(wire);
+		});
 	}
 
 	/** List memories or knowledge sources (SDK `context.list`). */
@@ -1075,11 +1319,12 @@ export class ContextResource extends Resource {
 			params.sourceFields != null &&
 			Object.keys(params.sourceFields).length > 0;
 
-		// `unified` is refused by the pinned SDK's request serializer, so that
-		// kind is built by hand and parsed with the SDK's own response
-		// serializer (PRO-1618). The body is already hand-written snake_case, so
-		// the source-field filters fold in directly instead of needing the
-		// passthrough below.
+		// A unified database takes no `type` (PRO-1618, CONTRACT: never send it
+		// there), which the pinned SDK's request serializer cannot omit, so
+		// that kind is built by hand and parsed with the SDK's own response
+		// serializer. The body is already hand-written snake_case, so the
+		// source-field filters fold in directly instead of needing the
+		// passthrough below. The listing shape itself is unchanged.
 		if (params.kind === "unified") {
 			return this.call("/context/list", () =>
 				this.rawTyped(
@@ -1088,7 +1333,6 @@ export class ContextResource extends Resource {
 					"/context/list",
 					compact({
 						...this.scope(params.collection, params.database),
-						type: "unified",
 						ids: params.ids,
 						page: params.page,
 						page_size: params.pageSize,
@@ -1267,8 +1511,10 @@ export class ContextResource extends Resource {
 
 		const query = new URLSearchParams(this.scope(params.collection, params.database));
 
-		if (params.kind) query.set("type", params.kind);
-
+		// Never `type` on a unified database (PRO-1618): the corpus selector is
+		// a split-database concept and the server accepts nothing but silence
+		// or "unified" there.
+		if (params.kind && params.kind !== "unified") query.set("type", params.kind);
 		if (params.depth != null) query.set("depth", String(params.depth));
 
 		if (params.maxSources != null) query.set("max_sources", String(params.maxSources));
@@ -1290,11 +1536,11 @@ export class ContextResource extends Resource {
 		if (params.kind === "unified") {
 			const scope = this.scope(params.collection, params.database);
 			const query = new URLSearchParams();
+			// No `type` (PRO-1618, CONTRACT: never send it on a unified database).
 			for (const [k, v] of Object.entries({
 				database: scope.database,
 				collection: scope.collection,
 				id: params.id,
-				type: "unified",
 				limit: params.limit,
 				cursor: params.cursor,
 			}))
@@ -1332,6 +1578,7 @@ export class ContextResource extends Resource {
 		opts?: RequestOptions,
 	): Promise<SDK.SourcesMemoryDeleteResponse> {
 		if (params.kind === "unified") {
+			// No `type` (PRO-1618, CONTRACT: never send it on a unified database).
 			return this.call("/context", () =>
 				this.rawTyped(
 					"unified delete",
@@ -1340,7 +1587,6 @@ export class ContextResource extends Resource {
 					compact({
 						...this.scope(params.collection, params.database),
 						ids: params.ids,
-						type: "unified",
 					}),
 					serialization.SourcesMemoryDeleteResponse.parseOrThrow,
 					opts?.signal,

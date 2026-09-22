@@ -4,9 +4,12 @@ import assert from "node:assert/strict";
 import {
 	buildRecalledContext,
 	renderRecalledContext,
+	renderUnifiedPrompt,
 	renderedChunkCount,
+	unifiedStructuredContent,
 } from "../src/context.js";
 import type { RecallResponse } from "../src/types.js";
+import { UNIFIED_QUERY_FIXTURE } from "./unified-fixture.js";
 
 test("buildRecalledContext includes entity paths, graph relations and extra context", () => {
 	const response = {
@@ -969,4 +972,181 @@ test("compact rendering never collapses bodies into a pointer", () => {
 	// promise content the rendered response does not contain.
 	assert.doesNotMatch(out, /same text as Chunk/);
 	assert.match(out, new RegExp(shared.slice(0, 50)), "the second body is rendered");
+});
+
+// --- PRO-1618: the unified rendering, and the split rendering pinned ---
+
+// The contract asks for `llm_prompt` verbatim: it already carries the context,
+// the related context, the graph paths and the citation labels. The renderer
+// hands it over unchanged and reads the structured view from the four keys
+// under the contract's own names.
+test("renderUnifiedPrompt returns llm_prompt verbatim and unifiedStructuredContent reads the four keys", () => {
+	const { text, truncated } = renderUnifiedPrompt(UNIFIED_QUERY_FIXTURE, { maxTotalChars: 40_000 });
+	assert.equal(text, UNIFIED_QUERY_FIXTURE.llm_prompt);
+	assert.equal(truncated, false);
+	assert.equal(renderUnifiedPrompt(UNIFIED_QUERY_FIXTURE).text, UNIFIED_QUERY_FIXTURE.llm_prompt, "no budget, no change");
+
+	assert.deepEqual(unifiedStructuredContent(UNIFIED_QUERY_FIXTURE), {
+		layout: "unified",
+		chunks: [
+			{
+				context_id: "chat-2026-07-29#w2",
+				chunk_id: "ck_9f2",
+				score: 0.87,
+				content: "user: Keep answers short please\nassistant: Got it.",
+				enrichment: { text: "User prefers short, bullet-point answers.", kind: "user_preference" },
+			},
+			{
+				context_id: "policy-1",
+				chunk_id: "ck_a01",
+				score: 0.61,
+				content: "Refund policy: 30-day window.",
+			},
+		],
+		graph: [{ path_summary: "John is on the Pro plan since June 2026." }],
+		relations: [
+			{
+				via: { from: "linear-PRO-1169", to: "linear-PRO-1169-comment-4" },
+				chunk: {
+					context_id: "linear-PRO-1169-comment-4",
+					chunk_id: "ck_c4",
+					score: 0.55,
+					content: "Comment 4: shipped the fix.",
+				},
+			},
+		],
+		// Distinct context ids, chunks first then related, and NO titles: the
+		// body carries none and none are invented.
+		sources: [
+			{ id: "chat-2026-07-29#w2" },
+			{ id: "policy-1" },
+			{ id: "linear-PRO-1169-comment-4" },
+		],
+	});
+});
+
+// The prompt is cut only by the total budget, on a LINE boundary, and says
+// how much was shown: slicing it anywhere could sever a `[n] context_id:`
+// header and leave a partial id the caller might pass on.
+test("renderUnifiedPrompt cuts on a line boundary and says how much was shown", () => {
+	const budget = 400;
+	const { text, truncated } = renderUnifiedPrompt(UNIFIED_QUERY_FIXTURE, { maxTotalChars: budget });
+	assert.equal(truncated, true);
+	assert.ok(text.length <= budget, `rendered ${text.length} > budget ${budget}`);
+	const noteAt = text.indexOf("\n\n[llm_prompt truncated: ");
+	assert.ok(noteAt > 0, "the truncation note is present");
+	const kept = text.slice(0, noteAt);
+	assert.ok(UNIFIED_QUERY_FIXTURE.llm_prompt.startsWith(kept), "what is shown is a prefix of the prompt");
+	assert.equal(UNIFIED_QUERY_FIXTURE.llm_prompt[kept.length], "\n", "the cut lands on a line boundary");
+	assert.match(text, new RegExp(`\\[llm_prompt truncated: ${kept.length} of ${UNIFIED_QUERY_FIXTURE.llm_prompt.length} characters shown to stay within ${budget}\\.`));
+	assert.match(text, /hydradb_inspect\.\]$/);
+});
+
+// The structured view is a second encoding of the same answer, not a way
+// around its limits: bodies are bounded when asked, and enrichment text with
+// them; ids, scores and kinds are never touched.
+test("unifiedStructuredContent bounds chunk bodies when asked", () => {
+	const structured = unifiedStructuredContent(UNIFIED_QUERY_FIXTURE, { maxChunkChars: 12 });
+	assert.equal(structured.chunks[0]!.content, "user: Keep a...");
+	assert.equal(structured.chunks[0]!.enrichment?.text, "User prefers...");
+	assert.equal(structured.chunks[0]!.enrichment?.kind, "user_preference");
+	assert.equal(structured.chunks[0]!.score, 0.87);
+	assert.equal(structured.relations[0]!.chunk.content, "Comment 4: s...");
+	// A body within the bound is untouched, and enrichment absent stays absent.
+	assert.equal(unifiedStructuredContent(UNIFIED_QUERY_FIXTURE, { maxChunkChars: 1000 }).chunks[0]!.content, UNIFIED_QUERY_FIXTURE.chunks[0]!.content);
+	assert.equal("enrichment" in structured.chunks[1]!, false);
+});
+
+// A chunk carrying nothing still renders as an entry the caller can index,
+// and an empty context id is not a source.
+test("unifiedStructuredContent tolerates sparse chunks", () => {
+	const structured = unifiedStructuredContent({
+		chunks: [{}],
+		graph: [{}],
+		relations: [{ chunk: { context_id: "only-related" } }],
+		llm_prompt: "",
+	});
+	assert.deepEqual(structured.chunks, [{ context_id: "", content: "" }]);
+	assert.deepEqual(structured.graph, [{ path_summary: "" }]);
+	assert.deepEqual(structured.relations, [{ via: { from: "", to: "" }, chunk: { context_id: "only-related", content: "" } }]);
+	assert.deepEqual(structured.sources, [{ id: "only-related" }]);
+});
+
+// The split rendering, pinned BYTE FOR BYTE. The expected strings were
+// produced by the renderer as it stood before the unified rendering was added
+// (PR #72's head) and are asserted with `equal`, not `match`: a split database
+// keeps the rendering it always had, and any drift here is a regression.
+// The relation arrow glyphs are the renderer's own and are written as escapes.
+const SPLIT_FIXTURE = {
+	chunks: [
+		{
+			chunkUuid: "c1",
+			id: "s1",
+			chunkContent: "Chunk one body",
+			sourceTitle: "Doc A",
+			relevancyScore: 0.91,
+			extraContextIds: ["ec1"],
+		},
+		{
+			chunkUuid: "c2",
+			id: "s2",
+			chunkContent: "Chunk two body, a different source",
+			relevancyScore: 0.4,
+		},
+	],
+	graphContext: {
+		queryPaths: [
+			{ relevancyScore: 0.9, combinedContext: "Alice -> prefers -> tea", triplets: [] },
+		],
+		chunkRelations: [
+			{
+				relevancyScore: 0.8,
+				groupId: "g1",
+				sourceChunkIds: ["c1"],
+				triplets: [
+					{
+						source: { name: "Alice", type: "person", entity_id: "e1" },
+						relation: {
+							canonical_predicate: "prefers",
+							raw_predicate: "likes",
+							context: "morning routine",
+							relationship_id: "r1",
+							chunk_id: "c1",
+						},
+						target: { name: "Tea", type: "drink", entity_id: "e2" },
+					},
+				],
+			},
+		],
+		chunkIdToGroupIds: { c1: ["g1"] },
+	},
+	additionalContext: {
+		ec1: { chunkUuid: "ec1", id: "s3", chunkContent: "Tea helps Alice focus", sourceTitle: "Doc B" },
+	},
+} as unknown as RecallResponse;
+
+// The v2 renderer's relation glyphs (U+2014 and U+2192), built from their
+// code points so the pin is byte-exact without the glyphs in this source.
+const RELATION_DASH = String.fromCharCode(0x2014);
+const RELATION_ARROW = String.fromCharCode(0x2192);
+
+const SPLIT_FULL_EXPECTED =
+	"=== ENTITY PATHS ===\nAlice -> prefers -> tea\n\n=== CONTEXT ===\n" +
+	"Chunk 1  [id: s1]  (91%)\nSource: Doc A\nChunk one body\nGraph Relations:\n" +
+	`  (Alice) ${RELATION_DASH}[likes]${RELATION_ARROW} (Tea) [morning routine]\n` +
+	"Extra Context:\n  Related Context (Doc B): Tea helps Alice focus\n\n---\n\n" +
+	"Chunk 2  [id: s2]  (40%)\nChunk two body, a different source";
+
+const SPLIT_COMPACT_EXPECTED =
+	"=== ENTITY PATHS ===\nAlice -> prefers -> tea\n\n=== CONTEXT ===\n" +
+	"Chunk 1  [id: s1]  (91%)\nSource: Doc A\nChunk one body\nGraph Relations:\n" +
+	`  (Alice) ${RELATION_DASH}[likes]${RELATION_ARROW} (Tea) [morning routine]\n\n---\n\n` +
+	"Chunk 2  [id: s2]  (40%)\nChunk two body, a different source";
+
+test("the split rendering is unchanged, byte for byte", () => {
+	assert.equal(buildRecalledContext(SPLIT_FIXTURE), SPLIT_FULL_EXPECTED);
+	assert.deepEqual(
+		renderRecalledContext(SPLIT_FIXTURE, { maxChunkChars: 600, includeExtraContext: false, maxTotalChars: 39_000 }),
+		{ text: SPLIT_COMPACT_EXPECTED, shown: 2 },
+	);
 });

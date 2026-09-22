@@ -34,6 +34,42 @@ Also hardened: an OAuth grant confined to a database but with no chosen
 collection previously could serialise its collection allowlist as an empty
 list, which refused every per-call `collection` override. Empty allowlists
 from the issuer are now treated as absent.
+### Changed: unified databases follow the PRO-1618 API contract
+
+On a UNIFIED database only. A split database keeps every request body and
+every rendering byte for byte.
+
+- `hydradb_query` sends no `type` and reads the four-key answer (`chunks`,
+  `graph`, `relations`, `llm_prompt`) by shape, never through the SDK's v2
+  serializer, which knows neither `llm_prompt` nor `context_id`. The text the
+  model sees is the server-built `llm_prompt` verbatim, with its citation
+  labels ([1], [R1], [P1]) and each entry's `context_id`; the same answer
+  rides beside it as structured content (`chunks[].context_id`, `score`,
+  `content`, `enrichment`; `graph[].path_summary`; `relations[]`; distinct
+  `sources[]` built from `context_id`, with no titles invented). A v2 answer
+  to a unified request, from a server that predates the unified response,
+  still goes to the v2 renderer. `detail` bounds the structured bodies; the
+  prompt is cut only by the total budget, on a line boundary, and says so.
+- New `follow_forceful_relations` on `hydradb_query` toggles the chunks
+  declared related at ingest. It is a unified-database option: the split
+  path goes through the pinned SDK, which knows only the deprecated
+  `query_forceful_relations` name, so it is refused on a split request rather
+  than sent under the wrong key or dropped.
+- `hydradb_ingest` sends the contract body: list key `context`, item fields
+  `text` or `conversation`, `context_id`, `title`, `enrich`, `instructions`,
+  `happened_at`, `attributes`, `custom_attributes`, `context_category`,
+  `forceful_relations` (`{ids}`), `acl`; request-level `upsert`. The 202 is
+  read by hand so `results[].source_id` (the context id) reaches the caller;
+  the SDK serializer reads a wire `id` and would have lost it.
+- New `hydradb_ingest` arguments: `attributes` and `happened_at` (the
+  preferred names for `metadata` and `observation_date`; both spellings are
+  accepted and a contradiction between them is refused), `custom_attributes`,
+  `instructions` (replaces the server's default extraction guidance for that
+  entry), `context_category`, `forceful_relations` and `acl`. The last three
+  exist on a unified item only and are refused by name on a split database.
+  The contract-named arguments work with `turns` as well as `text`.
+- `hydradb_list`, `hydradb_delete` and the relations read no longer send
+  `type: "unified"`, and the subgraph read never sends `type` for that kind.
 
 ## [1.4.0] - 2026-09-01
 
@@ -98,7 +134,7 @@ reads it first; sending both would risk one day discarding the per-turn
 speaker identity that anchoring depends on. `user_name` is also no longer
 discarded on a text ingest, which lost it on every layout.
 
-Unified ingest sends the `items[]` body (text or a role/content conversation
+Unified ingest sends the `context[]` body (text or a role/content conversation
 per item) and `hydradb_databases` can create a unified database through
 `type`. The pinned SDK predates both, so those calls and the layout probe go
 over the wrapper's shared raw v2 transport (`src/hydra/transport.ts`, the

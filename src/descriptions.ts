@@ -89,6 +89,12 @@ const PARAM = {
 		"(Alice)-[prefers]->(Tea) — that connect facts across separate memories, and they " +
 		"often carry the answer the matching text alone does not. Set false only when you " +
 		"want the raw matching text and nothing else.",
+	follow_forceful_relations:
+		"Also return chunks whose sources were declared related at ingest (see " +
+		"hydradb_ingest's forceful_relations), listed as RELATED CONTEXT with [R1]-style " +
+		"labels (default: true). Set false to get only what matched the query. UNIFIED " +
+		"databases only: on a split database the request is refused rather than the " +
+		"option silently ignored.",
 	text:
 		"The information to store. Provide EXACTLY ONE of `text` or `turns` — passing " +
 		"both is an error, and so is passing neither. Write it standalone: it must still " +
@@ -128,6 +134,39 @@ const PARAM = {
 		"recency reflects the fact rather than the write. The server stores a date and no " +
 		"time of day: a date-time is truncated to its date part, and anything that is not " +
 		"a date is rejected.",
+	context_category:
+		"A label YOU put on this entry: 'user_preference', 'business_knowledge', " +
+		"'decision_trace', or 'auto' (the default, meaning no label). Nothing infers it, " +
+		"so send a preference or a decision as text with the matching label; it comes " +
+		"back as the enrichment kind in later hydradb_query results. UNIFIED databases " +
+		"only; refused on a split database.",
+	instructions:
+		"Steer what Hydra DB extracts from this entry when `infer` is on, in a sentence " +
+		"or two (e.g. 'capture the decision and who made it, not the discussion'). " +
+		"Replaces this server's default extraction guidance for this entry only.",
+	happened_at:
+		'When the fact was true, as a calendar date YYYY-MM-DD (e.g. "2026-07-04"), ' +
+		"distinct from when you stored it. The preferred name for `observation_date`; " +
+		"pass one or the other, they mean the same thing. A date-time is kept as its " +
+		"date part; anything that is not a date is rejected.",
+	attributes:
+		"Declared, filterable key/value attributes stored with this entry, as {key: " +
+		"value}: the keys hydradb_query's filters can match on later, so set them when " +
+		'you expect to narrow by them, e.g. {"project": "hydradb", "kind": "decision"}. ' +
+		"The preferred name for `metadata`; pass one or the other, they mean the same thing.",
+	custom_attributes:
+		"Free-form key/value data stored with this entry and returned alongside it, " +
+		"not filterable. Use `attributes` for anything you will filter on.",
+	forceful_relations:
+		"Source ids (context ids) this entry is explicitly related to, such as the " +
+		"thread, ticket or document it belongs to. A later hydradb_query that returns " +
+		"this entry can pull those in as RELATED CONTEXT. Take the ids from hydradb_query, " +
+		"hydradb_list or an earlier hydradb_ingest result; never invent one. UNIFIED " +
+		"databases only; refused on a split database.",
+	ingest_acl:
+		"Principals that may read this entry: each an email, a `domain:<host>`, or a " +
+		"`group:<provider>:<id>`. Omit it for an entry anyone holding the key may read. " +
+		"UNIFIED databases only; refused on a split database.",
 	infer:
 		"Let Hydra DB extract insights and knowledge-graph entities from this text " +
 		"(default: true). Keep it true for anything about the user or their work — that " +
@@ -283,6 +322,8 @@ Searches both families by default. Every result carries \`[id: …]\` — pass i
 
 Collections partition the database by use case. This connection's default (if it has one) is shown by hydradb_list_collections; when there is none, a search without \`collection\` covers every collection in the database (up to 10). Pass \`collection\`, or \`collections\` for several, to aim it where the answer should live.
 
+On a UNIFIED database (see hydradb_databases) the result is the server-built context block, verbatim: each entry is labelled [1], [R1] (declared related) or [P1] (graph path) and names its context_id, which is its source id. Cite the labels when you use what they mark.
+
 Examples:
   {"query": "how does the user prefer code review feedback"}
   {"query": "postgres connection pooling decision", "kind": "knowledge"}
@@ -410,6 +451,7 @@ export const TOOL_DESCRIPTIONS = {
 			max_results: PARAM.max_results,
 			mode: PARAM.mode,
 			graph_context: PARAM.graph_context,
+			follow_forceful_relations: PARAM.follow_forceful_relations,
 			detail: PARAM.detail,
 			operator: PARAM.operator,
 			source_ids: PARAM.query_source_ids,
@@ -441,6 +483,16 @@ export const TOOL_DESCRIPTIONS = {
 			overwrite: PARAM.overwrite,
 			metadata: PARAM.metadata,
 			observation_date: PARAM.observation_date,
+			// The unified item's names (PRO-1618). `attributes` and `happened_at`
+			// are the preferred names for `metadata` and `observation_date` and
+			// work on every layout; the last three exist on a unified item only.
+			attributes: PARAM.attributes,
+			custom_attributes: PARAM.custom_attributes,
+			happened_at: PARAM.happened_at,
+			instructions: PARAM.instructions,
+			context_category: PARAM.context_category,
+			forceful_relations: PARAM.forceful_relations,
+			acl: PARAM.ingest_acl,
 			turns:
 				"The conversation to ingest, oldest first, as [{user, assistant}, ...]. Provide " +
 				"EXACTLY ONE of `text` or `turns` — passing both is an error, and so is passing " +

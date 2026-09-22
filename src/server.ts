@@ -9,11 +9,16 @@ import { toAddMemoryResponse, toMemoryList, toSourceList } from "./adapters.js";
 import type { PageInfo } from "./adapters.js";
 import { resolveConfig, resolveGraphConfig } from "./config.js";
 import type { GraphConfig } from "./config.js";
-import { renderRecalledContext } from "./context.js";
+import { renderRecalledContext, renderUnifiedPrompt, unifiedStructuredContent } from "./context.js";
 import { COLLECTION_PATTERN, MAX_BODY_BYTES, renderRows } from "./cypher.js";
 import { SERVER_INSTRUCTIONS, TOOL_DESCRIPTIONS } from "./descriptions.js";
-import { HydraDB, assertCollectionAllowed, assertDatabaseAllowed } from "./hydra/index.js";
-import type { ContextKind, QueryKind } from "./hydra/index.js";
+import {
+	assertCollectionAllowed,
+	assertDatabaseAllowed,
+	HydraDB,
+	isUnifiedQueryResult,
+} from "./hydra/index.js";
+import type { ContextCategory, ContextKind, QueryKind, UnifiedQueryResult } from "./hydra/index.js";
 import { HydraWrapperError } from "./hydra/index.js";
 import { logger } from "./logger.js";
 import { ALIAS_REPLACEMENTS, DEPRECATED_TOOL_NAMES, TOOL_NAMES } from "./tool-names.js";
@@ -127,6 +132,19 @@ function generatedSourceId(): string {
 
 function textResult(text: string): ToolResult {
 	return { content: [{ type: "text" as const, text }] };
+}
+
+/**
+ * A key-order-independent encoding, for telling whether two records the
+ * caller sent under two names say the same thing. Only objects are
+ * normalised; arrays keep their order because it carries meaning there.
+ */
+function canonicalJson(value: unknown): string {
+	return JSON.stringify(value, (_key, inner: unknown) => {
+		if (inner == null || typeof inner !== "object" || Array.isArray(inner)) return inner;
+		const record = inner as Record<string, unknown>;
+		return Object.fromEntries(Object.keys(record).sort().map((k) => [k, record[k]]));
+	});
 }
 
 /**
@@ -629,6 +647,7 @@ export function createHydraDBServer(
 		max_results?: number;
 		mode?: "fast" | "thinking" | "auto";
 		graph_context?: boolean;
+		follow_forceful_relations?: boolean;
 		detail?: "compact" | "full";
 		operator?: "or" | "and" | "phrase";
 		source_ids?: string[];
@@ -716,6 +735,10 @@ export function createHydraDBServer(
 			acl: args.acl,
 			numRelatedChunks: args.num_related_chunks,
 			graphContext: args.graph_context ?? true,
+			// Forwarded only as the caller gave it: the server defaults it to
+			// true, and the wrapper refuses it on a split request, so a
+			// manufactured value here would fail every split query.
+			followForcefulRelations: args.follow_forceful_relations,
 			queryApps: args.query_apps,
 			database: args.database,
 			collection: scopeCollection,
@@ -738,6 +761,14 @@ export function createHydraDBServer(
 				requestId = meta.requestId;
 			},
 		}), args.database);
+
+		// A unified database (PRO-1618) answers with the four-key body, decided
+		// by SHAPE rather than by the kind that was sent: a server that predates
+		// the unified response still answers a unified request in v2, and that
+		// goes on to the v2 renderer below exactly as before.
+		if (isUnifiedQueryResult(raw)) {
+			return renderUnifiedQuery(raw, kind, args.detail);
+		}
 
 		// The renderer reads the SDK payload directly; there is no longer a
 		// snake_case mirror to convert into.
@@ -875,6 +906,53 @@ export function createHydraDBServer(
 	}
 
 	/**
+	 * A unified answer (PRO-1618), rendered the way the contract asks: the
+	 * server-built `llm_prompt` verbatim as the text, because it already
+	 * carries the context, the related context, the graph paths and the
+	 * citation labels a model is meant to cite; and the four keys as
+	 * structured content beside it, so a host that parses rather than reads
+	 * gets `chunks[].context_id`, `score`, `content`, `enrichment`,
+	 * `graph[].path_summary`, `relations[]` and the distinct `sources[]`.
+	 *
+	 * `max_results` is not re-applied here. The prompt is the server's and
+	 * slicing the chunks under it would make the two views disagree; the
+	 * server honours the parameter itself. `detail` bounds the structured
+	 * bodies as it bounds the v2 chunk bodies; the prompt is cut only by the
+	 * total budget, on a line boundary, and says so.
+	 */
+	function renderUnifiedQuery(
+		res: UnifiedQueryResult,
+		kind: QueryKind,
+		detail?: "compact" | "full",
+	): ToolResult {
+		const { chunks, graph, relations } = res;
+		if (chunks.length === 0 && relations.length === 0 && graph.length === 0) {
+			return textResult(`No relevant ${resultNoun(kind)} found in Hydra DB.`);
+		}
+		const legend =
+			`\n\n---\nEach context_id above is a source id: pass one to ${TOOL_NAMES.INSPECT} for ` +
+			`that source's full content, or to ${TOOL_NAMES.DELETE} to remove it. The bracketed ` +
+			`labels ([1], [R1], [P1]) are citation labels: cite them when you use what they mark.`;
+		const headerAllowance = 120;
+		const { text: prompt } = renderUnifiedPrompt(res, {
+			maxTotalChars: QUERY_CHAR_BUDGET - legend.length - headerAllowance,
+		});
+		const extras = [
+			relations.length > 0 ? `${relations.length} related` : "",
+			graph.length > 0 ? `${graph.length} graph path${graph.length === 1 ? "" : "s"}` : "",
+		].filter((s) => s !== "");
+		const header =
+			`Found ${chunks.length} ${resultNoun(kind, chunks.length)}` +
+			`${extras.length > 0 ? ` (${extras.join(", ")})` : ""}:`;
+		return structuredResult(
+			`${header}\n\n${prompt}${legend}`,
+			unifiedStructuredContent(res, {
+				maxChunkChars: (detail ?? "compact") === "compact" ? COMPACT_CHUNK_CHARS : undefined,
+			}),
+		);
+	}
+
+	/**
 	 * The id the server assigned to the item it just stored.
 	 *
 	 * On the memory path the caller may supply `source_id`, but when it does not
@@ -967,12 +1045,33 @@ export function createHydraDBServer(
 		overwrite?: boolean;
 		metadata?: Record<string, unknown>;
 		observation_date?: string;
+		/** Free-form data beside the entry (unified `custom_attributes`, split `additional_metadata`). */
+		custom_attributes?: Record<string, unknown>;
+		/** Replaces the host's default extraction guidance for this entry. */
+		instructions?: string;
+		/** Unified only; the wrapper refuses it on a split database. */
+		context_category?: ContextCategory;
+		/** Unified only; the wrapper refuses it on a split database. */
+		forceful_relations?: string[];
+		/** Unified only; the wrapper refuses it on a split database. */
+		acl?: string[];
 		database?: string;
 		collection?: string;
 	}, signal?: AbortSignal): Promise<ToolResult> {
 		const kind: ContextKind =
 			args.kind ?? ((await isUnifiedDatabase(args.database, signal)) ? "unified" : "memory");
 		logger.debug(`${TOOL_NAMES.INGEST}: "${args.text.slice(0, 50)}..." (kind=${kind})`);
+
+		// The unified item's own fields (PRO-1618) are forwarded on EVERY kind:
+		// on a split database the wrapper refuses them by name, which is the
+		// answer a caller who set them needs, where dropping them here would
+		// report "success: 1" for a label or an ACL that was never stored.
+		const unifiedOnly = {
+			contextCategory: args.context_category,
+			forcefulRelations:
+				args.forceful_relations != null ? { ids: args.forceful_relations } : undefined,
+			acl: args.acl,
+		};
 
 		// The memory item shape has no counterpart on the knowledge path, which
 		// carries only a document and its filename — so those fields are sent only
@@ -994,17 +1093,29 @@ export function createHydraDBServer(
 						userName: args.user_name,
 						infer: args.infer ?? true,
 						isMarkdown: args.is_markdown,
-						customInstructions: INGEST_INSTRUCTIONS,
+						// The caller's steering replaces the host default; it is
+						// `instructions` on a unified item and `custom_instructions`
+						// on a split memory item, and the wrapper picks the key.
+						customInstructions: args.instructions ?? INGEST_INSTRUCTIONS,
 						metadata: args.metadata,
+						additionalMetadata: args.custom_attributes,
 						observationDate: args.observation_date,
 					}
-				: {};
+				: {
+						// The knowledge path carries neither, so only what the caller
+						// SAID goes through, for the wrapper to refuse by name; the
+						// host default is not manufactured here, or every knowledge
+						// write would fail on it.
+						customInstructions: args.instructions,
+						additionalMetadata: args.custom_attributes,
+					};
 
 		const raw = await withUnifiedFallback(args.kind == null, kind, (kindToSend) => hydra.context.ingest({
 			kind: kindToSend,
 			text: args.text,
 			title: args.title ?? defaultTitle(args.text),
 			...memoryOnly,
+			...unifiedOnly,
 			database: args.database,
 			collection: args.collection,
 			// Default stays true. The SDK retries POSTs, so upsert is what keeps a
@@ -1045,6 +1156,14 @@ export function createHydraDBServer(
 			title?: string;
 			isMarkdown?: boolean;
 			overwrite?: boolean;
+			/** The unified item's names (PRO-1618); `attributes`/`happenedAt` map onto the split memory item too. */
+			attributes?: Record<string, unknown>;
+			happenedAt?: string;
+			customAttributes?: Record<string, unknown>;
+			instructions?: string;
+			contextCategory?: ContextCategory;
+			forcefulRelations?: string[];
+			acl?: string[];
 			database?: string;
 			collection?: string;
 		},
@@ -1071,7 +1190,14 @@ export function createHydraDBServer(
 			infer: opts?.infer ?? true,
 			title: opts?.title,
 			isMarkdown: opts?.isMarkdown,
-			customInstructions: INGEST_INSTRUCTIONS,
+			customInstructions: opts?.instructions ?? INGEST_INSTRUCTIONS,
+			metadata: opts?.attributes,
+			observationDate: opts?.happenedAt,
+			additionalMetadata: opts?.customAttributes,
+			contextCategory: opts?.contextCategory,
+			forcefulRelations:
+				opts?.forcefulRelations != null ? { ids: opts.forcefulRelations } : undefined,
+			acl: opts?.acl,
 			upsert: opts?.overwrite ?? true,
 			database: opts?.database,
 			collection: opts?.collection,
@@ -2777,6 +2903,10 @@ export function createHydraDBServer(
 			.boolean()
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.graph_context),
+		follow_forceful_relations: z
+			.boolean()
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.follow_forceful_relations),
 		detail: z
 			.enum(["compact", "full"])
 			.optional()
@@ -2906,6 +3036,47 @@ export function createHydraDBServer(
 			.string()
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.user_name),
+		// The unified item's names (PRO-1618). `attributes` and `happened_at`
+		// are the preferred spellings of `metadata` and `observation_date`, kept
+		// side by side so existing callers keep working; the handler folds each
+		// pair and refuses a contradiction. The last three exist on a unified
+		// item only and the wrapper refuses them on a split database.
+		attributes: z
+			.record(z.unknown())
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.attributes),
+		custom_attributes: z
+			.record(z.unknown())
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.custom_attributes),
+		happened_at: z
+			.string()
+			.regex(OBSERVATION_DATE_PATTERN, {
+				message:
+					"happened_at must be a calendar date as YYYY-MM-DD (e.g. 2026-07-04); " +
+					"a date-time is accepted and kept as its date part",
+			})
+			.transform((value) => value.slice(0, CALENDAR_DATE_LENGTH))
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.happened_at),
+		instructions: z
+			.string()
+			.min(1)
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.instructions),
+		context_category: z
+			.enum(["auto", "user_preference", "business_knowledge", "decision_trace"])
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.context_category),
+		forceful_relations: z
+			.array(z.string().min(1))
+			.min(1)
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.forceful_relations),
+		acl: z
+			.array(z.string())
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.acl),
 	};
 
 	const conversationSchema = {
@@ -3288,6 +3459,13 @@ export function createHydraDBServer(
 			overwrite?: boolean;
 			metadata?: Record<string, unknown>;
 			observation_date?: string;
+			attributes?: Record<string, unknown>;
+			custom_attributes?: Record<string, unknown>;
+			happened_at?: string;
+			instructions?: string;
+			context_category?: ContextCategory;
+			forceful_relations?: string[];
+			acl?: string[];
 			turns?: ConversationTurn[];
 			user_name?: string;
 			database?: string;
@@ -3295,6 +3473,34 @@ export function createHydraDBServer(
 		};
 
 		const hasTurns = a.turns != null && a.turns.length > 0;
+
+		// `attributes`/`metadata` and `happened_at`/`observation_date` are one
+		// field each under two names (PRO-1618 renamed them). Both are accepted
+		// so nothing that worked stops working; a caller that sends both with
+		// different values has stated two things and only they can say which,
+		// so it is refused rather than one of them silently winning.
+		if (
+			a.attributes != null &&
+			a.metadata != null &&
+			canonicalJson(a.attributes) !== canonicalJson(a.metadata)
+		) {
+			throw new Error(
+				`${TOOL_NAMES.INGEST} received different values for \`attributes\` and its ` +
+				`older name \`metadata\`. Pass only \`attributes\`.`,
+			);
+		}
+		if (
+			a.happened_at != null &&
+			a.observation_date != null &&
+			a.happened_at !== a.observation_date
+		) {
+			throw new Error(
+				`${TOOL_NAMES.INGEST} received different values for \`happened_at\` and its ` +
+				`older name \`observation_date\`. Pass only \`happened_at\`.`,
+			);
+		}
+		const attributes = a.attributes ?? a.metadata;
+		const happenedAt = a.happened_at ?? a.observation_date;
 
 		// A conversation is a memory by definition; there is no knowledge document
 		// made of user/assistant pairs. Reject rather than quietly ingesting it as
@@ -3319,6 +3525,10 @@ export function createHydraDBServer(
 					["user_name", a.user_name],
 					["metadata", a.metadata],
 					["observation_date", a.observation_date],
+					["attributes", a.attributes],
+					["happened_at", a.happened_at],
+					["custom_attributes", a.custom_attributes],
+					["instructions", a.instructions],
 				] as const
 			)
 				.filter(([, value]) => value != null)
@@ -3359,6 +3569,19 @@ export function createHydraDBServer(
 					title: a.title,
 					isMarkdown: a.is_markdown,
 					overwrite: a.overwrite,
+					// The contract's names (PRO-1618) reach the conversation path
+					// as they reach the text path. `metadata` and
+					// `observation_date` were never forwarded here and still are
+					// not: a split conversation ingest keeps its wire body byte
+					// for byte, and the preferred names are the ones that work on
+					// both input shapes.
+					attributes: a.attributes,
+					happenedAt: a.happened_at,
+					customAttributes: a.custom_attributes,
+					instructions: a.instructions,
+					contextCategory: a.context_category,
+					forcefulRelations: a.forceful_relations,
+					acl: a.acl,
 					database: a.database,
 					collection: a.collection,
 				},
@@ -3383,8 +3606,13 @@ export function createHydraDBServer(
 					infer: a.infer,
 					is_markdown: a.is_markdown,
 					overwrite: a.overwrite,
-					metadata: a.metadata,
-					observation_date: a.observation_date,
+					metadata: attributes,
+					observation_date: happenedAt,
+					custom_attributes: a.custom_attributes,
+					instructions: a.instructions,
+					context_category: a.context_category,
+					forceful_relations: a.forceful_relations,
+					acl: a.acl,
 					database: a.database,
 					collection: a.collection,
 				},
