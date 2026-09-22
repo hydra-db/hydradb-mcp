@@ -767,7 +767,7 @@ export function createHydraDBServer(
 		// the unified response still answers a unified request in v2, and that
 		// goes on to the v2 renderer below exactly as before.
 		if (isUnifiedQueryResult(raw)) {
-			return renderUnifiedQuery(raw, kind, args.detail);
+			return renderUnifiedQuery(raw, kind, args.detail, requestId);
 		}
 
 		// The renderer reads the SDK payload directly; there is no longer a
@@ -924,15 +924,24 @@ export function createHydraDBServer(
 		res: UnifiedQueryResult,
 		kind: QueryKind,
 		detail?: "compact" | "full",
+		requestId?: string,
 	): ToolResult {
 		const { chunks, graph, relations } = res;
+		// The same line and the same structured field as the v2 path above: the
+		// request id is the ONLY key POST /feedback correlates on, and an empty
+		// answer is still a query the caller may want to rate.
+		const feedbackLine = requestId
+			? `\nWas this useful? Report it with ${TOOL_NAMES.FEEDBACK} using request_id: ${requestId}`
+			: "";
 		if (chunks.length === 0 && relations.length === 0 && graph.length === 0) {
-			return textResult(`No relevant ${resultNoun(kind)} found in Hydra DB.`);
+			const text = `No relevant ${resultNoun(kind)} found in Hydra DB.${feedbackLine}`;
+			return requestId != null ? structuredResult(text, { request_id: requestId }) : textResult(text);
 		}
 		const legend =
 			`\n\n---\nEach context_id above is a source id: pass one to ${TOOL_NAMES.INSPECT} for ` +
 			`that source's full content, or to ${TOOL_NAMES.DELETE} to remove it. The bracketed ` +
-			`labels ([1], [R1], [P1]) are citation labels: cite them when you use what they mark.`;
+			`labels ([1], [R1], [P1]) are citation labels: cite them when you use what they mark.` +
+			feedbackLine;
 		const headerAllowance = 120;
 		const { text: prompt } = renderUnifiedPrompt(res, {
 			maxTotalChars: QUERY_CHAR_BUDGET - legend.length - headerAllowance,
@@ -946,9 +955,12 @@ export function createHydraDBServer(
 			`${extras.length > 0 ? ` (${extras.join(", ")})` : ""}:`;
 		return structuredResult(
 			`${header}\n\n${prompt}${legend}`,
-			unifiedStructuredContent(res, {
-				maxChunkChars: (detail ?? "compact") === "compact" ? COMPACT_CHUNK_CHARS : undefined,
-			}),
+			{
+				...unifiedStructuredContent(res, {
+					maxChunkChars: (detail ?? "compact") === "compact" ? COMPACT_CHUNK_CHARS : undefined,
+				}),
+				...(requestId != null ? { request_id: requestId } : {}),
+			},
 		);
 	}
 

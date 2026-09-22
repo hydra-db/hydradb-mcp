@@ -3974,6 +3974,7 @@ test("query: prints the request id so feedback has something to attach to", asyn
 	// reaches the agent and the feedback tool is unusable.
 	assert.match(text, /request_id: req-from-meta/);
 	assert.match(text, /hydradb_feedback/);
+	assert.equal((res.structuredContent as { request_id?: string }).request_id, "req-from-meta");
 });
 
 test("feedback: over-long prose is refused locally, not after a round trip", async () => {
@@ -4314,7 +4315,7 @@ test("hydradb_databases issues exactly one GET /databases", async () => {
  * database nothing may take the SDK path, and a test that did would fail
  * loudly here rather than pass on a serializer that knows the wrong names.
  */
-function unifiedHydra(answers: Record<string, unknown> = {}): {
+function unifiedHydra(answers: Record<string, unknown> = {}, requestId?: string): {
 	hydra: HydraDB;
 	calls: { path: string; method: string; body: unknown; url: URL }[];
 } {
@@ -4328,10 +4329,13 @@ function unifiedHydra(answers: Record<string, unknown> = {}): {
 				? { databases: ["db_u"], details: [{ database: "db_u", type: "unified" }] }
 				: (answers[parsed.pathname] ?? {});
 		return Promise.resolve(
-			new Response(JSON.stringify({ success: true, data }), {
-				status: 200,
-				headers: { "content-type": "application/json" },
-			}),
+			new Response(
+				JSON.stringify({ success: true, data, ...(requestId != null ? { meta: { request_id: requestId } } : {}) }),
+				{
+					status: 200,
+					headers: { "content-type": "application/json" },
+				},
+			),
 		);
 	}) as typeof fetch;
 	const refuse = () => {
@@ -4407,6 +4411,35 @@ test("hydradb_query on a unified database reports an empty four-key answer as no
 	const client = await connect(hydra);
 	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "nothing" } });
 	assert.equal((result.content as { text: string }[])[0]!.text, "No relevant context items found in Hydra DB.");
+	await client.close();
+});
+
+// The raw transport unwraps the envelope before `call` can read meta off it,
+// so the request id has to be captured inside the transport and rendered by
+// the unified path exactly like the v2 one — otherwise hydradb_feedback has
+// nothing to attach to after a unified query.
+test("hydradb_query on a unified database surfaces the request id for hydradb_feedback", async () => {
+	const { hydra } = unifiedHydra({ "/query": UNIFIED_QUERY_FIXTURE }, "req_u_1");
+	const client = await connect(hydra);
+
+	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "refund policy" } });
+	assert.notEqual(result.isError, true, (result.content as { text: string }[])[0]?.text);
+
+	const text = (result.content as { text: string }[])[0]!.text;
+	assert.match(text, /Was this useful\? Report it with hydradb_feedback using request_id: req_u_1/);
+	assert.equal((result.structuredContent as { request_id?: string }).request_id, "req_u_1");
+	await client.close();
+});
+
+test("hydradb_query on a unified database surfaces the request id on an empty answer too", async () => {
+	const { hydra } = unifiedHydra({ "/query": { chunks: [], graph: [], relations: [], llm_prompt: "" } }, "req_u_2");
+	const client = await connect(hydra);
+
+	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "nothing" } });
+	const text = (result.content as { text: string }[])[0]!.text;
+	assert.match(text, /No relevant context items found in Hydra DB\./);
+	assert.match(text, /request_id: req_u_2/);
+	assert.equal((result.structuredContent as { request_id?: string }).request_id, "req_u_2");
 	await client.close();
 });
 

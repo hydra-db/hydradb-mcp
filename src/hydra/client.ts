@@ -19,7 +19,7 @@ import { HydraDBClient, HydraDBEnvironment, HydraDBError, serialization } from "
 import type { HydraDB as SDK } from "@hydradb/sdk";
 import { z } from "zod";
 
-import { unwrap } from "./envelope.js";
+import { readRequestId, unwrap } from "./envelope.js";
 import { HydraWrapperError, translateError } from "./errors.js";
 import { GraphResource } from "./graph.js";
 import { type RawTransport, newRawTransport, sendRaw } from "./transport.js";
@@ -759,36 +759,6 @@ function queryString(record: Record<string, string | number | undefined>): strin
 }
 
 /**
- * Pull the request id out of an envelope, or undefined when the response is not
- * enveloped (several SDK methods return bare objects — see envelope.ts).
- *
- * BOTH spellings are read, and that is not defensiveness. The wire is
- * snake_case, but the SDK camel-cases `meta` on the way through, so an SDK call
- * yields `requestId` while anything read straight off the HTTP response yields
- * `request_id` — which is the spelling errors.ts already handles for the raw
- * transport path. A reader that knows only one of them works on some calls and
- * silently returns undefined on the rest.
- */
-const requestMetaEnvelopeSchema = z.object({
-	meta: z
-		.object({
-			requestId: z.string().optional(),
-			request_id: z.string().optional(),
-		})
-		.optional(),
-});
-
-function readRequestId<T>(value: T): string | undefined {
-	const parsed = requestMetaEnvelopeSchema.safeParse(value);
-
-	if (!parsed.success) return undefined;
-
-	const id = parsed.data.meta?.requestId ?? parsed.data.meta?.request_id;
-
-	return id !== "" ? id : undefined;
-}
-
-/**
  * A view of a shared promise that rejects as soon as THIS caller's signal
  * aborts, without cancelling the shared work for anyone else. Used for the
  * memoised layout probe: many tool calls can be waiting on one request, and a
@@ -866,11 +836,21 @@ abstract class Resource {
 		path: string,
 		body: unknown,
 		signal?: AbortSignal,
+		onMeta?: (meta: { requestId?: string }) => void,
 	): Promise<unknown> {
 		if (!this.raw) {
 			throw new Error(`${what} needs the v2 transport, which this HydraDB instance was built without`);
 		}
-		return sendRaw<unknown>(this.raw, path, method, body, signal ? { signal } : undefined);
+		// `sendRaw` unwraps the envelope before this returns, so `call`'s own
+		// onMeta channel would read meta off an object that no longer carries
+		// it. The transport fires it instead, while the envelope is still whole.
+		return sendRaw<unknown>(
+			this.raw,
+			path,
+			method,
+			body,
+			signal || onMeta ? { signal, onMeta } : undefined,
+		);
 	}
 
 	protected constructor(
@@ -1076,6 +1056,7 @@ export class ContextResource extends Resource {
 						acl: params.acl,
 					}),
 					opts?.signal,
+					opts?.onMeta,
 				);
 				if (isUnifiedQueryResult(wire)) {
 					return toUnifiedQueryResult(wire);
@@ -1094,7 +1075,11 @@ export class ContextResource extends Resource {
 					);
 				}
 				return serialization.SearchV2RetrievalResult.parseOrThrow(wire, SDK_PARSE_OPTS);
-			}, opts?.onMeta);
+				// onMeta is deliberately NOT passed to call here: the envelope
+				// meta was already fired through rawWire while it was still
+				// whole, and call would re-fire it with undefined read off the
+				// unwrapped result, clobbering the id.
+			});
 		}
 
 		const request = {
