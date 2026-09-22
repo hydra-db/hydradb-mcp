@@ -4509,6 +4509,52 @@ test("hydradb_ingest turns on a unified database send a conversation with the co
 	await client.close();
 });
 
+// The older spellings fold onto the canonical ones before either ingest
+// branch runs, so a conversation given `metadata`/`observation_date` must
+// carry them exactly as `text` does — the turns path used to forward only
+// `a.attributes`/`a.happened_at` verbatim and drop the aliases in silence.
+test("hydradb_ingest turns folds metadata/observation_date onto the contract's names", async () => {
+	const unified = unifiedHydra({ "/context/ingest": UNIFIED_INGEST_202 });
+	const unifiedClient = await connect(unified.hydra);
+	await unifiedClient.callTool({
+		name: "hydradb_ingest",
+		arguments: {
+			turns: [{ user: "hi", assistant: "hello" }],
+			source_id: "chat-1",
+			metadata: { project: "hydradb" },
+			observation_date: "2026-07-29",
+		},
+	});
+	const unifiedItem = (
+		unified.calls.find((c) => c.path === "/context/ingest")!.body as {
+			context: Record<string, unknown>[];
+		}
+	).context[0]!;
+	assert.deepEqual(unifiedItem.attributes, { project: "hydradb" });
+	assert.equal(unifiedItem.happened_at, "2026-07-29");
+	await unifiedClient.close();
+
+	const split = mockHydra();
+	const splitClient = await connect(split.hydra);
+	await splitClient.callTool({
+		name: "hydradb_ingest",
+		arguments: {
+			turns: [{ user: "hi", assistant: "hello" }],
+			source_id: "chat-1",
+			metadata: { project: "hydradb" },
+			observation_date: "2026-07-29",
+		},
+	});
+	const splitItem = (
+		JSON.parse(
+			String(split.calls.find((c) => c.method === "ingest")!.args.memories),
+		) as Record<string, unknown>[]
+	)[0]!;
+	assert.deepEqual(splitItem.metadata, { project: "hydradb" });
+	assert.equal(splitItem.observation_date, "2026-07-29");
+	await splitClient.close();
+});
+
 // On a SPLIT database the preferred names fold onto the memory item's own
 // fields, and the unified-only ones are refused by name rather than dropped.
 test("hydradb_ingest on a split database folds attributes/happened_at and refuses the unified-only fields", async () => {

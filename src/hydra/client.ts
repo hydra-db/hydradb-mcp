@@ -192,15 +192,44 @@ export type QueryResult = SDK.SearchV2RetrievalResult | UnifiedQueryResult;
  * Decided by shape, not by what was requested (CONTRACT rule 4): stored logs
  * and split databases keep producing the v2 shape, and a server that predates
  * the unified response answers a unified request with it too. The unified
- * shape is the one carrying `llm_prompt` or a `graph` ARRAY; the v2 shape
+ * shape is ALL of `chunks`, `graph`, `relations` as arrays and `llm_prompt`
+ * as a string, with a usable `context_id` on every chunk; the v2 shape
  * carries `graph_context` and per-chunk `chunk_content` instead, and the
- * presence of `graph_context` is what settles a body that has both.
+ * presence of `graph_context` is what settles a body that has both. A body
+ * showing some unified keys but not the whole shape is malformed, not
+ * unified — `carriesUnifiedMarkers` is what calls that out so the caller
+ * can refuse it rather than let it read as an empty answer.
  */
 export function isUnifiedQueryResult(value: unknown): value is UnifiedQueryResult {
 	if (value == null || typeof value !== "object" || Array.isArray(value)) return false;
 	const record = value as Record<string, unknown>;
 	if ("graph_context" in record) return false;
-	return typeof record.llm_prompt === "string" || Array.isArray(record.graph);
+	if (typeof record.llm_prompt !== "string") return false;
+	if (!Array.isArray(record.chunks)) return false;
+	if (!Array.isArray(record.graph)) return false;
+	if (!Array.isArray(record.relations)) return false;
+	// A chunk whose source id is absent or not a string cannot be cited,
+	// inspected or deleted — it is a malformed row, not an empty one.
+	return record.chunks.every(
+		(chunk) =>
+			chunk != null &&
+			typeof chunk === "object" &&
+			typeof (chunk as Record<string, unknown>).context_id === "string" &&
+			(chunk as Record<string, unknown>).context_id !== "",
+	);
+}
+
+/**
+ * Keys only the unified `/query` body carries. A response showing any of
+ * them was meant to be unified; one that then fails `isUnifiedQueryResult`
+ * is a protocol violation, and routing it to the v2 serializer would quietly
+ * produce an empty-looking answer for what was a broken response.
+ */
+function carriesUnifiedMarkers(wire: unknown): boolean {
+	if (wire == null || typeof wire !== "object" || Array.isArray(wire)) return false;
+	const record = wire as Record<string, unknown>;
+	if ("graph_context" in record) return false;
+	return "llm_prompt" in record || "relations" in record || Array.isArray(record.graph);
 }
 
 /**
@@ -670,18 +699,45 @@ function compact(record: Record<string, unknown>): Record<string, unknown> {
  * what it had just written.
  */
 function parseUnifiedIngestResponse(wire: unknown): SDK.IngestionV2IngestResponse {
-	const record = (wire != null && typeof wire === "object" ? wire : {}) as Record<string, unknown>;
-	const rows = Array.isArray(record.results) ? (record.results as unknown[]) : [];
+	// A 202 whose body is not the documented shape is a protocol violation,
+	// not a quiet zero — answering "0 success, 0 failed" for a body that
+	// never said so tells the caller a write vanished that may have landed.
+	const malformed = (why: string): HydraWrapperError =>
+		new HydraWrapperError(
+			`Hydra DB /context/ingest → ERR: malformed unified ingest response: ${why}`,
+			"/context/ingest",
+			{ body: wire },
+		);
+	if (wire == null || typeof wire !== "object" || Array.isArray(wire)) {
+		throw malformed("expected an object");
+	}
+	const record = wire as Record<string, unknown>;
 	const str = (v: unknown) => (typeof v === "string" ? v : undefined);
-	const num = (v: unknown) => (typeof v === "number" ? v : undefined);
 	const bool = (v: unknown) => (typeof v === "boolean" ? v : undefined);
+	if (!Array.isArray(record.results)) {
+		throw malformed("results must be an array");
+	}
+	if (typeof record.success_count !== "number" || typeof record.failed_count !== "number") {
+		throw malformed("success_count and failed_count must be numbers");
+	}
+	const rows = record.results as unknown[];
+	for (const [i, raw] of rows.entries()) {
+		if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+			throw malformed(`results[${i}] must be an object`);
+		}
+		// Every row carries its per-item verdict; one without a status cannot
+		// be reported as either a success or a failure, so it is malformed.
+		if (typeof (raw as Record<string, unknown>).status !== "string") {
+			throw malformed(`results[${i}] must carry a string status`);
+		}
+	}
 	return {
 		success: bool(record.success),
 		message: str(record.message),
-		successCount: num(record.success_count),
-		failedCount: num(record.failed_count),
+		successCount: record.success_count as number,
+		failedCount: record.failed_count as number,
 		results: rows.map((raw) => {
-			const row = (raw != null && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+			const row = raw as Record<string, unknown>;
 			return {
 				id: str(row.source_id) ?? str(row.id),
 				title: str(row.title),
@@ -902,8 +958,10 @@ abstract class Resource {
 			return unwrap<T>(raw);
 		} catch (err) {
 			// A refused database is a decision the user made, not a transport
-			// failure from `path`; it keeps its own type and message.
-			if (err instanceof ScopeNotAllowedError) throw err;
+			// failure from `path`; it keeps its own type and message. So does an
+			// error the callback built itself — re-translating a
+			// HydraWrapperError would print the `Hydra DB … →` template twice.
+			if (err instanceof ScopeNotAllowedError || err instanceof HydraWrapperError) throw err;
 			throw translateError(path, err);
 		}
 	}
@@ -1019,9 +1077,23 @@ export class ContextResource extends Resource {
 					}),
 					opts?.signal,
 				);
-				return isUnifiedQueryResult(wire)
-					? toUnifiedQueryResult(wire)
-					: serialization.SearchV2RetrievalResult.parseOrThrow(wire, SDK_PARSE_OPTS);
+				if (isUnifiedQueryResult(wire)) {
+					return toUnifiedQueryResult(wire);
+				}
+				// A body showing unified keys without the full shape is
+				// malformed, not v2: the v2 serializer would accept it into an
+				// answer that only looks empty. Refuse it as the protocol
+				// error it is.
+				if (carriesUnifiedMarkers(wire)) {
+					throw new HydraWrapperError(
+						"Hydra DB /query → ERR: malformed unified response: expected " +
+							"chunks[], graph[], relations[], a string llm_prompt, and a " +
+							"string context_id on every chunk",
+						"/query",
+						{ body: wire },
+					);
+				}
+				return serialization.SearchV2RetrievalResult.parseOrThrow(wire, SDK_PARSE_OPTS);
 			}, opts?.onMeta);
 		}
 

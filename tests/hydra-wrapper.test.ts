@@ -1049,7 +1049,7 @@ test("unified-only ingest fields are refused on a split database", async () => {
 // the plugin already sends would be the cross-client divergence these PRs exist
 // to close.
 test("unified ingest maps is_markdown, and puts user_name where the server reads it", async () => {
-	const stub = () => fetchStub({ success: true, data: { success: true, success_count: 1, failed_count: 0 } });
+	const stub = () => fetchStub({ success: true, data: { success: true, success_count: 1, failed_count: 0, results: [{ source_id: "s", status: "queued" }] } });
 	const sdk = { context: { ingest() { throw new Error("SDK path must not be used for unified"); } } } as unknown as HydraDBClient;
 	const build = (fetch: typeof globalThis.fetch) =>
 		new HydraDB({ token: "t", database: "db_u", collection: "c1", baseUrl: "https://api.test", fetchFn: fetch }, sdk);
@@ -1267,18 +1267,98 @@ test("followForcefulRelations is refused on a split request", async () => {
 	assert.equal(sdkCalls, 0);
 });
 
-// The shape detector, on its own: the unified body is the one carrying
-// `llm_prompt` or a `graph` ARRAY; the v2 body carries `graph_context`, and
-// its presence settles a body that has both.
+// The shape detector, on its own: the unified body is the COMPLETE four-key
+// shape — `chunks`, `graph`, `relations` arrays and a string `llm_prompt`,
+// with a usable `context_id` on every chunk. Anything less is not unified;
+// the v2 body carries `graph_context`, and its presence settles a body that
+// has both.
 test("isUnifiedQueryResult tells the two /query shapes apart", () => {
 	assert.equal(isUnifiedQueryResult(UNIFIED_QUERY_FIXTURE), true);
 	assert.equal(isUnifiedQueryResult({ chunks: [], graph: [], relations: [], llm_prompt: "" }), true);
-	assert.equal(isUnifiedQueryResult({ chunks: [], graph: [] }), true);
+	// Partial unified shapes are NOT unified — a missing key or a chunk
+	// without its source id is a malformed response, not an empty answer.
+	assert.equal(isUnifiedQueryResult({ chunks: [], graph: [] }), false);
+	assert.equal(isUnifiedQueryResult({ chunks: [], graph: [], relations: [] }), false);
+	assert.equal(
+		isUnifiedQueryResult({ chunks: [], graph: [], relations: [], llm_prompt: 42 }),
+		false,
+	);
+	assert.equal(
+		isUnifiedQueryResult({ chunks: [{ chunk_id: "c1" }], graph: [], relations: [], llm_prompt: "" }),
+		false,
+		"a chunk without context_id cannot be cited or followed",
+	);
+	assert.equal(
+		isUnifiedQueryResult({ chunks: [{ context_id: "" }], graph: [], relations: [], llm_prompt: "" }),
+		false,
+		"an empty context_id is not usable",
+	);
+	assert.equal(
+		isUnifiedQueryResult({ chunks: ["oops"], graph: [], relations: [], llm_prompt: "" }),
+		false,
+	);
 	assert.equal(isUnifiedQueryResult({ chunks: [{ chunk_content: "x" }], graph_context: {} }), false);
-	assert.equal(isUnifiedQueryResult({ chunks: [], graph: [], graph_context: {} }), false);
+	assert.equal(
+		isUnifiedQueryResult({ chunks: [], graph: [], relations: [], llm_prompt: "", graph_context: {} }),
+		false,
+	);
 	assert.equal(isUnifiedQueryResult({ chunks: [] }), false);
 	assert.equal(isUnifiedQueryResult(null), false);
 	assert.equal(isUnifiedQueryResult([]), false);
+});
+
+// A response that shows unified keys without the full shape is malformed,
+// not empty: normalising it to `[]`/`""` would report a broken answer as "no
+// results". It rejects as a protocol error instead.
+test("a unified /query body missing keys or usable context_ids is a protocol error", async () => {
+	const sdk = { query() { throw new Error("SDK query must not be used for unified"); } } as unknown as HydraDBClient;
+	for (const body of [
+		{ chunks: [], graph: [], llm_prompt: "" }, // relations missing
+		{ chunks: [], graph: [], relations: [] }, // llm_prompt missing
+		{ chunks: [{ chunk_id: "c1" }], graph: [], relations: [], llm_prompt: "" }, // no context_id
+		{ chunks: [{ context_id: "" }], graph: [], relations: [], llm_prompt: "" }, // empty context_id
+	]) {
+		const { fetch } = fetchStub({ success: true, data: body });
+		const hydra = new HydraDB({ token: "t", database: "db_u", baseUrl: "https://api.test", fetchFn: fetch }, sdk);
+		await assert.rejects(
+			() => hydra.context.query({ query: "acme", kind: "unified" }),
+			(err: unknown) => {
+				assert.ok(err instanceof HydraWrapperError);
+				assert.match(err.message, /Hydra DB \/query → ERR: malformed unified response/);
+				return true;
+			},
+			`body ${JSON.stringify(body)} must be refused`,
+		);
+	}
+});
+
+// Same rule on the write path: a 202 that is not the documented shape is an
+// error, never "0 success, 0 failed" — that answer would report a stored
+// write as vanished, or a vanished one as stored.
+test("a malformed unified ingest 202 rejects rather than reading as zeroed", async () => {
+	const sdk = { context: { ingest() { throw new Error("SDK path must not be used for unified"); } } } as unknown as HydraDBClient;
+	for (const body of [
+		null,
+		"queued",
+		{ success: true }, // no results, no counts
+		{ results: { policy: "1" }, success_count: 1, failed_count: 0 }, // results not an array
+		{ results: [], success_count: 1 }, // failed_count missing
+		{ results: [], failed_count: 0 }, // success_count missing
+		{ results: [null], success_count: 0, failed_count: 1 }, // non-object row
+		{ results: [{ source_id: "s1" }], success_count: 1, failed_count: 0 }, // row without a status
+	]) {
+		const { fetch } = fetchStub({ success: true, data: body });
+		const hydra = new HydraDB({ token: "t", database: "db_u", baseUrl: "https://api.test", fetchFn: fetch }, sdk);
+		await assert.rejects(
+			() => hydra.context.ingest({ kind: "unified", text: "a note" }),
+			(err: unknown) => {
+				assert.ok(err instanceof HydraWrapperError);
+				assert.match(err.message, /Hydra DB \/context\/ingest → ERR: malformed unified ingest response/);
+				return true;
+			},
+			`body ${JSON.stringify(body)} must be refused`,
+		);
+	}
 });
 
 // PRO-1684 on PRO-1618: a unified database enforces document ACLs like a

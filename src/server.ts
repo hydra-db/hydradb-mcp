@@ -3570,13 +3570,13 @@ export function createHydraDBServer(
 					isMarkdown: a.is_markdown,
 					overwrite: a.overwrite,
 					// The contract's names (PRO-1618) reach the conversation path
-					// as they reach the text path. `metadata` and
-					// `observation_date` were never forwarded here and still are
-					// not: a split conversation ingest keeps its wire body byte
-					// for byte, and the preferred names are the ones that work on
-					// both input shapes.
-					attributes: a.attributes,
-					happenedAt: a.happened_at,
+					// as they reach the text path, folded with their older
+					// spellings the same way: a caller who sent `metadata` or
+					// `observation_date` on a conversation had them silently
+					// dropped, while the folded value lands on the same wire
+					// field either spelling would have used.
+					attributes,
+					happenedAt,
 					customAttributes: a.custom_attributes,
 					instructions: a.instructions,
 					contextCategory: a.context_category,
