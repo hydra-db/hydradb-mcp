@@ -52,6 +52,32 @@ function isRetryable(status: number): boolean {
 	return status === 429 || (status >= 500 && status <= 599);
 }
 
+/**
+ * Writes whose outcome cannot be inferred from a failure that carried NO HTTP
+ * status — a timeout, a dropped socket mid-write. The server may well have
+ * applied the request already, so re-sending it creates a second copy rather
+ * than replacing the first: a unified ingest without a caller `context_id` has
+ * nothing for an upsert to key on, and `POST /databases` has no upsert at all.
+ *
+ * A status-CARRYING failure on these paths still retries, because the status
+ * says the server declined before doing work. A status-less one never does.
+ * Reads keep the full budget — replaying one costs nothing but time.
+ *
+ * Matches openclaw-hydradb's REPLAY_UNSAFE_WRITES so the two clients answer a
+ * dying write the same way.
+ */
+const REPLAY_UNSAFE_WRITES = new Set(["/context/ingest", "/databases"]);
+
+function isReplayUnsafe(method: string, path: string): boolean {
+	// Match on the operation path, not the request path. Callers here do build
+	// query-carrying paths (`/context/relations?…`, `/byog/collections?…`), so a
+	// set lookup against the raw string would miss the moment one of these two
+	// endpoints grew a query param, and silently start replaying the write again.
+	// openclaw-hydradb shipped that exact bug in its own copy of this guard.
+	const operation = path.split("?", 1)[0];
+	return method === "POST" && REPLAY_UNSAFE_WRITES.has(operation);
+}
+
 /** Send with bounded retries on 429/5xx; the caller's abort ends retrying. */
 export async function sendRaw<T>(
 	t: RawTransport,
@@ -71,10 +97,22 @@ export async function sendRaw<T>(
 			if (opts?.signal?.aborted) throw err;
 			if (attempt === t.maxRetries) break;
 			if (status != null && !isRetryable(status)) break;
+			// No status means the request may already have been applied. Replaying
+			// a write that cannot be keyed for dedup would duplicate it.
+			if (status == null && isReplayUnsafe(method, path)) break;
 			// Exponential backoff. Bounded so a 429 on the last attempt does not
 			// hold the MCP host's tool timeout open for its own sake.
 			const delay = Math.min(250 * 2 ** attempt, 2_000);
 			await new Promise((resolve) => setTimeout(resolve, delay));
+			// The caller may have cancelled DURING the backoff. An abort
+			// listener registered afterwards never fires for a signal that is
+			// already aborted, so without this check the next attempt would
+			// run to completion for a caller who has already gone.
+			if (opts?.signal?.aborted) {
+				throw new HydraWrapperError(`Hydra DB ${path} → ERR: request cancelled by the caller`, path, {
+					cause: lastError,
+				});
+			}
 		}
 	}
 	throw lastError;
@@ -94,6 +132,9 @@ async function attemptRaw<T>(
 	const timer = setTimeout(() => controller.abort(), t.timeoutMs);
 	const onAbort = () => controller.abort();
 	opts?.signal?.addEventListener("abort", onAbort, { once: true });
+	// An already-aborted signal never fires "abort" again; carry it over so
+	// the fetch below is cancelled immediately instead of running for nobody.
+	if (opts?.signal?.aborted) controller.abort();
 	const doFetch = t.fetchFn ?? fetch;
 
 	try {
@@ -153,3 +194,6 @@ async function attemptRaw<T>(
 		opts?.signal?.removeEventListener("abort", onAbort);
 	}
 }
+
+/** Test seam: the replay guard, so a query-carrying path can be pinned. */
+export const isReplayUnsafeForTest = isReplayUnsafe;

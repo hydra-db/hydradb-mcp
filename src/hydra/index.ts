@@ -38,6 +38,7 @@ export type {
 	FeedbackRating,
 	FeedbackSource,
 	FeedbackGroundTruth,
+	Layout,
 } from "./client.js";
 
 export { GraphResource } from "./graph.js";
