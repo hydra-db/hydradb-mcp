@@ -100,8 +100,10 @@ chunks with their source id, a relevance score, and knowledge-graph context.
 | `query_apps` | boolean | No | App-aware retrieval over connector sources — exact IDs and actors, thread reconstruction, parent/child expansion (default: false) |
 | `collections` | array | No | Search several collections at once. Pass either this or `collection`, never both |
 
-Results include `resolved_scope` and per-source `inspect_args` when the source's
-collection is known. Copy those arguments, including your ACL, to follow-up calls;
+Compact results (the default) are text only: each chunk carries its source id and
+collection, and the header names the resolved scope. With `detail: "full"`,
+results also include structured `resolved_scope` and per-source `inspect_args` when
+the source's collection is known. Copy those arguments, including your ACL, to follow-up calls;
 tools never inherit a previous call's scope. With multiple collections, an ID
 alone is not enough: use the collection attached to that source. If it is missing,
 resolve the collection before inspecting. Explicit scope is never widened.

@@ -185,7 +185,9 @@ const PARAM = {
 		"chunk to its first ~600 characters and omits the surrounding-context blocks — " +
 		"enough to judge relevance and pick a source to inspect. 'full' returns every " +
 		"chunk whole; use it when the snippets are being cut off mid-answer. Either way " +
-		"the response is capped; hydradb_inspect reads a source in slices of at most 20000 characters.",
+		"the response is capped; hydradb_inspect reads a source in slices of at most 20000 characters. " +
+		"Compact returns text only; 'full' also returns structured content (resolved_scope, sources " +
+		"with ready-made inspect_args) for programmatic callers.",
 	fetch_source_id: "The source ID to fetch content for",
 	subgraph_id:
 		"The id of the item to start from — the value shown as [id: …] in hydradb_query results " +

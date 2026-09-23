@@ -140,7 +140,7 @@ test("overlapping source IDs in concurrent collection queries keep independent f
 		if (url.pathname === "/context/list") return json({ sources: [{ id: "shared-id", title: body.collection }], total: 1 });
 		throw new Error(`Unexpected route ${url.pathname}`);
 	}, { collection: undefined });
-	const results = await Promise.all(["a", "b"].map((collection) => client.callTool({ name: "hydradb_query", arguments: { query: "build", kind: "knowledge", database: `db-${collection}`, collection, acl: [`${collection}@example.invalid`] } })));
+	const results = await Promise.all(["a", "b"].map((collection) => client.callTool({ name: "hydradb_query", arguments: { query: "build", detail: "full", kind: "knowledge", database: `db-${collection}`, collection, acl: [`${collection}@example.invalid`] } })));
 	for (const [i, collection] of ["a", "b"].entries()) {
 		const result = results[i]!;
 		assert.equal(result.isError, undefined);
@@ -166,7 +166,7 @@ test("implicit single-collection query reports copyable scope; multi-collection 
 		if (url.pathname === "/context/list") return json({ sources: body.collection === "docs" ? [{ id: "shared-id" }] : [], total: body.collection === "docs" ? 1 : 0 });
 		throw new Error(`Unexpected route ${url.pathname}`);
 	}, { collection: undefined });
-	const single = await client.callTool({ name: "hydradb_query", arguments: { query: "build", kind: "knowledge" } });
+	const single = await client.callTool({ name: "hydradb_query", arguments: { query: "build", detail: "full", kind: "knowledge" } });
 	assert.deepEqual(output<QueryOutput>(single).resolved_scope, { database: "synthetic-db", collection: "docs" });
 	const list = await client.callTool({ name: "hydradb_list", arguments: output<QueryOutput>(single).sources[0]!.list_args });
 	assert.equal(output<ListOutput>(list).items.length, 1);
@@ -269,7 +269,7 @@ test("failed collection discovery preserves legitimate default searches with an 
 		throw new Error(`Unexpected route ${url.pathname}`);
 	}, { collection: undefined });
 	for (empty of [false, true]) {
-		const result = await client.callTool({ name: "hydradb_query", arguments: { query: "build" } });
+		const result = await client.callTool({ name: "hydradb_query", arguments: { query: "build", detail: "full" } });
 		assert.equal(result.isError, undefined);
 		assert.match(text(result), /Collection discovery failed; only the workspace default/);
 		assert.match(output<QueryOutput>(result).scope_warning!, /Named collections may contain additional results/);
@@ -306,4 +306,25 @@ test("identity lookups preserve multiple candidates; connector filtering disambi
 	assert.deepEqual(output<ListOutput>(connectorOnly).items.map((item) => item.id), ["source-connector-a"]);
 	assert.equal(calls[2]!.body.filters?.source_fields, undefined);
 	assert.deepEqual(calls[2]!.body.filters?.additional_metadata, { connector_id: "connector-a" });
+});
+
+// Compact (the default) is what a model reads directly: text only. Everything a
+// follow-up needs must therefore be in the text itself.
+test("compact query returns text only, and the text carries what a follow-up needs", async (t) => {
+	const { client } = await fixture(t, ({ url }) => {
+		if (url.pathname === "/query") return new Response(JSON.stringify({ success: true, data: queryData(), meta: { request_id: "request-1" } }));
+		throw new Error(`Unexpected route ${url.pathname}`);
+	});
+	const compact = await client.callTool({ name: "hydradb_query", arguments: { query: "build", kind: "knowledge" } });
+	assert.equal(compact.isError, undefined);
+	assert.equal(compact.structuredContent, undefined, "compact must not carry structuredContent");
+	const body = text(compact);
+	assert.match(body, /\[id: shared-id\]/);
+	assert.match(body, /Collection: "docs"/);
+	assert.match(body, /database "synthetic-db"/);
+	assert.match(body, /request_id: request-1/);
+	assert.match(body, /Synthetic dependency relation/);
+
+	const full = await client.callTool({ name: "hydradb_query", arguments: { query: "build", kind: "knowledge", detail: "full" } });
+	assert.ok(full.structuredContent, "full keeps structuredContent");
 });

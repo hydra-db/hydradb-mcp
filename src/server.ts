@@ -604,10 +604,21 @@ export function createHydraDBServer(
 		const resolvedScope = searchedCollections
 			? { database, collections: searchedCollections }
 			: singleScope({ database, collection: scopeCollection });
-		const queryResult = (text: string, extra: Record<string, unknown> = {}) => structuredResult(scopeWarning ? `${text}\n\nScope warning: ${scopeWarning}` : text, {
-			resolved_scope: resolvedScope, ...(requestId ? { request_id: requestId } : {}), ...extra,
-			...(scopeWarning ? { scope_warning: scopeWarning } : {}),
-		});
+		const compact = (args.detail ?? "compact") === "compact";
+		// Compact is the default a model reads directly, so it returns the text
+		// alone. Everything `structuredContent` carried is already in it — ids and
+		// collection per chunk, the resolved scope line, the request id, the scope
+		// warning — and hosts that surface both hand the model the same facts
+		// twice. `full` keeps the structured copy for programmatic callers.
+		// No outputSchema is declared on this tool, so omitting it is within spec.
+		const queryResult = (text: string, extra: Record<string, unknown> = {}) => {
+			const body = scopeWarning ? `${text}\n\nScope warning: ${scopeWarning}` : text;
+			if (compact) return textResult(body);
+			return structuredResult(body, {
+				resolved_scope: resolvedScope, ...(requestId ? { request_id: requestId } : {}), ...extra,
+				...(scopeWarning ? { scope_warning: scopeWarning } : {}),
+			});
+		};
 
 		// The server can return more chunks than were asked for — a live call with
 		// max_results=10 came back with 15, and all 15 were rendered. Honour the
@@ -667,8 +678,6 @@ export function createHydraDBServer(
 		// It also disagreed with its own header: `Found ${length}` counted every
 		// chunk while the list stopped at 10, so a 15-chunk result announced 15 and
 		// showed 10.
-		const compact = (args.detail ?? "compact") === "compact";
-
 		// The header and the legend are part of the response the caller pays for,
 		// so the renderer gets a budget with room already reserved for them.
 		// Adding framing after the ceiling had been applied put the finished
