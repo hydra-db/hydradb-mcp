@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-09-23
+
 ### Fixed — `hydradb_query` dropped the graph it was sent
 
 Measured against the SDK's `buildString` on the same live response, the query
