@@ -230,7 +230,9 @@ const PARAM = {
 		"chunk to its first ~600 characters and omits the surrounding-context blocks — " +
 		"enough to judge relevance and pick a source to inspect. 'full' returns every " +
 		"chunk whole; use it when the snippets are being cut off mid-answer. Either way " +
-		"the response is capped; hydradb_inspect reads a source in slices of at most 20000 characters.",
+		"the response is capped; hydradb_inspect reads a source in slices of at most 20000 characters. " +
+		"On a UNIFIED database this has no effect: the answer is never trimmed or capped, and " +
+		"every chunk and the server-built context block come back whole.",
 	fetch_source_id: "The source ID to fetch content for",
 	subgraph_id:
 		"The id of the item to start from — the value shown as [id: …] in hydradb_query results " +
@@ -322,7 +324,7 @@ Searches both families by default. Every result carries \`[id: …]\` — pass i
 
 Collections partition the database by use case. This connection's default (if it has one) is shown by hydradb_list_collections; when there is none, a search without \`collection\` covers every collection in the database (up to 10). Pass \`collection\`, or \`collections\` for several, to aim it where the answer should live.
 
-On a UNIFIED database (see hydradb_databases) the result is the server-built context block, verbatim: a markdown block. Results are numbered 1, 2, and so on; forceful relations (linked by the author at ingest, not matched by the query) are R1, R2; related facts (graph paths) are P1, P2. Each entry shows its Id, which is its source id. Cite them in brackets ([1], [R1], [P1]) when you use what they mark.
+On a UNIFIED database (see hydradb_databases) the result is the server-built context block, verbatim and whole, never trimmed or truncated: a markdown block. Results are numbered 1, 2, and so on; forceful relations (linked by the author at ingest, not matched by the query) are R1, R2; related facts (graph paths) are P1, P2. Each entry shows its Id, which is its source id. Cite them in brackets ([1], [R1], [P1]) when you use what they mark.
 
 Examples:
   {"query": "how does the user prefer code review feedback"}

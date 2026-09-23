@@ -4,7 +4,6 @@ import assert from "node:assert/strict";
 import {
 	buildRecalledContext,
 	renderRecalledContext,
-	renderUnifiedPrompt,
 	renderedChunkCount,
 	unifiedStructuredContent,
 } from "../src/context.js";
@@ -978,15 +977,10 @@ test("compact rendering never collapses bodies into a pointer", () => {
 // --- PRO-1618: the unified rendering, and the split rendering pinned ---
 
 // The contract asks for `llm_prompt` verbatim: it already carries the context,
-// the forceful relations, the graph paths and the citation labels. The renderer
-// hands it over unchanged and reads the structured view from the four keys
-// under the contract's own names.
-test("renderUnifiedPrompt returns llm_prompt verbatim and unifiedStructuredContent reads the four keys", () => {
-	const { text, truncated } = renderUnifiedPrompt(UNIFIED_QUERY_FIXTURE, { maxTotalChars: 40_000 });
-	assert.equal(text, UNIFIED_QUERY_FIXTURE.llm_prompt);
-	assert.equal(truncated, false);
-	assert.equal(renderUnifiedPrompt(UNIFIED_QUERY_FIXTURE).text, UNIFIED_QUERY_FIXTURE.llm_prompt, "no budget, no change");
-
+// the forceful relations, the graph paths and the citation labels. The
+// structured view beside it is read from the four keys under the contract's
+// own names, whole: every field the server sent, nothing trimmed.
+test("unifiedStructuredContent reads the four keys whole", () => {
 	assert.deepEqual(unifiedStructuredContent(UNIFIED_QUERY_FIXTURE), {
 		layout: "unified",
 		chunks: [
@@ -997,8 +991,16 @@ test("renderUnifiedPrompt returns llm_prompt verbatim and unifiedStructuredConte
 				content: "Refunds are processed within 30 days of purchase by the Finance Department.",
 				enrichment: "Refund window is 30 days; Finance owns refund processing.",
 				enrichment_kind: "business_knowledge",
+				temporal: [
+					{
+						content: "Refund policy effective_from June 2026. Start: 2026-06-01",
+						start_date: "2026-06-01",
+						end_date: null,
+					},
+				],
 			},
 			{
+				// No temporal[] on the wire, so none is invented.
 				context_id: "chat-2026-07-29",
 				chunk_id: "ck_chat_1",
 				score: 0.84,
@@ -1007,10 +1009,8 @@ test("renderUnifiedPrompt returns llm_prompt verbatim and unifiedStructuredConte
 				enrichment_kind: "user_preference",
 			},
 		],
-		graph: [
-			{ origin: "query_path", path_summary: "Refund processing is managed by the Finance Department." },
-			{ origin: "chunk_relation", path_summary: "The user prefers short answers about refunds." },
-		],
+		// Each path whole: origin, triplets and summary as the server sent them.
+		graph: UNIFIED_QUERY_FIXTURE.graph,
 		forceful_relations: [
 			{
 				via: { from: "refund-policy", to: "refund-faq" },
@@ -1034,41 +1034,27 @@ test("renderUnifiedPrompt returns llm_prompt verbatim and unifiedStructuredConte
 	});
 });
 
-// The prompt is cut only by the total budget, on a LINE boundary, and says
-// how much was shown: slicing it anywhere could sever an `**Id:**` line and
-// leave a partial id the caller might pass on.
-test("renderUnifiedPrompt cuts on a line boundary and says how much was shown", () => {
-	const budget = 400;
-	const { text, truncated } = renderUnifiedPrompt(UNIFIED_QUERY_FIXTURE, { maxTotalChars: budget });
-	assert.equal(truncated, true);
-	assert.ok(text.length <= budget, `rendered ${text.length} > budget ${budget}`);
-	const noteAt = text.indexOf("\n\n[llm_prompt truncated: ");
-	assert.ok(noteAt > 0, "the truncation note is present");
-	const kept = text.slice(0, noteAt);
-	assert.ok(UNIFIED_QUERY_FIXTURE.llm_prompt.startsWith(kept), "what is shown is a prefix of the prompt");
-	assert.equal(UNIFIED_QUERY_FIXTURE.llm_prompt[kept.length], "\n", "the cut lands on a line boundary");
-	assert.match(text, new RegExp(`\\[llm_prompt truncated: ${kept.length} of ${UNIFIED_QUERY_FIXTURE.llm_prompt.length} characters shown to stay within ${budget}\\.`));
-	assert.match(text, /hydradb_inspect\.\]$/);
-});
+// Nothing on the structured view is compacted: a body and an enrichment
+// string far longer than the split path's 600-character compact trim come
+// through byte for byte, on a result chunk and on a forceful relation's chunk.
+test("unifiedStructuredContent never trims chunk bodies or the enrichment string", () => {
+	const body = `${"The refund policy in full. ".repeat(2_000)}END`;
+	const enrichment = `${"Finance owns refunds. ".repeat(1_000)}END`;
+	const temporal = [{ content: "effective_from June 2026", start_date: "2026-06-01", end_date: null }];
 
-// The structured view is a second encoding of the same answer, not a way
-// around its limits: bodies are bounded when asked, and the enrichment string
-// with them; ids, scores and enrichment kinds are never touched.
-test("unifiedStructuredContent bounds chunk bodies and the enrichment string when asked", () => {
-	const structured = unifiedStructuredContent(UNIFIED_QUERY_FIXTURE, { maxChunkChars: 12 });
-	assert.equal(structured.chunks[0]!.content, "Refunds are ...");
-	assert.equal(structured.chunks[0]!.enrichment, "Refund windo...");
-	assert.equal(structured.chunks[0]!.enrichment_kind, "business_knowledge");
-	assert.equal(structured.chunks[0]!.score, 0.91);
-	assert.equal(structured.chunks[1]!.enrichment, "User prefers...");
-	assert.equal(structured.chunks[1]!.enrichment_kind, "user_preference");
-	assert.equal(structured.forceful_relations[0]!.chunk.content, "FAQ: refunds...");
-	// A body within the bound is untouched, and enrichment absent stays absent.
-	const full = unifiedStructuredContent(UNIFIED_QUERY_FIXTURE, { maxChunkChars: 1000 });
-	assert.equal(full.chunks[0]!.content, UNIFIED_QUERY_FIXTURE.chunks[0]!.content);
-	assert.equal(full.chunks[0]!.enrichment, UNIFIED_QUERY_FIXTURE.chunks[0]!.enrichment);
-	assert.equal("enrichment" in structured.forceful_relations[0]!.chunk, false);
-	assert.equal("enrichment_kind" in structured.forceful_relations[0]!.chunk, false);
+	const structured = unifiedStructuredContent({
+		chunks: [{ context_id: "long", content: body, enrichment, enrichment_kind: "business_knowledge", temporal }],
+		graph: [],
+		forceful_relations: [{ via: { from: "long", to: "long-2" }, chunk: { context_id: "long-2", content: body, enrichment } }],
+		llm_prompt: "",
+	});
+
+	assert.equal(structured.chunks[0]!.content, body);
+	assert.equal(structured.chunks[0]!.enrichment, enrichment);
+	assert.deepEqual(structured.chunks[0]!.temporal, temporal);
+	assert.equal(structured.forceful_relations[0]!.chunk.content, body);
+	assert.equal(structured.forceful_relations[0]!.chunk.enrichment, enrichment);
+	assert.doesNotMatch(JSON.stringify(structured), /\.\.\."/, "no clamp marker anywhere");
 });
 
 // `enrichment` and `enrichment_kind` are independent siblings: a declared
@@ -1085,13 +1071,13 @@ test("unifiedStructuredContent passes enrichment_kind through without enrichment
 			},
 		],
 		llm_prompt: "",
-	}, { maxChunkChars: 8 });
+	});
 
-	assert.deepEqual(structured.chunks, [{ context_id: "d1", content: "We chose...", enrichment_kind: "decision_trace" }]);
+	assert.deepEqual(structured.chunks, [{ context_id: "d1", content: "We chose Postgres.", enrichment_kind: "decision_trace" }]);
 	assert.deepEqual(structured.forceful_relations[0]!.chunk, {
 		context_id: "d2",
-		content: "Why Post...",
-		enrichment: "Postgres...",
+		content: "Why Postgres.",
+		enrichment: "Postgres chosen for JSONB.",
 		enrichment_kind: "decision_trace",
 	});
 });

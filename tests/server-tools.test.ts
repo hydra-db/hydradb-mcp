@@ -4396,7 +4396,7 @@ test("hydradb_query on a unified database sends no type, renders llm_prompt verb
 	const structured = result.structuredContent as {
 		layout: string;
 		chunks: { context_id: string; chunk_id?: string; score?: number; content: string; enrichment?: string; enrichment_kind?: string }[];
-		graph: { origin?: string; path_summary: string }[];
+		graph: { origin?: string; triplets?: unknown[]; path_summary: string }[];
 		forceful_relations: { via: { from: string; to: string }; chunk: { context_id: string; score?: number; enrichment?: string; enrichment_kind?: string } }[];
 		sources: Record<string, unknown>[];
 	};
@@ -4409,10 +4409,9 @@ test("hydradb_query on a unified database sends no type, renders llm_prompt verb
 	assert.equal(structured.chunks[0]!.enrichment_kind, "business_knowledge");
 	assert.equal(structured.chunks[1]!.enrichment, "User prefers short answers about refunds.");
 	assert.equal(structured.chunks[1]!.enrichment_kind, "user_preference");
-	assert.deepEqual(structured.graph, [
-		{ origin: "query_path", path_summary: "Refund processing is managed by the Finance Department." },
-		{ origin: "chunk_relation", path_summary: "The user prefers short answers about refunds." },
-	]);
+	assert.deepEqual(structured.chunks[0]!.temporal, UNIFIED_QUERY_FIXTURE.chunks[0]!.temporal);
+	assert.equal("temporal" in structured.chunks[1]!, false, "no temporal[] is invented");
+	assert.deepEqual(structured.graph, UNIFIED_QUERY_FIXTURE.graph, "every graph path whole, triplets included");
 	assert.deepEqual(structured.forceful_relations[0]!.via, { from: "refund-policy", to: "refund-faq" });
 	assert.equal(structured.forceful_relations[0]!.chunk.context_id, "refund-faq");
 	assert.equal(structured.forceful_relations[0]!.chunk.score, 0);
@@ -4428,6 +4427,56 @@ test("hydradb_query on a unified database sends no type, renders llm_prompt verb
 	]);
 
 	await client.close();
+});
+
+// Product decision: no compaction on a unified answer. An llm_prompt far over
+// the split path's 40,000-character query budget, and chunk bodies far over
+// its 600-character compact trim, come back whole under the DEFAULT detail
+// (compact) and under `full` alike, with no truncation note.
+test("hydradb_query on a unified database returns llm_prompt and every chunk whole, whatever detail says", async () => {
+	const body = `${"Refunds are processed by Finance. ".repeat(1_500)}END-OF-BODY`;
+	const enrichment = `${"Finance owns refund processing. ".repeat(500)}END-OF-ENRICHMENT`;
+	const lines = Array.from({ length: 3_000 }, (_, i) => `- **Id:** ctx-${i} · a line of the server-built prompt`);
+	const prompt = `# Query results\n\n${lines.join("\n")}\n\nEND-OF-PROMPT`;
+	assert.ok(prompt.length > 100_000, "the prompt is well over the split query budget");
+
+	const temporal = [{ content: "effective_from June 2026", start_date: "2026-06-01", end_date: null }];
+
+	const answer = {
+		chunks: [{ context_id: "long", chunk_id: "ck_1", score: 0.5, content: body, enrichment, enrichment_kind: "business_knowledge", temporal }],
+		graph: UNIFIED_QUERY_FIXTURE.graph,
+		forceful_relations: [{ via: { from: "long", to: "long-2" }, chunk: { context_id: "long-2", content: body, enrichment } }],
+		llm_prompt: prompt,
+	};
+
+	for (const args of [{ query: "q" }, { query: "q", detail: "compact" }, { query: "q", detail: "full" }]) {
+		const { hydra } = unifiedHydra({ "/query": answer });
+		const client = await connect(hydra);
+		const result = await client.callTool({ name: "hydradb_query", arguments: args });
+
+		// SAFETY: a tool result's content is the text-block array this server always returns.
+		const blocks = result.content as { text: string }[];
+		assert.notEqual(result.isError, true, blocks[0]?.text);
+
+		const text = blocks[0]!.text;
+		assert.ok(text.includes(prompt), `llm_prompt must come through whole (${JSON.stringify(args)})`);
+		assert.doesNotMatch(text, /truncated/, "no truncation note");
+
+		// SAFETY: the unified path returns unifiedStructuredContent, whose shape this narrows.
+		const structured = result.structuredContent as {
+			chunks: { content: string; enrichment?: string; temporal?: unknown }[];
+			graph: unknown[];
+			forceful_relations: { chunk: { content: string; enrichment?: string } }[];
+		};
+
+		assert.equal(structured.chunks[0]!.content, body);
+		assert.equal(structured.chunks[0]!.enrichment, enrichment);
+		assert.deepEqual(structured.chunks[0]!.temporal, temporal);
+		assert.deepEqual(structured.graph, UNIFIED_QUERY_FIXTURE.graph);
+		assert.equal(structured.forceful_relations[0]!.chunk.content, body);
+		assert.equal(structured.forceful_relations[0]!.chunk.enrichment, enrichment);
+		await client.close();
+	}
 });
 
 test("hydradb_query on a unified database reports an empty four-key answer as no results", async () => {

@@ -48,17 +48,21 @@ every rendering byte for byte.
   with its citation labels ([1], [R1], [P1]), its `## Forceful relations`
   section and each entry's `**Id:**`; the same answer rides beside it as
   structured content (`chunks[].context_id`, `score`, `content`, `enrichment`
-  as a plain string, bounded like the body, and `enrichment_kind`, the
-  declared `context_category`, passed through even when there is no
-  enrichment text; `graph[].origin` (`query_path` or `chunk_relation`) and
-  `graph[].path_summary`; `forceful_relations[]`, whose `chunk` has the same
-  shape; distinct `sources[]` built from `context_id`, with no titles
-  invented). Nothing on this path reads
+  as a plain string, `enrichment_kind`, the declared `context_category`,
+  passed through even when there is no enrichment text, and `temporal[]` when
+  the server sent it; `graph[].origin` (`query_path` or `chunk_relation`),
+  `graph[].triplets` and `graph[].path_summary`; `forceful_relations[]`,
+  whose `chunk` has the same shape; distinct `sources[]` built from
+  `context_id`, with no titles invented). Nothing on this path reads
   `tenant_id`, `sub_tenant_id` or `source_type` from the response meta, which
   a unified response does not carry. A v2 answer
   to a unified request, from a server that predates the unified response,
-  still goes to the v2 renderer. `detail` bounds the structured bodies; the
-  prompt is cut only by the total budget, on a line boundary, and says so.
+  still goes to the v2 renderer. Nothing on the unified answer is compacted:
+  the prompt is returned whole, with no total budget and no truncation note,
+  and every structured chunk keeps its full `content`, `enrichment` and
+  `temporal`. `detail` (default `compact`, which trims each chunk to about 600
+  characters) and the 40,000-character query budget apply to a split database
+  only.
 - New `follow_forceful_relations` on `hydradb_query` toggles the chunks
   declared related at ingest. It is a unified-database option: the split
   path goes through the pinned SDK, which knows only the deprecated

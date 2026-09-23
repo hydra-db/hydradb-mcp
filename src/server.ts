@@ -9,7 +9,7 @@ import { toAddMemoryResponse, toMemoryList, toSourceList } from "./adapters.js";
 import type { PageInfo } from "./adapters.js";
 import { resolveConfig, resolveGraphConfig } from "./config.js";
 import type { GraphConfig } from "./config.js";
-import { renderRecalledContext, renderUnifiedPrompt, unifiedStructuredContent } from "./context.js";
+import { renderRecalledContext, unifiedStructuredContent } from "./context.js";
 import { COLLECTION_PATTERN, MAX_BODY_BYTES, renderRows } from "./cypher.js";
 import { SERVER_INSTRUCTIONS, TOOL_DESCRIPTIONS } from "./descriptions.js";
 import {
@@ -767,7 +767,7 @@ export function createHydraDBServer(
 		// the unified response still answers a unified request in v2, and that
 		// goes on to the v2 renderer below exactly as before.
 		if (isUnifiedQueryResult(raw)) {
-			return renderUnifiedQuery(raw, kind, args.detail, requestId);
+			return renderUnifiedQuery(raw, kind, requestId);
 		}
 
 		// The renderer reads the SDK payload directly; there is no longer a
@@ -917,14 +917,15 @@ export function createHydraDBServer(
 	 *
 	 * `max_results` is not re-applied here. The prompt is the server's and
 	 * slicing the chunks under it would make the two views disagree; the
-	 * server honours the parameter itself. `detail` bounds the structured
-	 * bodies as it bounds the v2 chunk bodies; the prompt is cut only by the
-	 * total budget, on a line boundary, and says so.
+	 * server honours the parameter itself. Nothing is compacted either: the
+	 * prompt goes out whole, with no total budget and no truncation note, and
+	 * the structured chunks keep their full `content`, `enrichment` and
+	 * `temporal`. `detail` and the query budget apply to a split database
+	 * only.
 	 */
 	function renderUnifiedQuery(
 		res: UnifiedQueryResult,
 		kind: QueryKind,
-		detail?: "compact" | "full",
 		requestId?: string,
 	): ToolResult {
 		const { chunks, graph, forceful_relations: forcefulRelations } = res;
@@ -945,10 +946,6 @@ export function createHydraDBServer(
 			`remove it. Results are numbered 1, 2, and so on, forceful relations R1, R2 and related ` +
 			`facts P1, P2: cite them in brackets ([1], [R1], [P1]) when you use what they mark.` +
 			feedbackLine;
-		const headerAllowance = 120;
-		const { text: prompt } = renderUnifiedPrompt(res, {
-			maxTotalChars: QUERY_CHAR_BUDGET - legend.length - headerAllowance,
-		});
 		const extras = [
 			forcefulRelations.length > 0
 				? `${forcefulRelations.length} forceful relation${forcefulRelations.length === 1 ? "" : "s"}`
@@ -959,11 +956,9 @@ export function createHydraDBServer(
 			`Found ${chunks.length} ${resultNoun(kind, chunks.length)}` +
 			`${extras.length > 0 ? ` (${extras.join(", ")})` : ""}:`;
 		return structuredResult(
-			`${header}\n\n${prompt}${legend}`,
+			`${header}\n\n${res.llm_prompt}${legend}`,
 			{
-				...unifiedStructuredContent(res, {
-					maxChunkChars: (detail ?? "compact") === "compact" ? COMPACT_CHUNK_CHARS : undefined,
-				}),
+				...unifiedStructuredContent(res),
 				...(requestId != null ? { request_id: requestId } : {}),
 			},
 		);
@@ -1608,7 +1603,8 @@ export function createHydraDBServer(
 	 * query over a corpus of long documents could dominate the caller's context.
 	 * `compact` trims each body and drops the extra-context blocks; `full`
 	 * restores the previous rendering. The total budget applies either way,
-	 * because fifty capped chunks still add up.
+	 * because fifty capped chunks still add up. Both are split-database
+	 * ceilings: a unified answer is returned whole (see renderUnifiedQuery).
 	 */
 	const COMPACT_CHUNK_CHARS = 600;
 	const QUERY_CHAR_BUDGET = 40_000;

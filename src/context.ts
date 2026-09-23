@@ -1,6 +1,13 @@
 import type { HydraDB as SDK } from "@hydradb/sdk";
 
-import type { UnifiedChunk, UnifiedGraphOrigin, UnifiedQueryResult } from "./hydra/client.js";
+import type {
+	UnifiedChunk,
+	UnifiedGraphOrigin,
+	UnifiedGraphPath,
+	UnifiedQueryResult,
+	UnifiedTemporal,
+	UnifiedTriplet,
+} from "./hydra/client.js";
 
 /**
  * The renderer reads SDK payloads directly.
@@ -594,51 +601,24 @@ function render(
 // database answers with a server-built `llm_prompt` that already carries the
 // context, the forceful relations, the graph paths and citation labels ([1],
 // [R1], [P1]). The contract says to surface it verbatim rather than rebuild
-// it, so the renderer below does not walk the chunks at all: it hands the
-// prompt over, bounded, and the structured view beside it is read straight
-// from the four keys.
+// it, so nothing below walks the chunks to rebuild it: the prompt goes to the
+// caller WHOLE, and the structured view beside it is read straight from the
+// four keys, also whole. Neither is trimmed or cut to a budget: the answer is
+// the server's, sized by the server (`max_results` is how a caller asks for
+// less), and this client does not compact it.
 
-/** Room reserved for the truncation notice itself, so it also fits. */
-const UNIFIED_TRUNCATION_NOTE_ALLOWANCE = 240;
-
-/**
- * `llm_prompt`, verbatim, under a total character ceiling.
- *
- * When it does not fit, the cut lands on a LINE boundary rather than
- * mid-string, and the notice says how much was shown. Slicing the prompt
- * anywhere could sever an `**Id:**` line, leaving a partial id the caller
- * might pass to another tool.
- */
-export function renderUnifiedPrompt(
-	result: UnifiedQueryResult,
-	opts?: { maxTotalChars?: number },
-): { text: string; truncated: boolean } {
-	const prompt = result.llm_prompt;
-	const budget = opts?.maxTotalChars;
-	if (budget == null || prompt.length <= budget) return { text: prompt, truncated: false };
-	const room = Math.max(0, budget - UNIFIED_TRUNCATION_NOTE_ALLOWANCE);
-	const head = prompt.slice(0, room);
-	const lastBreak = head.lastIndexOf("\n");
-	const kept = lastBreak > 0 ? head.slice(0, lastBreak) : head;
-	return {
-		text:
-			`${kept}\n\n[llm_prompt truncated: ${kept.length} of ${prompt.length} characters shown ` +
-			`to stay within ${budget}. Narrow the query, lower max_results, or fetch a specific ` +
-			`source with hydradb_inspect.]`,
-		truncated: true,
-	};
-}
-
-/** One chunk of the structured view: the contract's own field names, bodies bounded. */
+/** One chunk of the structured view: the contract's own field names, every field whole. */
 export interface UnifiedStructuredChunk {
 	context_id: string;
 	chunk_id?: string;
 	score?: number;
 	content: string;
-	/** The enrichment text, bounded like the body. */
+	/** The enrichment text, whole. */
 	enrichment?: string;
 	/** The declared `context_category`, passed through as sent. */
 	enrichment_kind?: string;
+	/** Present only when the server sent it: the query engaged temporal reasoning. */
+	temporal?: UnifiedTemporal[];
 }
 
 // A type alias rather than an interface so it is assignable to the
@@ -646,21 +626,17 @@ export interface UnifiedStructuredChunk {
 export type UnifiedStructuredContent = {
 	layout: "unified";
 	chunks: UnifiedStructuredChunk[];
-	/** `origin` is passed through as sent, and omitted when the server sent none. */
-	graph: { origin?: UnifiedGraphOrigin; path_summary: string }[];
+	/** `origin` and `triplets` are passed through as sent, and omitted when the server sent none. */
+	graph: { origin?: UnifiedGraphOrigin; triplets?: UnifiedTriplet[]; path_summary: string }[];
 	forceful_relations: { via: { from: string; to: string }; chunk: UnifiedStructuredChunk }[];
 	/** Every distinct context id in the answer, in order of first appearance. No titles: the body carries none, and none are invented. */
 	sources: { id: string }[];
 };
 
-function clampBody(text: string, max?: number): string {
-	return max != null && text.length > max ? `${text.slice(0, max)}...` : text;
-}
-
-function structuredChunk(chunk: UnifiedChunk, maxChunkChars?: number): UnifiedStructuredChunk {
+function structuredChunk(chunk: UnifiedChunk): UnifiedStructuredChunk {
 	const out: UnifiedStructuredChunk = {
 		context_id: chunk.context_id ?? "",
-		content: clampBody(chunk.content ?? "", maxChunkChars),
+		content: chunk.content ?? "",
 	};
 	if (chunk.chunk_id != null) out.chunk_id = chunk.chunk_id;
 	if (typeof chunk.score === "number") out.score = chunk.score;
@@ -671,12 +647,28 @@ function structuredChunk(chunk: UnifiedChunk, maxChunkChars?: number): UnifiedSt
 	// The string checks keep a server that still sends the retired
 	// `{ text, kind }` object from leaking an object where a string belongs.
 	if (typeof chunk.enrichment === "string" && chunk.enrichment !== "") {
-		out.enrichment = clampBody(chunk.enrichment, maxChunkChars);
+		out.enrichment = chunk.enrichment;
 	}
 
 	if (typeof chunk.enrichment_kind === "string" && chunk.enrichment_kind !== "") {
 		out.enrichment_kind = chunk.enrichment_kind;
 	}
+
+	// Sent only when the query engaged temporal reasoning; passed through as
+	// sent, and never invented when it is absent.
+	if (Array.isArray(chunk.temporal)) out.temporal = chunk.temporal;
+
+	return out;
+}
+
+/** One graph path, whole: `origin` and `triplets` as sent, neither invented when absent. */
+function structuredPath(path: UnifiedGraphPath): UnifiedStructuredContent["graph"][number] {
+	const out: UnifiedStructuredContent["graph"][number] = { path_summary: path.path_summary ?? "" };
+
+	if (path.origin != null) out.origin = path.origin;
+
+	if (Array.isArray(path.triplets)) out.triplets = path.triplets;
+
 	return out;
 }
 
@@ -685,20 +677,17 @@ function structuredChunk(chunk: UnifiedChunk, maxChunkChars?: number): UnifiedSt
  * `chunks[].enrichment` (a string), `chunks[].enrichment_kind`,
  * `graph[].origin`, `graph[].path_summary` and `forceful_relations[]` (whose
  * `chunk` has the same shape) under the contract's names, plus the distinct
- * context ids as `sources[]`. Bodies and enrichment text are bounded like the
- * text view's are: this is a second encoding of the same answer, not a way
- * around its limits.
+ * context ids as `sources[]`. Every chunk carries its `temporal[]` when the
+ * server sent one, and every graph path its `triplets[]`. Nothing is trimmed:
+ * bodies and enrichment text come through whole, as the prompt beside them
+ * does.
  */
-export function unifiedStructuredContent(
-	result: UnifiedQueryResult,
-	opts?: { maxChunkChars?: number },
-): UnifiedStructuredContent {
-	const max = opts?.maxChunkChars;
-	const chunks = result.chunks.map((chunk) => structuredChunk(chunk, max));
+export function unifiedStructuredContent(result: UnifiedQueryResult): UnifiedStructuredContent {
+	const chunks = result.chunks.map((chunk) => structuredChunk(chunk));
 
 	const forcefulRelations = result.forceful_relations.map((relation) => ({
 		via: { from: relation.via?.from ?? "", to: relation.via?.to ?? "" },
-		chunk: structuredChunk(relation.chunk ?? {}, max),
+		chunk: structuredChunk(relation.chunk ?? {}),
 	}));
 
 	const seen = new Set<string>();
@@ -712,11 +701,7 @@ export function unifiedStructuredContent(
 	return {
 		layout: "unified",
 		chunks,
-		graph: result.graph.map((path) =>
-			path.origin != null
-				? { origin: path.origin, path_summary: path.path_summary ?? "" }
-				: { path_summary: path.path_summary ?? "" },
-		),
+		graph: result.graph.map(structuredPath),
 		forceful_relations: forcefulRelations,
 		sources,
 	};
