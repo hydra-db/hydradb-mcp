@@ -4382,40 +4382,49 @@ test("hydradb_query on a unified database sends no type, renders llm_prompt verb
 
 	const text = (result.content as { text: string }[])[0]!.text;
 	assert.ok(text.includes(UNIFIED_QUERY_FIXTURE.llm_prompt), "llm_prompt must be surfaced verbatim");
-	assert.match(text, /^Found 2 context items \(1 forceful relation, 2 graph paths\):\n\n=== CONTEXT ===/);
-	assert.match(text, /=== FORCEFUL RELATIONS ===\nLinked to a result by the author at ingest time \(forceful_relations\), not by relevance to this query\./);
-	assert.match(text, /Each context_id above is a source id: pass one to hydradb_inspect/);
-	assert.match(text, /\[1\], \[R1\], \[P1\]\) are citation labels/);
-	// Nothing of the v2 rendering: no per-chunk headers, no invented titles.
+	assert.match(text, /^Found 2 context items \(1 forceful relation, 2 graph paths\):\n\n# Query results\n/);
+	assert.match(text, /## Forceful relations\n\nLinked to a result by the author at ingest time \(forceful_relations\), not by relevance to this query\./);
+	assert.match(text, /\*\*Enrichment:\*\* Refund window is 30 days; Finance owns refund processing\./);
+	assert.match(text, /Each Id above is a source id \(context_id in the structured content\): pass one to hydradb_inspect/);
+	assert.match(text, /cite them in brackets \(\[1\], \[R1\], \[P1\]\) when you use what they mark/);
+	// Nothing of the v2 rendering or the retired prompt layout: no per-chunk
+	// headers, no invented titles, no `=== ... ===` sections.
 	assert.doesNotMatch(text, /^Chunk \d+ {2}\[id:/m);
 	assert.doesNotMatch(text, /^Source: /m);
+	assert.doesNotMatch(text, /^=== /m);
 
 	const structured = result.structuredContent as {
 		layout: string;
-		chunks: { context_id: string; chunk_id?: string; score?: number; content: string; enrichment?: { text?: string; kind?: string } }[];
+		chunks: { context_id: string; chunk_id?: string; score?: number; content: string; enrichment?: string; enrichment_kind?: string }[];
 		graph: { origin?: string; path_summary: string }[];
-		forceful_relations: { via: { from: string; to: string }; chunk: { context_id: string } }[];
+		forceful_relations: { via: { from: string; to: string }; chunk: { context_id: string; score?: number; enrichment?: string; enrichment_kind?: string } }[];
 		sources: Record<string, unknown>[];
 	};
 	assert.equal(structured.layout, "unified");
-	assert.deepEqual(structured.chunks.map((c) => c.context_id), ["chat-2026-07-29#w2", "policy-1"]);
-	assert.equal(structured.chunks[0]!.chunk_id, "ck_9f2");
-	assert.equal(structured.chunks[0]!.score, 0.87);
-	assert.equal(structured.chunks[0]!.content, "user: Keep answers short please\nassistant: Got it.");
-	assert.deepEqual(structured.chunks[0]!.enrichment, { text: "User prefers short, bullet-point answers.", kind: "user_preference" });
+	assert.deepEqual(structured.chunks.map((c) => c.context_id), ["refund-policy", "chat-2026-07-29"]);
+	assert.equal(structured.chunks[0]!.chunk_id, "ck_policy_3");
+	assert.equal(structured.chunks[0]!.score, 0.91);
+	assert.equal(structured.chunks[0]!.content, "Refunds are processed within 30 days of purchase by the Finance Department.");
+	assert.equal(structured.chunks[0]!.enrichment, "Refund window is 30 days; Finance owns refund processing.");
+	assert.equal(structured.chunks[0]!.enrichment_kind, "business_knowledge");
+	assert.equal(structured.chunks[1]!.enrichment, "User prefers short answers about refunds.");
+	assert.equal(structured.chunks[1]!.enrichment_kind, "user_preference");
 	assert.deepEqual(structured.graph, [
-		{ origin: "query_path", path_summary: "John is on the Pro plan since June 2026." },
-		{ origin: "chunk_relation", path_summary: "The refund policy allows refunds within 30 days." },
+		{ origin: "query_path", path_summary: "Refund processing is managed by the Finance Department." },
+		{ origin: "chunk_relation", path_summary: "The user prefers short answers about refunds." },
 	]);
-	assert.deepEqual(structured.forceful_relations[0]!.via, { from: "linear-PRO-1169", to: "linear-PRO-1169-comment-4" });
-	assert.equal(structured.forceful_relations[0]!.chunk.context_id, "linear-PRO-1169-comment-4");
+	assert.deepEqual(structured.forceful_relations[0]!.via, { from: "refund-policy", to: "refund-faq" });
+	assert.equal(structured.forceful_relations[0]!.chunk.context_id, "refund-faq");
+	assert.equal(structured.forceful_relations[0]!.chunk.score, 0);
+	assert.equal("enrichment" in structured.forceful_relations[0]!.chunk, false);
+	assert.equal("enrichment_kind" in structured.forceful_relations[0]!.chunk, false);
 	assert.equal("relations" in structured, false, "the pre-rename key is not emitted");
 	// sources[] is built from context_id and carries no title: the body has
 	// none, and none is invented.
 	assert.deepEqual(structured.sources, [
-		{ id: "chat-2026-07-29#w2" },
-		{ id: "policy-1" },
-		{ id: "linear-PRO-1169-comment-4" },
+		{ id: "refund-policy" },
+		{ id: "chat-2026-07-29" },
+		{ id: "refund-faq" },
 	]);
 
 	await client.close();

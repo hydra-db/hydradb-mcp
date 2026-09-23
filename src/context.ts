@@ -606,8 +606,8 @@ const UNIFIED_TRUNCATION_NOTE_ALLOWANCE = 240;
  *
  * When it does not fit, the cut lands on a LINE boundary rather than
  * mid-string, and the notice says how much was shown. Slicing the prompt
- * anywhere could sever a `[n] context_id:` header, leaving a partial id the
- * caller might pass to another tool.
+ * anywhere could sever an `**Id:**` line, leaving a partial id the caller
+ * might pass to another tool.
  */
 export function renderUnifiedPrompt(
 	result: UnifiedQueryResult,
@@ -635,7 +635,10 @@ export interface UnifiedStructuredChunk {
 	chunk_id?: string;
 	score?: number;
 	content: string;
-	enrichment?: { text?: string; kind?: string };
+	/** The enrichment text, bounded like the body. */
+	enrichment?: string;
+	/** The declared `context_category`, passed through as sent. */
+	enrichment_kind?: string;
 }
 
 // A type alias rather than an interface so it is assignable to the
@@ -661,21 +664,30 @@ function structuredChunk(chunk: UnifiedChunk, maxChunkChars?: number): UnifiedSt
 	};
 	if (chunk.chunk_id != null) out.chunk_id = chunk.chunk_id;
 	if (typeof chunk.score === "number") out.score = chunk.score;
-	if (chunk.enrichment != null) {
-		const enrichment: { text?: string; kind?: string } = {};
-		if (chunk.enrichment.text != null) enrichment.text = clampBody(chunk.enrichment.text, maxChunkChars);
-		if (chunk.enrichment.kind != null) enrichment.kind = chunk.enrichment.kind;
-		out.enrichment = enrichment;
+
+	// Both are plain strings on the wire, siblings on the chunk. The kind is
+	// independent of the text: a declared category with no enrichment text is
+	// still passed through, and neither is invented when the server sent none.
+	// The string checks keep a server that still sends the retired
+	// `{ text, kind }` object from leaking an object where a string belongs.
+	if (typeof chunk.enrichment === "string" && chunk.enrichment !== "") {
+		out.enrichment = clampBody(chunk.enrichment, maxChunkChars);
+	}
+
+	if (typeof chunk.enrichment_kind === "string" && chunk.enrichment_kind !== "") {
+		out.enrichment_kind = chunk.enrichment_kind;
 	}
 	return out;
 }
 
 /**
  * The structured view of a unified answer: `chunks[].content`,
- * `chunks[].enrichment`, `graph[].origin`, `graph[].path_summary` and
- * `forceful_relations[]` under the contract's names, plus the distinct
- * context ids as `sources[]`. Bodies are bounded like the text view's are:
- * this is a second encoding of the same answer, not a way around its limits.
+ * `chunks[].enrichment` (a string), `chunks[].enrichment_kind`,
+ * `graph[].origin`, `graph[].path_summary` and `forceful_relations[]` (whose
+ * `chunk` has the same shape) under the contract's names, plus the distinct
+ * context ids as `sources[]`. Bodies and enrichment text are bounded like the
+ * text view's are: this is a second encoding of the same answer, not a way
+ * around its limits.
  */
 export function unifiedStructuredContent(
 	result: UnifiedQueryResult,

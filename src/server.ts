@@ -911,9 +911,9 @@ export function createHydraDBServer(
 	 * carries the context, the forceful relations, the graph paths and the
 	 * citation labels a model is meant to cite; and the four keys as
 	 * structured content beside it, so a host that parses rather than reads
-	 * gets `chunks[].context_id`, `score`, `content`, `enrichment`,
-	 * `graph[].origin`, `graph[].path_summary`, `forceful_relations[]` and the
-	 * distinct `sources[]`.
+	 * gets `chunks[].context_id`, `score`, `content`, `enrichment` (a
+	 * string), `enrichment_kind`, `graph[].origin`, `graph[].path_summary`,
+	 * `forceful_relations[]` and the distinct `sources[]`.
 	 *
 	 * `max_results` is not re-applied here. The prompt is the server's and
 	 * slicing the chunks under it would make the two views disagree; the
@@ -940,9 +940,10 @@ export function createHydraDBServer(
 			return requestId != null ? structuredResult(text, { request_id: requestId }) : textResult(text);
 		}
 		const legend =
-			`\n\n---\nEach context_id above is a source id: pass one to ${TOOL_NAMES.INSPECT} for ` +
-			`that source's full content, or to ${TOOL_NAMES.DELETE} to remove it. The bracketed ` +
-			`labels ([1], [R1], [P1]) are citation labels: cite them when you use what they mark.` +
+			`\n\n---\nEach Id above is a source id (context_id in the structured content): pass one ` +
+			`to ${TOOL_NAMES.INSPECT} for that source's full content, or to ${TOOL_NAMES.DELETE} to ` +
+			`remove it. Results are numbered 1, 2, and so on, forceful relations R1, R2 and related ` +
+			`facts P1, P2: cite them in brackets ([1], [R1], [P1]) when you use what they mark.` +
 			feedbackLine;
 		const headerAllowance = 120;
 		const { text: prompt } = renderUnifiedPrompt(res, {

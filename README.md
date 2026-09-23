@@ -108,12 +108,18 @@ alone is not enough: use the collection attached to that source. If it is missin
 resolve the collection before inspecting. Explicit scope is never widened.
 
 On a **unified** database the result text is the server-built `llm_prompt`,
-verbatim: every entry is labelled `[1]`, `[R1]` (a forceful relation: linked
-by the author at ingest, not matched by the query) or `[P1]` (graph path) and
-names its `context_id`, which is its source id. The same answer is returned as
+verbatim. It is markdown (`# Query results`, then `## Results`,
+`## Forceful relations`, `## Related facts`, `## Temporal facts` and
+`## Sources`): results are numbered `1`, `2`, forceful relations (linked by the
+author at ingest, not matched by the query) `R1`, `R2`, and related facts
+(graph paths) `P1`, `P2`; cite them as `[1]`, `[R1]`, `[P1]`. Each entry shows
+its `**Id:**`, which is its source id. The same answer is returned as
 structured content (`chunks[]` with `context_id`, `score`, `content`,
-`enrichment`; `graph[]` with `origin` (`query_path` or `chunk_relation`) and
-`path_summary`; `forceful_relations[]`; distinct `sources[]`). A split database keeps the rendering it always had.
+`enrichment` (the enrichment text, a string) and `enrichment_kind` (the
+declared `context_category`, present even when there is no enrichment text);
+`graph[]` with `origin` (`query_path` or `chunk_relation`) and `path_summary`;
+`forceful_relations[]`, whose `chunk` has the same shape; distinct
+`sources[]`). A split database keeps the rendering it always had.
 
 ### **hydradb_ingest**
 

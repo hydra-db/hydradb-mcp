@@ -1014,7 +1014,7 @@ test("unified ingest reads results[].source_id as the id, and the rest of the 20
 	const hydra = new HydraDB({ token: "t", database: "db_u", baseUrl: "https://api.test", fetchFn: fetch }, sdk);
 	const res = await hydra.context.ingest({ kind: "unified", text: "a note", sourceId: "policy-1" });
 	assert.equal(res.success, true);
-	assert.equal(res.message, "queued");
+	assert.equal(res.message, "Context queued for ingestion successfully");
 	assert.equal(res.successCount, 1);
 	assert.equal(res.failedCount, 1);
 	assert.deepEqual(res.results, [

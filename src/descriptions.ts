@@ -322,7 +322,7 @@ Searches both families by default. Every result carries \`[id: …]\` — pass i
 
 Collections partition the database by use case. This connection's default (if it has one) is shown by hydradb_list_collections; when there is none, a search without \`collection\` covers every collection in the database (up to 10). Pass \`collection\`, or \`collections\` for several, to aim it where the answer should live.
 
-On a UNIFIED database (see hydradb_databases) the result is the server-built context block, verbatim: each entry is labelled [1], [R1] (a forceful relation: linked by the author at ingest, not matched by the query) or [P1] (graph path) and names its context_id, which is its source id. Cite the labels when you use what they mark.
+On a UNIFIED database (see hydradb_databases) the result is the server-built context block, verbatim: a markdown block. Results are numbered 1, 2, and so on; forceful relations (linked by the author at ingest, not matched by the query) are R1, R2; related facts (graph paths) are P1, P2. Each entry shows its Id, which is its source id. Cite them in brackets ([1], [R1], [P1]) when you use what they mark.
 
 Examples:
   {"query": "how does the user prefer code review feedback"}

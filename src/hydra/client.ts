@@ -117,12 +117,6 @@ export interface ForcefulRelations {
 // prompt is the one thing a client is told to surface verbatim. Field names
 // below are the wire names, exactly as CONTRACT.md states them.
 
-export interface UnifiedEnrichment {
-	text?: string;
-	/** The caller's `context_category`; absent when it was `auto`. */
-	kind?: string;
-}
-
 export interface UnifiedTemporal {
 	content?: string;
 	start_date?: string | null;
@@ -136,8 +130,14 @@ export interface UnifiedChunk {
 	score?: number;
 	/** The chunk's own text; enrichment is not concatenated into it. */
 	content?: string;
-	/** Absent when there is neither text nor kind. */
-	enrichment?: UnifiedEnrichment;
+	/** The enrichment text, a plain string; absent when there is none. */
+	enrichment?: string;
+	/**
+	 * The caller's declared `context_category` (`user_preference`,
+	 * `business_knowledge` or `decision_trace`), a sibling of `enrichment`.
+	 * Absent when none was declared; present even when `enrichment` is absent.
+	 */
+	enrichment_kind?: string;
 	/** Present only when the query engaged temporal reasoning. */
 	temporal?: UnifiedTemporal[];
 }

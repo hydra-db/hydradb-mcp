@@ -44,13 +44,16 @@ every rendering byte for byte.
   SDK's v2 serializer, which knows neither `llm_prompt` nor `context_id`. The
   shape requires a `forceful_relations` array; a body carrying the pre-rename
   `relations` key instead is refused as malformed, not read in its place. The
-  text the model sees is the server-built `llm_prompt` verbatim, with its
-  citation labels ([1], [R1], [P1]), its `=== FORCEFUL RELATIONS ===` section
-  and each entry's `context_id`; the same answer rides beside it as structured
-  content (`chunks[].context_id`, `score`, `content`, `enrichment`;
-  `graph[].origin` (`query_path` or `chunk_relation`) and
-  `graph[].path_summary`; `forceful_relations[]`; distinct `sources[]` built
-  from `context_id`, with no titles invented). Nothing on this path reads
+  text the model sees is the server-built `llm_prompt` verbatim: markdown,
+  with its citation labels ([1], [R1], [P1]), its `## Forceful relations`
+  section and each entry's `**Id:**`; the same answer rides beside it as
+  structured content (`chunks[].context_id`, `score`, `content`, `enrichment`
+  as a plain string, bounded like the body, and `enrichment_kind`, the
+  declared `context_category`, passed through even when there is no
+  enrichment text; `graph[].origin` (`query_path` or `chunk_relation`) and
+  `graph[].path_summary`; `forceful_relations[]`, whose `chunk` has the same
+  shape; distinct `sources[]` built from `context_id`, with no titles
+  invented). Nothing on this path reads
   `tenant_id`, `sub_tenant_id` or `source_type` from the response meta, which
   a unified response does not carry. A v2 answer
   to a unified request, from a server that predates the unified response,

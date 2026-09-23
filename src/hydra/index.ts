@@ -27,7 +27,6 @@ export type {
 	QueryResult,
 	UnifiedQueryResult,
 	UnifiedChunk,
-	UnifiedEnrichment,
 	UnifiedTemporal,
 	UnifiedEntity,
 	UnifiedEdge,

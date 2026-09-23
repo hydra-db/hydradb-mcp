@@ -8,6 +8,7 @@ import {
 	renderedChunkCount,
 	unifiedStructuredContent,
 } from "../src/context.js";
+import type { UnifiedChunk } from "../src/hydra/index.js";
 import type { RecallResponse } from "../src/types.js";
 import { UNIFIED_QUERY_FIXTURE } from "./unified-fixture.js";
 
@@ -990,47 +991,52 @@ test("renderUnifiedPrompt returns llm_prompt verbatim and unifiedStructuredConte
 		layout: "unified",
 		chunks: [
 			{
-				context_id: "chat-2026-07-29#w2",
-				chunk_id: "ck_9f2",
-				score: 0.87,
-				content: "user: Keep answers short please\nassistant: Got it.",
-				enrichment: { text: "User prefers short, bullet-point answers.", kind: "user_preference" },
+				context_id: "refund-policy",
+				chunk_id: "ck_policy_3",
+				score: 0.91,
+				content: "Refunds are processed within 30 days of purchase by the Finance Department.",
+				enrichment: "Refund window is 30 days; Finance owns refund processing.",
+				enrichment_kind: "business_knowledge",
 			},
 			{
-				context_id: "policy-1",
-				chunk_id: "ck_a01",
-				score: 0.61,
-				content: "Refund policy: 30-day window.",
+				context_id: "chat-2026-07-29",
+				chunk_id: "ck_chat_1",
+				score: 0.84,
+				content: "user: Keep refund answers short please\nassistant: Got it.",
+				enrichment: "User prefers short answers about refunds.",
+				enrichment_kind: "user_preference",
 			},
 		],
 		graph: [
-			{ origin: "query_path", path_summary: "John is on the Pro plan since June 2026." },
-			{ origin: "chunk_relation", path_summary: "The refund policy allows refunds within 30 days." },
+			{ origin: "query_path", path_summary: "Refund processing is managed by the Finance Department." },
+			{ origin: "chunk_relation", path_summary: "The user prefers short answers about refunds." },
 		],
 		forceful_relations: [
 			{
-				via: { from: "linear-PRO-1169", to: "linear-PRO-1169-comment-4" },
+				via: { from: "refund-policy", to: "refund-faq" },
+				// A score of 0 is still a score, and a chunk with no enrichment
+				// gets neither field invented.
 				chunk: {
-					context_id: "linear-PRO-1169-comment-4",
-					chunk_id: "ck_c4",
-					score: 0.55,
-					content: "Comment 4: shipped the fix.",
+					context_id: "refund-faq",
+					chunk_id: "ck_faq_1",
+					score: 0,
+					content: "FAQ: refunds to a card take 5 to 7 business days to appear.",
 				},
 			},
 		],
 		// Distinct context ids, chunks first then forceful relations, and NO titles: the
 		// body carries none and none are invented.
 		sources: [
-			{ id: "chat-2026-07-29#w2" },
-			{ id: "policy-1" },
-			{ id: "linear-PRO-1169-comment-4" },
+			{ id: "refund-policy" },
+			{ id: "chat-2026-07-29" },
+			{ id: "refund-faq" },
 		],
 	});
 });
 
 // The prompt is cut only by the total budget, on a LINE boundary, and says
-// how much was shown: slicing it anywhere could sever a `[n] context_id:`
-// header and leave a partial id the caller might pass on.
+// how much was shown: slicing it anywhere could sever an `**Id:**` line and
+// leave a partial id the caller might pass on.
 test("renderUnifiedPrompt cuts on a line boundary and says how much was shown", () => {
 	const budget = 400;
 	const { text, truncated } = renderUnifiedPrompt(UNIFIED_QUERY_FIXTURE, { maxTotalChars: budget });
@@ -1046,18 +1052,59 @@ test("renderUnifiedPrompt cuts on a line boundary and says how much was shown", 
 });
 
 // The structured view is a second encoding of the same answer, not a way
-// around its limits: bodies are bounded when asked, and enrichment text with
-// them; ids, scores and kinds are never touched.
-test("unifiedStructuredContent bounds chunk bodies when asked", () => {
+// around its limits: bodies are bounded when asked, and the enrichment string
+// with them; ids, scores and enrichment kinds are never touched.
+test("unifiedStructuredContent bounds chunk bodies and the enrichment string when asked", () => {
 	const structured = unifiedStructuredContent(UNIFIED_QUERY_FIXTURE, { maxChunkChars: 12 });
-	assert.equal(structured.chunks[0]!.content, "user: Keep a...");
-	assert.equal(structured.chunks[0]!.enrichment?.text, "User prefers...");
-	assert.equal(structured.chunks[0]!.enrichment?.kind, "user_preference");
-	assert.equal(structured.chunks[0]!.score, 0.87);
-	assert.equal(structured.forceful_relations[0]!.chunk.content, "Comment 4: s...");
+	assert.equal(structured.chunks[0]!.content, "Refunds are ...");
+	assert.equal(structured.chunks[0]!.enrichment, "Refund windo...");
+	assert.equal(structured.chunks[0]!.enrichment_kind, "business_knowledge");
+	assert.equal(structured.chunks[0]!.score, 0.91);
+	assert.equal(structured.chunks[1]!.enrichment, "User prefers...");
+	assert.equal(structured.chunks[1]!.enrichment_kind, "user_preference");
+	assert.equal(structured.forceful_relations[0]!.chunk.content, "FAQ: refunds...");
 	// A body within the bound is untouched, and enrichment absent stays absent.
-	assert.equal(unifiedStructuredContent(UNIFIED_QUERY_FIXTURE, { maxChunkChars: 1000 }).chunks[0]!.content, UNIFIED_QUERY_FIXTURE.chunks[0]!.content);
-	assert.equal("enrichment" in structured.chunks[1]!, false);
+	const full = unifiedStructuredContent(UNIFIED_QUERY_FIXTURE, { maxChunkChars: 1000 });
+	assert.equal(full.chunks[0]!.content, UNIFIED_QUERY_FIXTURE.chunks[0]!.content);
+	assert.equal(full.chunks[0]!.enrichment, UNIFIED_QUERY_FIXTURE.chunks[0]!.enrichment);
+	assert.equal("enrichment" in structured.forceful_relations[0]!.chunk, false);
+	assert.equal("enrichment_kind" in structured.forceful_relations[0]!.chunk, false);
+});
+
+// `enrichment` and `enrichment_kind` are independent siblings: a declared
+// category comes back even when there is no enrichment text, on a result chunk
+// and on a forceful relation's chunk alike.
+test("unifiedStructuredContent passes enrichment_kind through without enrichment", () => {
+	const structured = unifiedStructuredContent({
+		chunks: [{ context_id: "d1", content: "We chose Postgres.", enrichment_kind: "decision_trace" }],
+		graph: [],
+		forceful_relations: [
+			{
+				via: { from: "d1", to: "d2" },
+				chunk: { context_id: "d2", content: "Why Postgres.", enrichment: "Postgres chosen for JSONB.", enrichment_kind: "decision_trace" },
+			},
+		],
+		llm_prompt: "",
+	}, { maxChunkChars: 8 });
+
+	assert.deepEqual(structured.chunks, [{ context_id: "d1", content: "We chose...", enrichment_kind: "decision_trace" }]);
+	assert.deepEqual(structured.forceful_relations[0]!.chunk, {
+		context_id: "d2",
+		content: "Why Post...",
+		enrichment: "Postgres...",
+		enrichment_kind: "decision_trace",
+	});
+});
+
+// The retired `{ text, kind }` object is not the contract: a server that
+// still sends it gets neither field echoed, rather than an object where a
+// string belongs.
+test("unifiedStructuredContent does not echo the retired enrichment object", () => {
+	// Parsed from the wire like any response, so the off-contract field arrives untyped.
+	const legacy: UnifiedChunk = JSON.parse('{"context_id":"d1","content":"x","enrichment":{"text":"t","kind":"user_preference"}}');
+	const structured = unifiedStructuredContent({ chunks: [legacy], graph: [], forceful_relations: [], llm_prompt: "" });
+
+	assert.deepEqual(structured.chunks, [{ context_id: "d1", content: "x" }]);
 });
 
 // A chunk carrying nothing still renders as an entry the caller can index,
