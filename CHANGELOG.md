@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — unified search hardening from the staging run (PRO-2187)
+
+- **A unified answer is read by its shape on every route.** `kind: "all"` on a
+  unified database, or a defaulted search sent while the layout probe could not
+  answer, came back in the four-key body and was refused as
+  `INVALID_QUERY_RESPONSE`. The v2 route now recognises that body, reads it, and
+  remembers the database is unified. Explicit `all` on a known unified database
+  is sent as `unified`. A missing `forceful_relations` reads as none.
+- **Unified answers are bounded without losing a citation.** One search was
+  measured at ~265k characters. The prompt now keeps every heading, id and
+  label and shortens only long result bodies (each naming `hydradb_inspect`
+  for the full text) to the same budget as a split answer; `detail: "compact"`
+  caps bodies at 600 characters. The structured copy is shortened to match and
+  flagged (`content_truncated`, `shortened`). A prompt that fits is unchanged.
+- **One graph write no longer breaks every widened search.** The collection
+  listing includes graph-only collections; when the API refuses one as
+  `sub_tenant_ids do not exist`, a search this server widened drops it,
+  searches the rest, and says so in a scope warning. Collections the caller
+  named are never narrowed. Unified answers now carry scope warnings too.
+- **`kind: "unified"` on a known split database is refused before sending**
+  (query, ingest, list, delete). It used to hit knowledge or memory silently.
+
 ### Changed — the model resolves collection scope (PRO-1942)
 
 Wrong-partition retrieval fails silently: `POST /query` against an empty or

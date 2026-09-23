@@ -1318,9 +1318,9 @@ test("isUnifiedQueryResult tells the two /query shapes apart", () => {
 test("a unified /query body missing keys or usable context_ids is a protocol error", async () => {
 	const sdk = { query() { throw new Error("SDK query must not be used for unified"); } } as unknown as HydraDBClient;
 	for (const body of [
-		{ chunks: [], graph: [], llm_prompt: "" }, // forceful_relations missing
 		// The pre-rename key never shipped and is not read in its place.
 		{ chunks: [], graph: [], relations: [], llm_prompt: "" },
+		{ chunks: [], graph: [], forceful_relations: {}, llm_prompt: "" }, // present but not an array
 		{ chunks: [], graph: [], forceful_relations: [] }, // llm_prompt missing
 		{ chunks: [{ chunk_id: "c1" }], graph: [], forceful_relations: [], llm_prompt: "" }, // no context_id
 		{ chunks: [{ context_id: "" }], graph: [], forceful_relations: [], llm_prompt: "" }, // empty context_id
@@ -1337,6 +1337,21 @@ test("a unified /query body missing keys or usable context_ids is a protocol err
 			`body ${JSON.stringify(body)} must be refused`,
 		);
 	}
+});
+
+// forceful_relations is optional in the contract: a server that leaves it out
+// has declared no forced links, so the answer is read with none rather than
+// thrown away whole.
+test("a unified /query body without forceful_relations reads as none", async () => {
+	const sdk = { query() { throw new Error("SDK query must not be used for unified"); } } as unknown as HydraDBClient;
+	const { fetch } = fetchStub({ success: true, data: { chunks: [{ context_id: "c1", content: "x" }], graph: [], llm_prompt: "P" } });
+	const hydra = new HydraDB({ token: "t", database: "db_u", baseUrl: "https://api.test", fetchFn: fetch }, sdk);
+
+	const res = await hydra.context.query({ query: "acme", kind: "unified" });
+
+	assert.ok(isUnifiedQueryResult(res));
+	assert.deepEqual(res.forceful_relations, []);
+	assert.equal(res.chunks[0]?.context_id, "c1");
 });
 
 // Same rule on the write path: a 202 that is not the documented shape is an

@@ -203,9 +203,10 @@ export type QueryResult = SDK.SearchV2RetrievalResult | UnifiedQueryResult;
  * Decided by shape, not by what was requested (CONTRACT rule 4): stored logs
  * and split databases keep producing the v2 shape, and a server that predates
  * the unified response answers a unified request with it too. The unified
- * shape is ALL of `chunks`, `graph`, `forceful_relations` as arrays and
- * `llm_prompt` as a string, with a usable `context_id` on every chunk; the
- * v2 shape carries `graph_context` and per-chunk `chunk_content` instead, and
+ * shape is `chunks` and `graph` as arrays and `llm_prompt` as a string, with a
+ * usable `context_id` on every chunk; `forceful_relations` is optional in the
+ * contract, so an absent one reads as none (an array when present). The v2
+ * shape carries `graph_context` and per-chunk `chunk_content` instead, and
  * the presence of `graph_context` is what settles a body that has both. A body
  * showing some unified keys but not the whole shape is malformed, not
  * unified — `carriesUnifiedMarkers` is what calls that out so the caller
@@ -219,9 +220,14 @@ export function isUnifiedQueryResult(value: unknown): value is UnifiedQueryResul
 	if (!Array.isArray(record.chunks)) return false;
 	if (!Array.isArray(record.graph)) return false;
 
-	// The pre-rename `relations` key never shipped and is not read: a body
-	// carrying it instead of `forceful_relations` is refused as malformed.
-	if (!Array.isArray(record.forceful_relations)) return false;
+	// Optional, but an array when present. The pre-rename `relations` key never
+	// shipped and is not read: a body carrying it in place of
+	// `forceful_relations` is refused as malformed rather than read as "none".
+	if ("forceful_relations" in record) {
+		if (!Array.isArray(record.forceful_relations)) return false;
+	} else if ("relations" in record) {
+		return false;
+	}
 	// A chunk whose source id is absent or not a string cannot be cited,
 	// inspected or deleted — it is a malformed row, not an empty one.
 	return record.chunks.every(
@@ -245,6 +251,53 @@ function carriesUnifiedMarkers(wire: unknown): boolean {
 	if ("graph_context" in record) return false;
 
 	return "llm_prompt" in record || "forceful_relations" in record || Array.isArray(record.graph);
+}
+
+function malformedUnifiedResponse(wire: unknown): HydraWrapperError {
+	return new HydraWrapperError(
+		"Hydra DB /query → ERR: malformed unified response: expected " +
+			"chunks[], graph[], a string llm_prompt, a string context_id on every " +
+			"chunk, and forceful_relations[] when present",
+		"/query",
+		{ body: wire },
+	);
+}
+
+/**
+ * A `/query` answer that came back in the unified shape on a route that asked
+ * for `all`, `memory` or `knowledge`.
+ *
+ * The server picks the body shape from the DATABASE, not from the `type` it
+ * was sent: a unified database accepts `all` (it means the whole corpus) and
+ * still answers with the four-key body. So an explicit `kind: "all"`, or a
+ * defaulted one sent while the layout probe could not answer, reaches this
+ * route with a unified body — which the v2 check below would refuse as an
+ * invalid response. The SDK's parse passes every unified key through
+ * untouched (none of them are v2-declared), so the body is read here by its
+ * shape instead. The envelope is kept around it so `call` still reads the
+ * request id. `undefined` means the answer is v2 and the v2 checks apply.
+ */
+function unifiedFromV2Route(response: unknown): unknown {
+	const payload = unwrap<unknown>(response);
+
+	if (!isUnifiedQueryResult(payload)) {
+		// Only `llm_prompt` marks a broken unified body on this route: a v2
+		// body also carries additive `graph`/`forceful_relations` objects, and
+		// drops `graph_context` when the caller turned the graph off.
+		if (payload != null && typeof payload === "object" && "llm_prompt" in payload) {
+			throw malformedUnifiedResponse(payload);
+		}
+
+		return undefined;
+	}
+
+	const unified = toUnifiedQueryResult(payload);
+
+	if (payload === response) return unified;
+
+	// SAFETY: `unwrap` returned something other than its input only because
+	// `response` is an envelope object carrying the payload under `data`.
+	return { ...(response as Record<string, unknown>), data: unified };
 }
 
 /**
@@ -1080,15 +1133,8 @@ export class ContextResource extends Resource {
 				// malformed, not v2: the v2 serializer would accept it into an
 				// answer that only looks empty. Refuse it as the protocol
 				// error it is.
-				if (carriesUnifiedMarkers(wire)) {
-					throw new HydraWrapperError(
-						"Hydra DB /query → ERR: malformed unified response: expected " +
-							"chunks[], graph[], forceful_relations[], a string llm_prompt, and a " +
-							"string context_id on every chunk",
-						"/query",
-						{ body: wire },
-					);
-				}
+
+				if (carriesUnifiedMarkers(wire)) throw malformedUnifiedResponse(wire);
 				return serialization.SearchV2RetrievalResult.parseOrThrow(wire, SDK_PARSE_OPTS);
 				// onMeta is deliberately NOT passed to call here: the envelope
 				// meta was already fired through rawWire while it was still
@@ -1160,6 +1206,10 @@ export class ContextResource extends Resource {
 				if (!response.ok) {
 					throw new HydraDBError({ statusCode: response.status, body });
 				}
+
+					const unified = unifiedFromV2Route(body);
+
+					if (unified !== undefined) return unified;
 					validateQueryResponse(body);
 					// Use the SAME wire-to-SDK conversion as sdk.query, including nested
 					// graph context and metadata. Casting raw JSON loses their contents.
@@ -1184,6 +1234,9 @@ export class ContextResource extends Resource {
 
 		return this.call("/query", async () => {
 			const response = await this.sdk.query(request, req(opts));
+			const unified = unifiedFromV2Route(response);
+
+			if (unified !== undefined) return unified;
 			validateQueryResponse(response);
 			return response;
 		}, opts?.onMeta);
@@ -1838,6 +1891,27 @@ export class DatabasesResource extends Resource {
 			// tool call ends now rather than running on with a guessed layout.
 			if (signal?.aborted) throw err;
 			return "split";
+		}
+	}
+
+	/**
+	 * The layout only when it is KNOWN: learned from a refusal, or listed by the
+	 * probe. `undefined` when the probe failed or does not list the database —
+	 * unlike `layout()`, which reads that as split so defaults stay safe. A
+	 * caller that is about to refuse a request needs the difference: refusing
+	 * `unified` on a guessed split layout would block a valid call.
+	 */
+	async knownLayout(database: string, signal?: AbortSignal): Promise<Layout | undefined> {
+		const learned = this.learnedLayouts.get(database);
+
+		if (learned != null) return learned;
+
+		try {
+			return (await this.layouts(signal)).get(database);
+		} catch (err) {
+			if (signal?.aborted) throw err;
+
+			return undefined;
 		}
 	}
 

@@ -613,8 +613,12 @@ export interface UnifiedStructuredChunk {
 	chunk_id?: string;
 	score?: number;
 	content: string;
-	/** The enrichment text, whole. */
+	/** Set when `content` was shortened to keep the answer within its budget; `content_chars` is the full length. */
+	content_truncated?: true;
+	content_chars?: number;
+	/** The enrichment text: whole, unless `enrichment_truncated` says it was shortened with the content. */
 	enrichment?: string;
+	enrichment_truncated?: true;
 	/** The declared `context_category`, passed through as sent. */
 	enrichment_kind?: string;
 	/** Present only when the server sent it: the query engaged temporal reasoning. */
@@ -633,11 +637,135 @@ export type UnifiedStructuredContent = {
 	sources: { id: string }[];
 };
 
-function structuredChunk(chunk: UnifiedChunk): UnifiedStructuredChunk {
+/** Cut `text` to at most `max` characters at a word boundary; `undefined` when it already fits. */
+function cutAtWord(text: string, max: number): string | undefined {
+	if (text.length <= max) return undefined;
+	const head = text.slice(0, max);
+	const space = head.lastIndexOf(" ");
+
+	return (space > max * 0.6 ? head.slice(0, space) : head).trimEnd();
+}
+
+/**
+ * Fit the server-built `llm_prompt` into `maxTotalChars` without losing a
+ * citation.
+ *
+ * The prompt is a sequence of result blocks (`### 1. title`, `### R1. …`),
+ * each a heading, its `- **Relevance:** …` / `- **Id:** …` lines, then the
+ * body (content, enrichment). Cutting the prompt at a character count dropped
+ * whole blocks and left the model citing [1]/[R1]/[P1] labels whose text it
+ * never saw — why the answer went out whole. This keeps every heading, every
+ * metadata line and every other section (related facts, sources) exactly as
+ * sent, and shortens only block BODIES, each with a note naming how much was
+ * kept and the tool that returns the rest. Every label still arrives with its
+ * id; only long text is shortened.
+ *
+ * A prompt that already fits is returned untouched (`trimmed: false`), so
+ * small answers are byte-for-byte what the server built. `maxBodyChars`
+ * forces a per-block cap (the `detail: "compact"` view) even when it fits.
+ */
+export function fitUnifiedPrompt(
+	prompt: string,
+	opts: { maxTotalChars: number; maxBodyChars?: number },
+): { text: string; trimmed: boolean; bodyCap?: number } {
+	if (opts.maxBodyChars == null && prompt.length <= opts.maxTotalChars) {
+		return { text: prompt, trimmed: false };
+	}
+
+	const lines = prompt.split("\n");
+
+	type Block = { head: string[]; body: string[] };
+
+	const parts: (string | Block)[] = [];
+	let current: Block | undefined;
+
+	for (const line of lines) {
+		if (line.startsWith("### ")) {
+			current = { head: [line], body: [] };
+			parts.push(current);
+		} else if (current && (line.startsWith("## ") || line.startsWith("# ") || line === "---")) {
+			current = undefined;
+			parts.push(line);
+		} else if (current) {
+			// Metadata lines directly under the heading stay with it.
+			if (current.body.length === 0 && line.startsWith("- ")) current.head.push(line);
+			else current.body.push(line);
+		} else {
+			parts.push(line);
+		}
+	}
+
+	const blocks = parts.filter((p): p is Block => typeof p !== "string");
+	const bodyText = (b: Block) => b.body.join("\n").replace(/\s+$/, "");
+	const bodies = blocks.map(bodyText);
+	const fixed = prompt.length - bodies.reduce((n, b) => n + b.length, 0);
+	const noteAllowance = 140;
+
+	// The largest per-block cap whose total still fits ("water filling"): short
+	// bodies keep everything, long ones share what is left evenly.
+	let cap = opts.maxBodyChars ?? Number.POSITIVE_INFINITY;
+
+	if (prompt.length > opts.maxTotalChars && blocks.length > 0) {
+		let room = Math.max(0, opts.maxTotalChars - fixed - noteAllowance * blocks.length);
+		const sorted = [...bodies].map((b) => b.length).sort((a, b) => a - b);
+		let fill = room / sorted.length;
+
+		for (let i = 0; i < sorted.length; i++) {
+			if (sorted[i] <= fill) {
+				room -= sorted[i];
+				fill = sorted.length - i - 1 > 0 ? room / (sorted.length - i - 1) : fill;
+			} else break;
+		}
+
+		cap = Math.min(cap, Math.max(200, Math.floor(fill)));
+	}
+
+	let trimmed = false;
+	const out: string[] = [];
+
+	for (const part of parts) {
+		if (typeof part === "string") {
+			out.push(part);
+			continue;
+		}
+
+		out.push(...part.head);
+		const body = bodyText(part);
+		const cut = cutAtWord(body, cap);
+
+		if (cut === undefined) {
+			out.push(...part.body);
+			continue;
+		}
+
+		trimmed = true;
+		const id = /\*\*Id:\*\*\s*([^·\n]+?)\s*(?:·|$)/.exec(part.head.join("\n"))?.[1];
+		out.push(
+			`${cut} … [shortened: ${cut.length} of ${body.length} characters shown` +
+				(id ? ` — pass Id ${id} to hydradb_inspect for the full text]` : "]"),
+			"",
+		);
+	}
+
+	const result: { text: string; trimmed: boolean; bodyCap?: number } = { text: out.join("\n"), trimmed };
+
+	if (trimmed) result.bodyCap = cap;
+
+	return result;
+}
+
+function structuredChunk(chunk: UnifiedChunk, maxChars?: number): UnifiedStructuredChunk {
+	const content = chunk.content ?? "";
+	const cut = maxChars != null ? cutAtWord(content, maxChars) : undefined;
 	const out: UnifiedStructuredChunk = {
 		context_id: chunk.context_id ?? "",
-		content: chunk.content ?? "",
+		content: cut ?? content,
 	};
+
+	if (cut !== undefined) {
+		out.content_truncated = true;
+		out.content_chars = content.length;
+	}
 	if (chunk.chunk_id != null) out.chunk_id = chunk.chunk_id;
 	if (typeof chunk.score === "number") out.score = chunk.score;
 
@@ -647,7 +775,10 @@ function structuredChunk(chunk: UnifiedChunk): UnifiedStructuredChunk {
 	// The string checks keep a server that still sends the retired
 	// `{ text, kind }` object from leaking an object where a string belongs.
 	if (typeof chunk.enrichment === "string" && chunk.enrichment !== "") {
-		out.enrichment = chunk.enrichment;
+		const cutEnrichment = maxChars != null ? cutAtWord(chunk.enrichment, maxChars) : undefined;
+		out.enrichment = cutEnrichment ?? chunk.enrichment;
+
+		if (cutEnrichment !== undefined) out.enrichment_truncated = true;
 	}
 
 	if (typeof chunk.enrichment_kind === "string" && chunk.enrichment_kind !== "") {
@@ -678,16 +809,22 @@ function structuredPath(path: UnifiedGraphPath): UnifiedStructuredContent["graph
  * `graph[].origin`, `graph[].path_summary` and `forceful_relations[]` (whose
  * `chunk` has the same shape) under the contract's names, plus the distinct
  * context ids as `sources[]`. Every chunk carries its `temporal[]` when the
- * server sent one, and every graph path its `triplets[]`. Nothing is trimmed:
- * bodies and enrichment text come through whole, as the prompt beside them
- * does.
+ * server sent one, and every graph path its `triplets[]`. Bodies and
+ * enrichment come through whole unless `maxChunkChars` is set — which the
+ * renderer does exactly when it had to shorten the prompt beside them — and
+ * then each shortened field is flagged (`content_truncated` with the full
+ * `content_chars`, `enrichment_truncated`), so the two copies of one answer
+ * never disagree about what was left out.
  */
-export function unifiedStructuredContent(result: UnifiedQueryResult): UnifiedStructuredContent {
-	const chunks = result.chunks.map((chunk) => structuredChunk(chunk));
+export function unifiedStructuredContent(
+	result: UnifiedQueryResult,
+	opts: { maxChunkChars?: number } = {},
+): UnifiedStructuredContent {
+	const chunks = result.chunks.map((chunk) => structuredChunk(chunk, opts.maxChunkChars));
 
 	const forcefulRelations = result.forceful_relations.map((relation) => ({
 		via: { from: relation.via?.from ?? "", to: relation.via?.to ?? "" },
-		chunk: structuredChunk(relation.chunk ?? {}),
+		chunk: structuredChunk(relation.chunk ?? {}, opts.maxChunkChars),
 	}));
 
 	const seen = new Set<string>();
