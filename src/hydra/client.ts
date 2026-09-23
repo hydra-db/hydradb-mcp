@@ -111,11 +111,11 @@ export interface ForcefulRelations {
 // --- The unified `POST /query` response (PRO-1618) ---
 //
 // A unified database answers with EXACTLY four keys: `chunks`, `graph`,
-// `relations`, `llm_prompt`. It is not the v2 shape and is never run through
-// the SDK's v2 serializer: that serializer would rename nothing it does not
-// know and drop `llm_prompt` on the floor, and the server-built prompt is the
-// one thing a client is told to surface verbatim. Field names below are the
-// wire names, exactly as CONTRACT.md states them.
+// `forceful_relations`, `llm_prompt`. It is not the v2 shape and is never run
+// through the SDK's v2 serializer: that serializer would rename nothing it
+// does not know and drop `llm_prompt` on the floor, and the server-built
+// prompt is the one thing a client is told to surface verbatim. Field names
+// below are the wire names, exactly as CONTRACT.md states them.
 
 export interface UnifiedEnrichment {
 	text?: string;
@@ -161,13 +161,24 @@ export interface UnifiedTriplet {
 	target?: UnifiedEntity;
 }
 
+/**
+ * Where a graph path came from: `query_path` was grown from the query's own
+ * entities; `chunk_relation` is the neighbourhood of a returned chunk, and
+ * every hop on it names that chunk in `relation.chunk_id`.
+ */
+export type UnifiedGraphOrigin = "query_path" | "chunk_relation";
+
 export interface UnifiedGraphPath {
+	origin?: UnifiedGraphOrigin;
 	triplets?: UnifiedTriplet[];
 	path_summary?: string;
 }
 
-/** A chunk pulled in because its source was declared related at ingest. */
-export interface UnifiedRelation {
+/**
+ * A chunk pulled in because the caller declared `forceful_relations` at
+ * ingest, not because it matched the query.
+ */
+export interface UnifiedForcefulRelation {
 	/** `to` is the returned chunk's own context id; `from` may be "". */
 	via?: { from?: string; to?: string };
 	chunk?: UnifiedChunk;
@@ -177,8 +188,8 @@ export interface UnifiedQueryResult {
 	chunks: UnifiedChunk[];
 	/** Query paths first, then chunk expansions; `[]` when graph_context=false. */
 	graph: UnifiedGraphPath[];
-	/** `[]` when nothing was declared related, or follow_forceful_relations=false. */
-	relations: UnifiedRelation[];
+	/** `[]` when nothing was declared at ingest, or follow_forceful_relations=false. */
+	forceful_relations: UnifiedForcefulRelation[];
 	/** Server-built, with citation labels [1], [R1], [P1]. Surface it verbatim. */
 	llm_prompt: string;
 }
@@ -192,10 +203,10 @@ export type QueryResult = SDK.SearchV2RetrievalResult | UnifiedQueryResult;
  * Decided by shape, not by what was requested (CONTRACT rule 4): stored logs
  * and split databases keep producing the v2 shape, and a server that predates
  * the unified response answers a unified request with it too. The unified
- * shape is ALL of `chunks`, `graph`, `relations` as arrays and `llm_prompt`
- * as a string, with a usable `context_id` on every chunk; the v2 shape
- * carries `graph_context` and per-chunk `chunk_content` instead, and the
- * presence of `graph_context` is what settles a body that has both. A body
+ * shape is ALL of `chunks`, `graph`, `forceful_relations` as arrays and
+ * `llm_prompt` as a string, with a usable `context_id` on every chunk; the
+ * v2 shape carries `graph_context` and per-chunk `chunk_content` instead, and
+ * the presence of `graph_context` is what settles a body that has both. A body
  * showing some unified keys but not the whole shape is malformed, not
  * unified — `carriesUnifiedMarkers` is what calls that out so the caller
  * can refuse it rather than let it read as an empty answer.
@@ -207,7 +218,10 @@ export function isUnifiedQueryResult(value: unknown): value is UnifiedQueryResul
 	if (typeof record.llm_prompt !== "string") return false;
 	if (!Array.isArray(record.chunks)) return false;
 	if (!Array.isArray(record.graph)) return false;
-	if (!Array.isArray(record.relations)) return false;
+
+	// The pre-rename `relations` key never shipped and is not read: a body
+	// carrying it instead of `forceful_relations` is refused as malformed.
+	if (!Array.isArray(record.forceful_relations)) return false;
 	// A chunk whose source id is absent or not a string cannot be cited,
 	// inspected or deleted — it is a malformed row, not an empty one.
 	return record.chunks.every(
@@ -229,7 +243,8 @@ function carriesUnifiedMarkers(wire: unknown): boolean {
 	if (wire == null || typeof wire !== "object" || Array.isArray(wire)) return false;
 	const record = wire as Record<string, unknown>;
 	if ("graph_context" in record) return false;
-	return "llm_prompt" in record || "relations" in record || Array.isArray(record.graph);
+
+	return "llm_prompt" in record || "forceful_relations" in record || Array.isArray(record.graph);
 }
 
 /**
@@ -241,7 +256,7 @@ export function toUnifiedQueryResult(wire: UnifiedQueryResult): UnifiedQueryResu
 	return {
 		chunks: Array.isArray(wire.chunks) ? wire.chunks : [],
 		graph: Array.isArray(wire.graph) ? wire.graph : [],
-		relations: Array.isArray(wire.relations) ? wire.relations : [],
+		forceful_relations: Array.isArray(wire.forceful_relations) ? wire.forceful_relations : [],
 		llm_prompt: typeof wire.llm_prompt === "string" ? wire.llm_prompt : "",
 	};
 }
@@ -1068,7 +1083,7 @@ export class ContextResource extends Resource {
 				if (carriesUnifiedMarkers(wire)) {
 					throw new HydraWrapperError(
 						"Hydra DB /query → ERR: malformed unified response: expected " +
-							"chunks[], graph[], relations[], a string llm_prompt, and a " +
+							"chunks[], graph[], forceful_relations[], a string llm_prompt, and a " +
 							"string context_id on every chunk",
 						"/query",
 						{ body: wire },

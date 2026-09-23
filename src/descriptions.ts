@@ -91,8 +91,8 @@ const PARAM = {
 		"want the raw matching text and nothing else.",
 	follow_forceful_relations:
 		"Also return chunks whose sources were declared related at ingest (see " +
-		"hydradb_ingest's forceful_relations), listed as RELATED CONTEXT with [R1]-style " +
-		"labels (default: true). Set false to get only what matched the query. UNIFIED " +
+		"hydradb_ingest's forceful_relations), listed under FORCEFUL RELATIONS with " +
+		"[R1]-style labels (default: true). Set false to get only what matched the query. UNIFIED " +
 		"databases only: on a split database the request is refused rather than the " +
 		"option silently ignored.",
 	text:
@@ -160,7 +160,7 @@ const PARAM = {
 	forceful_relations:
 		"Source ids (context ids) this entry is explicitly related to, such as the " +
 		"thread, ticket or document it belongs to. A later hydradb_query that returns " +
-		"this entry can pull those in as RELATED CONTEXT. Take the ids from hydradb_query, " +
+		"this entry can pull those in as FORCEFUL RELATIONS. Take the ids from hydradb_query, " +
 		"hydradb_list or an earlier hydradb_ingest result; never invent one. UNIFIED " +
 		"databases only; refused on a split database.",
 	ingest_acl:
@@ -322,7 +322,7 @@ Searches both families by default. Every result carries \`[id: …]\` — pass i
 
 Collections partition the database by use case. This connection's default (if it has one) is shown by hydradb_list_collections; when there is none, a search without \`collection\` covers every collection in the database (up to 10). Pass \`collection\`, or \`collections\` for several, to aim it where the answer should live.
 
-On a UNIFIED database (see hydradb_databases) the result is the server-built context block, verbatim: each entry is labelled [1], [R1] (declared related) or [P1] (graph path) and names its context_id, which is its source id. Cite the labels when you use what they mark.
+On a UNIFIED database (see hydradb_databases) the result is the server-built context block, verbatim: each entry is labelled [1], [R1] (a forceful relation: linked by the author at ingest, not matched by the query) or [P1] (graph path) and names its context_id, which is its source id. Cite the labels when you use what they mark.
 
 Examples:
   {"query": "how does the user prefer code review feedback"}

@@ -977,7 +977,7 @@ test("compact rendering never collapses bodies into a pointer", () => {
 // --- PRO-1618: the unified rendering, and the split rendering pinned ---
 
 // The contract asks for `llm_prompt` verbatim: it already carries the context,
-// the related context, the graph paths and the citation labels. The renderer
+// the forceful relations, the graph paths and the citation labels. The renderer
 // hands it over unchanged and reads the structured view from the four keys
 // under the contract's own names.
 test("renderUnifiedPrompt returns llm_prompt verbatim and unifiedStructuredContent reads the four keys", () => {
@@ -1003,8 +1003,11 @@ test("renderUnifiedPrompt returns llm_prompt verbatim and unifiedStructuredConte
 				content: "Refund policy: 30-day window.",
 			},
 		],
-		graph: [{ path_summary: "John is on the Pro plan since June 2026." }],
-		relations: [
+		graph: [
+			{ origin: "query_path", path_summary: "John is on the Pro plan since June 2026." },
+			{ origin: "chunk_relation", path_summary: "The refund policy allows refunds within 30 days." },
+		],
+		forceful_relations: [
 			{
 				via: { from: "linear-PRO-1169", to: "linear-PRO-1169-comment-4" },
 				chunk: {
@@ -1015,7 +1018,7 @@ test("renderUnifiedPrompt returns llm_prompt verbatim and unifiedStructuredConte
 				},
 			},
 		],
-		// Distinct context ids, chunks first then related, and NO titles: the
+		// Distinct context ids, chunks first then forceful relations, and NO titles: the
 		// body carries none and none are invented.
 		sources: [
 			{ id: "chat-2026-07-29#w2" },
@@ -1051,7 +1054,7 @@ test("unifiedStructuredContent bounds chunk bodies when asked", () => {
 	assert.equal(structured.chunks[0]!.enrichment?.text, "User prefers...");
 	assert.equal(structured.chunks[0]!.enrichment?.kind, "user_preference");
 	assert.equal(structured.chunks[0]!.score, 0.87);
-	assert.equal(structured.relations[0]!.chunk.content, "Comment 4: s...");
+	assert.equal(structured.forceful_relations[0]!.chunk.content, "Comment 4: s...");
 	// A body within the bound is untouched, and enrichment absent stays absent.
 	assert.equal(unifiedStructuredContent(UNIFIED_QUERY_FIXTURE, { maxChunkChars: 1000 }).chunks[0]!.content, UNIFIED_QUERY_FIXTURE.chunks[0]!.content);
 	assert.equal("enrichment" in structured.chunks[1]!, false);
@@ -1063,12 +1066,13 @@ test("unifiedStructuredContent tolerates sparse chunks", () => {
 	const structured = unifiedStructuredContent({
 		chunks: [{}],
 		graph: [{}],
-		relations: [{ chunk: { context_id: "only-related" } }],
+		forceful_relations: [{ chunk: { context_id: "only-related" } }],
 		llm_prompt: "",
 	});
 	assert.deepEqual(structured.chunks, [{ context_id: "", content: "" }]);
+	// A path the server sent without an origin gets none invented.
 	assert.deepEqual(structured.graph, [{ path_summary: "" }]);
-	assert.deepEqual(structured.relations, [{ via: { from: "", to: "" }, chunk: { context_id: "only-related", content: "" } }]);
+	assert.deepEqual(structured.forceful_relations, [{ via: { from: "", to: "" }, chunk: { context_id: "only-related", content: "" } }]);
 	assert.deepEqual(structured.sources, [{ id: "only-related" }]);
 });
 

@@ -91,7 +91,7 @@ chunks with their source id, a relevance score, and knowledge-graph context.
 | `mode` | string | No | `fast`, `thinking` (default), or `auto` |
 | `detail` | string | No | `compact` (default) trims each chunk; `full` returns them whole |
 | `graph_context` | boolean | No | Include knowledge-graph relations (default: true) |
-| `follow_forceful_relations` | boolean | No | Also return chunks declared related at ingest, as RELATED CONTEXT (default: true). Unified databases only; refused on a split database |
+| `follow_forceful_relations` | boolean | No | Also return chunks declared related at ingest, under FORCEFUL RELATIONS (default: true). Unified databases only; refused on a split database |
 | `operator` | string | No | `or`, `and`, or `phrase`. Switches the query to keyword retrieval (`query_by=text`), which is the only mode Hydra DB accepts an operator on — semantic matching is off for that query. Unset (the default) is hybrid semantic search |
 | `source_ids` | array | No | Restrict the search to these sources |
 | `titles` | array | No | Restrict to exact document titles (case-insensitive); resolved to source IDs before normal search |
@@ -108,11 +108,12 @@ alone is not enough: use the collection attached to that source. If it is missin
 resolve the collection before inspecting. Explicit scope is never widened.
 
 On a **unified** database the result text is the server-built `llm_prompt`,
-verbatim: every entry is labelled `[1]`, `[R1]` (declared related) or `[P1]`
-(graph path) and names its `context_id`, which is its source id. The same
-answer is returned as structured content (`chunks[]` with `context_id`,
-`score`, `content`, `enrichment`; `graph[].path_summary`; `relations[]`;
-distinct `sources[]`). A split database keeps the rendering it always had.
+verbatim: every entry is labelled `[1]`, `[R1]` (a forceful relation: linked
+by the author at ingest, not matched by the query) or `[P1]` (graph path) and
+names its `context_id`, which is its source id. The same answer is returned as
+structured content (`chunks[]` with `context_id`, `score`, `content`,
+`enrichment`; `graph[]` with `origin` (`query_path` or `chunk_relation`) and
+`path_summary`; `forceful_relations[]`; distinct `sources[]`). A split database keeps the rendering it always had.
 
 ### **hydradb_ingest**
 
@@ -137,7 +138,7 @@ or `turns`.
 | `custom_attributes` | object | No | Free-form key/value data stored beside the entry, not filterable |
 | `instructions` | string | No | Steers what is extracted from this entry when `infer` is on; replaces the server's default guidance for it |
 | `context_category` | string | No | Your label for the entry: `user_preference`, `business_knowledge`, `decision_trace`, or `auto` (default, no label). Unified databases only |
-| `forceful_relations` | array | No | Source ids this entry is explicitly related to; a later query can pull them in as related context. Unified databases only |
+| `forceful_relations` | array | No | Source ids this entry is explicitly related to; a later query can pull them in under FORCEFUL RELATIONS. Unified databases only |
 | `acl` | array | No | Principals that may read the entry (email, `domain:<host>`, `group:<provider>:<id>`). Unified databases only |
 
 The three unified-only arguments are refused by name on a split database

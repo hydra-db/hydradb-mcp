@@ -1,6 +1,6 @@
 import type { HydraDB as SDK } from "@hydradb/sdk";
 
-import type { UnifiedChunk, UnifiedQueryResult } from "./hydra/client.js";
+import type { UnifiedChunk, UnifiedGraphOrigin, UnifiedQueryResult } from "./hydra/client.js";
 
 /**
  * The renderer reads SDK payloads directly.
@@ -592,7 +592,7 @@ function render(
 // buildString, and it is left exactly as it was: a split database keeps
 // producing the v2 shape and its rendering must not move by a byte. A unified
 // database answers with a server-built `llm_prompt` that already carries the
-// context, the related context, the graph paths and citation labels ([1],
+// context, the forceful relations, the graph paths and citation labels ([1],
 // [R1], [P1]). The contract says to surface it verbatim rather than rebuild
 // it, so the renderer below does not walk the chunks at all: it hands the
 // prompt over, bounded, and the structured view beside it is read straight
@@ -643,8 +643,9 @@ export interface UnifiedStructuredChunk {
 export type UnifiedStructuredContent = {
 	layout: "unified";
 	chunks: UnifiedStructuredChunk[];
-	graph: { path_summary: string }[];
-	relations: { via: { from: string; to: string }; chunk: UnifiedStructuredChunk }[];
+	/** `origin` is passed through as sent, and omitted when the server sent none. */
+	graph: { origin?: UnifiedGraphOrigin; path_summary: string }[];
+	forceful_relations: { via: { from: string; to: string }; chunk: UnifiedStructuredChunk }[];
 	/** Every distinct context id in the answer, in order of first appearance. No titles: the body carries none, and none are invented. */
 	sources: { id: string }[];
 };
@@ -671,10 +672,10 @@ function structuredChunk(chunk: UnifiedChunk, maxChunkChars?: number): UnifiedSt
 
 /**
  * The structured view of a unified answer: `chunks[].content`,
- * `chunks[].enrichment`, `graph[].path_summary` and `relations[]` under the
- * contract's names, plus the distinct context ids as `sources[]`. Bodies are
- * bounded like the text view's are: this is a second encoding of the same
- * answer, not a way around its limits.
+ * `chunks[].enrichment`, `graph[].origin`, `graph[].path_summary` and
+ * `forceful_relations[]` under the contract's names, plus the distinct
+ * context ids as `sources[]`. Bodies are bounded like the text view's are:
+ * this is a second encoding of the same answer, not a way around its limits.
  */
 export function unifiedStructuredContent(
 	result: UnifiedQueryResult,
@@ -682,13 +683,16 @@ export function unifiedStructuredContent(
 ): UnifiedStructuredContent {
 	const max = opts?.maxChunkChars;
 	const chunks = result.chunks.map((chunk) => structuredChunk(chunk, max));
-	const relations = result.relations.map((relation) => ({
+
+	const forcefulRelations = result.forceful_relations.map((relation) => ({
 		via: { from: relation.via?.from ?? "", to: relation.via?.to ?? "" },
 		chunk: structuredChunk(relation.chunk ?? {}, max),
 	}));
+
 	const seen = new Set<string>();
 	const sources: { id: string }[] = [];
-	for (const id of [...chunks.map((c) => c.context_id), ...relations.map((r) => r.chunk.context_id)]) {
+
+	for (const id of [...chunks.map((c) => c.context_id), ...forcefulRelations.map((r) => r.chunk.context_id)]) {
 		if (id === "" || seen.has(id)) continue;
 		seen.add(id);
 		sources.push({ id });
@@ -696,8 +700,12 @@ export function unifiedStructuredContent(
 	return {
 		layout: "unified",
 		chunks,
-		graph: result.graph.map((path) => ({ path_summary: path.path_summary ?? "" })),
-		relations,
+		graph: result.graph.map((path) =>
+			path.origin != null
+				? { origin: path.origin, path_summary: path.path_summary ?? "" }
+				: { path_summary: path.path_summary ?? "" },
+		),
+		forceful_relations: forcefulRelations,
 		sources,
 	};
 }

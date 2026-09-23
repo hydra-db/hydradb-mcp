@@ -3482,7 +3482,7 @@ function layoutFetch(type: "split" | "unified", raw: RawCall[] = []): typeof fet
 							? { success: true, message: "queued", results: [], success_count: 1, failed_count: 0 }
 							// The unified four-key answer (PRO-1618); only a unified
 							// database reaches the raw path at all.
-							: { chunks: [], graph: [], relations: [], llm_prompt: "" };
+							: { chunks: [], graph: [], forceful_relations: [], llm_prompt: "" };
 		return Promise.resolve(
 			new Response(JSON.stringify({ success: true, data }), {
 				status: 200,
@@ -4328,9 +4328,19 @@ function unifiedHydra(answers: Record<string, unknown> = {}, requestId?: string)
 			parsed.pathname === "/databases"
 				? { databases: ["db_u"], details: [{ database: "db_u", type: "unified" }] }
 				: (answers[parsed.pathname] ?? {});
+
+		// The unified envelope's meta as the contract states it: request id,
+		// version, latency and the scope, and NO tenant_id, sub_tenant_id or
+		// source_type. Nothing on the unified path may need those. Without a
+		// request id there is no meta at all (JSON.stringify drops undefined).
+		const meta =
+			requestId == null
+				? undefined
+				: { request_id: requestId, api_version: "2", latency_ms: 12, database: "db_u", collection: "c1" };
+
 		return Promise.resolve(
 			new Response(
-				JSON.stringify({ success: true, data, ...(requestId != null ? { meta: { request_id: requestId } } : {}) }),
+				JSON.stringify({ success: true, data, meta }),
 				{
 					status: 200,
 					headers: { "content-type": "application/json" },
@@ -4372,7 +4382,8 @@ test("hydradb_query on a unified database sends no type, renders llm_prompt verb
 
 	const text = (result.content as { text: string }[])[0]!.text;
 	assert.ok(text.includes(UNIFIED_QUERY_FIXTURE.llm_prompt), "llm_prompt must be surfaced verbatim");
-	assert.match(text, /^Found 2 context items \(1 related, 1 graph path\):\n\n=== CONTEXT ===/);
+	assert.match(text, /^Found 2 context items \(1 forceful relation, 2 graph paths\):\n\n=== CONTEXT ===/);
+	assert.match(text, /=== FORCEFUL RELATIONS ===\nLinked to a result by the author at ingest time \(forceful_relations\), not by relevance to this query\./);
 	assert.match(text, /Each context_id above is a source id: pass one to hydradb_inspect/);
 	assert.match(text, /\[1\], \[R1\], \[P1\]\) are citation labels/);
 	// Nothing of the v2 rendering: no per-chunk headers, no invented titles.
@@ -4382,8 +4393,8 @@ test("hydradb_query on a unified database sends no type, renders llm_prompt verb
 	const structured = result.structuredContent as {
 		layout: string;
 		chunks: { context_id: string; chunk_id?: string; score?: number; content: string; enrichment?: { text?: string; kind?: string } }[];
-		graph: { path_summary: string }[];
-		relations: { via: { from: string; to: string }; chunk: { context_id: string } }[];
+		graph: { origin?: string; path_summary: string }[];
+		forceful_relations: { via: { from: string; to: string }; chunk: { context_id: string } }[];
 		sources: Record<string, unknown>[];
 	};
 	assert.equal(structured.layout, "unified");
@@ -4392,9 +4403,13 @@ test("hydradb_query on a unified database sends no type, renders llm_prompt verb
 	assert.equal(structured.chunks[0]!.score, 0.87);
 	assert.equal(structured.chunks[0]!.content, "user: Keep answers short please\nassistant: Got it.");
 	assert.deepEqual(structured.chunks[0]!.enrichment, { text: "User prefers short, bullet-point answers.", kind: "user_preference" });
-	assert.deepEqual(structured.graph, [{ path_summary: "John is on the Pro plan since June 2026." }]);
-	assert.deepEqual(structured.relations[0]!.via, { from: "linear-PRO-1169", to: "linear-PRO-1169-comment-4" });
-	assert.equal(structured.relations[0]!.chunk.context_id, "linear-PRO-1169-comment-4");
+	assert.deepEqual(structured.graph, [
+		{ origin: "query_path", path_summary: "John is on the Pro plan since June 2026." },
+		{ origin: "chunk_relation", path_summary: "The refund policy allows refunds within 30 days." },
+	]);
+	assert.deepEqual(structured.forceful_relations[0]!.via, { from: "linear-PRO-1169", to: "linear-PRO-1169-comment-4" });
+	assert.equal(structured.forceful_relations[0]!.chunk.context_id, "linear-PRO-1169-comment-4");
+	assert.equal("relations" in structured, false, "the pre-rename key is not emitted");
 	// sources[] is built from context_id and carries no title: the body has
 	// none, and none is invented.
 	assert.deepEqual(structured.sources, [
@@ -4407,7 +4422,7 @@ test("hydradb_query on a unified database sends no type, renders llm_prompt verb
 });
 
 test("hydradb_query on a unified database reports an empty four-key answer as no results", async () => {
-	const { hydra } = unifiedHydra({ "/query": { chunks: [], graph: [], relations: [], llm_prompt: "" } });
+	const { hydra } = unifiedHydra({ "/query": { chunks: [], graph: [], forceful_relations: [], llm_prompt: "" } });
 	const client = await connect(hydra);
 	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "nothing" } });
 	assert.equal((result.content as { text: string }[])[0]!.text, "No relevant context items found in Hydra DB.");
@@ -4432,7 +4447,7 @@ test("hydradb_query on a unified database surfaces the request id for hydradb_fe
 });
 
 test("hydradb_query on a unified database surfaces the request id on an empty answer too", async () => {
-	const { hydra } = unifiedHydra({ "/query": { chunks: [], graph: [], relations: [], llm_prompt: "" } }, "req_u_2");
+	const { hydra } = unifiedHydra({ "/query": { chunks: [], graph: [], forceful_relations: [], llm_prompt: "" } }, "req_u_2");
 	const client = await connect(hydra);
 
 	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "nothing" } });

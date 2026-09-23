@@ -1268,38 +1268,43 @@ test("followForcefulRelations is refused on a split request", async () => {
 });
 
 // The shape detector, on its own: the unified body is the COMPLETE four-key
-// shape — `chunks`, `graph`, `relations` arrays and a string `llm_prompt`,
+// shape: `chunks`, `graph`, `forceful_relations` arrays and a string `llm_prompt`,
 // with a usable `context_id` on every chunk. Anything less is not unified;
 // the v2 body carries `graph_context`, and its presence settles a body that
 // has both.
 test("isUnifiedQueryResult tells the two /query shapes apart", () => {
 	assert.equal(isUnifiedQueryResult(UNIFIED_QUERY_FIXTURE), true);
-	assert.equal(isUnifiedQueryResult({ chunks: [], graph: [], relations: [], llm_prompt: "" }), true);
+	assert.equal(isUnifiedQueryResult({ chunks: [], graph: [], forceful_relations: [], llm_prompt: "" }), true);
 	// Partial unified shapes are NOT unified — a missing key or a chunk
 	// without its source id is a malformed response, not an empty answer.
 	assert.equal(isUnifiedQueryResult({ chunks: [], graph: [] }), false);
-	assert.equal(isUnifiedQueryResult({ chunks: [], graph: [], relations: [] }), false);
+	assert.equal(isUnifiedQueryResult({ chunks: [], graph: [], forceful_relations: [] }), false);
 	assert.equal(
-		isUnifiedQueryResult({ chunks: [], graph: [], relations: [], llm_prompt: 42 }),
+		isUnifiedQueryResult({ chunks: [], graph: [], relations: [], llm_prompt: "" }),
+		false,
+		"the pre-rename `relations` key is not the unified shape",
+	);
+	assert.equal(
+		isUnifiedQueryResult({ chunks: [], graph: [], forceful_relations: [], llm_prompt: 42 }),
 		false,
 	);
 	assert.equal(
-		isUnifiedQueryResult({ chunks: [{ chunk_id: "c1" }], graph: [], relations: [], llm_prompt: "" }),
+		isUnifiedQueryResult({ chunks: [{ chunk_id: "c1" }], graph: [], forceful_relations: [], llm_prompt: "" }),
 		false,
 		"a chunk without context_id cannot be cited or followed",
 	);
 	assert.equal(
-		isUnifiedQueryResult({ chunks: [{ context_id: "" }], graph: [], relations: [], llm_prompt: "" }),
+		isUnifiedQueryResult({ chunks: [{ context_id: "" }], graph: [], forceful_relations: [], llm_prompt: "" }),
 		false,
 		"an empty context_id is not usable",
 	);
 	assert.equal(
-		isUnifiedQueryResult({ chunks: ["oops"], graph: [], relations: [], llm_prompt: "" }),
+		isUnifiedQueryResult({ chunks: ["oops"], graph: [], forceful_relations: [], llm_prompt: "" }),
 		false,
 	);
 	assert.equal(isUnifiedQueryResult({ chunks: [{ chunk_content: "x" }], graph_context: {} }), false);
 	assert.equal(
-		isUnifiedQueryResult({ chunks: [], graph: [], relations: [], llm_prompt: "", graph_context: {} }),
+		isUnifiedQueryResult({ chunks: [], graph: [], forceful_relations: [], llm_prompt: "", graph_context: {} }),
 		false,
 	);
 	assert.equal(isUnifiedQueryResult({ chunks: [] }), false);
@@ -1313,10 +1318,12 @@ test("isUnifiedQueryResult tells the two /query shapes apart", () => {
 test("a unified /query body missing keys or usable context_ids is a protocol error", async () => {
 	const sdk = { query() { throw new Error("SDK query must not be used for unified"); } } as unknown as HydraDBClient;
 	for (const body of [
-		{ chunks: [], graph: [], llm_prompt: "" }, // relations missing
-		{ chunks: [], graph: [], relations: [] }, // llm_prompt missing
-		{ chunks: [{ chunk_id: "c1" }], graph: [], relations: [], llm_prompt: "" }, // no context_id
-		{ chunks: [{ context_id: "" }], graph: [], relations: [], llm_prompt: "" }, // empty context_id
+		{ chunks: [], graph: [], llm_prompt: "" }, // forceful_relations missing
+		// The pre-rename key never shipped and is not read in its place.
+		{ chunks: [], graph: [], relations: [], llm_prompt: "" },
+		{ chunks: [], graph: [], forceful_relations: [] }, // llm_prompt missing
+		{ chunks: [{ chunk_id: "c1" }], graph: [], forceful_relations: [], llm_prompt: "" }, // no context_id
+		{ chunks: [{ context_id: "" }], graph: [], forceful_relations: [], llm_prompt: "" }, // empty context_id
 	]) {
 		const { fetch } = fetchStub({ success: true, data: body });
 		const hydra = new HydraDB({ token: "t", database: "db_u", baseUrl: "https://api.test", fetchFn: fetch }, sdk);

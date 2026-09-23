@@ -908,11 +908,12 @@ export function createHydraDBServer(
 	/**
 	 * A unified answer (PRO-1618), rendered the way the contract asks: the
 	 * server-built `llm_prompt` verbatim as the text, because it already
-	 * carries the context, the related context, the graph paths and the
+	 * carries the context, the forceful relations, the graph paths and the
 	 * citation labels a model is meant to cite; and the four keys as
 	 * structured content beside it, so a host that parses rather than reads
 	 * gets `chunks[].context_id`, `score`, `content`, `enrichment`,
-	 * `graph[].path_summary`, `relations[]` and the distinct `sources[]`.
+	 * `graph[].origin`, `graph[].path_summary`, `forceful_relations[]` and the
+	 * distinct `sources[]`.
 	 *
 	 * `max_results` is not re-applied here. The prompt is the server's and
 	 * slicing the chunks under it would make the two views disagree; the
@@ -926,14 +927,15 @@ export function createHydraDBServer(
 		detail?: "compact" | "full",
 		requestId?: string,
 	): ToolResult {
-		const { chunks, graph, relations } = res;
+		const { chunks, graph, forceful_relations: forcefulRelations } = res;
 		// The same line and the same structured field as the v2 path above: the
 		// request id is the ONLY key POST /feedback correlates on, and an empty
 		// answer is still a query the caller may want to rate.
 		const feedbackLine = requestId
 			? `\nWas this useful? Report it with ${TOOL_NAMES.FEEDBACK} using request_id: ${requestId}`
 			: "";
-		if (chunks.length === 0 && relations.length === 0 && graph.length === 0) {
+
+		if (chunks.length === 0 && forcefulRelations.length === 0 && graph.length === 0) {
 			const text = `No relevant ${resultNoun(kind)} found in Hydra DB.${feedbackLine}`;
 			return requestId != null ? structuredResult(text, { request_id: requestId }) : textResult(text);
 		}
@@ -947,7 +949,9 @@ export function createHydraDBServer(
 			maxTotalChars: QUERY_CHAR_BUDGET - legend.length - headerAllowance,
 		});
 		const extras = [
-			relations.length > 0 ? `${relations.length} related` : "",
+			forcefulRelations.length > 0
+				? `${forcefulRelations.length} forceful relation${forcefulRelations.length === 1 ? "" : "s"}`
+				: "",
 			graph.length > 0 ? `${graph.length} graph path${graph.length === 1 ? "" : "s"}` : "",
 		].filter((s) => s !== "");
 		const header =
