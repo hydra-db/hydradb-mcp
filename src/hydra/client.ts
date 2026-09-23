@@ -1387,24 +1387,20 @@ export class ContextResource extends Resource {
 		if (params.sourceId != null) item.context_id = params.sourceId;
 		if (params.title != null) item.title = params.title;
 		if (params.text != null) item.text = params.text;
+		// A turn is exactly `{role, content}`: the server decodes the body
+		// strictly and refuses any other key, a per-turn `name` included.
 		if (params.pairs != null) {
 			item.conversation = params.pairs.flatMap((turn) => [
-				{ role: "user", content: turn.user, ...(params.userName ? { name: params.userName } : {}) },
+				{ role: "user", content: turn.user },
 				{ role: "assistant", content: turn.assistant },
 			]);
 		}
-		// `is_markdown` is sent only when the caller said something. The server's
-		// field is a plain bool, so omitting it and sending `false` are the same
-		// thing, and every other field on this item is conditional too.
-		if (params.isMarkdown != null) item.is_markdown = params.isMarkdown;
-		// Speaker identity has TWO homes on a unified item and the server reads
-		// the finer-grained one first: a conversation names its speaker per turn
-		// (set above), and the item-level `user_name` fills in only when the
-		// turns supplied none. So it goes on the item for a TEXT item only:
-		// sending both would be redundant on the wire, and a client that let the
-		// item-level value win would silently discard the per-turn identity that
-		// speaker anchoring depends on.
-		if (params.pairs == null && params.userName != null) item.user_name = params.userName;
+		// The speaker lives on the item, for both shapes: a text item is what
+		// that person said, and a conversation's user turns are theirs.
+		if (params.userName != null) item.user_name = params.userName;
+		// `is_markdown` is not part of the unified item and would be refused by
+		// the strict decoder; unified ingest takes text as sent, so it is not
+		// forwarded. It still applies on a split database.
 		item.enrich = params.infer ?? true;
 		if (item.enrich && params.customInstructions != null) {
 			item.instructions = params.customInstructions;
@@ -1419,7 +1415,7 @@ export class ContextResource extends Resource {
 		}
 		if (params.forcefulRelations != null) {
 			item.forceful_relations = compact({
-				ids: params.forcefulRelations.ids,
+				context_ids: params.forcefulRelations.ids,
 				properties: params.forcefulRelations.properties,
 			});
 		}

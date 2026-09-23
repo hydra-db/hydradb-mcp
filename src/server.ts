@@ -1322,8 +1322,8 @@ export function createHydraDBServer(
 			kind: kindToSend,
 			pairs: turns,
 			sourceId,
-			// On the unified path this becomes each user turn's `name`, which is
-			// where speaker identity lives there — so it is carried, not dropped.
+			// On the unified path this is the item's `user_name`, which is where
+			// speaker identity lives there — so it is carried, not dropped.
 			userName: opts?.userName ?? "User",
 			infer: opts?.infer ?? true,
 			title: opts?.title,

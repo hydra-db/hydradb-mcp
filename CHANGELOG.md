@@ -29,6 +29,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`kind: "unified"` on a known split database is refused before sending**
   (query, ingest, list, delete). It used to hit knowledge or memory silently.
 
+### Changed — unified ingest follows the strict item contract (hydradb-application#1653)
+
+The server now decodes a unified item strictly and refuses unknown keys, so
+three things the MCP sent would be a 400:
+
+- A conversation turn is exactly `{role, content}`: no per-turn `name`. The
+  speaker is the item's `user_name`, on conversations and text notes alike.
+- Forced links are `forceful_relations: {context_ids, properties}` (was
+  `ids`). The tool parameter is unchanged: a list of context ids.
+- `is_markdown` is not sent to a unified database; it still applies on split.
+
 ### Changed — the model resolves collection scope (PRO-1942)
 
 Wrong-partition retrieval fails silently: `POST /query` against an empty or
@@ -79,12 +90,10 @@ every rendering byte for byte.
   `tenant_id`, `sub_tenant_id` or `source_type` from the response meta, which
   a unified response does not carry. A v2 answer
   to a unified request, from a server that predates the unified response,
-  still goes to the v2 renderer. Nothing on the unified answer is compacted:
-  the prompt is returned whole, with no total budget and no truncation note,
-  and every structured chunk keeps its full `content`, `enrichment` and
-  `temporal`. `detail` (default `compact`, which trims each chunk to about 600
-  characters) and the 40,000-character query budget apply to a split database
-  only.
+  still goes to the v2 renderer. The unified answer is held to the same
+  40,000-character budget as a split one by shortening long result bodies
+  only (see "unified search hardening" above); a prompt that fits is returned
+  whole.
 - New `follow_forceful_relations` on `hydradb_query` toggles the chunks
   declared related at ingest. It is a unified-database option: the split
   path goes through the pinned SDK, which knows only the deprecated
@@ -93,7 +102,7 @@ every rendering byte for byte.
 - `hydradb_ingest` sends the contract body: list key `context`, item fields
   `text` or `conversation`, `context_id`, `title`, `enrich`, `instructions`,
   `happened_at`, `attributes`, `custom_attributes`, `context_category`,
-  `forceful_relations` (`{ids}`), `acl`; request-level `upsert`. The 202 is
+  `forceful_relations` (`{context_ids}`), `acl`, `user_name`; request-level `upsert`. The 202 is
   read by hand so `results[].source_id` (the context id) reaches the caller;
   the SDK serializer reads a wire `id` and would have lost it.
 - New `hydradb_ingest` arguments: `attributes` and `happened_at` (the

@@ -3571,12 +3571,14 @@ test("hydradb_ingest with turns defaults to unified on a unified database", asyn
 	assert.equal(calls.find((c) => c.method === "ingest"), undefined, "unified must not use the SDK ingest serializer");
 	// The contract's list key is `context` (never `items`).
 	const body = raw.find((c) => c.path === "/context/ingest")!.body as {
-		context: { conversation: { role: string; content: string; name?: string }[] }[];
+		context: { conversation: Record<string, unknown>[]; user_name?: string }[];
 	};
+	// A turn is exactly {role, content}; the speaker is the item's user_name.
 	assert.deepEqual(body.context[0]!.conversation, [
-		{ role: "user", content: "i prefer dark mode", name: "Ada" },
+		{ role: "user", content: "i prefer dark mode" },
 		{ role: "assistant", content: "noted" },
 	]);
+	assert.equal(body.context[0]!.user_name, "Ada");
 	await client.close();
 });
 
@@ -4560,13 +4562,13 @@ test("hydradb_ingest on a unified database sends the contract body and reports t
 				attributes: { team: "support" },
 				custom_attributes: { source_app: "wiki" },
 				context_category: "business_knowledge",
-				forceful_relations: { ids: ["chat-w1"] },
+				forceful_relations: { context_ids: ["chat-w1"] },
 				acl: ["user_email:a@x.com", "domain:acme.com"],
 			},
 		],
 	});
 	const raw = JSON.stringify(sent.body);
-	for (const key of ["items", "contexts", "type", "relations", "custom_instructions", "observation_date", "metadata", "additional_metadata", "infer", "source_id"]) {
+	for (const key of ["items", "contexts", "type", "relations", "custom_instructions", "observation_date", "metadata", "additional_metadata", "infer", "source_id", "name", "is_markdown", "ids"]) {
 		assert.equal(raw.includes(`"${key}"`), false, `${key} must not be sent on a unified ingest`);
 	}
 
@@ -4599,7 +4601,7 @@ test("hydradb_ingest turns on a unified database send a conversation with the co
 
 	const item = (calls.find((c) => c.path === "/context/ingest")!.body as { context: Record<string, unknown>[] }).context[0]!;
 	assert.deepEqual(item.conversation, [
-		{ role: "user", content: "let's go with Postgres", name: "Ada" },
+		{ role: "user", content: "let's go with Postgres" },
 		{ role: "assistant", content: "Agreed." },
 	]);
 	assert.equal(item.context_id, "chat-1");
@@ -4609,8 +4611,8 @@ test("hydradb_ingest turns on a unified database send a conversation with the co
 	assert.deepEqual(item.attributes, { project: "hydradb" });
 	assert.equal(item.happened_at, "2026-07-29");
 	assert.equal(item.context_category, "decision_trace");
-	assert.deepEqual(item.forceful_relations, { ids: ["policy-1"] });
-	assert.equal("user_name" in item, false, "per-turn name is authoritative on a conversation");
+	assert.deepEqual(item.forceful_relations, { context_ids: ["policy-1"] });
+	assert.equal(item.user_name, "Ada", "the speaker is the item's user_name");
 
 	await client.close();
 });

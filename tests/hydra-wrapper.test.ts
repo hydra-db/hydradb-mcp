@@ -965,22 +965,23 @@ test("unified ingest posts the contract body: context[], instructions, forceful_
 				context_id: "chat-1",
 				title: "Theme preference",
 				conversation: [
-					{ role: "user", content: "I prefer dark mode", name: "Ada" },
+					{ role: "user", content: "I prefer dark mode" },
 					{ role: "assistant", content: "Noted" },
 				],
+				user_name: "Ada",
 				enrich: true,
 				instructions: "focus",
 				happened_at: "2026-09-01",
 				attributes: { topic: "ui" },
 				custom_attributes: { source_app: "wiki" },
 				context_category: "user_preference",
-				forceful_relations: { ids: ["chat-w1"] },
+				forceful_relations: { context_ids: ["chat-w1"] },
 				acl: ["user_email:a@x.com", "domain:acme.com"],
 			},
 		],
 	});
 	// CONTRACT client rule 2: none of the pre-rename keys, and never `type`.
-	for (const key of ["items", "contexts", "type", "relations", "custom_instructions", "observation_date", "metadata", "additional_metadata", "infer", "source_id"]) {
+	for (const key of ["items", "contexts", "type", "relations", "custom_instructions", "observation_date", "metadata", "additional_metadata", "infer", "source_id", "name", "is_markdown", "ids"]) {
 		assert.equal(raw.includes(`"${key}"`), false, `${key} must not be sent on a unified ingest`);
 	}
 });
@@ -1044,46 +1045,42 @@ test("unified-only ingest fields are refused on a split database", async () => {
 	assert.equal(sdkCalls, 0, "nothing reaches the wire");
 });
 
-// `IngestItem` carries `is_markdown` and `user_name` (hydradb-application#870),
-// so these map onto the unified item instead of being refused. Refusing what
-// the plugin already sends would be the cross-client divergence these PRs exist
-// to close.
-test("unified ingest maps is_markdown, and puts user_name where the server reads it", async () => {
+// The unified item is decoded strictly (hydradb-application#1653): a turn is
+// exactly {role, content}, the speaker is the item's `user_name` on both
+// shapes, and `is_markdown` is not an item field. Sending any of the old keys
+// would be a 400 naming the key.
+test("unified ingest puts user_name on the item, never on a turn, and does not send is_markdown", async () => {
 	const stub = () => fetchStub({ success: true, data: { success: true, success_count: 1, failed_count: 0, results: [{ source_id: "s", status: "queued" }] } });
 	const sdk = { context: { ingest() { throw new Error("SDK path must not be used for unified"); } } } as unknown as HydraDBClient;
+
 	const build = (fetch: typeof globalThis.fetch) =>
 		new HydraDB({ token: "t", database: "db_u", collection: "c1", baseUrl: "https://api.test", fetchFn: fetch }, sdk);
+
 	const itemOf = (calls: { init: RequestInit }[]) =>
 		(JSON.parse(String(calls[0]!.init.body)) as { context: Record<string, unknown>[] }).context[0]!;
 
-	// A TEXT item: user_name has no turn to ride on, so it goes on the item.
 	const text = stub();
 	await build(text.fetch).context.ingest({ kind: "unified", text: "a note", isMarkdown: true, userName: "Ada" });
 	const textItem = itemOf(text.calls);
-	assert.equal(textItem.is_markdown, true);
 	assert.equal(textItem.user_name, "Ada");
+	assert.equal("is_markdown" in textItem, false, "is_markdown is not a unified item field");
 
-	// A CONVERSATION: the per-turn `name` is the finer-grained statement of the
-	// same fact and the server reads it FIRST, so the item-level field is not
-	// sent alongside it. Sending both risks a client one day letting the
-	// item-level value win, which would discard per-turn speaker identity.
 	const convo = stub();
 	await build(convo.fetch).context.ingest({
 		kind: "unified",
 		pairs: [{ user: "hi", assistant: "hello" }],
 		userName: "Ada",
 	});
-	const convoItem = itemOf(convo.calls) as { conversation: { name?: string }[]; user_name?: string };
-	assert.equal(convoItem.conversation[0]!.name, "Ada");
-	assert.equal(convoItem.user_name, undefined, "per-turn name is authoritative; do not send both");
+	const convoItem = itemOf(convo.calls) as { conversation: Record<string, unknown>[]; user_name?: string };
+	assert.deepEqual(convoItem.conversation, [
+		{ role: "user", content: "hi" },
+		{ role: "assistant", content: "hello" },
+	]);
+	assert.equal(convoItem.user_name, "Ada", "the speaker is the item's user_name");
 
-	// Omitted stays omitted: the server's is_markdown is a plain bool, so an
-	// absent field and `false` mean the same thing and the smaller body wins.
 	const bare = stub();
 	await build(bare.fetch).context.ingest({ kind: "unified", text: "a note" });
-	const bareItem = itemOf(bare.calls);
-	assert.equal("is_markdown" in bareItem, false);
-	assert.equal("user_name" in bareItem, false);
+	assert.equal("user_name" in itemOf(bare.calls), false);
 });
 
 test("database create with a layout posts type, plain create keeps the SDK path", async () => {
