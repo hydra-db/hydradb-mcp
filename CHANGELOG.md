@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — `hydradb_query` dropped the graph it was sent
+
+Measured against the SDK's `buildString` on the same live response, the query
+text announced "80 of 80 ranked facts" and showed none of them, and showed no
+per-chunk graph relations at all. The renderer now follows `buildString`'s graph
+layout while keeping its own ids, dedupe, budget and follow-up hints:
+
+- **Query paths render their triplets**, then the combined context as a
+  `Combined:` line. Previously a present `combined_context` replaced the
+  triplets, and the server now puts a summary label there.
+- **Per-chunk relations are no longer filtered at relevancy 0.4 by default.**
+  Live `chunk_relations` score 0.05–0.13, so the floor removed every one.
+- **Relations carry their date** — `[source] → predicate → [target] (as of
+  date): context` — so a superseded fact is distinguishable from a current one.
+- **Each chunk shows a `Metadata:` line** merging `additional_metadata` and
+  `metadata`, which were previously discarded.
+- **Dated facts** from a temporal query render when the server reports the
+  temporal filter applied.
+
+The response is still one text block plus the existing `structuredContent`.
+
 ### Changed — the model resolves collection scope (PRO-1942)
 
 Wrong-partition retrieval fails silently: `POST /query` against an empty or
