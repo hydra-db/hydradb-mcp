@@ -9,7 +9,7 @@ import { toAddMemoryResponse, toMemoryList, toSourceList } from "./adapters.js";
 import type { PageInfo } from "./adapters.js";
 import { resolveConfig, resolveGraphConfig } from "./config.js";
 import type { GraphConfig } from "./config.js";
-import { fitUnifiedPrompt, renderRecalledContext, unifiedStructuredContent } from "./context.js";
+import { boundStructuredContent, fitUnifiedPrompt, renderRecalledContext, unifiedStructuredContent } from "./context.js";
 import { COLLECTION_PATTERN, MAX_BODY_BYTES, renderRows } from "./cypher.js";
 import { SERVER_INSTRUCTIONS, TOOL_DESCRIPTIONS } from "./descriptions.js";
 import {
@@ -1025,9 +1025,10 @@ export function createHydraDBServer(
 	 * and label goes out as the server wrote it, and only long result bodies are
 	 * shortened, each with a note naming hydradb_inspect for the full text. A
 	 * prompt that already fits goes out byte for byte. `detail: "compact"` caps
-	 * every body at COMPACT_CHUNK_CHARS, as it does on a split database, and the
-	 * structured chunks are shortened to the same cap whenever the prompt was,
-	 * flagged so a host can tell.
+	 * every body at COMPACT_CHUNK_CHARS, as it does on a split database. The
+	 * structured copy is shortened to the same cap whenever the prompt was, and
+	 * held to the same budget on its own (graph triplets and temporal facts are
+	 * not in the prompt cut), every cut flagged so a host can tell.
 	 */
 	function renderUnifiedQuery(
 		res: UnifiedQueryResult,
@@ -1069,15 +1070,20 @@ export function createHydraDBServer(
 			`Found ${chunks.length} ${resultNoun(kind, chunks.length)}` +
 			`${extras.length > 0 ? ` (${extras.join(", ")})` : ""}:`;
 
-		const fit = fitUnifiedPrompt(res.llm_prompt, {
+		const fit = fitUnifiedPrompt(res, {
 			maxTotalChars: QUERY_CHAR_BUDGET - header.length - legend.length - warningLine.length - 4,
 			maxBodyChars: opts.detail === "compact" ? COMPACT_CHUNK_CHARS : undefined,
 		});
+		const structured = unifiedStructuredContent(res, fit.bodyCap != null ? { maxChunkChars: fit.bodyCap } : {});
+		// The structured copy carries graph triplets and temporal facts the
+		// prompt cut does not reach, so it gets its own bound.
+		const structuredCut = boundStructuredContent(structured, QUERY_CHAR_BUDGET);
+
 		return structuredResult(
 			`${header}\n\n${fit.text}${warningLine}${legend}`,
 			{
-				...unifiedStructuredContent(res, fit.trimmed ? { maxChunkChars: fit.bodyCap } : {}),
-				...(fit.trimmed ? { shortened: true } : {}),
+				...structured,
+				...(fit.trimmed || structuredCut ? { shortened: true } : {}),
 				...warningField,
 				...(requestId != null ? { request_id: requestId } : {}),
 			},

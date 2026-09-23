@@ -16,11 +16,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   remembers the database is unified. Explicit `all` on a known unified database
   is sent as `unified`. A missing `forceful_relations` reads as none.
 - **Unified answers are bounded without losing a citation.** One search was
-  measured at ~265k characters. The prompt now keeps every heading, id and
-  label and shortens only long result bodies (each naming `hydradb_inspect`
-  for the full text) to the same budget as a split answer; `detail: "compact"`
-  caps bodies at 600 characters. The structured copy is shortened to match and
-  flagged (`content_truncated`, `shortened`). A prompt that fits is unchanged.
+  measured at ~265k characters. Result bodies are found in the prompt by the
+  answer's own `chunks[]` text (they are written verbatim and may be Markdown,
+  so the prompt's lines are not parsed for structure) and shortened in place,
+  each naming `hydradb_inspect` for the full text; every heading, id and label
+  is kept. If the prompt is still over budget, it is cut at a line with a note,
+  so the 40,000-character bound always holds. `detail: "compact"` caps bodies
+  at 600 characters. The structured copy is shortened to match and has its own
+  bound (graph triplets dropped, temporal lists cut, long bodies shortened,
+  then graph paths cut), each flagged (`content_truncated`,
+  `graph_triplets_omitted`, `temporal_truncated`, `graph_paths_total`,
+  `shortened`). A prompt that fits is unchanged.
 - **One graph write no longer breaks every widened search.** The collection
   listing includes graph-only collections; when the API refuses one as
   `sub_tenant_ids do not exist`, a search this server widened drops it,
@@ -28,6 +34,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   named are never narrowed. Unified answers now carry scope warnings too.
 - **`kind: "unified"` on a known split database is refused before sending**
   (query, ingest, list, delete). It used to hit knowledge or memory silently.
+- **Database layouts are re-read after five minutes**, and forgotten when this
+  client creates or deletes a database. The cache is keyed by name, and a name
+  can be deleted and recreated under the other layout while a stdio server runs.
 
 ### Changed — unified ingest follows the strict item contract (hydradb-application#1653)
 

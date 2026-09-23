@@ -253,6 +253,13 @@ function carriesUnifiedMarkers(wire: unknown): boolean {
 	return "llm_prompt" in record || "forceful_relations" in record || Array.isArray(record.graph);
 }
 
+/**
+ * How long a probed or learned layout is trusted before `GET /databases` is
+ * asked again. Long enough that a busy session probes rarely, short enough
+ * that a database deleted and recreated under the other layout is picked up.
+ */
+const LAYOUT_TTL_MS = 5 * 60_000;
+
 function malformedUnifiedResponse(wire: unknown): HydraWrapperError {
 	return new HydraWrapperError(
 		"Hydra DB /query → ERR: malformed unified response: expected " +
@@ -1745,6 +1752,10 @@ export class DatabasesResource extends Resource {
 	create(
 		params: CreateDatabaseParams,
 	): Promise<SDK.TenantsTenantCreateAcceptedResponse> {
+		// A created name may carry a layout the cache has never seen, or a
+		// different one than a database of the same name deleted earlier.
+		this.forgetLayouts();
+
 		if (params.type != null) {
 			// The pinned SDK's create request has no `type`; the generated
 			// serializer would drop it and provision a split database in silence.
@@ -1776,8 +1787,13 @@ export class DatabasesResource extends Resource {
 		);
 	}
 
-	delete(database: string): Promise<SDK.TenantsTenantDeleteResponse> {
-		return this.call("/databases", () => this.sdk.databases.delete({ database }));
+	async delete(database: string): Promise<SDK.TenantsTenantDeleteResponse> {
+		const res = await this.call<SDK.TenantsTenantDeleteResponse, unknown>("/databases", () => this.sdk.databases.delete({ database }));
+
+		// The name can now be created again under the other layout.
+		this.forgetLayouts();
+
+		return res;
 	}
 
 	/**
@@ -1818,7 +1834,33 @@ export class DatabasesResource extends Resource {
 	 * recording it a process whose probe failed pays the refused request again
 	 * on every defaulted call for the life of the process.
 	 */
-	private readonly learnedLayouts = new Map<string, Layout>();
+	private readonly learnedLayouts = new Map<string, { layout: Layout; at: number }>();
+
+	/** When `layoutCache` was built; see LAYOUT_TTL_MS. */
+	private layoutCacheAt = 0;
+
+	/**
+	 * Drop every cached layout, probed and learned. Called after this client
+	 * creates or deletes a database: the name is the cache key, and a name can
+	 * be deleted and created again under the other layout.
+	 */
+	forgetLayouts(): void {
+		this.layoutCache = undefined;
+		this.learnedLayouts.clear();
+	}
+
+	/** A learned layout still inside LAYOUT_TTL_MS, or undefined. */
+	private learned(database: string): Layout | undefined {
+		const entry = this.learnedLayouts.get(database);
+		if (entry == null) return undefined;
+		if (Date.now() - entry.at > LAYOUT_TTL_MS) {
+			this.learnedLayouts.delete(database);
+
+			return undefined;
+		}
+
+		return entry.layout;
+	}
 
 	/**
 	 * Record a layout the probe did not supply. See `learnedLayouts`.
@@ -1828,18 +1870,24 @@ export class DatabasesResource extends Resource {
 	 * clear and can be discarded exactly when it is most needed.
 	 */
 	recordLayout(database: string, layout: Layout): void {
-		this.learnedLayouts.set(database, layout);
+		this.learnedLayouts.set(database, { layout, at: Date.now() });
 	}
 
 	/**
 	 * Every database this key can see, with its storage layout (PRO-1618), read
-	 * from `GET /databases` `details[]`. Memoised for the life of the process:
-	 * a layout is fixed at creation, so it cannot go stale, and the probe is
-	 * what lets the tools pick `unified` as a default without a failed request.
+	 * from `GET /databases` `details[]`. Memoised for LAYOUT_TTL_MS: a layout is
+	 * fixed for a database's life, but the cache is keyed by NAME, and a name
+	 * can be deleted and created again under the other layout while this
+	 * process runs (a stdio server lives as long as its host). The probe is what
+	 * lets the tools pick `unified` as a default without a failed request.
 	 */
 	layouts(signal?: AbortSignal): Promise<Map<string, Layout>> {
+		if (this.layoutCache && Date.now() - this.layoutCacheAt > LAYOUT_TTL_MS) this.forgetLayouts();
+
 		let cache = this.layoutCache;
+
 		if (!cache) {
+			this.layoutCacheAt = Date.now();
 			// The shared probe deliberately takes NO caller signal: it is
 			// bounded by the transport's own deadline, and it serves every
 			// tool call that arrives while it is in flight. Binding it to the
@@ -1863,7 +1911,13 @@ export class DatabasesResource extends Resource {
 		// Merged at READ time, not when the probe resolved: a layout learned
 		// after the cache was built still has to be visible here.
 		const probed = cache.then((map) =>
-			this.learnedLayouts.size === 0 ? map : new Map([...map, ...this.learnedLayouts]),
+			this.learnedLayouts.size === 0
+				? map
+				: new Map([...map, ...[...this.learnedLayouts.keys()].flatMap((db) => {
+					const layout = this.learned(db);
+
+					return layout ? [[db, layout] as const] : [];
+				})]),
 		);
 		return abortable(probed, signal);
 	}
@@ -1878,7 +1932,7 @@ export class DatabasesResource extends Resource {
 		// A learned layout answers before the probe is consulted at all, so a
 		// process whose probe keeps failing still stops guessing after the
 		// first refusal.
-		const learned = this.learnedLayouts.get(database);
+		const learned = this.learned(database);
 		if (learned != null) return learned;
 		try {
 			return (await this.layouts(signal)).get(database) ?? "split";
@@ -1898,7 +1952,7 @@ export class DatabasesResource extends Resource {
 	 * `unified` on a guessed split layout would block a valid call.
 	 */
 	async knownLayout(database: string, signal?: AbortSignal): Promise<Layout | undefined> {
-		const learned = this.learnedLayouts.get(database);
+		const learned = this.learned(database);
 
 		if (learned != null) return learned;
 

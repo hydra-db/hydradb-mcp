@@ -6,7 +6,8 @@ import { HydraDBError } from "@hydradb/sdk";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
-import { fitUnifiedPrompt, unifiedStructuredContent } from "../src/context.js";
+import { boundStructuredContent, fitUnifiedPrompt, unifiedStructuredContent } from "../src/context.js";
+import type { UnifiedQueryResult } from "../src/hydra/client.js";
 import { HydraDB } from "../src/hydra/index.js";
 import { createHydraDBServer, unsearchableCollections } from "../src/server.js";
 
@@ -59,7 +60,11 @@ function build(opts: {
 			list: record("sdk.list", { inner: { sources: [], total: 0 } }),
 			delete: record("sdk.delete", { success: true, deletedCount: 1 }),
 		},
-		databases: { collections: record("sdk.collections", { collections: opts.collections ?? [] }) },
+		databases: {
+			collections: record("sdk.collections", { collections: opts.collections ?? [] }),
+			create: record("sdk.databases.create", { status: "accepted" }),
+			delete: record("sdk.databases.delete", { status: "deletion_scheduled" }),
+		},
 	} as unknown as HydraDBClient;
 
 	const fetchFn = ((url: string | URL | Request, init?: RequestInit) => {
@@ -177,30 +182,42 @@ test("a broken unified answer on the v2 route is refused as malformed, not read 
 
 // ---------------------------------------------------------------- fix 2
 
-function bigPrompt(bodyChars: number, blocks = 3): string {
+type Body = { id: string; content: string; enrichment?: string };
+
+/** A unified answer whose llm_prompt is laid out the way the server writes it: bodies verbatim under heading, metadata and id. */
+function unifiedAnswer(bodies: Body[]): UnifiedQueryResult {
 	const parts = ["# Query results", "**Query:** refund", "", "## Results", ""];
 
-	for (let i = 1; i <= blocks; i++) {
-		parts.push(`### ${i}. doc-${i}`, `- **Relevance:** 0.9`, `- **Id:** id-${i} · **Last updated:** 2026-09-23`, "",
-			`${"word ".repeat(bodyChars / 5)}`, "", `**Enrichment:** note ${i}`, "", "---");
-	}
+	bodies.forEach((b, i) => {
+		parts.push(`### ${i + 1}. doc-${i + 1}`, "- **Relevance:** 0.90", `- **Id:** ${b.id} · **Last updated:** 2026-09-23`, "", b.content, "");
 
+		if (b.enrichment) parts.push(`**Enrichment:** ${b.enrichment}`, "");
+
+		parts.push("---", "");
+	});
 	parts.push("## Related facts", "", "- [P1] **a** -rel→ **b** [1][2][3]", "", "## Sources", "", "1. **doc-1** (id: id-1)");
 
-	return parts.join("\n");
+	return {
+		chunks: bodies.map((b) => ({ context_id: b.id, content: b.content, ...(b.enrichment ? { enrichment: b.enrichment } : {}) })),
+		graph: [],
+		forceful_relations: [],
+		llm_prompt: parts.join("\n"),
+	};
 }
 
+const words = (chars: number) => "word ".repeat(chars / 5).trim();
+
 test("fitUnifiedPrompt returns a prompt that fits byte for byte", () => {
-	const prompt = bigPrompt(100);
-	const fit = fitUnifiedPrompt(prompt, { maxTotalChars: 40_000 });
+	const answer = unifiedAnswer([{ id: "id-1", content: words(100) }]);
+	const fit = fitUnifiedPrompt(answer, { maxTotalChars: 40_000 });
 
 	assert.equal(fit.trimmed, false);
-	assert.equal(fit.text, prompt);
+	assert.equal(fit.text, answer.llm_prompt);
 });
 
 test("fitUnifiedPrompt keeps every heading, id and citation and shortens only bodies", () => {
-	const prompt = bigPrompt(60_000);
-	const fit = fitUnifiedPrompt(prompt, { maxTotalChars: 20_000 });
+	const answer = unifiedAnswer([1, 2, 3].map((i) => ({ id: `id-${i}`, content: words(60_000), enrichment: `note ${i}` })));
+	const fit = fitUnifiedPrompt(answer, { maxTotalChars: 20_000 });
 
 	assert.equal(fit.trimmed, true);
 	assert.ok(fit.text.length <= 20_000, `got ${fit.text.length}`);
@@ -209,14 +226,41 @@ test("fitUnifiedPrompt keeps every heading, id and citation and shortens only bo
 		assert.ok(fit.text.includes(`### ${i}. doc-${i}`), `heading ${i} kept`);
 		assert.ok(fit.text.includes(`- **Id:** id-${i}`), `id line ${i} kept`);
 		assert.ok(fit.text.includes(`pass Id id-${i} to hydradb_inspect`), `note ${i} names the id`);
+		assert.ok(fit.text.includes(`**Enrichment:** note ${i}`), `short enrichment ${i} kept whole`);
 	}
 
 	assert.ok(fit.text.includes("- [P1] **a** -rel→ **b** [1][2][3]"), "related facts untouched");
 	assert.ok(fit.text.includes("## Sources"), "sources untouched");
 });
 
+// Greptile P1 on #94: result bodies are written verbatim and can be Markdown.
+// A parser that took `#`/`##`/`###`/`---` lines for the server's structure let
+// a Markdown document escape the budget, or forge a result block.
+test("fitUnifiedPrompt bounds Markdown bodies whose headings and rules look like the prompt's own", () => {
+	const doc = Array.from({ length: 400 }, (_, i) =>
+		[`# Chapter ${i}`, `## Section ${i}`, `### ${i}. looks like a result`, "---", words(200)].join("\n")).join("\n");
+	const answer = unifiedAnswer([{ id: "md-1", content: doc }, { id: "md-2", content: words(500) }]);
+	const fit = fitUnifiedPrompt(answer, { maxTotalChars: 10_000 });
+
+	assert.ok(answer.llm_prompt.length > 90_000, "the fixture really is large");
+	assert.ok(fit.text.length <= 10_000, `got ${fit.text.length}`);
+	assert.ok(fit.text.includes("- **Id:** md-1") && fit.text.includes("- **Id:** md-2"), "both results keep their id");
+	assert.ok(fit.text.includes("pass Id md-1 to hydradb_inspect"), "the Markdown body was shortened in place");
+	assert.ok(fit.text.includes(words(500)), "the short body is kept whole");
+});
+
+test("fitUnifiedPrompt still holds the bound when a body cannot be located", () => {
+	const answer = unifiedAnswer([{ id: "x", content: words(50_000) }]);
+	answer.chunks = [{ context_id: "x", content: "text the server rendered differently" }];
+	const fit = fitUnifiedPrompt(answer, { maxTotalChars: 8_000 });
+
+	assert.equal(fit.trimmed, true);
+	assert.ok(fit.text.length <= 8_000, `got ${fit.text.length}`);
+	assert.match(fit.text, /Answer cut at 8000 characters/);
+});
+
 test("fitUnifiedPrompt with a body cap (detail=compact) shortens even a prompt that fits", () => {
-	const fit = fitUnifiedPrompt(bigPrompt(2_000), { maxTotalChars: 40_000, maxBodyChars: 600 });
+	const fit = fitUnifiedPrompt(unifiedAnswer([{ id: "c1", content: words(2_000) }]), { maxTotalChars: 40_000, maxBodyChars: 600 });
 
 	assert.equal(fit.trimmed, true);
 	assert.equal(fit.bodyCap, 600);
@@ -225,7 +269,6 @@ test("fitUnifiedPrompt with a body cap (detail=compact) shortens even a prompt t
 
 test("the structured copy is shortened to the same cap and flagged", () => {
 	const long = "x ".repeat(5_000);
-
 	const out = unifiedStructuredContent(
 		{ chunks: [{ context_id: "c1", content: long, enrichment: long }], graph: [], forceful_relations: [], llm_prompt: "" },
 		{ maxChunkChars: 600 },
@@ -237,16 +280,35 @@ test("the structured copy is shortened to the same cap and flagged", () => {
 	assert.equal(out.chunks[0]!.enrichment_truncated, true);
 });
 
-test("a huge unified answer stays within the query budget end to end", async () => {
-	const huge = "word ".repeat(40_000);
-
-	const body = {
-		chunks: [{ chunk_id: "k1", context_id: "id-1", content: huge }],
-		graph: [],
+// Greptile P1 on #94: graph triplets, path summaries and temporal facts are not
+// in the prompt cut, so a graph-heavy answer's structured copy stayed unbounded.
+test("boundStructuredContent holds a graph-heavy structured copy to its budget and keeps every id", () => {
+	const triplet = { source: { name: "a".repeat(200) }, relation: { predicate: "p", context: "c".repeat(400) }, target: { name: "b".repeat(200) } };
+	const out = unifiedStructuredContent({
+		chunks: [1, 2, 3].map((i) => ({
+			context_id: `id-${i}`,
+			content: "short",
+			temporal: Array.from({ length: 20 }, () => ({ content: "t".repeat(200) })),
+		})),
+		graph: Array.from({ length: 300 }, () => ({ origin: "query_path" as const, path_summary: "s".repeat(800), triplets: [triplet, triplet] })),
 		forceful_relations: [],
-		llm_prompt: bigPrompt(200_000, 1),
-	};
+		llm_prompt: "",
+	});
 
+	assert.ok(JSON.stringify(out).length > 200_000, "the fixture really is large");
+	assert.equal(boundStructuredContent(out, 40_000), true);
+	assert.ok(JSON.stringify(out).length <= 40_000, `got ${JSON.stringify(out).length}`);
+	assert.equal(out.graph_triplets_omitted, true);
+	assert.ok(out.graph.every((p) => !("triplets" in p) && p.path_summary.length <= 300));
+	assert.deepEqual(out.chunks.map((c) => c.context_id), ["id-1", "id-2", "id-3"]);
+	assert.deepEqual(out.sources.map((s) => s.id), ["id-1", "id-2", "id-3"]);
+
+	const small = unifiedStructuredContent(UNIFIED_BODY);
+	assert.equal(boundStructuredContent(small, 40_000), false, "a small copy is left alone");
+});
+
+test("a huge unified answer stays within the query budget end to end", async () => {
+	const body = unifiedAnswer([{ id: "id-1", content: words(200_000) }]);
 	const { hydra } = build({ probe: "unified", rawQueryData: body });
 	const res = await (await connect(hydra)).callTool({ name: "hydradb_query", arguments: { query: "release" } });
 	const structured = res.structuredContent as { shortened?: boolean; chunks: { content: string; content_truncated?: boolean }[] };
@@ -344,4 +406,50 @@ test("kind=unified still goes out when the layout is unknown (the server decides
 
 	assert.equal(res.isError, undefined, textOf(res));
 	assert.ok(calls.find((c) => c.method === "raw POST /query"));
+});
+
+// Greptile P1 on #94: the layout cache is keyed by database NAME and lived for
+// the whole process, so a database deleted and recreated under the other
+// layout kept its old layout — refusing a valid `unified`, or sending `all`
+// as unified to a split database.
+test("a cached layout is re-read after its TTL, and create/delete forget it", async () => {
+	const opts: { probe: Probe } = { probe: "split" };
+	const { hydra } = build(opts);
+	const realNow = Date.now;
+
+	assert.equal(await hydra.databases.knownLayout("db_test"), "split");
+	opts.probe = "unified";
+	assert.equal(await hydra.databases.knownLayout("db_test"), "split", "cached within the TTL");
+
+	try {
+		const later = realNow() + 5 * 60_000 + 1;
+		Date.now = () => later;
+		assert.equal(await hydra.databases.knownLayout("db_test"), "unified", "probed again after the TTL");
+	} finally {
+		Date.now = realNow;
+	}
+
+	opts.probe = "split";
+	await hydra.databases.delete("db_test");
+	assert.equal(await hydra.databases.knownLayout("db_test"), "split", "delete forgets the cache");
+
+	opts.probe = "unified";
+	await hydra.databases.create({ database: "db_test" });
+	assert.equal(await hydra.databases.knownLayout("db_test"), "unified", "create forgets the cache");
+});
+
+test("a learned layout expires with the same TTL", async () => {
+	const { hydra } = build({ probe: "fail" });
+	const realNow = Date.now;
+
+	hydra.databases.recordLayout("db_test", "unified");
+	assert.equal(await hydra.databases.knownLayout("db_test"), "unified");
+
+	try {
+		const later = realNow() + 5 * 60_000 + 1;
+		Date.now = () => later;
+		assert.equal(await hydra.databases.knownLayout("db_test"), undefined, "an expired learned layout is not trusted");
+	} finally {
+		Date.now = realNow;
+	}
 });
