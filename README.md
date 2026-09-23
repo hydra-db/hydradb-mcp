@@ -137,10 +137,10 @@ or `turns`.
 | `source_id` | string | No | Identifier for this entry. **Reusing one REPLACES what is stored under it** |
 | `overwrite` | boolean | No | Allow that replacement (default: true) |
 | `infer` | boolean | No | Extract insights and graph entities (default: true) |
-| `is_markdown` | boolean | No | Chunk on markdown structure (default: false) |
+| `is_markdown` | boolean | No | Chunk on markdown structure (default: false). Split databases only; not sent to a unified database |
 | `metadata` | object | No | Key/value metadata, matchable later via `metadata_filters` |
 | `observation_date` | string | No | When the fact was true, as `YYYY-MM-DD` (e.g. `2026-07-04`), vs when it was stored |
-| `user_name` | string | No | What to call the user, used with `turns` (default: `User`) |
+| `user_name` | string | No | What to call the user, used with `turns` (default: `User`). On a unified database it also names the speaker of a `text` note |
 | `attributes` | object | No | Preferred name for `metadata`; pass one or the other |
 | `happened_at` | string | No | Preferred name for `observation_date`; pass one or the other |
 | `custom_attributes` | object | No | Free-form key/value data stored beside the entry, not filterable |

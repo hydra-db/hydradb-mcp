@@ -3571,12 +3571,14 @@ test("hydradb_ingest with turns defaults to unified on a unified database", asyn
 	assert.equal(calls.find((c) => c.method === "ingest"), undefined, "unified must not use the SDK ingest serializer");
 	// The contract's list key is `context` (never `items`).
 	const body = raw.find((c) => c.path === "/context/ingest")!.body as {
-		context: { conversation: { role: string; content: string; name?: string }[] }[];
+		context: { conversation: Record<string, unknown>[]; user_name?: string }[];
 	};
+	// A turn is exactly {role, content}; the speaker is the item's user_name.
 	assert.deepEqual(body.context[0]!.conversation, [
-		{ role: "user", content: "i prefer dark mode", name: "Ada" },
+		{ role: "user", content: "i prefer dark mode" },
 		{ role: "assistant", content: "noted" },
 	]);
+	assert.equal(body.context[0]!.user_name, "Ada");
 	await client.close();
 });
 
@@ -4429,11 +4431,14 @@ test("hydradb_query on a unified database sends no type, renders llm_prompt verb
 	await client.close();
 });
 
-// Product decision: no compaction on a unified answer. An llm_prompt far over
-// the split path's 40,000-character query budget, and chunk bodies far over
-// its 600-character compact trim, come back whole under the DEFAULT detail
-// (compact) and under `full` alike, with no truncation note.
-test("hydradb_query on a unified database returns llm_prompt and every chunk whole, whatever detail says", async () => {
+// A unified answer is held to the same 40,000-character budget as a split one
+// (PRO-2187; it used to go out whole). This prompt has no body the MCP can find
+// in it — every line is server structure — so only the last-resort cut applies:
+// the text stops at the budget with a note, and the structured copy is bounded
+// on its own (graph triplets dropped, long bodies shortened, each flagged). Ids,
+// scores and temporal facts survive. A prompt that fits is covered by the
+// "whole" tests: it is still returned byte for byte.
+test("hydradb_query on a unified database holds an over-budget answer to the query budget, whatever detail says", async () => {
 	const body = `${"Refunds are processed by Finance. ".repeat(1_500)}END-OF-BODY`;
 	const enrichment = `${"Finance owns refund processing. ".repeat(500)}END-OF-ENRICHMENT`;
 	const lines = Array.from({ length: 3_000 }, (_, i) => `- **Id:** ctx-${i} · a line of the server-built prompt`);
@@ -4459,22 +4464,25 @@ test("hydradb_query on a unified database returns llm_prompt and every chunk who
 		assert.notEqual(result.isError, true, blocks[0]?.text);
 
 		const text = blocks[0]!.text;
-		assert.ok(text.includes(prompt), `llm_prompt must come through whole (${JSON.stringify(args)})`);
-		assert.doesNotMatch(text, /truncated/, "no truncation note");
+		assert.ok(text.length <= 40_000, `text held to the budget (${JSON.stringify(args)}): ${text.length}`);
+		assert.ok(text.startsWith("Found 1"), "the header is kept");
+		assert.match(text, /Answer cut at \d+ characters to fit the response budget/);
 
 		// SAFETY: the unified path returns unifiedStructuredContent, whose shape this narrows.
 		const structured = result.structuredContent as {
-			chunks: { content: string; enrichment?: string; temporal?: unknown }[];
-			graph: unknown[];
-			forceful_relations: { chunk: { content: string; enrichment?: string } }[];
+			shortened?: boolean;
+			chunks: { context_id: string; score?: number; content: string; content_truncated?: boolean; temporal?: unknown }[];
+			forceful_relations: { chunk: { context_id: string; content: string } }[];
 		};
 
-		assert.equal(structured.chunks[0]!.content, body);
-		assert.equal(structured.chunks[0]!.enrichment, enrichment);
+		assert.equal(structured.shortened, true);
+		assert.ok(JSON.stringify(structured).length <= 40_000, "the structured copy has its own bound");
+		assert.equal(structured.chunks[0]!.context_id, "long");
+		assert.equal(structured.chunks[0]!.score, 0.5);
 		assert.deepEqual(structured.chunks[0]!.temporal, temporal);
-		assert.deepEqual(structured.graph, UNIFIED_QUERY_FIXTURE.graph);
-		assert.equal(structured.forceful_relations[0]!.chunk.content, body);
-		assert.equal(structured.forceful_relations[0]!.chunk.enrichment, enrichment);
+		assert.equal(structured.chunks[0]!.content_truncated, true);
+		assert.equal(structured.forceful_relations[0]!.chunk.context_id, "long-2");
+
 		await client.close();
 	}
 });
@@ -4560,13 +4568,13 @@ test("hydradb_ingest on a unified database sends the contract body and reports t
 				attributes: { team: "support" },
 				custom_attributes: { source_app: "wiki" },
 				context_category: "business_knowledge",
-				forceful_relations: { ids: ["chat-w1"] },
+				forceful_relations: { context_ids: ["chat-w1"] },
 				acl: ["user_email:a@x.com", "domain:acme.com"],
 			},
 		],
 	});
 	const raw = JSON.stringify(sent.body);
-	for (const key of ["items", "contexts", "type", "relations", "custom_instructions", "observation_date", "metadata", "additional_metadata", "infer", "source_id"]) {
+	for (const key of ["items", "contexts", "type", "relations", "custom_instructions", "observation_date", "metadata", "additional_metadata", "infer", "source_id", "name", "is_markdown", "ids"]) {
 		assert.equal(raw.includes(`"${key}"`), false, `${key} must not be sent on a unified ingest`);
 	}
 
@@ -4599,7 +4607,7 @@ test("hydradb_ingest turns on a unified database send a conversation with the co
 
 	const item = (calls.find((c) => c.path === "/context/ingest")!.body as { context: Record<string, unknown>[] }).context[0]!;
 	assert.deepEqual(item.conversation, [
-		{ role: "user", content: "let's go with Postgres", name: "Ada" },
+		{ role: "user", content: "let's go with Postgres" },
 		{ role: "assistant", content: "Agreed." },
 	]);
 	assert.equal(item.context_id, "chat-1");
@@ -4609,8 +4617,8 @@ test("hydradb_ingest turns on a unified database send a conversation with the co
 	assert.deepEqual(item.attributes, { project: "hydradb" });
 	assert.equal(item.happened_at, "2026-07-29");
 	assert.equal(item.context_category, "decision_trace");
-	assert.deepEqual(item.forceful_relations, { ids: ["policy-1"] });
-	assert.equal("user_name" in item, false, "per-turn name is authoritative on a conversation");
+	assert.deepEqual(item.forceful_relations, { context_ids: ["policy-1"] });
+	assert.equal(item.user_name, "Ada", "the speaker is the item's user_name");
 
 	await client.close();
 });

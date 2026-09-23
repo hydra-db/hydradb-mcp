@@ -175,12 +175,14 @@ const PARAM = {
 		"string, a code block).",
 	is_markdown:
 		"Set true when `text` contains markdown (headings, lists, code fences) so Hydra DB " +
-		"chunks on structure instead of splitting mid-section. Default false.",
+		"chunks on structure instead of splitting mid-section. Default false. Split databases " +
+		"only: a unified database takes text as sent, and this is not forwarded there.",
 	turns: "Array of conversation turns, each with a 'user' and 'assistant' field",
 	user_name:
 		"What to call the user in the stored conversation (default: 'User'). Set it when " +
 		"you know their actual name, so extracted facts read as being about a person " +
-		"rather than about an anonymous participant. Applies to `turns` only.",
+		"rather than about an anonymous participant. Applies to `turns`; on a unified " +
+		"database it also names the speaker of a `text` note.",
 	kind:
 		"Which family to list: 'memory' (stored memories) or 'knowledge' (ingested " +
 		"sources). ALWAYS SET IT on a split database — these are separate corpora with " +

@@ -9,7 +9,7 @@ import { toAddMemoryResponse, toMemoryList, toSourceList } from "./adapters.js";
 import type { PageInfo } from "./adapters.js";
 import { resolveConfig, resolveGraphConfig } from "./config.js";
 import type { GraphConfig } from "./config.js";
-import { renderRecalledContext, unifiedStructuredContent } from "./context.js";
+import { boundStructuredContent, fitUnifiedPrompt, renderRecalledContext, unifiedStructuredContent } from "./context.js";
 import { COLLECTION_PATTERN, MAX_BODY_BYTES, renderRows } from "./cypher.js";
 import { SERVER_INSTRUCTIONS, TOOL_DESCRIPTIONS } from "./descriptions.js";
 import {
@@ -180,6 +180,23 @@ function structuredResult(
  */
 function errorResult(text: string): ToolResult {
 	return { content: [{ type: "text" as const, text }], isError: true };
+}
+
+/**
+ * The collection names a `/query` refusal says are not searchable, from the
+ * API's `sub_tenant_ids do not exist: [a, b]` message. Empty for any other
+ * error, so only that refusal can narrow a search.
+ */
+export function unsearchableCollections(err: unknown): string[] {
+	const message = err instanceof Error ? err.message : String(err);
+	const match = /(?:sub_tenant_ids|collections) do not exist: \[([^\]]*)\]/.exec(message);
+
+	if (!match) return [];
+
+	return match[1]
+		.split(",")
+		.map((name) => name.trim().replace(/^["']|["']$/g, ""))
+		.filter((name) => name !== "");
 }
 
 /**
@@ -490,6 +507,33 @@ export function createHydraDBServer(
 	}
 
 	/**
+	 * `kind: "unified"` named by the caller on a database KNOWN to be split.
+	 * A unified request goes out without `type`, and a split database reads an
+	 * absent type as its own default — knowledge for a search, list or delete,
+	 * memory for a write — so the call would quietly succeed against a corpus
+	 * the caller did not ask for. Refused here instead. Only a known layout is
+	 * trusted: when the probe cannot answer, the request goes out and the
+	 * server decides, as before.
+	 */
+	async function refuseUnifiedOnSplit(
+		tool: string,
+		kind: string | undefined,
+		database?: string,
+		signal?: AbortSignal,
+	): Promise<ToolResult | undefined> {
+		if (kind !== "unified") return undefined;
+		const target = database?.trim() || hydra.database;
+
+		if ((await hydra.databases.knownLayout(target, signal)) !== "split") return undefined;
+		const kinds = tool === TOOL_NAMES.QUERY ? `"memory", "knowledge" or "all"` : `"memory" or "knowledge"`;
+
+		return errorResult(
+			`${tool} was called with kind "unified", but database "${target}" is a split database: ` +
+				`it keeps memory and knowledge apart, so nothing was sent. Leave \`kind\` out, or pass ${kinds}.`,
+		);
+	}
+
+	/**
 	 * The server names the rule when a split kind reaches a unified database:
 	 * `type 'memory' is not valid on a unified database`. When the kind was a
 	 * host-owned DEFAULT (not the caller's choice) and the layout probe could
@@ -665,8 +709,20 @@ export function createHydraDBServer(
 		// used to pin `kind: "memory"`, which made every ingested knowledge source
 		// unreachable from the MCP — `hydradb_list`/`hydradb_inspect` could browse
 		// knowledge but nothing could search it.
-		const kind: QueryKind =
+		const refused = await refuseUnifiedOnSplit(TOOL_NAMES.QUERY, args.kind, args.database, signal);
+
+		if (refused) return refused;
+
+		let kind: QueryKind =
 			args.kind ?? ((await isUnifiedDatabase(args.database, signal)) ? "unified" : "all");
+		// `all` on a database known to be unified names the same corpus as
+		// `unified` (the server normalises it), so it is sent as `unified`: the
+		// request then takes the unified route, and unified-only options such as
+		// follow_forceful_relations are not refused for naming "all".
+
+		if (kind === "all" && (await hydra.databases.knownLayout(args.database?.trim() || hydra.database, signal)) === "unified") {
+			kind = "unified";
+		}
 		logger.debug(`${TOOL_NAMES.QUERY}: "${args.query}" (kind=${kind})`);
 
 		const maxResults = args.max_results ?? 10;
@@ -723,7 +779,7 @@ export function createHydraDBServer(
 		// apparently successful empty/partial answer. The one permitted retry is
 		// withUnifiedFallback's kind rewrite, which fires only on the server's
 		// own "unified database" refusal and re-sends the same scope.
-		const raw = await withUnifiedFallback(args.kind == null, kind, (kindToSend) => hydra.context.query({
+		const search = () => withUnifiedFallback(args.kind == null, kind, (kindToSend) => hydra.context.query({
 			query: args.query,
 			kind: kindToSend,
 			maxResults,
@@ -762,12 +818,52 @@ export function createHydraDBServer(
 			},
 		}), args.database);
 
+		// The one scope change allowed after the scope was chosen: a collection
+		// THIS server widened to (never one the caller named) that the API then
+		// refuses as not searchable. The collection listing also returns
+		// graph-only (BYOG) collections — one hydradb_graph_query write creates
+		// `default` — and a search naming one fails whole with "sub_tenant_ids do
+		// not exist: [default]". Dropping just the refused names and searching
+		// the rest is the same workaround a caller applies by naming the
+		// collection, and the answer says which were skipped.
+		let raw: Awaited<ReturnType<typeof search>>;
+
+		try {
+			raw = await search();
+		} catch (err) {
+			const refusedNames = widened ? unsearchableCollections(err) : [];
+			const remaining = (widened ?? []).filter((n) => !refusedNames.includes(n));
+
+			if (refusedNames.length === 0 || remaining.length === 0 || remaining.length === widened?.length) throw err;
+			widened = remaining;
+
+			if (remaining.length === 1) {
+				scopeCollection = remaining[0];
+				scopeCollections = undefined;
+			} else {
+				scopeCollections = remaining;
+			}
+
+			const skipped = refusedNames.map((n) => JSON.stringify(n)).join(", ");
+			scopeWarning =
+				`Skipped collection${refusedNames.length === 1 ? "" : "s"} ${skipped}: listed for this database ` +
+				`but not searchable (for example a graph-only collection). The other collections were searched.`;
+			logger.warn(`${TOOL_NAMES.QUERY}: retrying without unsearchable collection(s) ${skipped}`);
+			raw = await search();
+		}
+
+		// Seen the unified body on a request that did not name `unified`: the
+		// database is unified whatever the probe said, so later calls skip it.
+		if (isUnifiedQueryResult(raw) && kind !== "unified") {
+			hydra.databases.recordLayout(database, "unified");
+		}
+
 		// A unified database (PRO-1618) answers with the four-key body, decided
 		// by SHAPE rather than by the kind that was sent: a server that predates
 		// the unified response still answers a unified request in v2, and that
 		// goes on to the v2 renderer below exactly as before.
 		if (isUnifiedQueryResult(raw)) {
-			return renderUnifiedQuery(raw, kind, requestId);
+			return renderUnifiedQuery(raw, kind, requestId, { detail: args.detail, scopeWarning });
 		}
 
 		// The renderer reads the SDK payload directly; there is no longer a
@@ -919,19 +1015,26 @@ export function createHydraDBServer(
 	 * slicing the chunks under it would make the two views disagree; the
 	 * server honours the parameter itself.
 	 *
-	 * Unbounded on purpose. Product decision for PRO-1618: no compaction on a
-	 * unified answer. The prompt goes out whole, with no total budget and no
-	 * truncation note, and the structured chunks keep their full `content`,
-	 * `enrichment` and `temporal`. A client-side cut left the model citing
-	 * [1], [R1] and [P1] labels whose text it never saw. The size levers are
-	 * the server's own prompt limits and the caller's `max_results`; the MCP
-	 * protocol and this server's transports put no cap on a tool result.
-	 * `detail` and the query budget apply to a split database only.
+	 * Bounded by the same QUERY_CHAR_BUDGET as a split answer, without losing a
+	 * citation. An unbounded answer was measured on staging at ~265k characters
+	 * (~66k tokens) for one search over a 100 KB document, text and structured
+	 * copy together — most of a model's context for a single tool call. The
+	 * earlier objection to a budget still holds: a character cut dropped whole
+	 * results and left the model citing [1], [R1] and [P1] labels whose text it
+	 * never saw. So `fitUnifiedPrompt` never drops a result: every heading, id
+	 * and label goes out as the server wrote it, and only long result bodies are
+	 * shortened, each with a note naming hydradb_inspect for the full text. A
+	 * prompt that already fits goes out byte for byte. `detail: "compact"` caps
+	 * every body at COMPACT_CHUNK_CHARS, as it does on a split database. The
+	 * structured copy is shortened to the same cap whenever the prompt was, and
+	 * held to the same budget on its own (graph triplets and temporal facts are
+	 * not in the prompt cut), every cut flagged so a host can tell.
 	 */
 	function renderUnifiedQuery(
 		res: UnifiedQueryResult,
 		kind: QueryKind,
 		requestId?: string,
+		opts: { detail?: "compact" | "full"; scopeWarning?: string } = {},
 	): ToolResult {
 		const { chunks, graph, forceful_relations: forcefulRelations } = res;
 		// The same line and the same structured field as the v2 path above: the
@@ -941,9 +1044,15 @@ export function createHydraDBServer(
 			? `\nWas this useful? Report it with ${TOOL_NAMES.FEEDBACK} using request_id: ${requestId}`
 			: "";
 
+		const warningLine = opts.scopeWarning ? `\n\nScope warning: ${opts.scopeWarning}` : "";
+		const warningField = opts.scopeWarning ? { scope_warning: opts.scopeWarning } : {};
+
 		if (chunks.length === 0 && forcefulRelations.length === 0 && graph.length === 0) {
-			const text = `No relevant ${resultNoun(kind)} found in Hydra DB.${feedbackLine}`;
-			return requestId != null ? structuredResult(text, { request_id: requestId }) : textResult(text);
+			const text = `No relevant ${resultNoun(kind)} found in Hydra DB.${warningLine}${feedbackLine}`;
+
+			return requestId != null || opts.scopeWarning
+				? structuredResult(text, { ...(requestId != null ? { request_id: requestId } : {}), ...warningField })
+				: textResult(text);
 		}
 		const legend =
 			`\n\n---\nEach Id above is a source id (context_id in the structured content): pass one ` +
@@ -960,10 +1069,22 @@ export function createHydraDBServer(
 		const header =
 			`Found ${chunks.length} ${resultNoun(kind, chunks.length)}` +
 			`${extras.length > 0 ? ` (${extras.join(", ")})` : ""}:`;
+
+		const fit = fitUnifiedPrompt(res, {
+			maxTotalChars: QUERY_CHAR_BUDGET - header.length - legend.length - warningLine.length - 4,
+			maxBodyChars: opts.detail === "compact" ? COMPACT_CHUNK_CHARS : undefined,
+		});
+		const structured = unifiedStructuredContent(res, fit.bodyCap != null ? { maxChunkChars: fit.bodyCap } : {});
+		// The structured copy carries graph triplets and temporal facts the
+		// prompt cut does not reach, so it gets its own bound.
+		const structuredCut = boundStructuredContent(structured, QUERY_CHAR_BUDGET);
+
 		return structuredResult(
-			`${header}\n\n${res.llm_prompt}${legend}`,
+			`${header}\n\n${fit.text}${warningLine}${legend}`,
 			{
-				...unifiedStructuredContent(res),
+				...structured,
+				...(fit.trimmed || structuredCut ? { shortened: true } : {}),
+				...warningField,
 				...(requestId != null ? { request_id: requestId } : {}),
 			},
 		);
@@ -1075,6 +1196,9 @@ export function createHydraDBServer(
 		database?: string;
 		collection?: string;
 	}, signal?: AbortSignal): Promise<ToolResult> {
+		const refused = await refuseUnifiedOnSplit(TOOL_NAMES.INGEST, args.kind, args.database, signal);
+
+		if (refused) return refused;
 		const kind: ContextKind =
 			args.kind ?? ((await isUnifiedDatabase(args.database, signal)) ? "unified" : "memory");
 		logger.debug(`${TOOL_NAMES.INGEST}: "${args.text.slice(0, 50)}..." (kind=${kind})`);
@@ -1191,6 +1315,9 @@ export function createHydraDBServer(
 		// `hydradb_ingest` answered a unified database with a 400 while the text
 		// half worked — one tool, one of its two input shapes broken. Resolved
 		// and retried exactly as `runStore` does.
+		const refused = await refuseUnifiedOnSplit(TOOL_NAMES.INGEST, opts?.kind, opts?.database, signal);
+
+		if (refused) return refused;
 		const kind: ContextKind =
 			opts?.kind ?? ((await isUnifiedDatabase(opts?.database, signal)) ? "unified" : "memory");
 		logger.debug(
@@ -1201,8 +1328,8 @@ export function createHydraDBServer(
 			kind: kindToSend,
 			pairs: turns,
 			sourceId,
-			// On the unified path this becomes each user turn's `name`, which is
-			// where speaker identity lives there — so it is carried, not dropped.
+			// On the unified path this is the item's `user_name`, which is where
+			// speaker identity lives there — so it is carried, not dropped.
 			userName: opts?.userName ?? "User",
 			infer: opts?.infer ?? true,
 			title: opts?.title,
@@ -1299,6 +1426,9 @@ export function createHydraDBServer(
 		database?: string;
 		collection?: string;
 	}, signal?: AbortSignal): Promise<ToolResult> {
+		const refused = await refuseUnifiedOnSplit(TOOL_NAMES.LIST, args.kind, args.database, signal);
+
+		if (refused) return refused;
 		const defaulted = args.kind == null;
 		const kind: ContextKind =
 			args.kind ?? ((await isUnifiedDatabase(args.database, signal)) ? "unified" : "memory");
@@ -2164,6 +2294,9 @@ export function createHydraDBServer(
 		// Whether the caller CHOSE memory, or merely got it. A wrong-family delete
 		// is silent — the server removes nothing and says so in the vocabulary of
 		// the family we asked about — so the report has to know which happened.
+		const refused = await refuseUnifiedOnSplit(TOOL_NAMES.DELETE, args.kind, args.database, signal);
+
+		if (refused) return refused;
 		const kindAssumed = args.kind == null;
 		const kind: ContextKind =
 			args.kind ?? ((await isUnifiedDatabase(args.database, signal)) ? "unified" : "memory");

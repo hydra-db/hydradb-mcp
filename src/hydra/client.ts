@@ -203,9 +203,10 @@ export type QueryResult = SDK.SearchV2RetrievalResult | UnifiedQueryResult;
  * Decided by shape, not by what was requested (CONTRACT rule 4): stored logs
  * and split databases keep producing the v2 shape, and a server that predates
  * the unified response answers a unified request with it too. The unified
- * shape is ALL of `chunks`, `graph`, `forceful_relations` as arrays and
- * `llm_prompt` as a string, with a usable `context_id` on every chunk; the
- * v2 shape carries `graph_context` and per-chunk `chunk_content` instead, and
+ * shape is `chunks` and `graph` as arrays and `llm_prompt` as a string, with a
+ * usable `context_id` on every chunk; `forceful_relations` is optional in the
+ * contract, so an absent one reads as none (an array when present). The v2
+ * shape carries `graph_context` and per-chunk `chunk_content` instead, and
  * the presence of `graph_context` is what settles a body that has both. A body
  * showing some unified keys but not the whole shape is malformed, not
  * unified — `carriesUnifiedMarkers` is what calls that out so the caller
@@ -219,9 +220,14 @@ export function isUnifiedQueryResult(value: unknown): value is UnifiedQueryResul
 	if (!Array.isArray(record.chunks)) return false;
 	if (!Array.isArray(record.graph)) return false;
 
-	// The pre-rename `relations` key never shipped and is not read: a body
-	// carrying it instead of `forceful_relations` is refused as malformed.
-	if (!Array.isArray(record.forceful_relations)) return false;
+	// Optional, but an array when present. The pre-rename `relations` key never
+	// shipped and is not read: a body carrying it in place of
+	// `forceful_relations` is refused as malformed rather than read as "none".
+	if ("forceful_relations" in record) {
+		if (!Array.isArray(record.forceful_relations)) return false;
+	} else if ("relations" in record) {
+		return false;
+	}
 	// A chunk whose source id is absent or not a string cannot be cited,
 	// inspected or deleted — it is a malformed row, not an empty one.
 	return record.chunks.every(
@@ -245,6 +251,60 @@ function carriesUnifiedMarkers(wire: unknown): boolean {
 	if ("graph_context" in record) return false;
 
 	return "llm_prompt" in record || "forceful_relations" in record || Array.isArray(record.graph);
+}
+
+/**
+ * How long a probed or learned layout is trusted before `GET /databases` is
+ * asked again. Long enough that a busy session probes rarely, short enough
+ * that a database deleted and recreated under the other layout is picked up.
+ */
+const LAYOUT_TTL_MS = 5 * 60_000;
+
+function malformedUnifiedResponse(wire: unknown): HydraWrapperError {
+	return new HydraWrapperError(
+		"Hydra DB /query → ERR: malformed unified response: expected " +
+			"chunks[], graph[], a string llm_prompt, a string context_id on every " +
+			"chunk, and forceful_relations[] when present",
+		"/query",
+		{ body: wire },
+	);
+}
+
+/**
+ * A `/query` answer that came back in the unified shape on a route that asked
+ * for `all`, `memory` or `knowledge`.
+ *
+ * The server picks the body shape from the DATABASE, not from the `type` it
+ * was sent: a unified database accepts `all` (it means the whole corpus) and
+ * still answers with the four-key body. So an explicit `kind: "all"`, or a
+ * defaulted one sent while the layout probe could not answer, reaches this
+ * route with a unified body — which the v2 check below would refuse as an
+ * invalid response. The SDK's parse passes every unified key through
+ * untouched (none of them are v2-declared), so the body is read here by its
+ * shape instead. The envelope is kept around it so `call` still reads the
+ * request id. `undefined` means the answer is v2 and the v2 checks apply.
+ */
+function unifiedFromV2Route(response: unknown): unknown {
+	const payload = unwrap<unknown>(response);
+
+	if (!isUnifiedQueryResult(payload)) {
+		// Only `llm_prompt` marks a broken unified body on this route: a v2
+		// body also carries additive `graph`/`forceful_relations` objects, and
+		// drops `graph_context` when the caller turned the graph off.
+		if (payload != null && typeof payload === "object" && "llm_prompt" in payload) {
+			throw malformedUnifiedResponse(payload);
+		}
+
+		return undefined;
+	}
+
+	const unified = toUnifiedQueryResult(payload);
+
+	if (payload === response) return unified;
+
+	// SAFETY: `unwrap` returned something other than its input only because
+	// `response` is an envelope object carrying the payload under `data`.
+	return { ...(response as Record<string, unknown>), data: unified };
 }
 
 /**
@@ -1080,15 +1140,8 @@ export class ContextResource extends Resource {
 				// malformed, not v2: the v2 serializer would accept it into an
 				// answer that only looks empty. Refuse it as the protocol
 				// error it is.
-				if (carriesUnifiedMarkers(wire)) {
-					throw new HydraWrapperError(
-						"Hydra DB /query → ERR: malformed unified response: expected " +
-							"chunks[], graph[], forceful_relations[], a string llm_prompt, and a " +
-							"string context_id on every chunk",
-						"/query",
-						{ body: wire },
-					);
-				}
+
+				if (carriesUnifiedMarkers(wire)) throw malformedUnifiedResponse(wire);
 				return serialization.SearchV2RetrievalResult.parseOrThrow(wire, SDK_PARSE_OPTS);
 				// onMeta is deliberately NOT passed to call here: the envelope
 				// meta was already fired through rawWire while it was still
@@ -1160,6 +1213,10 @@ export class ContextResource extends Resource {
 				if (!response.ok) {
 					throw new HydraDBError({ statusCode: response.status, body });
 				}
+
+					const unified = unifiedFromV2Route(body);
+
+					if (unified !== undefined) return unified;
 					validateQueryResponse(body);
 					// Use the SAME wire-to-SDK conversion as sdk.query, including nested
 					// graph context and metadata. Casting raw JSON loses their contents.
@@ -1184,6 +1241,9 @@ export class ContextResource extends Resource {
 
 		return this.call("/query", async () => {
 			const response = await this.sdk.query(request, req(opts));
+			const unified = unifiedFromV2Route(response);
+
+			if (unified !== undefined) return unified;
 			validateQueryResponse(response);
 			return response;
 		}, opts?.onMeta);
@@ -1334,24 +1394,20 @@ export class ContextResource extends Resource {
 		if (params.sourceId != null) item.context_id = params.sourceId;
 		if (params.title != null) item.title = params.title;
 		if (params.text != null) item.text = params.text;
+		// A turn is exactly `{role, content}`: the server decodes the body
+		// strictly and refuses any other key, a per-turn `name` included.
 		if (params.pairs != null) {
 			item.conversation = params.pairs.flatMap((turn) => [
-				{ role: "user", content: turn.user, ...(params.userName ? { name: params.userName } : {}) },
+				{ role: "user", content: turn.user },
 				{ role: "assistant", content: turn.assistant },
 			]);
 		}
-		// `is_markdown` is sent only when the caller said something. The server's
-		// field is a plain bool, so omitting it and sending `false` are the same
-		// thing, and every other field on this item is conditional too.
-		if (params.isMarkdown != null) item.is_markdown = params.isMarkdown;
-		// Speaker identity has TWO homes on a unified item and the server reads
-		// the finer-grained one first: a conversation names its speaker per turn
-		// (set above), and the item-level `user_name` fills in only when the
-		// turns supplied none. So it goes on the item for a TEXT item only:
-		// sending both would be redundant on the wire, and a client that let the
-		// item-level value win would silently discard the per-turn identity that
-		// speaker anchoring depends on.
-		if (params.pairs == null && params.userName != null) item.user_name = params.userName;
+		// The speaker lives on the item, for both shapes: a text item is what
+		// that person said, and a conversation's user turns are theirs.
+		if (params.userName != null) item.user_name = params.userName;
+		// `is_markdown` is not part of the unified item and would be refused by
+		// the strict decoder; unified ingest takes text as sent, so it is not
+		// forwarded. It still applies on a split database.
 		item.enrich = params.infer ?? true;
 		if (item.enrich && params.customInstructions != null) {
 			item.instructions = params.customInstructions;
@@ -1366,7 +1422,7 @@ export class ContextResource extends Resource {
 		}
 		if (params.forcefulRelations != null) {
 			item.forceful_relations = compact({
-				ids: params.forcefulRelations.ids,
+				context_ids: params.forcefulRelations.ids,
 				properties: params.forcefulRelations.properties,
 			});
 		}
@@ -1696,6 +1752,10 @@ export class DatabasesResource extends Resource {
 	create(
 		params: CreateDatabaseParams,
 	): Promise<SDK.TenantsTenantCreateAcceptedResponse> {
+		// A created name may carry a layout the cache has never seen, or a
+		// different one than a database of the same name deleted earlier.
+		this.forgetLayouts();
+
 		if (params.type != null) {
 			// The pinned SDK's create request has no `type`; the generated
 			// serializer would drop it and provision a split database in silence.
@@ -1727,8 +1787,13 @@ export class DatabasesResource extends Resource {
 		);
 	}
 
-	delete(database: string): Promise<SDK.TenantsTenantDeleteResponse> {
-		return this.call("/databases", () => this.sdk.databases.delete({ database }));
+	async delete(database: string): Promise<SDK.TenantsTenantDeleteResponse> {
+		const res = await this.call<SDK.TenantsTenantDeleteResponse, unknown>("/databases", () => this.sdk.databases.delete({ database }));
+
+		// The name can now be created again under the other layout.
+		this.forgetLayouts();
+
+		return res;
 	}
 
 	/**
@@ -1769,7 +1834,33 @@ export class DatabasesResource extends Resource {
 	 * recording it a process whose probe failed pays the refused request again
 	 * on every defaulted call for the life of the process.
 	 */
-	private readonly learnedLayouts = new Map<string, Layout>();
+	private readonly learnedLayouts = new Map<string, { layout: Layout; at: number }>();
+
+	/** When `layoutCache` was built; see LAYOUT_TTL_MS. */
+	private layoutCacheAt = 0;
+
+	/**
+	 * Drop every cached layout, probed and learned. Called after this client
+	 * creates or deletes a database: the name is the cache key, and a name can
+	 * be deleted and created again under the other layout.
+	 */
+	forgetLayouts(): void {
+		this.layoutCache = undefined;
+		this.learnedLayouts.clear();
+	}
+
+	/** A learned layout still inside LAYOUT_TTL_MS, or undefined. */
+	private learned(database: string): Layout | undefined {
+		const entry = this.learnedLayouts.get(database);
+		if (entry == null) return undefined;
+		if (Date.now() - entry.at > LAYOUT_TTL_MS) {
+			this.learnedLayouts.delete(database);
+
+			return undefined;
+		}
+
+		return entry.layout;
+	}
 
 	/**
 	 * Record a layout the probe did not supply. See `learnedLayouts`.
@@ -1779,18 +1870,24 @@ export class DatabasesResource extends Resource {
 	 * clear and can be discarded exactly when it is most needed.
 	 */
 	recordLayout(database: string, layout: Layout): void {
-		this.learnedLayouts.set(database, layout);
+		this.learnedLayouts.set(database, { layout, at: Date.now() });
 	}
 
 	/**
 	 * Every database this key can see, with its storage layout (PRO-1618), read
-	 * from `GET /databases` `details[]`. Memoised for the life of the process:
-	 * a layout is fixed at creation, so it cannot go stale, and the probe is
-	 * what lets the tools pick `unified` as a default without a failed request.
+	 * from `GET /databases` `details[]`. Memoised for LAYOUT_TTL_MS: a layout is
+	 * fixed for a database's life, but the cache is keyed by NAME, and a name
+	 * can be deleted and created again under the other layout while this
+	 * process runs (a stdio server lives as long as its host). The probe is what
+	 * lets the tools pick `unified` as a default without a failed request.
 	 */
 	layouts(signal?: AbortSignal): Promise<Map<string, Layout>> {
+		if (this.layoutCache && Date.now() - this.layoutCacheAt > LAYOUT_TTL_MS) this.forgetLayouts();
+
 		let cache = this.layoutCache;
+
 		if (!cache) {
+			this.layoutCacheAt = Date.now();
 			// The shared probe deliberately takes NO caller signal: it is
 			// bounded by the transport's own deadline, and it serves every
 			// tool call that arrives while it is in flight. Binding it to the
@@ -1814,7 +1911,13 @@ export class DatabasesResource extends Resource {
 		// Merged at READ time, not when the probe resolved: a layout learned
 		// after the cache was built still has to be visible here.
 		const probed = cache.then((map) =>
-			this.learnedLayouts.size === 0 ? map : new Map([...map, ...this.learnedLayouts]),
+			this.learnedLayouts.size === 0
+				? map
+				: new Map([...map, ...[...this.learnedLayouts.keys()].flatMap((db) => {
+					const layout = this.learned(db);
+
+					return layout ? [[db, layout] as const] : [];
+				})]),
 		);
 		return abortable(probed, signal);
 	}
@@ -1829,7 +1932,7 @@ export class DatabasesResource extends Resource {
 		// A learned layout answers before the probe is consulted at all, so a
 		// process whose probe keeps failing still stops guessing after the
 		// first refusal.
-		const learned = this.learnedLayouts.get(database);
+		const learned = this.learned(database);
 		if (learned != null) return learned;
 		try {
 			return (await this.layouts(signal)).get(database) ?? "split";
@@ -1838,6 +1941,27 @@ export class DatabasesResource extends Resource {
 			// tool call ends now rather than running on with a guessed layout.
 			if (signal?.aborted) throw err;
 			return "split";
+		}
+	}
+
+	/**
+	 * The layout only when it is KNOWN: learned from a refusal, or listed by the
+	 * probe. `undefined` when the probe failed or does not list the database —
+	 * unlike `layout()`, which reads that as split so defaults stay safe. A
+	 * caller that is about to refuse a request needs the difference: refusing
+	 * `unified` on a guessed split layout would block a valid call.
+	 */
+	async knownLayout(database: string, signal?: AbortSignal): Promise<Layout | undefined> {
+		const learned = this.learned(database);
+
+		if (learned != null) return learned;
+
+		try {
+			return (await this.layouts(signal)).get(database);
+		} catch (err) {
+			if (signal?.aborted) throw err;
+
+			return undefined;
 		}
 	}
 
