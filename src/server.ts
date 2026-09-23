@@ -487,6 +487,7 @@ export function createHydraDBServer(
 		mode?: "fast" | "thinking" | "auto";
 		graph_context?: boolean;
 		detail?: "compact" | "full";
+		structured?: boolean;
 		operator?: "or" | "and" | "phrase";
 		source_ids?: string[];
 		titles?: string[];
@@ -604,10 +605,23 @@ export function createHydraDBServer(
 		const resolvedScope = searchedCollections
 			? { database, collections: searchedCollections }
 			: singleScope({ database, collection: scopeCollection });
-		const queryResult = (text: string, extra: Record<string, unknown> = {}) => structuredResult(scopeWarning ? `${text}\n\nScope warning: ${scopeWarning}` : text, {
-			resolved_scope: resolvedScope, ...(requestId ? { request_id: requestId } : {}), ...extra,
-			...(scopeWarning ? { scope_warning: scopeWarning } : {}),
-		});
+		const compact = (args.detail ?? "compact") === "compact";
+		// Text only unless the caller asks for `structured: true`. The default
+		// consumer is a model reading the text, and everything `structuredContent`
+		// carries is already in it — ids and collection per chunk, the resolved
+		// scope line, the request id, the scope warning — so hosts that surface
+		// both handed the model the same facts twice. Programmatic callers opt in.
+		// Independent of `detail`, which only decides how much of each chunk is
+		// shown. No outputSchema is declared on this tool, so omitting it is
+		// within spec.
+		const queryResult = (text: string, extra: Record<string, unknown> = {}) => {
+			const body = scopeWarning ? `${text}\n\nScope warning: ${scopeWarning}` : text;
+			if (args.structured !== true) return textResult(body);
+			return structuredResult(body, {
+				resolved_scope: resolvedScope, ...(requestId ? { request_id: requestId } : {}), ...extra,
+				...(scopeWarning ? { scope_warning: scopeWarning } : {}),
+			});
+		};
 
 		// The server can return more chunks than were asked for — a live call with
 		// max_results=10 came back with 15, and all 15 were rendered. Honour the
@@ -667,8 +681,6 @@ export function createHydraDBServer(
 		// It also disagreed with its own header: `Found ${length}` counted every
 		// chunk while the list stopped at 10, so a 15-chunk result announced 15 and
 		// showed 10.
-		const compact = (args.detail ?? "compact") === "compact";
-
 		// The header and the legend are part of the response the caller pays for,
 		// so the renderer gets a budget with room already reserved for them.
 		// Adding framing after the ceiling had been applied put the finished
@@ -2489,6 +2501,10 @@ export function createHydraDBServer(
 			.enum(["compact", "full"])
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.detail),
+		structured: z
+			.boolean()
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.structured),
 		operator: z
 			.enum(["or", "and", "phrase"])
 			.optional()

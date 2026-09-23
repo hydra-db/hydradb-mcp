@@ -23,6 +23,8 @@ type PathTriplet = {
 		raw_predicate?: string;
 		context?: string;
 		chunk_id?: string | null;
+		temporal_details?: string | null;
+		timestamp?: number | string | null;
 	};
 	target?: { name?: string };
 };
@@ -37,10 +39,11 @@ type PathTriplet = {
  *
  * Rendered verbatim, that ships ids, tenant identifiers and JSON punctuation
  * into the prompt in place of the content, and the reader has to parse it back
- * out. The SDK's own renderer unwraps this (`dist/helpers/buildString.js`);
- * this port keeps the behaviour without taking the rest of that helper, which
- * drops the evidence-score filter, extra context and `raw_predicate` handling
- * below.
+ * out. The SDK's own renderer unwraps this (`dist/helpers/buildString.js`).
+ * The rest of this file follows that helper's graph rendering — triplets with
+ * dates, per-chunk relations, the metadata line, dated facts — while keeping
+ * what it lacks: source ids, extra context, `raw_predicate`, dedupe and the
+ * output budget.
  *
  * The wire format is snake_case regardless of SDK casing, so the keys checked
  * here are the wire ones. Anything that does not match the envelope shape is
@@ -125,14 +128,95 @@ function extractChunkText(chunkContent: string | undefined): string {
 	return trimmed;
 }
 
-function formatTriplet(triplet: PathTriplet): string {
+/**
+ * Best-known date for a relation, as the SDK's `buildString` reports it: the
+ * extraction's resolved `temporal_details` when it dated the fact, else the
+ * relation's stored timestamp (unix seconds, milliseconds tolerated).
+ */
+function relationWhen(rel: PathTriplet["relation"]): string | undefined {
+	const td = rel?.temporal_details;
+	if (typeof td === "string" && td.trim()) return td.trim().slice(0, 10);
+	return epochDate(rel?.timestamp) ?? (typeof rel?.timestamp === "string" && rel.timestamp ? rel.timestamp.slice(0, 10) : undefined);
+}
+
+function epochDate(epoch: unknown): string | undefined {
+	if (epoch == null || epoch === "" || epoch === 0) return undefined;
+	let e = Number(epoch);
+	if (!Number.isFinite(e) || e <= 0) return undefined;
+	if (e > 1e11) e /= 1000;
+	return new Date(e * 1000).toISOString().slice(0, 10);
+}
+
+/**
+ * One relation, in the SDK `buildString` shape:
+ * `[source] → predicate → [target] (as of date): context`.
+ *
+ * The date matters: the graph holds facts that were true once and are not now,
+ * and without it the reader cannot tell a superseded fact from a current one.
+ * `raw_predicate` is still preferred over the canonical one — it is the wording
+ * the source actually used.
+ */
+function formatTriplet(triplet: PathTriplet, indent = "  "): string {
 	const src = triplet.source?.name ?? "?";
 	const rel = triplet.relation;
 	const predicate =
 		rel?.raw_predicate ?? rel?.canonical_predicate ?? "related to";
 	const tgt = triplet.target?.name ?? "?";
-	const ctx = rel?.context ? ` [${rel.context}]` : "";
-	return `  (${src}) —[${predicate}]→ (${tgt})${ctx}`;
+	const when = relationWhen(rel);
+	const ctx = rel?.context?.trim();
+	return `${indent}[${src}] → ${predicate} → [${tgt}]${when ? ` (as of ${when})` : ""}${ctx ? `: ${ctx}` : ""}`;
+}
+
+/**
+ * The chunk's metadata as one line, merged the way `buildString` merges it:
+ * the free-form per-document map first, then schema-backed metadata, which wins
+ * a key conflict because it is the validated one.
+ *
+ * Both maps hold values the caller chose to attach at ingest — dates, types,
+ * flags — and dropping them here discarded them one step before the model saw
+ * them. `title` is skipped because it is already the `Source:` line.
+ */
+function metadataLine(chunk: { additionalMetadata?: Record<string, unknown>; metadata?: Record<string, unknown> }): string | undefined {
+	const merged: Record<string, unknown> = { ...(chunk.additionalMetadata ?? {}), ...(chunk.metadata ?? {}) };
+	const parts: string[] = [];
+	for (const key of Object.keys(merged).sort()) {
+		if (key === "title") continue;
+		const value = merged[key];
+		if (value == null) continue;
+		const rendered = typeof value === "object" ? JSON.stringify(value) : String(value);
+		if (rendered === "") continue;
+		parts.push(`${key}: ${rendered}`);
+	}
+	return parts.length > 0 ? `Metadata: ${parts.join(" | ")}` : undefined;
+}
+
+/**
+ * Dated facts from a temporal query, ported from `buildString`.
+ *
+ * Gated on `temporalFilter.applied`: a degraded lookup renders nothing rather
+ * than implying no dated facts exist.
+ */
+function formatTemporal(response: RecallResponse): string[] {
+	if (!response.temporalFilter?.applied) return [];
+	const lines: string[] = [];
+	const dur = response.temporalDuration;
+	if (dur?.days != null) {
+		lines.push(
+			`COMPUTED DURATION: ${dur.days} days${dur.approximate ? " (approximate)" : ""} ` +
+				`(${dur.fromDate} → ${dur.toDate})`,
+		);
+	}
+	const facts: string[] = [];
+	for (const f of response.temporalFacts ?? []) {
+		const start = epochDate(f.eventStart);
+		const end = epochDate(f.eventEnd);
+		let when = start && end && end !== start ? ` | ${start} → ${end}` : start ? ` | ${start}` : end ? ` | until ${end}` : "";
+		if (when && (f.datePrecision === "month" || f.datePrecision === "year")) when += ` (~${f.datePrecision})`;
+		const phrase = f.evidencePhrase?.trim();
+		facts.push(`  [${f.subject ?? ""}] → ${f.relation ?? ""} → [${f.object ?? ""}]${when}${phrase ? ` — "${phrase}"` : ""}`);
+	}
+	if (facts.length > 0) lines.push("Dated Facts (event dates resolved from the sources):", ...facts);
+	return lines;
 }
 
 /**
@@ -258,7 +342,12 @@ function render(
 		maxTotalChars?: number;
 	},
 ): { text: string; shown: number } {
-	const minScore = opts?.minEvidenceScore ?? 0.4;
+	// No floor by default, matching the SDK's `buildString`. The 0.4 floor this
+	// used to apply predates the server's current relation scoring: live
+	// chunk_relations now score 0.05–0.13 while being exactly the facts the chunk
+	// was extracted into, so the floor removed every per-chunk relation and the
+	// section never rendered. A caller can still pass one.
+	const minScore = opts?.minEvidenceScore ?? 0;
 	const maxGroupOccurrences = opts?.maxGroupOccurrences;
 	const maxChunkChars = opts?.maxChunkChars;
 	const includeExtraContext = opts?.includeExtraContext ?? true;
@@ -355,6 +444,8 @@ function render(
 		if (title) {
 			lines.push(`Source: ${title}`);
 		}
+		const metaLine = metadataLine(chunk);
+		if (metaLine) lines.push(metaLine);
 
 		const bodyText = extractChunkText(chunk.chunkContent);
 		if (bodyDuplicateOf != null) {
@@ -490,35 +581,37 @@ function render(
 		chunkSections.push(lines.join("\n"));
 	}
 
+	// Each path renders its triplets, then its combined context — the SDK's
+	// `buildString` layout. This used to print the combined context INSTEAD of
+	// the triplets whenever one was present, and the server now puts a summary
+	// label there ("Graph summary cluster 1 — 80 of 80 ranked facts …"), so the
+	// output announced 80 facts and showed none of them.
 	const entityPathLines: string[] = [];
 	const rawPaths: ScoredPath[] = graphCtx.queryPaths ?? [];
-	for (const path of rawPaths) {
-		if (path.combinedContext) {
-			entityPathLines.push(path.combinedContext);
-		} else {
-			const triplets = path.triplets ?? [];
-			const segments: string[] = [];
-			for (const pt of triplets) {
-				const s = pt.source?.name;
-				const rel = pt.relation;
-				const p =
-					rel?.raw_predicate ??
-					rel?.canonical_predicate ??
-					"related to";
-				const t = pt.target?.name;
-				segments.push(`(${s} -> ${p} -> ${t})`);
-			}
-			if (segments.length > 0) {
-				entityPathLines.push(segments.join(" -> "));
-			}
-		}
+	for (let i = 0; i < rawPaths.length; i++) {
+		const path = rawPaths[i]!;
+		const triplets = (path.triplets ?? []) as PathTriplet[];
+		const combined = path.combinedContext?.trim();
+		if (triplets.length === 0 && !combined) continue;
+		const score = path.relevancyScore != null ? ` (score: ${path.relevancyScore.toFixed(2)})` : "";
+		entityPathLines.push(`Path ${i + 1}${score}`);
+		for (const triplet of triplets) entityPathLines.push(formatTriplet(triplet));
+		if (combined) entityPathLines.push(triplets.length > 0 ? `  Combined: ${combined}` : `  ${combined}`);
 	}
+
+	const temporalLines = formatTemporal(response);
 
 	const output: string[] = [];
 
 	if (entityPathLines.length > 0) {
 		output.push("=== ENTITY PATHS ===");
 		output.push(entityPathLines.join("\n"));
+		output.push("");
+	}
+
+	if (temporalLines.length > 0) {
+		output.push("=== DATED FACTS ===");
+		output.push(temporalLines.join("\n"));
 		output.push("");
 	}
 
@@ -544,20 +637,30 @@ function render(
 		// under it. Half the budget leaves room for the chunks the caller asked
 		// for.
 		const headBudget = Math.floor(budget / 2);
+		// Both prefix sections share that half, dated facts first: a temporal
+		// query's answer usually IS one of them, while graph lines are supporting.
 		let head = "";
-		if (entityPathLines.length > 0) {
-			const keptPaths: string[] = [];
-			let headUsed = "=== ENTITY PATHS ===\n\n".length;
-			for (const line of entityPathLines) {
+		let headUsed = 0;
+		for (const [label, sectionLines] of [
+			["DATED FACTS", temporalLines],
+			["ENTITY PATHS", entityPathLines],
+		] as const) {
+			if (sectionLines.length === 0) continue;
+			const header = `=== ${label} ===\n`;
+			headUsed += header.length + 1;
+			const keptLines: string[] = [];
+			for (const line of sectionLines) {
 				if (headUsed + line.length + 1 > headBudget) break;
-				keptPaths.push(line);
+				keptLines.push(line);
 				headUsed += line.length + 1;
 			}
-			const droppedPaths = entityPathLines.length - keptPaths.length;
-			head =
-				`=== ENTITY PATHS ===\n${keptPaths.join("\n")}` +
-				(droppedPaths > 0 ? `\n[${droppedPaths} more entity path(s) omitted]` : "") +
+			const droppedLines = sectionLines.length - keptLines.length;
+			const section =
+				`${header}${keptLines.join("\n")}` +
+				(droppedLines > 0 ? `\n[${droppedLines} more line(s) omitted]` : "") +
 				"\n\n";
+			// Budgeted dated-facts-first, but printed in the unbudgeted order.
+			head = label === "ENTITY PATHS" ? section + head : head + section;
 		}
 		const kept: string[] = [];
 		// The prefix and the framing count against the ceiling too. Budgeting only
