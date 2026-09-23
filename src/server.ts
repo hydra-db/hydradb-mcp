@@ -487,6 +487,7 @@ export function createHydraDBServer(
 		mode?: "fast" | "thinking" | "auto";
 		graph_context?: boolean;
 		detail?: "compact" | "full";
+		structured?: boolean;
 		operator?: "or" | "and" | "phrase";
 		source_ids?: string[];
 		titles?: string[];
@@ -605,15 +606,17 @@ export function createHydraDBServer(
 			? { database, collections: searchedCollections }
 			: singleScope({ database, collection: scopeCollection });
 		const compact = (args.detail ?? "compact") === "compact";
-		// Compact is the default a model reads directly, so it returns the text
-		// alone. Everything `structuredContent` carried is already in it — ids and
-		// collection per chunk, the resolved scope line, the request id, the scope
-		// warning — and hosts that surface both hand the model the same facts
-		// twice. `full` keeps the structured copy for programmatic callers.
-		// No outputSchema is declared on this tool, so omitting it is within spec.
+		// Text only unless the caller asks for `structured: true`. The default
+		// consumer is a model reading the text, and everything `structuredContent`
+		// carries is already in it — ids and collection per chunk, the resolved
+		// scope line, the request id, the scope warning — so hosts that surface
+		// both handed the model the same facts twice. Programmatic callers opt in.
+		// Independent of `detail`, which only decides how much of each chunk is
+		// shown. No outputSchema is declared on this tool, so omitting it is
+		// within spec.
 		const queryResult = (text: string, extra: Record<string, unknown> = {}) => {
 			const body = scopeWarning ? `${text}\n\nScope warning: ${scopeWarning}` : text;
-			if (compact) return textResult(body);
+			if (args.structured !== true) return textResult(body);
 			return structuredResult(body, {
 				resolved_scope: resolvedScope, ...(requestId ? { request_id: requestId } : {}), ...extra,
 				...(scopeWarning ? { scope_warning: scopeWarning } : {}),
@@ -2498,6 +2501,10 @@ export function createHydraDBServer(
 			.enum(["compact", "full"])
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.detail),
+		structured: z
+			.boolean()
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.structured),
 		operator: z
 			.enum(["or", "and", "phrase"])
 			.optional()

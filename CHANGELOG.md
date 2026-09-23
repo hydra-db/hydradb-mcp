@@ -28,15 +28,15 @@ layout while keeping its own ids, dedupe, budget and follow-up hints:
 - **Dated facts** from a temporal query render when the server reports the
   temporal filter applied.
 
-### Changed — compact `hydradb_query` returns text only
+### Added — `structured` on `hydradb_query` (default `false`)
 
-`detail: "compact"` (the default) no longer attaches `structuredContent`. The
-text already carries every fact it held — source id and collection per chunk,
-the resolved scope line, the request id, any scope warning — and hosts that
-surface both handed the model the same facts twice. `detail: "full"` still
-returns `resolved_scope` and `sources[]` with ready-made `inspect_args` for
-programmatic callers. The tool declares no `outputSchema`, so this is within
-the MCP spec.
+`hydradb_query` returns text only unless called with `structured: true`, in
+either `detail` mode. The text already carries every fact `structuredContent`
+held — source id and collection per chunk, the resolved scope line, the
+request id, any scope warning — and hosts that surface both handed the model
+the same facts twice. `structured: true` adds `resolved_scope`, `request_id`
+and `sources[]` with ready-made `inspect_args` for programmatic callers. The
+tool declares no `outputSchema`, so this is within the MCP spec.
 
 ### Changed — the model resolves collection scope (PRO-1942)
 

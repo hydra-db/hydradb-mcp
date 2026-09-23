@@ -90,6 +90,7 @@ chunks with their source id, a relevance score, and knowledge-graph context.
 | `max_results` | number | No | Maximum chunks to return (1-50, default: 10) |
 | `mode` | string | No | `fast`, `thinking` (default), or `auto` |
 | `detail` | string | No | `compact` (default) trims each chunk; `full` returns them whole |
+| `structured` | boolean | No | Also return `structuredContent` (`resolved_scope`, `request_id`, `sources` with `inspect_args`). Default: false — text only |
 | `graph_context` | boolean | No | Include knowledge-graph relations (default: true) |
 | `operator` | string | No | `or`, `and`, or `phrase`. Switches the query to keyword retrieval (`query_by=text`), which is the only mode Hydra DB accepts an operator on — semantic matching is off for that query. Unset (the default) is hybrid semantic search |
 | `source_ids` | array | No | Restrict the search to these sources |
@@ -100,8 +101,8 @@ chunks with their source id, a relevance score, and knowledge-graph context.
 | `query_apps` | boolean | No | App-aware retrieval over connector sources — exact IDs and actors, thread reconstruction, parent/child expansion (default: false) |
 | `collections` | array | No | Search several collections at once. Pass either this or `collection`, never both |
 
-Compact results (the default) are text only: each chunk carries its source id and
-collection, and the header names the resolved scope. With `detail: "full"`,
+Results are text only by default: each chunk carries its source id and
+collection, and the header names the resolved scope. With `structured: true`,
 results also include structured `resolved_scope` and per-source `inspect_args` when
 the source's collection is known. Copy those arguments, including your ACL, to follow-up calls;
 tools never inherit a previous call's scope. With multiple collections, an ID

@@ -185,9 +185,12 @@ const PARAM = {
 		"chunk to its first ~600 characters and omits the surrounding-context blocks — " +
 		"enough to judge relevance and pick a source to inspect. 'full' returns every " +
 		"chunk whole; use it when the snippets are being cut off mid-answer. Either way " +
-		"the response is capped; hydradb_inspect reads a source in slices of at most 20000 characters. " +
-		"Compact returns text only; 'full' also returns structured content (resolved_scope, sources " +
-		"with ready-made inspect_args) for programmatic callers.",
+		"the response is capped; hydradb_inspect reads a source in slices of at most 20000 characters.",
+	structured:
+		"Also return structured content alongside the text: resolved_scope, request_id and " +
+		"sources with ready-made inspect_args/list_args. Default false — the text already " +
+		"carries every source id, collection and the scope, so leave this off when reading " +
+		"the result; set it only when code consumes the fields.",
 	fetch_source_id: "The source ID to fetch content for",
 	subgraph_id:
 		"The id of the item to start from — the value shown as [id: …] in hydradb_query results " +
@@ -406,6 +409,7 @@ export const TOOL_DESCRIPTIONS = {
 			mode: PARAM.mode,
 			graph_context: PARAM.graph_context,
 			detail: PARAM.detail,
+			structured: PARAM.structured,
 			operator: PARAM.operator,
 			source_ids: PARAM.query_source_ids,
 			titles: PARAM.query_titles,
