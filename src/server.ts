@@ -917,11 +917,16 @@ export function createHydraDBServer(
 	 *
 	 * `max_results` is not re-applied here. The prompt is the server's and
 	 * slicing the chunks under it would make the two views disagree; the
-	 * server honours the parameter itself. Nothing is compacted either: the
-	 * prompt goes out whole, with no total budget and no truncation note, and
-	 * the structured chunks keep their full `content`, `enrichment` and
-	 * `temporal`. `detail` and the query budget apply to a split database
-	 * only.
+	 * server honours the parameter itself.
+	 *
+	 * Unbounded on purpose. Product decision for PRO-1618: no compaction on a
+	 * unified answer. The prompt goes out whole, with no total budget and no
+	 * truncation note, and the structured chunks keep their full `content`,
+	 * `enrichment` and `temporal`. A client-side cut left the model citing
+	 * [1], [R1] and [P1] labels whose text it never saw. The size levers are
+	 * the server's own prompt limits and the caller's `max_results`; the MCP
+	 * protocol and this server's transports put no cap on a tool result.
+	 * `detail` and the query budget apply to a split database only.
 	 */
 	function renderUnifiedQuery(
 		res: UnifiedQueryResult,
