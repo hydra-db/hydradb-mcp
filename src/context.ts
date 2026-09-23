@@ -1,5 +1,14 @@
 import type { HydraDB as SDK } from "@hydradb/sdk";
 
+import type {
+	UnifiedChunk,
+	UnifiedGraphOrigin,
+	UnifiedGraphPath,
+	UnifiedQueryResult,
+	UnifiedTemporal,
+	UnifiedTriplet,
+} from "./hydra/client.js";
+
 /**
  * The renderer reads SDK payloads directly.
  *
@@ -583,3 +592,118 @@ function render(
 	}
 	return { text, shown: chunkSections.length };
 }
+
+// --- The unified rendering (PRO-1618) ---
+//
+// Everything above is the v2 renderer, this server's own port of the SDK's
+// buildString, and it is left exactly as it was: a split database keeps
+// producing the v2 shape and its rendering must not move by a byte. A unified
+// database answers with a server-built `llm_prompt` that already carries the
+// context, the forceful relations, the graph paths and citation labels ([1],
+// [R1], [P1]). The contract says to surface it verbatim rather than rebuild
+// it, so nothing below walks the chunks to rebuild it: the prompt goes to the
+// caller WHOLE, and the structured view beside it is read straight from the
+// four keys, also whole. Neither is trimmed or cut to a budget: the answer is
+// the server's, sized by the server (`max_results` is how a caller asks for
+// less), and this client does not compact it.
+
+/** One chunk of the structured view: the contract's own field names, every field whole. */
+export interface UnifiedStructuredChunk {
+	context_id: string;
+	chunk_id?: string;
+	score?: number;
+	content: string;
+	/** The enrichment text, whole. */
+	enrichment?: string;
+	/** The declared `context_category`, passed through as sent. */
+	enrichment_kind?: string;
+	/** Present only when the server sent it: the query engaged temporal reasoning. */
+	temporal?: UnifiedTemporal[];
+}
+
+// A type alias rather than an interface so it is assignable to the
+// `Record<string, unknown>` the tool result's structured content is typed as.
+export type UnifiedStructuredContent = {
+	layout: "unified";
+	chunks: UnifiedStructuredChunk[];
+	/** `origin` and `triplets` are passed through as sent, and omitted when the server sent none. */
+	graph: { origin?: UnifiedGraphOrigin; triplets?: UnifiedTriplet[]; path_summary: string }[];
+	forceful_relations: { via: { from: string; to: string }; chunk: UnifiedStructuredChunk }[];
+	/** Every distinct context id in the answer, in order of first appearance. No titles: the body carries none, and none are invented. */
+	sources: { id: string }[];
+};
+
+function structuredChunk(chunk: UnifiedChunk): UnifiedStructuredChunk {
+	const out: UnifiedStructuredChunk = {
+		context_id: chunk.context_id ?? "",
+		content: chunk.content ?? "",
+	};
+	if (chunk.chunk_id != null) out.chunk_id = chunk.chunk_id;
+	if (typeof chunk.score === "number") out.score = chunk.score;
+
+	// Both are plain strings on the wire, siblings on the chunk. The kind is
+	// independent of the text: a declared category with no enrichment text is
+	// still passed through, and neither is invented when the server sent none.
+	// The string checks keep a server that still sends the retired
+	// `{ text, kind }` object from leaking an object where a string belongs.
+	if (typeof chunk.enrichment === "string" && chunk.enrichment !== "") {
+		out.enrichment = chunk.enrichment;
+	}
+
+	if (typeof chunk.enrichment_kind === "string" && chunk.enrichment_kind !== "") {
+		out.enrichment_kind = chunk.enrichment_kind;
+	}
+
+	// Sent only when the query engaged temporal reasoning; passed through as
+	// sent, and never invented when it is absent.
+	if (Array.isArray(chunk.temporal)) out.temporal = chunk.temporal;
+
+	return out;
+}
+
+/** One graph path, whole: `origin` and `triplets` as sent, neither invented when absent. */
+function structuredPath(path: UnifiedGraphPath): UnifiedStructuredContent["graph"][number] {
+	const out: UnifiedStructuredContent["graph"][number] = { path_summary: path.path_summary ?? "" };
+
+	if (path.origin != null) out.origin = path.origin;
+
+	if (Array.isArray(path.triplets)) out.triplets = path.triplets;
+
+	return out;
+}
+
+/**
+ * The structured view of a unified answer: `chunks[].content`,
+ * `chunks[].enrichment` (a string), `chunks[].enrichment_kind`,
+ * `graph[].origin`, `graph[].path_summary` and `forceful_relations[]` (whose
+ * `chunk` has the same shape) under the contract's names, plus the distinct
+ * context ids as `sources[]`. Every chunk carries its `temporal[]` when the
+ * server sent one, and every graph path its `triplets[]`. Nothing is trimmed:
+ * bodies and enrichment text come through whole, as the prompt beside them
+ * does.
+ */
+export function unifiedStructuredContent(result: UnifiedQueryResult): UnifiedStructuredContent {
+	const chunks = result.chunks.map((chunk) => structuredChunk(chunk));
+
+	const forcefulRelations = result.forceful_relations.map((relation) => ({
+		via: { from: relation.via?.from ?? "", to: relation.via?.to ?? "" },
+		chunk: structuredChunk(relation.chunk ?? {}),
+	}));
+
+	const seen = new Set<string>();
+	const sources: { id: string }[] = [];
+
+	for (const id of [...chunks.map((c) => c.context_id), ...forcefulRelations.map((r) => r.chunk.context_id)]) {
+		if (id === "" || seen.has(id)) continue;
+		seen.add(id);
+		sources.push({ id });
+	}
+	return {
+		layout: "unified",
+		chunks,
+		graph: result.graph.map(structuredPath),
+		forceful_relations: forcefulRelations,
+		sources,
+	};
+}
+

@@ -5,8 +5,11 @@ import {
 	buildRecalledContext,
 	renderRecalledContext,
 	renderedChunkCount,
+	unifiedStructuredContent,
 } from "../src/context.js";
+import type { UnifiedChunk } from "../src/hydra/index.js";
 import type { RecallResponse } from "../src/types.js";
+import { UNIFIED_QUERY_FIXTURE } from "./unified-fixture.js";
 
 test("buildRecalledContext includes entity paths, graph relations and extra context", () => {
 	const response = {
@@ -969,4 +972,218 @@ test("compact rendering never collapses bodies into a pointer", () => {
 	// promise content the rendered response does not contain.
 	assert.doesNotMatch(out, /same text as Chunk/);
 	assert.match(out, new RegExp(shared.slice(0, 50)), "the second body is rendered");
+});
+
+// --- PRO-1618: the unified rendering, and the split rendering pinned ---
+
+// The contract asks for `llm_prompt` verbatim: it already carries the context,
+// the forceful relations, the graph paths and the citation labels. The
+// structured view beside it is read from the four keys under the contract's
+// own names, whole: every field the server sent, nothing trimmed.
+test("unifiedStructuredContent reads the four keys whole", () => {
+	assert.deepEqual(unifiedStructuredContent(UNIFIED_QUERY_FIXTURE), {
+		layout: "unified",
+		chunks: [
+			{
+				context_id: "refund-policy",
+				chunk_id: "ck_policy_3",
+				score: 0.91,
+				content: "Refunds are processed within 30 days of purchase by the Finance Department.",
+				enrichment: "Refund window is 30 days; Finance owns refund processing.",
+				enrichment_kind: "business_knowledge",
+				temporal: [
+					{
+						content: "Refund policy effective_from June 2026. Start: 2026-06-01",
+						start_date: "2026-06-01",
+						end_date: null,
+					},
+				],
+			},
+			{
+				// No temporal[] on the wire, so none is invented.
+				context_id: "chat-2026-07-29",
+				chunk_id: "ck_chat_1",
+				score: 0.84,
+				content: "user: Keep refund answers short please\nassistant: Got it.",
+				enrichment: "User prefers short answers about refunds.",
+				enrichment_kind: "user_preference",
+			},
+		],
+		// Each path whole: origin, triplets and summary as the server sent them.
+		graph: UNIFIED_QUERY_FIXTURE.graph,
+		forceful_relations: [
+			{
+				via: { from: "refund-policy", to: "refund-faq" },
+				// A score of 0 is still a score, and a chunk with no enrichment
+				// gets neither field invented.
+				chunk: {
+					context_id: "refund-faq",
+					chunk_id: "ck_faq_1",
+					score: 0,
+					content: "FAQ: refunds to a card take 5 to 7 business days to appear.",
+				},
+			},
+		],
+		// Distinct context ids, chunks first then forceful relations, and NO titles: the
+		// body carries none and none are invented.
+		sources: [
+			{ id: "refund-policy" },
+			{ id: "chat-2026-07-29" },
+			{ id: "refund-faq" },
+		],
+	});
+});
+
+// Nothing on the structured view is compacted: a body and an enrichment
+// string far longer than the split path's 600-character compact trim come
+// through byte for byte, on a result chunk and on a forceful relation's chunk.
+test("unifiedStructuredContent never trims chunk bodies or the enrichment string", () => {
+	const body = `${"The refund policy in full. ".repeat(2_000)}END`;
+	const enrichment = `${"Finance owns refunds. ".repeat(1_000)}END`;
+	const temporal = [{ content: "effective_from June 2026", start_date: "2026-06-01", end_date: null }];
+
+	const structured = unifiedStructuredContent({
+		chunks: [{ context_id: "long", content: body, enrichment, enrichment_kind: "business_knowledge", temporal }],
+		graph: [],
+		forceful_relations: [{ via: { from: "long", to: "long-2" }, chunk: { context_id: "long-2", content: body, enrichment } }],
+		llm_prompt: "",
+	});
+
+	assert.equal(structured.chunks[0]!.content, body);
+	assert.equal(structured.chunks[0]!.enrichment, enrichment);
+	assert.deepEqual(structured.chunks[0]!.temporal, temporal);
+	assert.equal(structured.forceful_relations[0]!.chunk.content, body);
+	assert.equal(structured.forceful_relations[0]!.chunk.enrichment, enrichment);
+	assert.doesNotMatch(JSON.stringify(structured), /\.\.\."/, "no clamp marker anywhere");
+});
+
+// `enrichment` and `enrichment_kind` are independent siblings: a declared
+// category comes back even when there is no enrichment text, on a result chunk
+// and on a forceful relation's chunk alike.
+test("unifiedStructuredContent passes enrichment_kind through without enrichment", () => {
+	const structured = unifiedStructuredContent({
+		chunks: [{ context_id: "d1", content: "We chose Postgres.", enrichment_kind: "decision_trace" }],
+		graph: [],
+		forceful_relations: [
+			{
+				via: { from: "d1", to: "d2" },
+				chunk: { context_id: "d2", content: "Why Postgres.", enrichment: "Postgres chosen for JSONB.", enrichment_kind: "decision_trace" },
+			},
+		],
+		llm_prompt: "",
+	});
+
+	assert.deepEqual(structured.chunks, [{ context_id: "d1", content: "We chose Postgres.", enrichment_kind: "decision_trace" }]);
+	assert.deepEqual(structured.forceful_relations[0]!.chunk, {
+		context_id: "d2",
+		content: "Why Postgres.",
+		enrichment: "Postgres chosen for JSONB.",
+		enrichment_kind: "decision_trace",
+	});
+});
+
+// The retired `{ text, kind }` object is not the contract: a server that
+// still sends it gets neither field echoed, rather than an object where a
+// string belongs.
+test("unifiedStructuredContent does not echo the retired enrichment object", () => {
+	// Parsed from the wire like any response, so the off-contract field arrives untyped.
+	const legacy: UnifiedChunk = JSON.parse('{"context_id":"d1","content":"x","enrichment":{"text":"t","kind":"user_preference"}}');
+	const structured = unifiedStructuredContent({ chunks: [legacy], graph: [], forceful_relations: [], llm_prompt: "" });
+
+	assert.deepEqual(structured.chunks, [{ context_id: "d1", content: "x" }]);
+});
+
+// A chunk carrying nothing still renders as an entry the caller can index,
+// and an empty context id is not a source.
+test("unifiedStructuredContent tolerates sparse chunks", () => {
+	const structured = unifiedStructuredContent({
+		chunks: [{}],
+		graph: [{}],
+		forceful_relations: [{ chunk: { context_id: "only-related" } }],
+		llm_prompt: "",
+	});
+	assert.deepEqual(structured.chunks, [{ context_id: "", content: "" }]);
+	// A path the server sent without an origin gets none invented.
+	assert.deepEqual(structured.graph, [{ path_summary: "" }]);
+	assert.deepEqual(structured.forceful_relations, [{ via: { from: "", to: "" }, chunk: { context_id: "only-related", content: "" } }]);
+	assert.deepEqual(structured.sources, [{ id: "only-related" }]);
+});
+
+// The split rendering, pinned BYTE FOR BYTE. The expected strings were
+// produced by the renderer as it stood before the unified rendering was added
+// (PR #72's head) and are asserted with `equal`, not `match`: a split database
+// keeps the rendering it always had, and any drift here is a regression.
+// The relation arrow glyphs are the renderer's own and are written as escapes.
+const SPLIT_FIXTURE = {
+	chunks: [
+		{
+			chunkUuid: "c1",
+			id: "s1",
+			chunkContent: "Chunk one body",
+			sourceTitle: "Doc A",
+			relevancyScore: 0.91,
+			extraContextIds: ["ec1"],
+		},
+		{
+			chunkUuid: "c2",
+			id: "s2",
+			chunkContent: "Chunk two body, a different source",
+			relevancyScore: 0.4,
+		},
+	],
+	graphContext: {
+		queryPaths: [
+			{ relevancyScore: 0.9, combinedContext: "Alice -> prefers -> tea", triplets: [] },
+		],
+		chunkRelations: [
+			{
+				relevancyScore: 0.8,
+				groupId: "g1",
+				sourceChunkIds: ["c1"],
+				triplets: [
+					{
+						source: { name: "Alice", type: "person", entity_id: "e1" },
+						relation: {
+							canonical_predicate: "prefers",
+							raw_predicate: "likes",
+							context: "morning routine",
+							relationship_id: "r1",
+							chunk_id: "c1",
+						},
+						target: { name: "Tea", type: "drink", entity_id: "e2" },
+					},
+				],
+			},
+		],
+		chunkIdToGroupIds: { c1: ["g1"] },
+	},
+	additionalContext: {
+		ec1: { chunkUuid: "ec1", id: "s3", chunkContent: "Tea helps Alice focus", sourceTitle: "Doc B" },
+	},
+} as unknown as RecallResponse;
+
+// The v2 renderer's relation glyphs (U+2014 and U+2192), built from their
+// code points so the pin is byte-exact without the glyphs in this source.
+const RELATION_DASH = String.fromCharCode(0x2014);
+const RELATION_ARROW = String.fromCharCode(0x2192);
+
+const SPLIT_FULL_EXPECTED =
+	"=== ENTITY PATHS ===\nAlice -> prefers -> tea\n\n=== CONTEXT ===\n" +
+	"Chunk 1  [id: s1]  (91%)\nSource: Doc A\nChunk one body\nGraph Relations:\n" +
+	`  (Alice) ${RELATION_DASH}[likes]${RELATION_ARROW} (Tea) [morning routine]\n` +
+	"Extra Context:\n  Related Context (Doc B): Tea helps Alice focus\n\n---\n\n" +
+	"Chunk 2  [id: s2]  (40%)\nChunk two body, a different source";
+
+const SPLIT_COMPACT_EXPECTED =
+	"=== ENTITY PATHS ===\nAlice -> prefers -> tea\n\n=== CONTEXT ===\n" +
+	"Chunk 1  [id: s1]  (91%)\nSource: Doc A\nChunk one body\nGraph Relations:\n" +
+	`  (Alice) ${RELATION_DASH}[likes]${RELATION_ARROW} (Tea) [morning routine]\n\n---\n\n` +
+	"Chunk 2  [id: s2]  (40%)\nChunk two body, a different source";
+
+test("the split rendering is unchanged, byte for byte", () => {
+	assert.equal(buildRecalledContext(SPLIT_FIXTURE), SPLIT_FULL_EXPECTED);
+	assert.deepEqual(
+		renderRecalledContext(SPLIT_FIXTURE, { maxChunkChars: 600, includeExtraContext: false, maxTotalChars: 39_000 }),
+		{ text: SPLIT_COMPACT_EXPECTED, shown: 2 },
+	);
 });

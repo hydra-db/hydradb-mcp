@@ -34,6 +34,55 @@ Also hardened: an OAuth grant confined to a database but with no chosen
 collection previously could serialise its collection allowlist as an empty
 list, which refused every per-call `collection` override. Empty allowlists
 from the issuer are now treated as absent.
+### Changed: unified databases follow the PRO-1618 API contract
+
+On a UNIFIED database only. A split database keeps every request body and
+every rendering byte for byte.
+
+- `hydradb_query` sends no `type` and reads the four-key answer (`chunks`,
+  `graph`, `forceful_relations`, `llm_prompt`) by shape, never through the
+  SDK's v2 serializer, which knows neither `llm_prompt` nor `context_id`. The
+  shape requires a `forceful_relations` array; a body carrying the pre-rename
+  `relations` key instead is refused as malformed, not read in its place. The
+  text the model sees is the server-built `llm_prompt` verbatim: markdown,
+  with its citation labels ([1], [R1], [P1]), its `## Forceful relations`
+  section and each entry's `**Id:**`; the same answer rides beside it as
+  structured content (`chunks[].context_id`, `score`, `content`, `enrichment`
+  as a plain string, `enrichment_kind`, the declared `context_category`,
+  passed through even when there is no enrichment text, and `temporal[]` when
+  the server sent it; `graph[].origin` (`query_path` or `chunk_relation`),
+  `graph[].triplets` and `graph[].path_summary`; `forceful_relations[]`,
+  whose `chunk` has the same shape; distinct `sources[]` built from
+  `context_id`, with no titles invented). Nothing on this path reads
+  `tenant_id`, `sub_tenant_id` or `source_type` from the response meta, which
+  a unified response does not carry. A v2 answer
+  to a unified request, from a server that predates the unified response,
+  still goes to the v2 renderer. Nothing on the unified answer is compacted:
+  the prompt is returned whole, with no total budget and no truncation note,
+  and every structured chunk keeps its full `content`, `enrichment` and
+  `temporal`. `detail` (default `compact`, which trims each chunk to about 600
+  characters) and the 40,000-character query budget apply to a split database
+  only.
+- New `follow_forceful_relations` on `hydradb_query` toggles the chunks
+  declared related at ingest. It is a unified-database option: the split
+  path goes through the pinned SDK, which knows only the deprecated
+  `query_forceful_relations` name, so it is refused on a split request rather
+  than sent under the wrong key or dropped.
+- `hydradb_ingest` sends the contract body: list key `context`, item fields
+  `text` or `conversation`, `context_id`, `title`, `enrich`, `instructions`,
+  `happened_at`, `attributes`, `custom_attributes`, `context_category`,
+  `forceful_relations` (`{ids}`), `acl`; request-level `upsert`. The 202 is
+  read by hand so `results[].source_id` (the context id) reaches the caller;
+  the SDK serializer reads a wire `id` and would have lost it.
+- New `hydradb_ingest` arguments: `attributes` and `happened_at` (the
+  preferred names for `metadata` and `observation_date`; both spellings are
+  accepted and a contradiction between them is refused), `custom_attributes`,
+  `instructions` (replaces the server's default extraction guidance for that
+  entry), `context_category`, `forceful_relations` and `acl`. The last three
+  exist on a unified item only and are refused by name on a split database.
+  The contract-named arguments work with `turns` as well as `text`.
+- `hydradb_list`, `hydradb_delete` and the relations read no longer send
+  `type: "unified"`, and the subgraph read never sends `type` for that kind.
 
 ## [1.4.0] - 2026-09-01
 
@@ -98,7 +147,7 @@ reads it first; sending both would risk one day discarding the per-turn
 speaker identity that anchoring depends on. `user_name` is also no longer
 discarded on a text ingest, which lost it on every layout.
 
-Unified ingest sends the `items[]` body (text or a role/content conversation
+Unified ingest sends the `context[]` body (text or a role/content conversation
 per item) and `hydradb_databases` can create a unified database through
 `type`. The pinned SDK predates both, so those calls and the layout probe go
 over the wrapper's shared raw v2 transport (`src/hydra/transport.ts`, the

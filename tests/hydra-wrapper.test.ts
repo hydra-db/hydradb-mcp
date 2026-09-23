@@ -8,9 +8,11 @@ import {
 	DEFAULT_TIMEOUT_SECONDS,
 	HydraDB,
 	HydraWrapperError,
+	isUnifiedQueryResult,
 	translateError,
 	unwrap,
 } from "../src/hydra/index.js";
+import { UNIFIED_INGEST_202, UNIFIED_QUERY_FIXTURE } from "./unified-fixture.js";
 
 test("unwrap returns .data for an envelope and passes through bare payloads", () => {
 	assert.deepEqual(unwrap({ data: { a: 1 }, success: true, meta: {} }), { a: 1 });
@@ -921,8 +923,14 @@ function fetchStub(body: unknown, status = 200): { fetch: typeof fetch; calls: {
 	return { fetch: impl, calls };
 }
 
-test("unified ingest posts items[] as a JSON body, not the multipart memories field", async () => {
-	const { fetch, calls } = fetchStub({ success: true, data: { success: true, success_count: 1, failed_count: 0 } });
+// The exact JSON `POST /context/ingest` receives on a unified database, per
+// CONTRACT.md: list key `context` (not `items`), `instructions` (not
+// `custom_instructions`), `forceful_relations` (not `relations`) with the ids
+// under `ids`, `context_category` and `acl` on the item, `upsert` on the
+// request. The server accepts the old names as aliases; a client sends the
+// documented ones and none of the removed ones.
+test("unified ingest posts the contract body: context[], instructions, forceful_relations", async () => {
+	const { fetch, calls } = fetchStub({ success: true, data: UNIFIED_INGEST_202 });
 	const sdk = { context: { ingest() { throw new Error("SDK path must not be used for unified"); } } } as unknown as HydraDBClient;
 	const hydra = new HydraDB({ token: "t", database: "db_u", collection: "c1", baseUrl: "https://api.test", fetchFn: fetch }, sdk);
 
@@ -930,11 +938,16 @@ test("unified ingest posts items[] as a JSON body, not the multipart memories fi
 		kind: "unified",
 		pairs: [{ user: "I prefer dark mode", assistant: "Noted" }],
 		sourceId: "chat-1",
+		title: "Theme preference",
 		userName: "Ada",
 		infer: true,
 		customInstructions: "focus",
 		metadata: { topic: "ui" },
+		additionalMetadata: { source_app: "wiki" },
 		observationDate: "2026-09-01",
+		contextCategory: "user_preference",
+		forcefulRelations: { ids: ["chat-w1"] },
+		acl: ["user_email:a@x.com", "domain:acme.com"],
 		upsert: true,
 	});
 
@@ -942,25 +955,93 @@ test("unified ingest posts items[] as a JSON body, not the multipart memories fi
 	assert.equal(calls[0]!.url, "https://api.test/context/ingest");
 	assert.equal(calls[0]!.init.method, "POST");
 	assert.equal((calls[0]!.init.headers as Record<string, string>)["API-Version"], "2");
-	const body = JSON.parse(String(calls[0]!.init.body));
-	assert.deepEqual(body, {
+	const raw = String(calls[0]!.init.body);
+	assert.deepEqual(JSON.parse(raw), {
 		database: "db_u",
 		collection: "c1",
 		upsert: true,
-		items: [
+		context: [
 			{
+				context_id: "chat-1",
+				title: "Theme preference",
 				conversation: [
 					{ role: "user", content: "I prefer dark mode", name: "Ada" },
 					{ role: "assistant", content: "Noted" },
 				],
-				context_id: "chat-1",
 				enrich: true,
-				custom_instructions: "focus",
-				attributes: { topic: "ui" },
+				instructions: "focus",
 				happened_at: "2026-09-01",
+				attributes: { topic: "ui" },
+				custom_attributes: { source_app: "wiki" },
+				context_category: "user_preference",
+				forceful_relations: { ids: ["chat-w1"] },
+				acl: ["user_email:a@x.com", "domain:acme.com"],
 			},
 		],
 	});
+	// CONTRACT client rule 2: none of the pre-rename keys, and never `type`.
+	for (const key of ["items", "contexts", "type", "relations", "custom_instructions", "observation_date", "metadata", "additional_metadata", "infer", "source_id"]) {
+		assert.equal(raw.includes(`"${key}"`), false, `${key} must not be sent on a unified ingest`);
+	}
+});
+
+// `auto` is the server's default and means "no label": the item says only
+// what the caller decided, so the key is absent rather than sent as "auto".
+test("unified ingest omits context_category when it is auto", async () => {
+	const { fetch, calls } = fetchStub({ success: true, data: UNIFIED_INGEST_202 });
+	const sdk = { context: { ingest() { throw new Error("SDK path must not be used for unified"); } } } as unknown as HydraDBClient;
+	const hydra = new HydraDB({ token: "t", database: "db_u", baseUrl: "https://api.test", fetchFn: fetch }, sdk);
+	await hydra.context.ingest({ kind: "unified", text: "a note", contextCategory: "auto" });
+	const item = (JSON.parse(String(calls[0]!.init.body)) as { context: Record<string, unknown>[] }).context[0]!;
+	assert.equal("context_category" in item, false);
+});
+
+// The 202 is read by hand: the pinned SDK's serializer reads each result's id
+// from a wire `id`, and the unified response names it `source_id` (the
+// context id). Through the serializer every unified ingest came back with no
+// id, so the caller could neither inspect nor delete what it had written.
+test("unified ingest reads results[].source_id as the id, and the rest of the 202", async () => {
+	const { fetch } = fetchStub({ success: true, data: {
+		...UNIFIED_INGEST_202,
+		results: [
+			...UNIFIED_INGEST_202.results,
+			{ source_id: "bad-1", title: null, status: "failed", infer: false, error: "too large", error_code: "ITEM_TOO_LARGE" },
+		],
+		success_count: 1,
+		failed_count: 1,
+	} });
+	const sdk = { context: { ingest() { throw new Error("SDK path must not be used for unified"); } } } as unknown as HydraDBClient;
+	const hydra = new HydraDB({ token: "t", database: "db_u", baseUrl: "https://api.test", fetchFn: fetch }, sdk);
+	const res = await hydra.context.ingest({ kind: "unified", text: "a note", sourceId: "policy-1" });
+	assert.equal(res.success, true);
+	assert.equal(res.message, "Context queued for ingestion successfully");
+	assert.equal(res.successCount, 1);
+	assert.equal(res.failedCount, 1);
+	assert.deepEqual(res.results, [
+		{ id: "policy-1", title: "Refund policy", status: "queued", infer: true, error: undefined, errorCode: undefined },
+		{ id: "bad-1", title: undefined, status: "failed", infer: false, error: "too large", errorCode: "ITEM_TOO_LARGE" },
+	]);
+});
+
+// The unified item's own fields have no home on a split path. They are refused
+// by name, on the memory branch and the knowledge branch alike, rather than
+// dropped: a caller answered "success: 1" has been told the label, the
+// relations or the ACL were stored when they were discarded.
+test("unified-only ingest fields are refused on a split database", async () => {
+	let sdkCalls = 0;
+	const sdk = { context: { ingest() { sdkCalls++; return Promise.resolve({ data: {}, success: true }); } } } as unknown as HydraDBClient;
+	const hydra = new HydraDB({ token: "t", database: "db_s" }, sdk);
+	for (const kind of ["memory", "knowledge"] as const) {
+		await assert.rejects(
+			() => hydra.context.ingest({ kind, text: "a note", contextCategory: "decision_trace" }),
+			/contextCategory applies to a unified database only/,
+		);
+		await assert.rejects(
+			() => hydra.context.ingest({ kind, text: "a note", forcefulRelations: { ids: ["x"] }, acl: ["a@x.com"] }),
+			/forcefulRelations, acl apply to a unified database only/,
+		);
+	}
+	assert.equal(sdkCalls, 0, "nothing reaches the wire");
 });
 
 // `IngestItem` carries `is_markdown` and `user_name` (hydradb-application#870),
@@ -968,12 +1049,12 @@ test("unified ingest posts items[] as a JSON body, not the multipart memories fi
 // the plugin already sends would be the cross-client divergence these PRs exist
 // to close.
 test("unified ingest maps is_markdown, and puts user_name where the server reads it", async () => {
-	const stub = () => fetchStub({ success: true, data: { success: true, success_count: 1, failed_count: 0 } });
+	const stub = () => fetchStub({ success: true, data: { success: true, success_count: 1, failed_count: 0, results: [{ source_id: "s", status: "queued" }] } });
 	const sdk = { context: { ingest() { throw new Error("SDK path must not be used for unified"); } } } as unknown as HydraDBClient;
 	const build = (fetch: typeof globalThis.fetch) =>
 		new HydraDB({ token: "t", database: "db_u", collection: "c1", baseUrl: "https://api.test", fetchFn: fetch }, sdk);
 	const itemOf = (calls: { init: RequestInit }[]) =>
-		(JSON.parse(String(calls[0]!.init.body)) as { items: Record<string, unknown>[] }).items[0]!;
+		(JSON.parse(String(calls[0]!.init.body)) as { context: Record<string, unknown>[] }).context[0]!;
 
 	// A TEXT item: user_name has no turn to ride on, so it goes on the item.
 	const text = stub();
@@ -1096,13 +1177,15 @@ test("a layout learned outside the probe answers without asking again", async ()
 	assert.equal(working.calls.length, 1, "the probe is still asked exactly once");
 });
 
-// The pinned SDK's REQUEST serializers reject `type: "unified"` before anything
-// is sent, so every read and delete that names that kind is built by hand and
-// its result is parsed with the SDK's own response serializer: callers get the
-// same camelCase object either way.
-test("unified query, list and delete bypass the SDK request serializers and return SDK-shaped results", async () => {
+// A unified database takes NO `type` (CONTRACT: never send it there), which
+// the pinned SDK's request serializers cannot omit, so every read and delete
+// that names that kind is built by hand. List and delete keep their shapes and
+// are parsed with the SDK's own response serializer; the query answer is the
+// four-key body and is returned AS IS, never run through the v2 serializer
+// (which knows neither `llm_prompt` nor `context_id`).
+test("unified query, list and delete send no type; the query answer is the four-key body untouched", async () => {
 	const answers: Record<string, unknown> = {
-		"/query": { chunks: [{ chunk_uuid: "c1", id: "s1", chunk_content: "body", relevancy_score: 0.9 }], sources: [] },
+		"/query": UNIFIED_QUERY_FIXTURE,
 		"/context/list": { sources: [{ id: "s1", title: "T" }], total: 1 },
 		"/context": { success: true, deleted_count: 2, user_memory_deleted: 2, results: [] },
 	};
@@ -1123,28 +1206,174 @@ test("unified query, list and delete bypass the SDK request serializers and retu
 	} as unknown as HydraDBClient;
 	const hydra = new HydraDB({ token: "t", database: "db_u", collection: "c1", baseUrl: "https://api.test", fetchFn: fetchImpl }, sdk);
 
-	const q = await hydra.context.query({ query: "acme", kind: "unified", maxResults: 5, operator: "and" });
-	assert.equal(q.chunks?.[0]?.chunkContent, "body", "query result is parsed to the SDK's camelCase");
-	assert.equal(q.chunks?.[0]?.relevancyScore, 0.9);
-	assert.deepEqual(JSON.parse(String(calls[0]!.init.body)), {
-		database: "db_u", collection: "c1", query: "acme", type: "unified", operator: "and", query_by: "text", max_results: 5,
+	const q = await hydra.context.query({
+		query: "acme", kind: "unified", maxResults: 5, operator: "and", followForcefulRelations: false,
 	});
+	assert.ok(isUnifiedQueryResult(q), "a unified answer is recognised by its shape");
+	assert.deepEqual(q, UNIFIED_QUERY_FIXTURE, "the four-key body is returned untouched");
+	assert.deepEqual(JSON.parse(String(calls[0]!.init.body)), {
+		database: "db_u", collection: "c1", query: "acme", operator: "and", query_by: "text", max_results: 5,
+		follow_forceful_relations: false,
+	});
+	// The option travels under the contract's name and only when stated.
+	await hydra.context.query({ query: "acme", kind: "unified" });
+	const bare = JSON.parse(String(calls[1]!.init.body)) as Record<string, unknown>;
+	assert.equal("follow_forceful_relations" in bare, false);
+	assert.equal("query_forceful_relations" in bare, false);
+	assert.equal("type" in bare, false);
 
 	const l = await hydra.context.list({ kind: "unified", page: 2, pageSize: 10 });
 	assert.equal((l as unknown as { sources: { id: string }[] }).sources[0]?.id, "s1");
-	assert.deepEqual(JSON.parse(String(calls[1]!.init.body)), { database: "db_u", collection: "c1", type: "unified", page: 2, page_size: 10 });
+	assert.deepEqual(JSON.parse(String(calls[2]!.init.body)), { database: "db_u", collection: "c1", page: 2, page_size: 10 });
 
 	const d = await hydra.context.delete({ ids: ["a", "b"], kind: "unified" });
 	assert.equal(d.deletedCount, 2, "delete result is parsed to the SDK's camelCase");
-	assert.equal(calls[2]!.init.method, "DELETE");
-	assert.deepEqual(JSON.parse(String(calls[2]!.init.body)), { database: "db_u", collection: "c1", ids: ["a", "b"], type: "unified" });
+	assert.equal(calls[3]!.init.method, "DELETE");
+	assert.deepEqual(JSON.parse(String(calls[3]!.init.body)), { database: "db_u", collection: "c1", ids: ["a", "b"] });
+});
+
+// CONTRACT client rule 4: the shape decides, not the kind that was sent. A
+// server that predates the unified response answers a unified request with
+// the v2 body, and that still has to reach the v2 renderer in the SDK's
+// camelCase, exactly as before.
+test("a v2 answer to a unified query still goes through the SDK serializer", async () => {
+	const { fetch } = fetchStub({ success: true, data: {
+		chunks: [{ chunk_uuid: "c1", id: "s1", chunk_content: "body", relevancy_score: 0.9 }],
+		graph_context: { query_paths: [], chunk_relations: [], chunk_id_to_group_ids: {} },
+	} });
+	const sdk = { query() { throw new Error("SDK query must not be used for unified"); } } as unknown as HydraDBClient;
+	const hydra = new HydraDB({ token: "t", database: "db_u", baseUrl: "https://api.test", fetchFn: fetch }, sdk);
+	const q = await hydra.context.query({ query: "acme", kind: "unified" });
+	assert.equal(isUnifiedQueryResult(q), false);
+	const v2 = q as { chunks?: { chunkContent?: string; relevancyScore?: number }[] };
+	assert.equal(v2.chunks?.[0]?.chunkContent, "body");
+	assert.equal(v2.chunks?.[0]?.relevancyScore, 0.9);
+});
+
+// The split path goes through the pinned SDK, whose request knows only the
+// deprecated `query_forceful_relations`. Sending the option under that name
+// would contradict the contract; dropping it would tell the caller it was
+// honoured. So it is refused, and nothing reaches the wire.
+test("followForcefulRelations is refused on a split request", async () => {
+	let sdkCalls = 0;
+	const sdk = { query() { sdkCalls++; return Promise.resolve({ data: { chunks: [] }, success: true }); } } as unknown as HydraDBClient;
+	const hydra = new HydraDB({ token: "t", database: "db_s" }, sdk);
+	for (const kind of ["memory", "knowledge", "all", undefined] as const) {
+		await assert.rejects(
+			() => hydra.context.query({ query: "q", kind, followForcefulRelations: true }),
+			/followForcefulRelations applies to a unified database only/,
+		);
+	}
+	assert.equal(sdkCalls, 0);
+});
+
+// The shape detector, on its own: the unified body is the COMPLETE four-key
+// shape: `chunks`, `graph`, `forceful_relations` arrays and a string `llm_prompt`,
+// with a usable `context_id` on every chunk. Anything less is not unified;
+// the v2 body carries `graph_context`, and its presence settles a body that
+// has both.
+test("isUnifiedQueryResult tells the two /query shapes apart", () => {
+	assert.equal(isUnifiedQueryResult(UNIFIED_QUERY_FIXTURE), true);
+	assert.equal(isUnifiedQueryResult({ chunks: [], graph: [], forceful_relations: [], llm_prompt: "" }), true);
+	// Partial unified shapes are NOT unified — a missing key or a chunk
+	// without its source id is a malformed response, not an empty answer.
+	assert.equal(isUnifiedQueryResult({ chunks: [], graph: [] }), false);
+	assert.equal(isUnifiedQueryResult({ chunks: [], graph: [], forceful_relations: [] }), false);
+	assert.equal(
+		isUnifiedQueryResult({ chunks: [], graph: [], relations: [], llm_prompt: "" }),
+		false,
+		"the pre-rename `relations` key is not the unified shape",
+	);
+	assert.equal(
+		isUnifiedQueryResult({ chunks: [], graph: [], forceful_relations: [], llm_prompt: 42 }),
+		false,
+	);
+	assert.equal(
+		isUnifiedQueryResult({ chunks: [{ chunk_id: "c1" }], graph: [], forceful_relations: [], llm_prompt: "" }),
+		false,
+		"a chunk without context_id cannot be cited or followed",
+	);
+	assert.equal(
+		isUnifiedQueryResult({ chunks: [{ context_id: "" }], graph: [], forceful_relations: [], llm_prompt: "" }),
+		false,
+		"an empty context_id is not usable",
+	);
+	assert.equal(
+		isUnifiedQueryResult({ chunks: ["oops"], graph: [], forceful_relations: [], llm_prompt: "" }),
+		false,
+	);
+	assert.equal(isUnifiedQueryResult({ chunks: [{ chunk_content: "x" }], graph_context: {} }), false);
+	assert.equal(
+		isUnifiedQueryResult({ chunks: [], graph: [], forceful_relations: [], llm_prompt: "", graph_context: {} }),
+		false,
+	);
+	assert.equal(isUnifiedQueryResult({ chunks: [] }), false);
+	assert.equal(isUnifiedQueryResult(null), false);
+	assert.equal(isUnifiedQueryResult([]), false);
+});
+
+// A response that shows unified keys without the full shape is malformed,
+// not empty: normalising it to `[]`/`""` would report a broken answer as "no
+// results". It rejects as a protocol error instead.
+test("a unified /query body missing keys or usable context_ids is a protocol error", async () => {
+	const sdk = { query() { throw new Error("SDK query must not be used for unified"); } } as unknown as HydraDBClient;
+	for (const body of [
+		{ chunks: [], graph: [], llm_prompt: "" }, // forceful_relations missing
+		// The pre-rename key never shipped and is not read in its place.
+		{ chunks: [], graph: [], relations: [], llm_prompt: "" },
+		{ chunks: [], graph: [], forceful_relations: [] }, // llm_prompt missing
+		{ chunks: [{ chunk_id: "c1" }], graph: [], forceful_relations: [], llm_prompt: "" }, // no context_id
+		{ chunks: [{ context_id: "" }], graph: [], forceful_relations: [], llm_prompt: "" }, // empty context_id
+	]) {
+		const { fetch } = fetchStub({ success: true, data: body });
+		const hydra = new HydraDB({ token: "t", database: "db_u", baseUrl: "https://api.test", fetchFn: fetch }, sdk);
+		await assert.rejects(
+			() => hydra.context.query({ query: "acme", kind: "unified" }),
+			(err: unknown) => {
+				assert.ok(err instanceof HydraWrapperError);
+				assert.match(err.message, /Hydra DB \/query → ERR: malformed unified response/);
+				return true;
+			},
+			`body ${JSON.stringify(body)} must be refused`,
+		);
+	}
+});
+
+// Same rule on the write path: a 202 that is not the documented shape is an
+// error, never "0 success, 0 failed" — that answer would report a stored
+// write as vanished, or a vanished one as stored.
+test("a malformed unified ingest 202 rejects rather than reading as zeroed", async () => {
+	const sdk = { context: { ingest() { throw new Error("SDK path must not be used for unified"); } } } as unknown as HydraDBClient;
+	for (const body of [
+		null,
+		"queued",
+		{ success: true }, // no results, no counts
+		{ results: { policy: "1" }, success_count: 1, failed_count: 0 }, // results not an array
+		{ results: [], success_count: 1 }, // failed_count missing
+		{ results: [], failed_count: 0 }, // success_count missing
+		{ results: [null], success_count: 0, failed_count: 1 }, // non-object row
+		{ results: [{ source_id: "s1" }], success_count: 1, failed_count: 0 }, // row without a status
+	]) {
+		const { fetch } = fetchStub({ success: true, data: body });
+		const hydra = new HydraDB({ token: "t", database: "db_u", baseUrl: "https://api.test", fetchFn: fetch }, sdk);
+		await assert.rejects(
+			() => hydra.context.ingest({ kind: "unified", text: "a note" }),
+			(err: unknown) => {
+				assert.ok(err instanceof HydraWrapperError);
+				assert.match(err.message, /Hydra DB \/context\/ingest → ERR: malformed unified ingest response/);
+				return true;
+			},
+			`body ${JSON.stringify(body)} must be refused`,
+		);
+	}
 });
 
 // PRO-1684 on PRO-1618: a unified database enforces document ACLs like a
 // split one, so the hand-built relations request has to carry the principals
 // in the same repeated form the SDK path sends. Dropping them would make
-// "view as" silently widen to everything on this layout.
-test("unified relations carries acl principals and the unified type", async () => {
+// "view as" silently widen to everything on this layout. And no `type`: the
+// contract says never to send it on a unified database.
+test("unified relations carries acl principals and no type", async () => {
 	const calls: string[] = [];
 	const fetchImpl = ((url: string | URL | Request) => {
 		calls.push(String(url));
@@ -1158,7 +1387,7 @@ test("unified relations carries acl principals and the unified type", async () =
 	await hydra.context.relations({ kind: "unified", id: "s1", limit: 3, acl: ["alice@acme.com", "group:slack:C1"] });
 	const sent = new URL(calls[0]!);
 	assert.equal(sent.pathname, "/context/relations");
-	assert.equal(sent.searchParams.get("type"), "unified");
+	assert.equal(sent.searchParams.has("type"), false, "never send type on a unified database");
 	assert.equal(sent.searchParams.get("id"), "s1");
 	assert.equal(sent.searchParams.get("limit"), "3");
 	assert.deepEqual(sent.searchParams.getAll("acl"), ["alice@acme.com", "group:slack:C1"]);

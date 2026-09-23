@@ -12,7 +12,7 @@
  * `fetchFn` is injectable for tests only; production never sets it.
  */
 
-import { unwrap } from "./envelope.js";
+import { readRequestId, unwrap } from "./envelope.js";
 import { HydraWrapperError, responseError, translateError } from "./errors.js";
 
 /** The SDK's own default, restated so this file does not depend on importing it. */
@@ -28,6 +28,13 @@ export interface RawTransport {
 
 export interface RawRequestOptions {
 	signal?: AbortSignal;
+	/**
+	 * Fired once per successful response with the envelope's meta, BEFORE
+	 * `data` is unwrapped — sendRaw's return keeps only `data`, so without this
+	 * the envelope's `meta.request_id` (the only key POST /feedback correlates
+	 * on) never reaches a caller of a raw-path call.
+	 */
+	onMeta?: (meta: { requestId?: string }) => void;
 }
 
 export function newRawTransport(config: {
@@ -166,6 +173,8 @@ async function attemptRaw<T>(
 			// and all.
 			throw responseError(path, response.status, parsed);
 		}
+
+		opts?.onMeta?.({ requestId: readRequestId(parsed) });
 
 		return unwrap<T>(parsed);
 	} catch (err) {
