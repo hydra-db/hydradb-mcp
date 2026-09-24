@@ -890,33 +890,29 @@ test("a contained chunk keeps its id, score and relations", () => {
 	assert.match(out, /a related passage/, "its extra context must survive");
 });
 
-// The whole rendering must fit the ceiling, including the entity-path prefix.
-test("entity paths count against the output budget", () => {
-	const out = buildRecalledContext(
-		{
-			chunks: Array.from({ length: 20 }, (_, i) => ({
-				chunkUuid: `c${i}`,
-				id: `s${i}`,
-				chunkContent: `body-${i} ` + "x".repeat(3000),
+// No output budget: nothing retrieval returned is ever dropped or cut. A big
+// result renders whole — every chunk body and every entity path.
+test("the rendering has no output budget: every chunk and path survives", () => {
+	const out = buildRecalledContext({
+		chunks: Array.from({ length: 20 }, (_, i) => ({
+			chunkUuid: `c${i}`,
+			id: `s${i}`,
+			chunkContent: `body-${i} ` + "x".repeat(3000),
+		})),
+		graphContext: {
+			queryPaths: Array.from({ length: 200 }, (_, i) => ({
+				relevancyScore: 0.9,
+				combinedContext: `entity path ${i} ` + "p".repeat(200),
+				triplets: [],
 			})),
-			graphContext: {
-				queryPaths: Array.from({ length: 200 }, (_, i) => ({
-					relevancyScore: 0.9,
-					combinedContext: `entity path ${i} ` + "p".repeat(200),
-					triplets: [],
-				})),
-				chunkRelations: [],
-				chunkIdToGroupIds: {},
-			},
-		} as never,
-		{ maxTotalChars: 20_000 },
-	);
+			chunkRelations: [],
+			chunkIdToGroupIds: {},
+		},
+	} as never);
 
-	assert.ok(
-		out.length <= 20_000,
-		`the whole rendering must fit the ceiling, got ${out.length}`,
-	);
-	assert.match(out, /ENTITY PATHS/, "the prefix is still included, just budgeted");
+	assert.match(out, /body-19/, "the last chunk renders");
+	assert.match(out, /entity path 199/, "the last entity path renders");
+	assert.doesNotMatch(out, /truncated|omitted/, "nothing is cut");
 });
 
 // Greptile, PR #49: the count was derived by matching /^Chunk \d+/ over the
@@ -958,22 +954,20 @@ test("a body pointer never aims forward, where truncation could remove it", () =
 	assert.match(out, /every language they write/);
 });
 
-test("compact rendering never collapses bodies into a pointer", () => {
+// Bodies always render whole, so a `(same text as Chunk N)` pointer always
+// names a chunk that really carries the shared text — collapsing is safe in
+// every mode now that per-chunk trimming is gone.
+test("duplicate bodies collapse into a pointer that always resolves", () => {
 	const shared = "y".repeat(400);
-	const out = buildRecalledContext(
-		{
-			chunks: [
-				{ chunkUuid: "c1", id: "doc", chunkContent: `${"x".repeat(2000)}${shared}` },
-				{ chunkUuid: "c2", id: "doc", chunkContent: shared },
-			],
-		} as never,
-		{ maxChunkChars: 600 },
-	);
+	const out = buildRecalledContext({
+		chunks: [
+			{ chunkUuid: "c1", id: "doc", chunkContent: `${"x".repeat(2000)}${shared}` },
+			{ chunkUuid: "c2", id: "doc", chunkContent: shared },
+		],
+	} as never);
 
-	// The shared text sits past chunk 1's 600-character cut, so a pointer would
-	// promise content the rendered response does not contain.
-	assert.doesNotMatch(out, /same text as Chunk/);
-	assert.match(out, new RegExp(shared.slice(0, 50)), "the second body is rendered");
+	assert.match(out, /same text as Chunk 1/, "the contained body collapses");
+	assert.match(out, new RegExp(shared.slice(0, 50)), "the shared text is rendered once, whole");
 });
 
 // Live /query, hydra_internal_docs, Sep 2026: the one query path carried 80

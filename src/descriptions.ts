@@ -181,11 +181,8 @@ const PARAM = {
 		"How many items to return per page (1-100). Defaults to the server's page size. " +
 		"Raise it to see more at once; lower it to keep the response small.",
 	detail:
-		"How much of each matching chunk to return. 'compact' (default) trims each " +
-		"chunk to its first ~600 characters and omits the surrounding-context blocks — " +
-		"enough to judge relevance and pick a source to inspect. 'full' returns every " +
-		"chunk whole; use it when the snippets are being cut off mid-answer. Either way " +
-		"the response is capped; hydradb_inspect reads a source in slices of at most 20000 characters.",
+		"'compact' (default) omits the surrounding-context blocks; 'full' includes them. " +
+		"Chunk bodies are never truncated in either mode — every matching chunk is returned whole.",
 	structured:
 		"Also return structured content alongside the text: resolved_scope, request_id and " +
 		"sources with ready-made inspect_args/list_args. Default false — the text already " +

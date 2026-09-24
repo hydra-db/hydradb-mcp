@@ -681,11 +681,6 @@ export function createHydraDBServer(
 		// It also disagreed with its own header: `Found ${length}` counted every
 		// chunk while the list stopped at 10, so a 15-chunk result announced 15 and
 		// showed 10.
-		// The header and the legend are part of the response the caller pays for,
-		// so the renderer gets a budget with room already reserved for them.
-		// Adding framing after the ceiling had been applied put the finished
-		// response over the documented limit — the same mistake as leaving the
-		// entity-path prefix out of the accounting, one layer up.
 		// The request id is the ONLY key POST /feedback correlates on, and it
 		// cannot be reconstructed later — if it is not printed here, the feedback
 		// tool has nothing to attach a submission to. Rendered on its own line so
@@ -702,7 +697,6 @@ export function createHydraDBServer(
 			feedbackLine;
 
 		const scopeLine = scopeText(resolvedScope);
-		const headerAllowance = 120 + scopeLine.length + (scopeWarning?.length ?? 0) + 20;
 		const sourceRefs = new Map<string, Record<string, unknown>>();
 		const singleCollection = "collection" in resolvedScope
 			? resolvedScope.collection
@@ -728,12 +722,10 @@ export function createHydraDBServer(
 		});
 
 		const { text: contextStr, shown } = renderRecalledContext({ ...res, chunks: scopedChunks }, {
-			// Compact keeps every chunk but trims each body and drops the
-			// extra-context blocks; `full` is the unchanged rendering.
-			...(compact
-				? { maxChunkChars: COMPACT_CHUNK_CHARS, includeExtraContext: false }
-				: {}),
-			maxTotalChars: QUERY_CHAR_BUDGET - legend.length - headerAllowance,
+			// Compact drops the surrounding-context blocks; neither mode
+			// truncates — every chunk body renders whole and every chunk is
+			// shown. Retrieval already bounds the response via max_results.
+			...(compact ? { includeExtraContext: false } : {}),
 		});
 
 		return queryResult(
@@ -1203,8 +1195,6 @@ export function createHydraDBServer(
 	 * restores the previous rendering. The total budget applies either way,
 	 * because fifty capped chunks still add up.
 	 */
-	const COMPACT_CHUNK_CHARS = 600;
-	const QUERY_CHAR_BUDGET = 40_000;
 
 	/** Bound any one server-supplied string, marking it when it is shortened. */
 	function clamp(text: string, budget: number): string {

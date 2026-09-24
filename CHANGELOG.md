@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-09-24
+
+### Changed — `hydradb_query` never truncates
+
+- Removed all output truncation: the per-chunk body trim (~600 chars in
+  compact) and the 40,000-character total response budget are gone. Every
+  matching chunk renders whole, every entity path renders, and nothing is
+  dropped to fit a ceiling. `max_results` remains the size knob.
+- `detail` now controls only the surrounding-context blocks: `compact`
+  (default) omits them, `full` includes them.
+- Duplicate-body collapsing (`same text as Chunk N`) now applies in both
+  modes; with whole bodies the pointer always resolves.
+
 ## [1.5.0] - 2026-09-23
 
 ### Fixed — `hydradb_query` dropped the graph it was sent
