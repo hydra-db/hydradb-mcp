@@ -2238,13 +2238,14 @@ async function queryText(args: Record<string, unknown>, chunks = longChunks(10))
 	return (result.content as { text: string }[])[0]!.text;
 }
 
-// Chunk bodies were rendered at full length with no cap of any kind.
-test("hydradb_query defaults to compact and trims chunk bodies", async () => {
+// Chunk bodies are never truncated: compact only omits the surrounding-context
+// blocks, and every body renders whole in both modes.
+test("hydradb_query defaults to compact and renders whole chunk bodies", async () => {
 	const text = await queryText({ query: "q" });
 
-	assert.match(text, /chunk truncated/);
+	assert.doesNotMatch(text, /chunk truncated/);
 	assert.doesNotMatch(text, /Extra Context/, "compact omits surrounding-context blocks");
-	// Still shows every chunk — compact trims, it does not drop matches.
+	// Shows every chunk, whole.
 	assert.equal(text.match(/Chunk \d+/g)?.length, 10);
 });
 
@@ -2255,36 +2256,28 @@ test("detail:full restores whole chunk bodies and extra context", async () => {
 	assert.match(text, /Extra Context/);
 });
 
-test("compact is materially smaller than full", async () => {
+test("compact differs from full only by the extra-context blocks", async () => {
 	const compact = await queryText({ query: "q" });
 	const full = await queryText({ query: "q", detail: "full" });
 
-	assert.ok(
-		compact.length < full.length * 0.4,
-		`expected a large reduction, got ${compact.length} vs ${full.length}`,
-	);
+	assert.ok(compact.length < full.length, "full carries the extra-context blocks");
+	assert.doesNotMatch(compact, /Extra Context/);
+	assert.match(full, /Extra Context/);
 });
 
-// A per-chunk cap does not bound the whole: many capped chunks still add up.
-test("hydradb_query caps the total response even in full detail", async () => {
+// No response ceiling: everything retrieval returned is rendered, and the
+// header counts exactly what the body shows. max_results is the size knob.
+test("hydradb_query never truncates the response, even for huge results", async () => {
 	const text = await queryText(
 		{ query: "q", detail: "full", max_results: 50 },
 		longChunks(50, 5000),
 	);
 
-	assert.ok(text.length < 45_000, `expected a bounded response, got ${text.length}`);
-	assert.match(text, /response truncated: showing \d+ of 50 chunks/);
-	assert.match(text, /hydradb_inspect/, "must say how to get a source in full");
-
-	// Greptile, PR #49: the header must count what survived truncation, not what
-	// went in — otherwise it promises source ids the body does not contain.
+	assert.doesNotMatch(text, /response truncated/);
 	const announced = Number(text.match(/Found (\d+) /)?.[1]);
 	const rendered = (text.match(/^Chunk \d+/gm) ?? []).length;
 	assert.equal(announced, rendered, "header must match the chunks actually shown");
-	assert.ok(rendered < 50, "the budget should have dropped some chunks");
-
-	// And it must never cut a chunk header in half.
-	assert.doesNotMatch(text, /\[id: [^\]]*$/, "a severed id must not be left danging");
+	assert.equal(rendered, 50, "every chunk renders");
 });
 
 // A live call with max_results=10 returned 15 chunks, and all 15 were rendered.
@@ -2299,21 +2292,14 @@ test("max_results actually bounds what is rendered", async () => {
 	assert.match(text, /Found 3 /);
 });
 
-// Greptile, PR #49: the header and legend were appended after the renderer had
-// applied its ceiling, so the finished response exceeded the documented limit.
-test("the whole query response stays within the documented ceiling", async () => {
+// The framing (header, legend, feedback line) always accompanies the body,
+// however large the result.
+test("the query response keeps its framing on huge results", async () => {
 	const text = await queryText(
 		{ query: "q", detail: "full", max_results: 50 },
 		longChunks(50, 5000),
 	);
 
-	// 40k is the documented ceiling for the response the caller receives, not
-	// for one component of it.
-	assert.ok(
-		text.length <= 40_000,
-		`the finished response must fit the ceiling, got ${text.length}`,
-	);
-	// The framing that has to fit is still present.
 	assert.match(text, /^Found \d+ /);
 	assert.match(text, /hydradb_inspect/);
 });

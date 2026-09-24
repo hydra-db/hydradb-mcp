@@ -303,9 +303,6 @@ export function renderedChunkCount(response: RecallResponse): number {
  * budget applies overstates what survived it. The header and the body must
  * describe the same thing.
  */
-/** Room reserved for the truncation notice itself, so it also fits. */
-const TRUNCATION_NOTE_ALLOWANCE = 240;
-
 export function renderRecalledContext(
 	response: RecallResponse,
 	opts?: Parameters<typeof buildRecalledContext>[1],
@@ -331,15 +328,8 @@ function render(
 	opts?: {
 		maxGroupOccurrences?: number;
 		minEvidenceScore?: number;
-		/**
-		 * Per-chunk body ceiling. Unset renders every chunk in full, which is what
-		 * `detail: "full"` asks for.
-		 */
-		maxChunkChars?: number;
 		/** Drop the Extra Context blocks entirely (compact mode). */
 		includeExtraContext?: boolean;
-		/** Total character ceiling for the whole rendering. */
-		maxTotalChars?: number;
 	},
 ): { text: string; shown: number } {
 	// No floor by default, matching the SDK's `buildString`. The 0.4 floor this
@@ -349,7 +339,6 @@ function render(
 	// section never rendered. A caller can still pass one.
 	const minScore = opts?.minEvidenceScore ?? 0;
 	const maxGroupOccurrences = opts?.maxGroupOccurrences;
-	const maxChunkChars = opts?.maxChunkChars;
 	const includeExtraContext = opts?.includeExtraContext ?? true;
 
 	const chunks = response.chunks ?? [];
@@ -390,18 +379,13 @@ function render(
 	const chunkSections: string[] = [];
 
 	// Suppress chunks wholly contained in another chunk before rendering any of
-	// them, so the numbering reflects what the caller actually receives.
-	// Body collapsing is disabled when per-chunk trimming is on. Compact mode
-	// already caps each body, so the duplication it would remove is small — and
-	// the pointer could name a chunk whose RENDERED body was cut before the
-	// shared text, promising content no rendered chunk actually contains.
-	const contained =
-		maxChunkChars == null
-			? containedChunkIndices(
-					chunks.map((c) => extractChunkText(c.chunkContent)),
-					chunks.map((c) => c.id == null ? undefined : JSON.stringify([c.collection, c.id])),
-				)
-			: new Map<number, number>();
+	// them, so the numbering reflects what the caller actually receives. Bodies
+	// always render whole, so a "(same text as Chunk N)" pointer always names a
+	// chunk that really carries the shared text.
+	const contained = containedChunkIndices(
+		chunks.map((c) => extractChunkText(c.chunkContent)),
+		chunks.map((c) => c.id == null ? undefined : JSON.stringify([c.collection, c.id])),
+	);
 	// Extra context is deduped by CONTENT as well as by id: the same passage
 	// arrives under different ids, and an id-keyed check never notices.
 	// Maps a passage to the chunk number that already rendered it, so a later
@@ -451,12 +435,7 @@ function render(
 		if (bodyDuplicateOf != null) {
 			lines.push(`(same text as Chunk ${bodyDuplicateOf})`);
 		} else
-		lines.push(
-			maxChunkChars != null && bodyText.length > maxChunkChars
-				? `${bodyText.slice(0, maxChunkChars)}… [chunk truncated: ${bodyText.length} chars; ` +
-					`use detail:"full" or ${"hydradb_inspect"} for the whole source]`
-				: bodyText,
-		);
+		lines.push(bodyText);
 
 		// The SDK types this optional where the old hand-written mirror had it
 		// required. An absent uuid simply matches no relation, which is the
@@ -621,68 +600,5 @@ function render(
 	}
 
 	const text = output.join("\n");
-	const budget = opts?.maxTotalChars;
-	if (budget != null && text.length > budget) {
-		// A per-chunk cap does not bound the whole: fifty capped chunks still add
-		// up. The total ceiling is the one that actually protects the caller.
-		//
-		// Cut at a CHUNK boundary, not mid-string. Slicing the joined text can
-		// sever a chunk header, leaving a partial `[id: …]` the caller might try
-		// to use, and it silently removes whole sections the "Found N" header is
-		// still counting. Dropping whole chunks and saying how many were dropped
-		// keeps the header and the body describing the same thing.
-		// The prefix needs its own ceiling, not just a place in the accounting: a
-		// graph-heavy result can produce entity paths that exceed the whole budget
-		// on their own, and then no amount of dropping chunks brings the total
-		// under it. Half the budget leaves room for the chunks the caller asked
-		// for.
-		const headBudget = Math.floor(budget / 2);
-		// Both prefix sections share that half, dated facts first: a temporal
-		// query's answer usually IS one of them, while graph lines are supporting.
-		let head = "";
-		let headUsed = 0;
-		for (const [label, sectionLines] of [
-			["DATED FACTS", temporalLines],
-			["ENTITY PATHS", entityPathLines],
-		] as const) {
-			if (sectionLines.length === 0) continue;
-			const header = `=== ${label} ===\n`;
-			headUsed += header.length + 1;
-			const keptLines: string[] = [];
-			for (const line of sectionLines) {
-				if (headUsed + line.length + 1 > headBudget) break;
-				keptLines.push(line);
-				headUsed += line.length + 1;
-			}
-			const droppedLines = sectionLines.length - keptLines.length;
-			const section =
-				`${header}${keptLines.join("\n")}` +
-				(droppedLines > 0 ? `\n[${droppedLines} more line(s) omitted]` : "") +
-				"\n\n";
-			// Budgeted dated-facts-first, but printed in the unbudgeted order.
-			head = label === "ENTITY PATHS" ? section + head : head + section;
-		}
-		const kept: string[] = [];
-		// The prefix and the framing count against the ceiling too. Budgeting only
-		// the chunk sections let a graph-heavy result exceed the documented limit
-		// by however large its entity paths happened to be.
-		let used = head.length + "=== CONTEXT ===\n".length + TRUNCATION_NOTE_ALLOWANCE;
-		const separator = "\n\n---\n\n";
-		for (const section of chunkSections) {
-			const cost = section.length + (kept.length > 0 ? separator.length : 0);
-			if (used + cost > budget) break;
-			kept.push(section);
-			used += cost;
-		}
-		const dropped = chunkSections.length - kept.length;
-		return {
-			text:
-				`${head}=== CONTEXT ===\n${kept.join(separator)}\n\n` +
-				`[response truncated: showing ${kept.length} of ${chunkSections.length} chunks. ` +
-				`${dropped} omitted to stay within ${budget} characters. Narrow the query, lower ` +
-				`max_results, or fetch a specific source with hydradb_inspect.]`,
-			shown: kept.length,
-		};
-	}
 	return { text, shown: chunkSections.length };
 }
