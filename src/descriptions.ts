@@ -60,12 +60,13 @@ const PARAM = {
 		"is the right one. This re-RANKS; it never excludes older sources, so " +
 		"check the dates in the results rather than assuming the top hit is current.",
 	query_apps:
-		"Search connector-ingested sources with app awareness (default: false). " +
-		"Turn it on for Slack, Jira, Confluence, Drive and similar: it matches " +
-		"exact IDs and actors, reconstructs threads, and pulls in parent/child " +
-		"pages that plain text matching misses — a Jira comment is unhelpful " +
-		"without its issue, and a Slack reply without its thread. Adds a little " +
-		"latency, so leave it off for corpora you uploaded directly.",
+		"Search connector-ingested sources with app awareness. ON unless you pass " +
+		"false: Hydra DB applies it whenever this is omitted. It matches exact IDs " +
+		"(a ticket key such as REV-2933) and actors, reconstructs threads, and pulls " +
+		"in linked, parent and child items that plain text matching misses — a Jira " +
+		"comment is unhelpful without its issue, and a Slack reply without its " +
+		"thread. Pass false only for corpora you uploaded directly, to save a little " +
+		"latency.",
 	collections:
 		"Search SEVERAL collections at once, as a list of names. Use it when the " +
 		"answer could live in more than one and you do not know which — otherwise " +
@@ -278,6 +279,8 @@ const SEARCH_BODY = `Search Hydra DB for anything the user has stored: memories 
 CALL THIS BEFORE ANSWERING whenever the answer could depend on the user's history, preferences, prior decisions, project details, or a document they have ingested — including when you are merely unsure. A query that returns nothing costs one call; answering from a blank slate costs the user a correction.
 
 Searches both families by default. Every result carries \`[id: …]\` — pass it to hydradb_inspect for the full source, or to hydradb_delete to remove it.
+
+Tickets and other work items (Jira, Linear, GitHub): put the key in the query ("what happened with REV-2933"). The named item comes first; the items linked to it follow, each with a \`Relation:\` line saying how (e.g. "REV-3158 linked_to REV-2933"), and the named item's \`Links:\` line lists its links, parent and children. To trace a chain — an epic to its child, the child to a linked epic, that epic to the ticket that records the outcome — query each linked key in turn instead of stopping at the first document that summarises the plan. When the Metadata line carries an item's url, status or dates, cite the url and prefer the latest resolved item for "what was decided"; when it does not, open the item with hydradb_inspect before relying on them.
 
 Collections partition the database by use case. This connection's default (if it has one) is shown by hydradb_list_collections; when there is none, a search without \`collection\` covers every collection in the database (up to 10). Pass \`collection\`, or \`collections\` for several, to aim it where the answer should live.
 

@@ -98,7 +98,7 @@ chunks with their source id, a relevance score, and knowledge-graph context.
 | `metadata_filters` | object | No | Exact-match filters over stored metadata |
 | `num_related_chunks` | number | No | Adjacent chunks to attach per match (0-5, default: 0) |
 | `recency_bias` | number | No | Favour recently-updated sources when ranking, 0-1 (default: 0). Re-ranks only; it never excludes older sources |
-| `query_apps` | boolean | No | App-aware retrieval over connector sources — exact IDs and actors, thread reconstruction, parent/child expansion (default: false) |
+| `query_apps` | boolean | No | App-aware retrieval over connector sources — exact IDs and actors, thread reconstruction, linked and parent/child items (on by default: Hydra DB applies it when omitted; pass `false` to skip) |
 | `collections` | array | No | Search several collections at once. Pass either this or `collection`, never both |
 
 Results are text only by default: each chunk carries its source id and

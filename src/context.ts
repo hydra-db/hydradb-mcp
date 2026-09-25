@@ -168,6 +168,36 @@ function formatTriplet(triplet: PathTriplet, indent = "  "): string {
 }
 
 /**
+ * Keys the server sets when a query names an item (a ticket key such as
+ * REV-2933): `app_links` on the named item lists what it is linked to, and
+ * `app_relation` on each linked item says how. They get lines of their own
+ * (see trailLines) instead of riding the metadata line.
+ */
+const TRAIL_KEYS = new Set(["app_links", "app_relation"]);
+
+/**
+ * The trail lines for a chunk: which items the named one links to, and why a
+ * linked item is here. Buried in the metadata line they read as one more
+ * attribute; as their own lines they are the next hops to follow — query a
+ * linked key to walk the trail (epic -> child -> linked outcome).
+ */
+function trailLines(chunk: Parameters<typeof metadataLine>[0]): string[] {
+	const merged = { ...(chunk.additionalMetadata ?? {}), ...(chunk.metadata ?? {}) };
+	const lines: string[] = [];
+
+	// The server writes both trail keys as strings.
+	const relation = String(merged.app_relation ?? "").trim();
+
+	if (relation !== "") lines.push(`Relation: ${relation}`);
+
+	const links = String(merged.app_links ?? "").trim();
+
+	if (links !== "") lines.push(`Links (query a key to follow it): ${links}`);
+
+	return lines;
+}
+
+/**
  * The chunk's metadata as one line, merged the way `buildString` merges it:
  * the free-form per-document map first, then schema-backed metadata, which wins
  * a key conflict because it is the validated one.
@@ -180,7 +210,7 @@ function metadataLine(chunk: { additionalMetadata?: Record<string, unknown>; met
 	const merged: Record<string, unknown> = { ...(chunk.additionalMetadata ?? {}), ...(chunk.metadata ?? {}) };
 	const parts: string[] = [];
 	for (const key of Object.keys(merged).sort()) {
-		if (key === "title") continue;
+		if (key === "title" || TRAIL_KEYS.has(key)) continue;
 		const value = merged[key];
 		if (value == null) continue;
 		const rendered = typeof value === "object" ? JSON.stringify(value) : String(value);
@@ -444,6 +474,8 @@ function render(
 		if (title) {
 			lines.push(`Source: ${title}`);
 		}
+
+		lines.push(...trailLines(chunk));
 		const metaLine = metadataLine(chunk);
 		if (metaLine) lines.push(metaLine);
 
