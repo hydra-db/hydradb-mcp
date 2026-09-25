@@ -907,3 +907,37 @@ test("an omitted acl stays undefined rather than becoming an empty list", async 
 	assert.equal(seen.query.acl, undefined);
 	assert.equal(seen.list.acl, undefined);
 });
+
+test("every call path sends X-HydraDB-Source: mcp", async (t) => {
+	const seen: { path: string; source: string | null; fern: string | null }[] = [];
+	t.mock.method(globalThis, "fetch", async (input: Request | string | URL, init?: RequestInit) => {
+		const url = new URL(input instanceof Request ? input.url : String(input));
+		const headers = new Headers(input instanceof Request ? input.headers : undefined);
+
+		for (const [k, v] of new Headers(init?.headers)) headers.set(k, v);
+
+		seen.push({ path: url.pathname, source: headers.get("x-hydradb-source"), fern: headers.get("x-fern-language") });
+
+		const data = url.pathname.endsWith("/subgraph")
+			? { seed_source_id: "s1", sources: [], relations: [], auxiliary_relations: [], is_truncated: false, auxiliary_truncated: false, max_depth_reached: 0, success: true, message: "ok" }
+			: { chunks: [] };
+
+		return new Response(JSON.stringify({ success: true, data, meta: {} }), {
+			status: 200,
+			headers: { "content-type": "application/json" },
+		});
+	});
+
+	const hydra = new HydraDB({ token: "tok", database: "db_test" });
+	await hydra.context.query({ query: "owner" });
+	await hydra.context.query({ query: "owner", titles: ["Roadmap"] });
+	await hydra.context.subgraph({ id: "s1" });
+
+	assert.equal(seen.length, 3);
+
+	for (const call of seen) {
+		assert.equal(call.source, "mcp", `${call.path} must carry the MCP label`);
+	}
+
+	assert.equal(seen[0]?.fern, "JavaScript");
+});
