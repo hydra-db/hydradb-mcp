@@ -1050,3 +1050,36 @@ test("dated facts render only when the temporal filter was applied", () => {
 	const degraded = buildRecalledContext({ ...base, temporalFilter: { applied: false } } as never);
 	assert.doesNotMatch(degraded, /DATED FACTS/);
 });
+
+test("a named ticket lists its links and a linked ticket says how it is linked", () => {
+	// SAFETY: the fixture carries exactly the chunk fields buildRecalledContext reads.
+	const out = buildRecalledContext({
+		chunks: [
+			{
+				chunkUuid: "c1",
+				id: "s-2933",
+				sourceTitle: "Outstanding Balance Holds $250 Threshold",
+				chunkContent: "epic body",
+				additionalMetadata: {
+					app_external_id: "REV-2933",
+					app_status: "Done",
+					app_links: "REV-3158 (linked_to): OBH $250 threshold experiment: outcome and recommendation; REV-2679 (parent)",
+				},
+			},
+			{
+				chunkUuid: "c2",
+				id: "s-3158",
+				sourceTitle: "OBH $250 threshold experiment: outcome and recommendation",
+				chunkContent: "decision body",
+				additionalMetadata: { app_external_id: "REV-3158", app_relation: "REV-3158 linked_to REV-2933" },
+			},
+		],
+	} as never);
+
+	assert.match(
+		out,
+		/Source: Outstanding Balance Holds \$250 Threshold\nLinks \(query a key to follow it\): REV-3158 \(linked_to\): OBH \$250 threshold experiment: outcome and recommendation; REV-2679 \(parent\)\nMetadata: app_external_id: REV-2933 \| app_status: Done\n/,
+	);
+	assert.match(out, /Source: OBH \$250 threshold experiment: outcome and recommendation\nRelation: REV-3158 linked_to REV-2933\nMetadata: app_external_id: REV-3158\n/);
+	assert.doesNotMatch(out, /app_links:|app_relation:/, "trail keys are not repeated on the metadata line");
+});
