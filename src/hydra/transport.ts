@@ -18,6 +18,8 @@ import { HydraWrapperError, responseError, translateError } from "./errors.js";
 /** The SDK's own default, restated so this file does not depend on importing it. */
 export const DEFAULT_BASE_URL = "https://api.hydradb.com";
 
+export const SOURCE_HEADERS = { "X-HydraDB-Source": "mcp" } as const;
+
 export interface RawTransport {
 	token: string;
 	baseUrl: string;
@@ -106,6 +108,7 @@ async function attemptRaw<T>(
 				// hand-rolled path that omitted it would silently get v1
 				// behaviour from the same endpoints.
 				"API-Version": "2",
+				...SOURCE_HEADERS,
 			},
 			...(body !== undefined ? { body: JSON.stringify(body) } : {}),
 			signal: controller.signal,
