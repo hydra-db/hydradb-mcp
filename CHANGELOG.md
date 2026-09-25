@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.1] - 2026-09-25
+
+### Added — `hydradb_query` shows a named ticket's links
+
+When a query names a ticket key, results now say how each linked item relates to
+it (`Relation:`) and list the named ticket's links (`Links (query a key to follow
+it):`), so an agent can follow a Jira trail (parent, linked issues, links of links)
+one query at a time. The tool description and README also state that
+`query_apps` is on by default: Hydra DB applies it when the argument is omitted.
+(#96)
+
 ## [1.5.0] - 2026-09-23
 
 ### Fixed — `hydradb_query` dropped the graph it was sent
