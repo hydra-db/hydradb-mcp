@@ -22,7 +22,7 @@ import { z } from "zod";
 import { unwrap } from "./envelope.js";
 import { HydraWrapperError, translateError } from "./errors.js";
 import { GraphResource } from "./graph.js";
-import { type RawTransport, newRawTransport, sendRaw } from "./transport.js";
+import { type RawTransport, SOURCE_HEADERS, newRawTransport, sendRaw } from "./transport.js";
 
 export type ContextKind = "memory" | "knowledge";
 
@@ -1419,6 +1419,7 @@ export class HydraDB {
 				// on stdio transport is the JSON-RPC channel. Only the sink is
 				// overridden — level and silencing keep the SDK's own defaults.
 				logging: { logger: STDERR_LOGGER },
+				headers: { ...SOURCE_HEADERS },
 			});
 
 		this.database = config.database;
