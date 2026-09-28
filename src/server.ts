@@ -1,6 +1,5 @@
 import { Buffer } from "node:buffer";
 import { createHash, randomUUID } from "node:crypto";
-import { createRequire } from "node:module";
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
@@ -17,6 +16,7 @@ import type { ContextKind, QueryKind } from "./hydra/index.js";
 import { logger } from "./logger.js";
 import { ALIAS_REPLACEMENTS, DEPRECATED_TOOL_NAMES, TOOL_NAMES } from "./tool-names.js";
 import type { MemoryResultItem } from "./types.js";
+import { SERVER_VERSION } from "./version.js";
 
 // Host-owned default: silently attached to ingest so Hydra DB extracts the kind
 // of personal context this server cares about. Injected here (not in the
@@ -26,15 +26,6 @@ const INGEST_INSTRUCTIONS =
 	"goals, and recurring themes. Capture any stated or implied personal context " +
 	"that would help personalise future interactions.";
 
-// Read the version from package.json rather than repeating it here: the literal
-// this replaces sat at 1.0.0 through the whole 1.x line, so every client saw
-// stale version metadata. `../package.json` resolves to the package root from
-// both `src/` (tsx) and `dist/` (published build).
-const require = createRequire(import.meta.url);
-
-const { version: SERVER_VERSION } = require("../package.json") as {
-	version: string;
-};
 
 type ToolResult = {
 	content: { type: "text"; text: string }[];
