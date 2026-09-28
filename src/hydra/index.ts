@@ -60,6 +60,6 @@ export {
 
 export { unwrap } from "./envelope.js";
 
-export { DEFAULT_BASE_URL, newRawTransport, sendRaw } from "./transport.js";
+export { DEFAULT_BASE_URL, apiKeyId, newRawTransport, sendRaw } from "./transport.js";
 
 export type { RawTransport } from "./transport.js";

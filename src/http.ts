@@ -24,7 +24,7 @@ import cors from "cors";
 import express, { type Express } from "express";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 
-import { HydraDB, type HydraConfig } from "./hydra/index.js";
+import { HydraDB, type HydraConfig, apiKeyId } from "./hydra/index.js";
 import {
 	buildAllowedHosts,
 	type HttpServerConfig,
@@ -270,7 +270,8 @@ export function createHttpApp(config: HttpServerConfig): Express {
 				return;
 			}
 			const t = result.token;
-			oauthUserId = t.userId;
+			// A token without a subject is still an OAuth caller; keep it distinct from direct key use.
+			oauthUserId = t.userId || `key-${apiKeyId(t.apiKey)}`;
 			identity = {
 				apiKey: t.apiKey,
 				...(t.database != null ? { database: t.database } : {}),

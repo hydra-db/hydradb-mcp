@@ -28,15 +28,19 @@ export interface CallerIdentity {
 	oauthUserId?: string;
 }
 
+export function apiKeyId(token: string): string {
+	const dot = token.indexOf(".");
+
+	if (dot > 0) return token.slice(0, dot);
+
+	// Legacy keys have no id prefix; a hash identifies the key without revealing it.
+	return `sha256-${createHash("sha256").update(token).digest("hex").slice(0, 16)}`;
+}
+
 export function mcpUser({ token, oauthUserId }: CallerIdentity): string {
 	if (oauthUserId) return `mcp:oauth:${oauthUserId}`;
 
-	const dot = token.indexOf(".");
-
-	if (dot > 0) return `mcp:apikey:${token.slice(0, dot)}`;
-
-	// Legacy keys have no id prefix; a hash identifies the key without revealing it.
-	return `mcp:apikey:sha256-${createHash("sha256").update(token).digest("hex").slice(0, 16)}`;
+	return `mcp:apikey:${apiKeyId(token)}`;
 }
 
 export function mcpHeaders(identity: CallerIdentity) {

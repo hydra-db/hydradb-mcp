@@ -195,19 +195,23 @@ test("a CORS preflight (OPTIONS) for an allowed origin succeeds", async () => {
 	);
 });
 
-test("hosted OAuth calls reach the API tagged with the signed-in user, never the key secret", async (t) => {
+async function hostedToolCall(
+	t: { mock: { method: typeof import("node:test").mock.method }; after: (fn: () => void) => void },
+	bearer: string,
+	token: { sub?: string },
+): Promise<Headers[]> {
 	const now = 1_800_000_000_000;
 
 	const introspection: typeof fetch = async () =>
 		new Response(
 			JSON.stringify({
 				active: true,
-				sub: "user-1",
 				client_id: "hmc_claude",
 				aud: "https://mcp.test",
 				exp: Math.floor(now / 1000) + 3600,
 				database: "personal",
 				api_key: "hk_live_abc.SECRET",
+				...token,
 			}),
 			{ status: 200, headers: { "Content-Type": "application/json" } },
 		);
@@ -270,7 +274,7 @@ test("hosted OAuth calls reach the API tagged with the signed-in user, never the
 				method: "POST",
 				path: "/mcp",
 				headers: {
-					Authorization: "Bearer hmat_token",
+					Authorization: `Bearer ${bearer}`,
 					"Content-Type": "application/json",
 					Accept: "application/json, text/event-stream",
 				},
@@ -291,9 +295,20 @@ test("hosted OAuth calls reach the API tagged with the signed-in user, never the
 	assert.equal(res.status, 200, res.body);
 	assert.ok(upstream.length > 0, "the tool call never reached the API");
 
-	for (const h of upstream) {
+	return upstream;
+}
+
+test("hosted OAuth calls reach the API tagged with the signed-in user, never the key secret", async (t) => {
+	for (const h of await hostedToolCall(t, "hmat_with_sub", { sub: "user-1" })) {
 		assert.equal(h.get("x-hydradb-mcp-user"), "mcp:oauth:user-1");
 		assert.equal(h.get("x-hydradb-source"), "mcp");
+		assert.ok(!h.get("x-hydradb-mcp-user")?.includes("SECRET"));
+	}
+});
+
+test("hosted OAuth calls without a subject stay tagged as OAuth, by key id", async (t) => {
+	for (const h of await hostedToolCall(t, "hmat_without_sub", {})) {
+		assert.equal(h.get("x-hydradb-mcp-user"), "mcp:oauth:key-hk_live_abc");
 		assert.ok(!h.get("x-hydradb-mcp-user")?.includes("SECRET"));
 	}
 });
