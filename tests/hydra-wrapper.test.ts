@@ -11,6 +11,8 @@ import {
 	translateError,
 	unwrap,
 } from "../src/hydra/index.js";
+import { mcpUser } from "../src/hydra/transport.js";
+import { SERVER_VERSION } from "../src/version.js";
 
 test("unwrap returns .data for an envelope and passes through bare payloads", () => {
 	assert.deepEqual(unwrap({ data: { a: 1 }, success: true, meta: {} }), { a: 1 });
@@ -941,3 +943,88 @@ test("every call path sends X-HydraDB-Source: mcp", async (t) => {
 
 	assert.equal(seen[0]?.fern, "JavaScript");
 });
+
+test("mcpUser tags OAuth users by id and API-key users by key id, never the secret", () => {
+	assert.equal(mcpUser({ token: "hk_live_abc.SECRET", oauthUserId: "user-1" }), "mcp:oauth:user-1");
+	assert.equal(mcpUser({ token: "hk_live_abc.SECRET" }), "mcp:apikey:hk_live_abc");
+
+	const legacy = mcpUser({ token: "legacykeywithoutid" });
+
+	assert.match(legacy, /^mcp:apikey:sha256-[0-9a-f]{16}$/);
+	assert.equal(legacy, mcpUser({ token: "legacykeywithoutid" }));
+	assert.ok(!legacy.includes("legacykeywithoutid"));
+	assert.match(mcpUser({ token: ".SECRET" }), /^mcp:apikey:sha256-/);
+});
+
+test("only a HydraDB-shaped key exposes its id; any other token is identified by hash alone", () => {
+	assert.equal(mcpUser({ token: "sk_live_y1QbNp1qM3uF.x9QmZ7tR2wLs5vB1nC4d" }), "mcp:apikey:sk_live_y1QbNp1qM3uF");
+
+	for (const token of [
+		"secretpartone.secretparttwo",
+		"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl",
+		"sk_live_abc.has.two.dots",
+		"sk_live_abc.",
+		"not a key.at all",
+	]) {
+		const tag = mcpUser({ token });
+
+		assert.match(tag, /^mcp:apikey:sha256-[0-9a-f]{16}$/, token);
+
+		for (const fragment of token.split(/[.\s]/).filter((f) => f.length > 3)) {
+			assert.ok(!tag.includes(fragment), `${token} leaked "${fragment}"`);
+		}
+	}
+});
+
+function captureHeaders(t: { mock: { method: typeof import("node:test").mock.method } }) {
+	const seen: { path: string; headers: Headers }[] = [];
+
+	t.mock.method(globalThis, "fetch", async (input: Request | string | URL, init?: RequestInit) => {
+		const url = new URL(input instanceof Request ? input.url : String(input));
+		const headers = new Headers(input instanceof Request ? input.headers : undefined);
+
+		for (const [k, v] of new Headers(init?.headers)) headers.set(k, v);
+
+		seen.push({ path: url.pathname, headers });
+
+		const data = url.pathname.endsWith("/subgraph")
+			? { seed_source_id: "s1", sources: [], relations: [], auxiliary_relations: [], is_truncated: false, auxiliary_truncated: false, max_depth_reached: 0, success: true, message: "ok" }
+			: url.pathname.endsWith("/byog/collections")
+				? { collections: [] }
+				: { chunks: [] };
+
+		return new Response(JSON.stringify({ success: true, data, meta: {} }), {
+			status: 200,
+			headers: { "content-type": "application/json" },
+		});
+	});
+
+	return seen;
+}
+
+for (const [label, config, wantUser] of [
+	["API key", { token: "hk_live_abc.SECRET" }, "mcp:apikey:hk_live_abc"],
+	["OAuth", { token: "hk_live_abc.SECRET", oauthUserId: "user-1" }, "mcp:oauth:user-1"],
+] as const) {
+	test(`every call path sends the MCP user and version headers (${label})`, async (t) => {
+		const seen = captureHeaders(t);
+		const hydra = new HydraDB({ ...config, database: "db_test" });
+
+		await hydra.context.query({ query: "owner" });
+		await hydra.context.query({ query: "owner", titles: ["Roadmap"] });
+		await hydra.context.subgraph({ id: "s1" });
+		await hydra.graph.listCollections({ database: "db_test" });
+
+		assert.equal(seen.length, 4);
+
+		for (const { path, headers } of seen) {
+			assert.equal(headers.get("x-hydradb-source"), "mcp", path);
+			assert.equal(headers.get("x-hydradb-mcp-user"), wantUser, path);
+			assert.equal(headers.get("x-hydradb-mcp-version"), SERVER_VERSION, path);
+
+			for (const [name, value] of headers) {
+				if (name !== "authorization") assert.ok(!value.includes("SECRET"), `${path} leaks the key in ${name}`);
+			}
+		}
+	});
+}

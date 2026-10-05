@@ -194,3 +194,121 @@ test("a CORS preflight (OPTIONS) for an allowed origin succeeds", async () => {
 		/x-hydradb-database/,
 	);
 });
+
+async function hostedToolCall(
+	t: { mock: { method: typeof import("node:test").mock.method }; after: (fn: () => void) => void },
+	bearer: string,
+	token: { sub?: string },
+): Promise<Headers[]> {
+	const now = 1_800_000_000_000;
+
+	const introspection: typeof fetch = async () =>
+		new Response(
+			JSON.stringify({
+				active: true,
+				client_id: "hmc_claude",
+				aud: "https://mcp.test",
+				exp: Math.floor(now / 1000) + 3600,
+				database: "personal",
+				api_key: "hk_live_abc.SECRET",
+				...token,
+			}),
+			{ status: 200, headers: { "Content-Type": "application/json" } },
+		);
+
+	const upstream: Headers[] = [];
+
+	t.mock.method(globalThis, "fetch", async (input: Request | string | URL, init?: RequestInit) => {
+		const headers = new Headers(input instanceof Request ? input.headers : undefined);
+
+		for (const [k, v] of new Headers(init?.headers)) headers.set(k, v);
+
+		upstream.push(headers);
+
+		return new Response(JSON.stringify({ success: true, data: { chunks: [] }, meta: {} }), {
+			status: 200,
+			headers: { "content-type": "application/json" },
+		});
+	});
+
+	const hosts = buildAllowedHosts(0, ["mcp.test"]);
+
+	const app = createHttpApp({
+		port: 0,
+		bindAddress: "127.0.0.1",
+		allowedOrigins: [],
+		allowedHosts: hosts,
+		trustProxy: false,
+		oauth: {
+			issuer: "https://app.test",
+			resource: "https://mcp.test",
+			introspectionSecret: "s3cret",
+			fetchFn: introspection,
+			now: () => now,
+		},
+	});
+
+	const srv = await new Promise<http.Server>((resolve) => {
+		const s = app.listen(0, "127.0.0.1", () => resolve(s));
+	});
+
+	t.after(() => srv.close());
+
+	// SAFETY: the server listens on a TCP port, so address() is an AddressInfo.
+	const oauthPort = (srv.address() as AddressInfo).port;
+
+	hosts.add(`127.0.0.1:${oauthPort}`);
+
+	const res = await new Promise<Res>((resolve, reject) => {
+		const body = JSON.stringify({
+			jsonrpc: "2.0",
+			id: 1,
+			method: "tools/call",
+			params: { name: "hydradb_query", arguments: { query: "owner" } },
+		});
+
+		const req = http.request(
+			{
+				host: "127.0.0.1",
+				port: oauthPort,
+				method: "POST",
+				path: "/mcp",
+				headers: {
+					Authorization: `Bearer ${bearer}`,
+					"Content-Type": "application/json",
+					Accept: "application/json, text/event-stream",
+				},
+			},
+			(r) => {
+				let data = "";
+				r.on("data", (c) => {
+					data += c;
+				});
+				r.on("end", () => resolve({ status: r.statusCode ?? 0, headers: r.headers, body: data }));
+			},
+		);
+
+		req.on("error", reject);
+		req.end(body);
+	});
+
+	assert.equal(res.status, 200, res.body);
+	assert.ok(upstream.length > 0, "the tool call never reached the API");
+
+	return upstream;
+}
+
+test("hosted OAuth calls reach the API tagged with the signed-in user, never the key secret", async (t) => {
+	for (const h of await hostedToolCall(t, "hmat_with_sub", { sub: "user-1" })) {
+		assert.equal(h.get("x-hydradb-mcp-user"), "mcp:oauth:user-1");
+		assert.equal(h.get("x-hydradb-source"), "mcp");
+		assert.ok(!h.get("x-hydradb-mcp-user")?.includes("SECRET"));
+	}
+});
+
+test("hosted OAuth calls without a subject stay tagged as OAuth, by key id", async (t) => {
+	for (const h of await hostedToolCall(t, "hmat_without_sub", {})) {
+		assert.equal(h.get("x-hydradb-mcp-user"), "mcp:oauth:key-hk_live_abc");
+		assert.ok(!h.get("x-hydradb-mcp-user")?.includes("SECRET"));
+	}
+});

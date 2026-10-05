@@ -24,6 +24,7 @@ import { newRawTransport, type RawTransport, sendRaw } from "./transport.js";
 
 export interface GraphConfig {
 	token: string;
+	oauthUserId?: string;
 	baseUrl?: string;
 	timeoutSeconds?: number;
 	maxRetries?: number;

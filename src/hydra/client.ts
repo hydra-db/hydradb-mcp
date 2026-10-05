@@ -21,8 +21,8 @@ import { z } from "zod";
 
 import { unwrap } from "./envelope.js";
 import { HydraWrapperError, translateError } from "./errors.js";
-import { GraphResource } from "./graph.js";
-import { type RawTransport, SOURCE_HEADERS, newRawTransport, sendRaw } from "./transport.js";
+import { type GraphConfig, GraphResource } from "./graph.js";
+import { type RawTransport, mcpHeaders, newRawTransport, sendRaw } from "./transport.js";
 
 export type ContextKind = "memory" | "knowledge";
 
@@ -112,6 +112,8 @@ function validateQueryResponse(response: unknown): void {
 export interface HydraConfig {
 	/** Bearer token (the HydraDB API key). */
 	token: string;
+	/** Set when the caller signed in through OAuth on the hosted server. */
+	oauthUserId?: string;
 	/** Database scope (canonical name for the tenant). */
 	database: string;
 	/** Collection scope (canonical name for the sub-tenant). */
@@ -1419,7 +1421,7 @@ export class HydraDB {
 				// on stdio transport is the JSON-RPC channel. Only the sink is
 				// overridden — level and silencing keep the SDK's own defaults.
 				logging: { logger: STDERR_LOGGER },
-				headers: { ...SOURCE_HEADERS },
+				headers: mcpHeaders(config),
 			});
 
 		this.database = config.database;
@@ -1458,11 +1460,16 @@ export class HydraDB {
 			config.allowedCollections,
 			raw,
 		);
-		this.graph = new GraphResource({
+
+		const graphConfig: GraphConfig = {
 			token: config.token,
 			...(config.baseUrl != null ? { baseUrl: config.baseUrl } : {}),
 			timeoutSeconds: config.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS,
 			maxRetries: config.maxRetries ?? DEFAULT_MAX_RETRIES,
-		});
+		};
+
+		if (config.oauthUserId) graphConfig.oauthUserId = config.oauthUserId;
+
+		this.graph = new GraphResource(graphConfig);
 	}
 }

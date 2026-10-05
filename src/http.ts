@@ -24,7 +24,7 @@ import cors from "cors";
 import express, { type Express } from "express";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 
-import { HydraDB } from "./hydra/index.js";
+import { HydraDB, type HydraConfig, apiKeyId } from "./hydra/index.js";
 import {
 	buildAllowedHosts,
 	type HttpServerConfig,
@@ -242,6 +242,7 @@ export function createHttpApp(config: HttpServerConfig): Express {
 		// key directly: the same resolver runs, and the tool layer never learns
 		// OAuth exists.
 		let identity: ResolvedIdentity | undefined;
+		let oauthUserId: string | undefined;
 		const bearer = bearerFromHeader(req.headers.authorization);
 		if (oauth && isAccessToken(bearer)) {
 			const result = await introspect(oauth, bearer);
@@ -269,6 +270,8 @@ export function createHttpApp(config: HttpServerConfig): Express {
 				return;
 			}
 			const t = result.token;
+			// A token without a subject is still an OAuth caller; keep it distinct from direct key use.
+			oauthUserId = t.userId || `key-${apiKeyId(t.apiKey)}`;
 			identity = {
 				apiKey: t.apiKey,
 				...(t.database != null ? { database: t.database } : {}),
@@ -309,7 +312,7 @@ export function createHttpApp(config: HttpServerConfig): Express {
 
 		const creds = resolution.credentials;
 		try {
-			const hydra = new HydraDB({
+			const hydraConfig: HydraConfig = {
 				token: creds.apiKey,
 				database: creds.database,
 				collection: creds.collection,
@@ -322,7 +325,11 @@ export function createHttpApp(config: HttpServerConfig): Express {
 					? { timeoutSeconds: creds.timeoutSeconds }
 					: {}),
 				...(creds.maxRetries != null ? { maxRetries: creds.maxRetries } : {}),
-			});
+			};
+
+			if (oauthUserId) hydraConfig.oauthUserId = oauthUserId;
+
+			const hydra = new HydraDB(hydraConfig);
 			const server = createHydraDBServer(hydra, creds.graph, { oauthTools: identity != null });
 
 			// Stateless: this pair serves exactly this request and is discarded when

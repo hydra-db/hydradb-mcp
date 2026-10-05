@@ -12,6 +12,9 @@
  * `fetchFn` is injectable for tests only; production never sets it.
  */
 
+import { createHash } from "node:crypto";
+
+import { SERVER_VERSION } from "../version.js";
 import { unwrap } from "./envelope.js";
 import { HydraWrapperError, responseError, translateError } from "./errors.js";
 
@@ -20,11 +23,43 @@ export const DEFAULT_BASE_URL = "https://api.hydradb.com";
 
 export const SOURCE_HEADERS = { "X-HydraDB-Source": "mcp" } as const;
 
+export interface CallerIdentity {
+	token: string;
+	oauthUserId?: string;
+}
+
+// HydraDB keys are <prefix>_<env>_<id>.<secret>, and only that public id may leave the process.
+const HYDRADB_API_KEY_FORMAT = /^([A-Za-z0-9]+_[A-Za-z0-9]+_[A-Za-z0-9_-]+)\.[A-Za-z0-9_-]+$/;
+
+export function apiKeyId(token: string): string {
+	const id = HYDRADB_API_KEY_FORMAT.exec(token)?.[1];
+
+	if (id) return id;
+
+	// Anything else (legacy or foreign tokens) is identified by a hash, never by a fragment of it.
+	return `sha256-${createHash("sha256").update(token).digest("hex").slice(0, 16)}`;
+}
+
+export function mcpUser({ token, oauthUserId }: CallerIdentity): string {
+	if (oauthUserId) return `mcp:oauth:${oauthUserId}`;
+
+	return `mcp:apikey:${apiKeyId(token)}`;
+}
+
+export function mcpHeaders(identity: CallerIdentity) {
+	return {
+		...SOURCE_HEADERS,
+		"X-HydraDB-MCP-User": mcpUser(identity),
+		"X-HydraDB-MCP-Version": SERVER_VERSION,
+	};
+}
+
 export interface RawTransport {
 	token: string;
 	baseUrl: string;
 	timeoutMs: number;
 	maxRetries: number;
+	headers?: Record<string, string>;
 	fetchFn?: typeof fetch;
 }
 
@@ -34,6 +69,7 @@ export interface RawRequestOptions {
 
 export function newRawTransport(config: {
 	token: string;
+	oauthUserId?: string;
 	baseUrl?: string;
 	timeoutSeconds?: number;
 	maxRetries?: number;
@@ -46,6 +82,7 @@ export function newRawTransport(config: {
 		baseUrl: (config.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, ""),
 		timeoutMs: (config.timeoutSeconds ?? defaults.timeoutSeconds) * 1000,
 		maxRetries: config.maxRetries ?? defaults.maxRetries,
+		headers: mcpHeaders(config),
 		...(config.fetchFn ? { fetchFn: config.fetchFn } : {}),
 	};
 }
@@ -108,7 +145,7 @@ async function attemptRaw<T>(
 				// hand-rolled path that omitted it would silently get v1
 				// behaviour from the same endpoints.
 				"API-Version": "2",
-				...SOURCE_HEADERS,
+				...(t.headers ?? SOURCE_HEADERS),
 			},
 			...(body !== undefined ? { body: JSON.stringify(body) } : {}),
 			signal: controller.signal,
