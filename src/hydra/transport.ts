@@ -28,12 +28,15 @@ export interface CallerIdentity {
 	oauthUserId?: string;
 }
 
+// HydraDB keys are <prefix>_<env>_<id>.<secret>, and only that public id may leave the process.
+const HYDRADB_API_KEY_FORMAT = /^([A-Za-z0-9]+_[A-Za-z0-9]+_[A-Za-z0-9_-]+)\.[A-Za-z0-9_-]+$/;
+
 export function apiKeyId(token: string): string {
-	const dot = token.indexOf(".");
+	const id = HYDRADB_API_KEY_FORMAT.exec(token)?.[1];
 
-	if (dot > 0) return token.slice(0, dot);
+	if (id) return id;
 
-	// Legacy keys have no id prefix; a hash identifies the key without revealing it.
+	// Anything else (legacy or foreign tokens) is identified by a hash, never by a fragment of it.
 	return `sha256-${createHash("sha256").update(token).digest("hex").slice(0, 16)}`;
 }
 

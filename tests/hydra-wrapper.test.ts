@@ -956,6 +956,26 @@ test("mcpUser tags OAuth users by id and API-key users by key id, never the secr
 	assert.match(mcpUser({ token: ".SECRET" }), /^mcp:apikey:sha256-/);
 });
 
+test("only a HydraDB-shaped key exposes its id; any other token is identified by hash alone", () => {
+	assert.equal(mcpUser({ token: "sk_live_y1QbNp1qM3uF.x9QmZ7tR2wLs5vB1nC4d" }), "mcp:apikey:sk_live_y1QbNp1qM3uF");
+
+	for (const token of [
+		"secretpartone.secretparttwo",
+		"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl",
+		"sk_live_abc.has.two.dots",
+		"sk_live_abc.",
+		"not a key.at all",
+	]) {
+		const tag = mcpUser({ token });
+
+		assert.match(tag, /^mcp:apikey:sha256-[0-9a-f]{16}$/, token);
+
+		for (const fragment of token.split(/[.\s]/).filter((f) => f.length > 3)) {
+			assert.ok(!tag.includes(fragment), `${token} leaked "${fragment}"`);
+		}
+	}
+});
+
 function captureHeaders(t: { mock: { method: typeof import("node:test").mock.method } }) {
 	const seen: { path: string; headers: Headers }[] = [];
 
