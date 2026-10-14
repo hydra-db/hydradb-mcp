@@ -43,14 +43,126 @@ jobs:
           file: ./Dockerfile
           push: true
           platforms: linux/amd64
-          tags: |
-            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
-            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
+          # PRO-2793: only the -amd64 SUFFIXED tag. The shared :SHA and :latest
+          # are written solely by merge-manifest, as a complete two-arch list, so
+          # no shared tag ever points at a single-arch image. Claiming :latest
+          # here would also briefly REPLACE an existing multi-arch list with an
+          # amd64-only manifest until the merge finished.
+          tags: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}-amd64
+          # Unchanged scope: this is still the amd64 cache. arm64 gets its own.
           cache-from: type=gha,scope=hydradb-mcp
           cache-to: type=gha,scope=hydradb-mcp,mode=max
 
+  # PRO-2793: arm64 sibling of build-and-push, so prod/mcp can be scheduled on
+  # Graviton nodes. Same shape as MOVEIT deploy-prod.yml (PRO-2426).
+  #
+  # A SEPARATE job, not a matrix leg, so each arch keeps its own cache and its
+  # own failure surface.
+  #
+  # Native arm runner, not QEMU: arm64 hosted runners bill below x64 and
+  # emulation costs 3-5x the minutes. A failure here BLOCKS the prod deploy; it
+  # does not fall back to amd64, because without the merge there is no shared
+  # :SHA tag to deploy.
+  #
+  # Actions here are pinned to commit SHAs (the same pins deploy-byoc.yaml
+  # already uses): this job holds id-token: write and assumes the PRODUCTION
+  # AWS role, so a repointed upstream tag would run unreviewed code with prod
+  # credentials.
+  build-arm64:
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - id: login-ecr
+        uses: aws-actions/amazon-ecr-login@d539f0932e70871a027e9d5a9d8fc38589180a64 # v2.1.6
+
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          platforms: linux/arm64
+          # A suffixed tag (not digest-only) so the child is tag-protected from
+          # any ECR lifecycle rule that expires untagged manifests.
+          tags: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}-arm64
+          # Own cache scope so the two arches don't clobber each other's layers.
+          cache-from: type=gha,scope=hydradb-mcp-linux-arm64
+          cache-to: type=gha,scope=hydradb-mcp-linux-arm64,mode=max
+
+  # PRO-2793: the ONLY writer of the shared :SHA and :latest tags. Combines the
+  # two per-arch children into one manifest list; Kubernetes picks per node.
+  merge-manifest:
+    needs: [build-and-push, build-arm64]
+    if: |
+      !cancelled() &&
+      needs.build-and-push.result == 'success' &&
+      needs.build-arm64.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - id: login-ecr
+        uses: aws-actions/amazon-ecr-login@d539f0932e70871a027e9d5a9d8fc38589180a64 # v2.1.6
+
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Create manifest list and push
+        env:
+          REPO: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}
+        run: |
+          set -euo pipefail
+          # Both children must exist before anything shared is published.
+          for suffix in amd64 arm64; do
+            docker buildx imagetools inspect "${REPO}:${IMAGE_TAG}-${suffix}" >/dev/null \
+              || { echo "source tag :${IMAGE_TAG}-${suffix} not found" >&2; exit 1; }
+          done
+          docker buildx imagetools create \
+            -t "${REPO}:${IMAGE_TAG}" \
+            -t "${REPO}:latest" \
+            "${REPO}:${IMAGE_TAG}-amd64" \
+            "${REPO}:${IMAGE_TAG}-arm64"
+
+      - name: Verify both architectures are present
+        env:
+          REPO: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}
+        run: |
+          set -euo pipefail
+          # Parse with jq, don't grep: --raw is pretty-printed JSON.
+          RAW=$(docker buildx imagetools inspect "${REPO}:${IMAGE_TAG}" --raw)
+          for arch in amd64 arm64; do
+            jq -e --arg a "$arch" \
+              'any(.manifests[]; .platform.os == "linux" and .platform.architecture == $a)' \
+              <<< "$RAW" >/dev/null || { echo "$arch missing from manifest" >&2; echo "$RAW" >&2; exit 1; }
+          done
+          echo "manifest ${IMAGE_TAG} contains both amd64 and arm64"
+
   deploy:
-    needs: build-and-push
+    # PRO-2793: requires merge-manifest to have SUCCEEDED (not merely
+    # not-failed). The shared :SHA only exists once the merge writes it, so a
+    # skipped or failed merge -- including an arm64 build failure -- stops the
+    # deploy instead of pointing ArgoCD at a missing tag. There is no
+    # "not rebuilt" path in this workflow, so "skipped" is never acceptable here.
+    needs: [build-and-push, merge-manifest]
+    if: |
+      !cancelled() &&
+      needs.build-and-push.result == 'success' &&
+      needs.merge-manifest.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
