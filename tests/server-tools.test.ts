@@ -3734,6 +3734,50 @@ test("the retry itself is not retried", async () => {
 	await client.close();
 });
 
+test("a recovered search returns its documents, and the structured scope names what was kept and skipped", async () => {
+	const { hydra, calls } = mockHydra(
+		{
+			collections: { collections: ["hydradbpoc", "default", "Servicenow"] },
+			query: (args: { collections?: string[] }) =>
+				args?.collections?.includes("default")
+					? Promise.reject(unsearchable400("default"))
+					: Promise.resolve({
+						success: true,
+						meta: { requestId: "req-retry" },
+						data: {
+							chunks: [{
+								chunkUuid: "c-visa",
+								id: "src-visa",
+								chunkContent: "Raise the visa request through the Global Mobility catalogue item.",
+								sourceTitle: "US Business Visa SOP",
+								relevancyScore: 0.88,
+							}],
+						},
+					}),
+		},
+		{ collection: null },
+	);
+
+	const client = await connect(hydra);
+	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "US visa process", structured: true } });
+	assert.notEqual(result.isError, true);
+	assert.equal(queryCall(calls).length, 2);
+
+	const text = firstText(result);
+	assert.match(text, /Found 1 /);
+	assert.match(text, /Global Mobility catalogue item/);
+	assert.match(text, /Scope warning: Skipped "default"/);
+
+	const structured = result.structuredContent as Record<string, unknown>;
+	assert.ok(structured, "query should return structuredContent when asked");
+	assert.deepEqual(structured.resolved_scope, { database: "db_test", collections: ["hydradbpoc", "Servicenow"] });
+	assert.match(String(structured.scope_warning), /Skipped "default".*not searchable/);
+	assert.equal(structured.request_id, "req-retry");
+	const sources = structured.sources as { id: string }[];
+	assert.deepEqual(sources.map((s) => s.id), ["src-visa"]);
+	await client.close();
+});
+
 test("unsearchableCollectionsOf reads both server wordings and ignores other errors", () => {
 	const wrap = (err: unknown) => translateError("/query", err);
 	assert.deepEqual(unsearchableCollectionsOf(wrap(unsearchable400("default"))), ["default"]);
