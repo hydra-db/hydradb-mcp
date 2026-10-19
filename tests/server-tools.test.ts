@@ -7,7 +7,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { z } from "zod";
 
-import { HydraDB } from "../src/hydra/index.js";
+import { HydraDB, translateError } from "../src/hydra/index.js";
 import {
 	__resetAliasWarnings,
 	__resetShutdown,
@@ -16,6 +16,7 @@ import {
 	beginShutdown,createHydraDBServer,
 	inFlightCount,
 	legacyToolsEnabled,
+	unsearchableCollectionsOf,
 } from "../src/server.js";
 import {
 	CANONICAL_TOOL_NAMES,
@@ -3617,6 +3618,135 @@ test("a failed multi-collection search stays an error rather than silently chang
 	await client.close();
 });
 
+// PRO-2791: the listing is the union of vector store, source rows and BYOG
+// graphs, but /query validates names against the vector store alone. A
+// widened search that includes a listed-but-unsearchable name fails whole.
+const unsearchable400 = (names: string, wording = "do not exist") =>
+	new HydraDBError({
+		statusCode: 400,
+		body: {
+			success: false,
+			error: {
+				code: "INVALID_INPUT",
+				message: `sub_tenant_ids ${wording}: [${names}]; fix: check the names, a collection is searchable once a document has been ingested into it`,
+			},
+		},
+	});
+
+/** A query mock that refuses `refused` names once, then answers over the rest. */
+const refusing = (refused: string[], wording?: string) =>
+	(args: { collections?: string[]; collection?: string }) => {
+		const asked = args?.collections ?? (args?.collection != null ? [args.collection] : []);
+		const bad = asked.filter((n) => refused.includes(n));
+		return bad.length > 0
+			? Promise.reject(unsearchable400(bad.join(" "), wording))
+			: Promise.resolve({ data: { chunks: [] }, success: true });
+	};
+
+test("a widened search drops the collections /query refuses and runs once more over the rest", async () => {
+	const { hydra, calls } = mockHydra(
+		{ collections: { collections: ["hydradbpoc", "default", "Servicenow"] }, query: refusing(["default"]) },
+		{ collection: null },
+	);
+
+	const client = await connect(hydra);
+	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
+	assert.notEqual(result.isError, true);
+	const qs = queryCall(calls);
+	assert.equal(qs.length, 2);
+	assert.deepEqual(qs[0]!.args.collections, ["hydradbpoc", "default", "Servicenow"]);
+	assert.deepEqual(qs[1]!.args.collections, ["hydradbpoc", "Servicenow"]);
+	assert.match(firstText(result), /Skipped "default"/);
+	assert.match(firstText(result), /any of the 2 collections of database "db_test" \(hydradbpoc, Servicenow\)/);
+	await client.close();
+});
+
+test("the retry narrows to a single collection when only one searchable name remains", async () => {
+	const { hydra, calls } = mockHydra(
+		{ collections: { collections: ["default", "sales"] }, query: refusing(["default"]) },
+		{ collection: null },
+	);
+
+	const client = await connect(hydra);
+	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
+	assert.notEqual(result.isError, true);
+	const qs = queryCall(calls);
+	assert.equal(qs.length, 2);
+	assert.equal(qs[1]!.args.collection, "sales");
+	assert.equal(qs[1]!.args.collections, undefined);
+	await client.close();
+});
+
+test("the retry falls back to the workspace default when every listed collection is refused", async () => {
+	const { hydra, calls } = mockHydra(
+		{ collections: { collections: ["default", "graph2"] }, query: refusing(["default", "graph2"], "are BYOG graph collections, which /query does not search") },
+		{ collection: null },
+	);
+
+	const client = await connect(hydra);
+	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
+	assert.notEqual(result.isError, true);
+	const qs = queryCall(calls);
+	assert.equal(qs.length, 2);
+	assert.equal(qs[1]!.args.collection, undefined);
+	assert.equal(qs[1]!.args.collections, undefined);
+	assert.match(firstText(result), /Skipped "default", "graph2"/);
+	assert.match(firstText(result), /Only the workspace default was searched/);
+	await client.close();
+});
+
+test("a caller's own collections are never narrowed, even on the same 400", async () => {
+	const { hydra, calls } = mockHydra({ query: refusing(["default"]) }, { collection: null });
+	const client = await connect(hydra);
+	const result = await client.callTool({
+		name: "hydradb_query",
+		arguments: { query: "q", collections: ["hydradbpoc", "default"] },
+	});
+	assert.equal(result.isError, true);
+	assert.equal(queryCall(calls).length, 1);
+	assert.match(firstText(result), /sub_tenant_ids do not exist: \[default\]/);
+	await client.close();
+});
+
+test("a 400 that names only collections this search did not send stays an error", async () => {
+	const { hydra, calls } = mockHydra(
+		{ query: () => Promise.reject(unsearchable400("other")) },
+		{ collection: null },
+	);
+
+	const client = await connect(hydra);
+	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
+	assert.equal(result.isError, true);
+	assert.equal(queryCall(calls).length, 1);
+	await client.close();
+});
+
+test("the retry itself is not retried", async () => {
+	const { hydra, calls } = mockHydra(
+		{ query: () => Promise.reject(unsearchable400("sales")) },
+		{ collection: null },
+	);
+
+	const client = await connect(hydra);
+	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
+	assert.equal(result.isError, true);
+	assert.equal(queryCall(calls).length, 2);
+	await client.close();
+});
+
+test("unsearchableCollectionsOf reads both server wordings and ignores other errors", () => {
+	const wrap = (err: unknown) => translateError("/query", err);
+	assert.deepEqual(unsearchableCollectionsOf(wrap(unsearchable400("default"))), ["default"]);
+	assert.deepEqual(unsearchableCollectionsOf(wrap(unsearchable400("a b"))), ["a", "b"]);
+	assert.deepEqual(
+		unsearchableCollectionsOf(wrap(unsearchable400("default", "are BYOG graph collections, which /query does not search"))),
+		["default"],
+	);
+	assert.equal(unsearchableCollectionsOf(wrap(new HydraDBError({ statusCode: 400, body: { error: { code: "INVALID_INPUT", message: "database is required" } } }))), null);
+	assert.equal(unsearchableCollectionsOf(wrap(new HydraDBError({ statusCode: 500, body: { error: { code: "E", message: "sub_tenant_ids do not exist: [x]" } } }))), null);
+	assert.equal(unsearchableCollectionsOf(wrap(new Error("sub_tenant_ids do not exist: [x]"))), null);
+	assert.equal(unsearchableCollectionsOf(new Error("boom")), null);
+});
 
 test("widening stays inside a collection confinement", async () => {
 	const { hydra, calls } = mockHydra({}, { collection: null, allowedCollections: ["sales"] });

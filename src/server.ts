@@ -11,7 +11,7 @@ import type { GraphConfig } from "./config.js";
 import { renderRecalledContext } from "./context.js";
 import { COLLECTION_PATTERN, MAX_BODY_BYTES, renderRows } from "./cypher.js";
 import { SERVER_INSTRUCTIONS, TOOL_DESCRIPTIONS } from "./descriptions.js";
-import { HydraDB, assertCollectionAllowed, assertDatabaseAllowed } from "./hydra/index.js";
+import { HydraDB, HydraWrapperError, assertCollectionAllowed, assertDatabaseAllowed } from "./hydra/index.js";
 import type { ContextKind, QueryKind } from "./hydra/index.js";
 import { logger } from "./logger.js";
 import { ALIAS_REPLACEMENTS, DEPRECATED_TOOL_NAMES, TOOL_NAMES } from "./tool-names.js";
@@ -366,6 +366,32 @@ function collectionNamesOf(res: unknown): string[] | null {
 	return listed as string[];
 }
 
+/**
+ * Collection names a `/query` 400 rejected as unsearchable, or null when the
+ * error is anything else.
+ *
+ * `GET /databases/collections` is the union of every place a collection name
+ * can be stored: the vector store, the source rows, and the database's BYOG
+ * graphs. `/query` validates names against the vector store alone, so a BYOG
+ * graph (the MCP's own graph tools default to one called `default`) or a
+ * collection whose documents never produced a vector is listed but refused,
+ * and an automatically widened search that includes it fails whole. The
+ * server names the offenders: `sub_tenant_ids do not exist: [a b]`, or on
+ * newer builds `sub_tenant_ids are BYOG graph collections, which /query does
+ * not search: [a b]`. Go's `%v` separates the names with spaces.
+ */
+export function unsearchableCollectionsOf(err: unknown): string[] | null {
+	if (!(err instanceof HydraWrapperError) || err.status !== 400) return null;
+
+	const body = err.body as { error?: { message?: unknown } } | null | undefined;
+	const message = typeof body?.error?.message === "string" ? body.error.message : err.message;
+	const match = /sub_tenant_ids [^:[\]]*:\s*\[([^\]]*)\]/.exec(message);
+	if (match == null) return null;
+
+	const names = match[1]!.split(/[\s,]+/).filter((n) => n !== "");
+	return names.length > 0 ? names : null;
+}
+
 export function createHydraDBServer(
 	hydraOverride?: HydraDB,
 	/**
@@ -585,7 +611,32 @@ export function createHydraDBServer(
 		// failure. Retrying in the workspace default silently changed the corpus
 		// and could turn malformed responses or inaccessible partitions into an
 		// apparently successful empty/partial answer.
-		const raw = await send();
+		//
+		// One exception, and only for a scope this code chose itself: the
+		// listing can name collections `/query` refuses (see
+		// `unsearchableCollectionsOf`), and the server rejects the whole
+		// widened request over them. That is not a failed search of real data,
+		// it is a wrong guess at the searchable set, so the refused names are
+		// dropped and the search runs once more over what remains, saying so.
+		// A caller's own `collection`/`collections` is never narrowed.
+		let raw: Awaited<ReturnType<typeof send>>;
+		try {
+			raw = await send();
+		} catch (err) {
+			const refused = widened == null ? null : unsearchableCollectionsOf(err);
+			const kept = refused == null ? null : widened!.filter((n) => !refused.includes(n));
+			if (kept == null || kept.length === widened!.length) throw err;
+
+			const skipped = widened!.filter((n) => !kept.includes(n));
+			widened = kept.length > 0 ? kept : undefined;
+			scopeCollection = kept.length === 1 ? kept[0] : undefined;
+			scopeCollections = kept.length > 1 ? kept : undefined;
+			scopeWarning = `Skipped ${skipped.map((n) => JSON.stringify(n)).join(", ")}: listed for database ` +
+				`"${database}" but not searchable (a BYOG graph collection, or one with no indexed documents).` +
+				(kept.length === 0 ? " Only the workspace default was searched." : "");
+			logger.debug(`${TOOL_NAMES.QUERY}: retrying without unsearchable collections ${skipped.join(", ")}`);
+			raw = await send();
+		}
 
 		// The renderer reads the SDK payload directly; there is no longer a
 		// snake_case mirror to convert into.
