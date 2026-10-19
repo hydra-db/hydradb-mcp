@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.2] - 2026-10-19
+
+### Fixed — a bare `hydradb_query` failed whole over a listed-but-unsearchable collection (PRO-2791)
+
+`GET /databases/collections` returns the union of the vector store, the source
+rows and the database's BYOG graphs, but `/query` validates collection names
+against the vector store alone. When a bare `hydradb_query` widened to every
+listed collection and one of them was a BYOG graph (a graph called `default`,
+the MCP graph tools' own default name, is the usual case), the server refused
+the whole request with `400 sub_tenant_ids do not exist: [default]`. A widened
+search now reads the refused names out of that 400, drops them, and runs once
+more over what remains, with a scope warning naming what was skipped. A
+caller's own `collection`/`collections` is never narrowed, a 400 naming
+collections this search did not send stays an error, and the retry is not
+retried. (#101)
+
 ## [1.5.1] - 2026-09-25
 
 ### Added — `hydradb_query` shows a named ticket's links
