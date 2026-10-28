@@ -14,6 +14,25 @@ test("all tool names are unique", () => {
 	assert.equal(unique.size, names.length);
 });
 
+test("canonical inventory includes the complete database tool family", () => {
+	const canonical = new Set<string>(CANONICAL_TOOL_NAMES);
+
+	for (const name of [
+		"hydradb_databases",
+		"hydradb_create_database",
+		"hydradb_delete_database",
+		"hydradb_database_readiness",
+		"hydradb_get_metadata_schema",
+		"hydradb_add_metadata_fields",
+		"hydradb_database_stats",
+	]) {
+		assert.ok(
+			canonical.has(name),
+			`${name} must be available on API-key, stdio and OAuth connections`,
+		);
+	}
+});
+
 test("all tool names have corresponding descriptions", () => {
 	for (const toolName of Object.values(TOOL_NAMES)) {
 		assert.ok(

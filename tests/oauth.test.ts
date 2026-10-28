@@ -413,6 +413,33 @@ test("hydradb_databases on a confined connection answers from the list, marking 
 	assert.match(body.result.content[0].text, /confined/);
 });
 
+test("a confined OAuth connection refuses every database tool outside its approved list", async () => {
+	__resetIntrospectionCache();
+	introspectAnswer = () => ({ status: 200, body: active({ database: "personal", databases: ["personal"] }) });
+
+	for (const [name, args] of [
+		["hydradb_create_database", { database: "work" }],
+		["hydradb_delete_database", { database: "work" }],
+		["hydradb_database_readiness", { database: "work" }],
+		["hydradb_get_metadata_schema", { database: "work" }],
+		["hydradb_add_metadata_fields", { database: "work", add_fields: [{ name: "region", data_type: "VARCHAR" }] }],
+		["hydradb_database_stats", { database: "work" }],
+	] as const) {
+		const res = await request(
+			"POST",
+			"/",
+			{ host: `127.0.0.1:${port}`, ...JSON_HEADERS, authorization: "Bearer hmat_database_tools" },
+				JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }),
+			);
+
+			const result = JSON.parse(res.body).result;
+
+		assert.equal(result.isError, true, name);
+		assert.match(result.content[0].text, /cannot use database "work"/, name);
+		assert.match(result.content[0].text, /confined to database "personal"/, name);
+	}
+});
+
 test("the 401 challenge is readable cross-origin, so browser clients can discover the issuer", async () => {
 	const res = await request(
 		"OPTIONS",
@@ -463,19 +490,29 @@ test("request headers cannot re-scope an OAuth identity after consent", async ()
 	assert.match(g.result.content[0].text, /confined to database "personal"/);
 });
 
-test("hydradb_databases is registered for OAuth connections only", async () => {
+test("database tools are registered for OAuth and API-key connections", async () => {
 	__resetIntrospectionCache();
 	introspectAnswer = () => ({ status: 200, body: active() });
 	const viaToken = await request("POST", "/", { host: `127.0.0.1:${port}`, ...JSON_HEADERS, authorization: "Bearer hmat_tools" }, TOOLS_LIST);
-	assert.ok(toolNames(viaToken).includes("hydradb_databases"));
 	const viaKey = await request(
 		"POST",
 		"/",
 		{ host: `127.0.0.1:${port}`, ...JSON_HEADERS, authorization: "Bearer sk_live_abc.def", "x-hydradb-database": "db" },
 		TOOLS_LIST,
 	);
-	// An API-key connection's tool list is exactly what it was before OAuth existed.
-	assert.ok(!toolNames(viaKey).includes("hydradb_databases"));
+
+	for (const name of [
+		"hydradb_databases",
+		"hydradb_create_database",
+		"hydradb_delete_database",
+		"hydradb_database_readiness",
+		"hydradb_get_metadata_schema",
+		"hydradb_add_metadata_fields",
+		"hydradb_database_stats",
+	]) {
+		assert.ok(toolNames(viaToken).includes(name), `${name} missing from OAuth tools`);
+		assert.ok(toolNames(viaKey).includes(name), `${name} missing from API-key tools`);
+	}
 });
 
 // --- The graph surface must not be a way around consent ---

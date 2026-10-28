@@ -28,6 +28,24 @@ const skipReason = !RUN_LIVE_TESTS
 const INDEX_TIMEOUT_MS = Number(process.env.HYDRADB_INDEX_TIMEOUT_MS ?? 300_000);
 const POLL_INTERVAL_MS = 5_000;
 
+const liveBaseUrl = process.env.HYDRADB_BASE_URL ?? process.env.HYDRA_DB_BASE_URL;
+
+const localDatabaseSkipReason = (() => {
+	if (skipReason) return skipReason;
+
+	if (!liveBaseUrl) return "HYDRADB_BASE_URL must name the local API for database lifecycle tests";
+
+	try {
+		const host = new URL(liveBaseUrl).hostname;
+
+		return host === "localhost" || host === "127.0.0.1" || host === "::1"
+			? false
+			: "Database lifecycle tests refuse non-local HYDRADB_BASE_URL values";
+	} catch {
+		return "HYDRADB_BASE_URL must be a valid local URL";
+	}
+})();
+
 /**
  * Is this failure worth another attempt inside the polling window?
  *
@@ -104,6 +122,77 @@ function client(): HydraDB {
 		...(config.baseUrl != null ? { baseUrl: config.baseUrl } : {}),
 	});
 }
+
+test(
+	"live local: database create -> readiness -> schema -> stats -> delete",
+	{ skip: localDatabaseSkipReason },
+	async () => {
+		const hydra = client();
+		const database = `mcp-e2e-${Date.now()}`;
+		let exists = false;
+
+		try {
+			const created = await hydra.databases.create({
+				database,
+				embeddingsDimension: 1024,
+				databaseMetadataSchema: [{
+					name: "vendor",
+					dataType: "VARCHAR",
+					maxLength: 128,
+					enableMatch: true,
+				}],
+			});
+
+			exists = true;
+
+			assert.equal(created.database ?? created.tenantId, database);
+
+			const provisioned = await pollUntil("database is ready for ingestion", async () => {
+				const status = await hydra.databases.readiness({ database });
+
+				return {
+					value: status.infra?.readyForIngestion === true ? status : null,
+					observed: status,
+				};
+			});
+
+			assert.ok(provisioned.value, `database did not become ready: ${JSON.stringify(provisioned.observed)}`);
+
+			const initialSchema = await hydra.databases.getMetadataSchema({ database });
+			assert.ok(initialSchema.fields?.some((field) => field.name === "vendor"));
+
+			const updated = await hydra.databases.updateMetadataSchema({
+				database,
+				addFields: [{ name: "amount", dataType: "DOUBLE", enableMatch: true }],
+			});
+
+			assert.ok(updated.addedFields?.includes("amount"));
+
+			const finalSchema = await hydra.databases.getMetadataSchema({ database });
+			assert.ok(finalSchema.fields?.some((field) => field.name === "amount"));
+
+			const stats = await hydra.databases.stats({ database });
+
+			assert.equal(stats.database ?? stats.tenantId, database);
+			assert.ok(Number.isFinite(Number(stats.knowledgeCollection?.rowCount)));
+			assert.ok(Number.isFinite(Number(stats.memoryCollection?.rowCount)));
+
+			await hydra.databases.delete({ database });
+			exists = false;
+
+			const removed = await pollUntil("database disappears from list", async () => {
+				const listed = await hydra.databases.list();
+				const databases = listed.databases ?? listed.tenantIds ?? [];
+
+				return { value: databases.includes(database) ? null : true, observed: databases };
+			});
+
+			assert.equal(removed.value, true, `database still listed: ${JSON.stringify(removed.observed)}`);
+		} finally {
+			if (exists) await hydra.databases.delete({ database });
+		}
+	},
+);
 
 // The memory and knowledge families are ingested, listed and deleted through
 // different server paths. The previous single test ingested a MEMORY and then

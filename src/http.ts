@@ -330,7 +330,7 @@ export function createHttpApp(config: HttpServerConfig): Express {
 			if (oauthUserId) hydraConfig.oauthUserId = oauthUserId;
 
 			const hydra = new HydraDB(hydraConfig);
-			const server = createHydraDBServer(hydra, creds.graph, { oauthTools: identity != null });
+			const server = createHydraDBServer(hydra, creds.graph);
 
 			// Stateless: this pair serves exactly this request and is discarded when
 			// the response closes. Tearing them down on `close` — which fires for a
