@@ -82,15 +82,15 @@ function mockHydra(
 				memoryCollection: { rowCount: 1 },
 			}),
 		},
-		// The SDK 2.1.4 serializer drops request fields it predates (titles on
-		// /query, filters on /context/list), so those paths use the SDK's
-		// authenticated raw fetch. Record the parsed body under the endpoint's
-		// last path segment so a boundary test can assert what was actually sent.
+		// A listing with metadata filters, projected fields, nested threads or
+		// `all` uses the SDK's authenticated raw fetch (see ContextResource.list).
+		// Record the parsed body under the endpoint's last path segment so a
+		// boundary test can assert what was actually sent.
 		fetch: async (input: string | URL | Request, init?: RequestInit) => {
 			const path = String(typeof input === "object" && "url" in input ? input.url : input);
 			const method = path.split("/").filter(Boolean).pop() ?? "fetch";
 			calls.push({ method: `${method}-fetch`, args: JSON.parse(String(init?.body ?? "{}")) });
-			const data = method === "query" ? { chunks: [] } : "list" in responses ? responses.list : { sources: [], total: 0 };
+			const data = "list" in responses ? responses.list : { sources: [], total: 0 };
 			return new Response(JSON.stringify({ success: true, data }), {
 				status: 200,
 				headers: { "content-type": "application/json" },
@@ -714,12 +714,10 @@ test("hydradb_list resolves a knowledge source by provider id through source_fie
 
 	assert.notEqual(result.isError, true);
 	assert.match((result.content as { text: string }[])[0]!.text, /src-confluence-1/);
-	// filters ride the raw-fetch bypass (SDK serializer drops them), so assert on
-	// the body actually sent to /context/list.
-	const call = calls.find((c) => c.method === "list-fetch");
+	const call = calls.find((c) => c.method === "list");
 	assert.ok(call, "a source-field list must reach /context/list");
 	assert.deepEqual(call.args.filters, {
-		source_fields: { app_external_id: "123456", app_provider: "confluence" },
+		sourceFields: { appExternalId: "123456", appProvider: "confluence" },
 	});
 	assert.equal(call.args.type, "knowledge");
 	assert.equal(call.args.database, "db_test");
@@ -740,14 +738,14 @@ test("hydradb_list combines source selectors without losing scope, ACL, ids or p
 			},
 		});
 		assert.notEqual(result.isError, true);
-		assert.deepEqual(calls.map((call) => call.method), ["list-fetch"], "no unfiltered retry");
+		assert.deepEqual(calls.map((call) => call.method), ["list"], "no unfiltered retry");
 		assert.deepEqual(calls[0]!.args, {
 			database: "customer_db", collection: "research", type: "knowledge",
-			ids: ["source-1"], page: 2, page_size: 10, acl: ["user-1"],
-			filters: { source_fields: {
-				app_external_id: "page-1", url: "https://example.test/wiki/pages/page-1", app_provider: "confluence",
+			ids: ["source-1"], page: 2, pageSize: 10, acl: ["user-1"],
+			filters: { sourceFields: {
+				appExternalId: "page-1", url: "https://example.test/wiki/pages/page-1", appProvider: "confluence",
 			} },
-			group_threads: false,
+			groupThreads: false,
 		});
 		const text = (result.content as { text: string }[])[0]!.text;
 		assert.match(text, /No visible sources.*page 2.*customer_db.*research/);
@@ -768,7 +766,7 @@ test("hydradb_list URL-only lookup identifies the default workspace on an empty 
 		});
 		assert.notEqual(result.isError, true);
 		assert.deepEqual(calls[0]!.args.filters, {
-			source_fields: { url: "https://example.test/wiki/pages/page-1" },
+			sourceFields: { url: "https://example.test/wiki/pages/page-1" },
 		});
 		assert.equal(calls[0]!.args.collection, undefined);
 		assert.match((result.content as { text: string }[])[0]!.text, /No visible sources.*db_test.*workspace default/);
@@ -2518,6 +2516,157 @@ test("hydradb_query forwards metadata filters and related-chunk count", async ()
 	const call = calls.find((c) => c.method === "query");
 	assert.deepEqual(call?.args.metadataFilters, { team: "platform" });
 	assert.equal(call?.args.numRelatedChunks, 2);
+	await client.close();
+});
+
+test("hydradb_query sends every documented query field it is given", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	await client.callTool({
+		name: "hydradb_query",
+		arguments: {
+			query: "q",
+			additional_context: "project Atlas",
+			alpha: 0.3,
+			query_by: "hybrid",
+			query_forceful_relations: true,
+			temporal_reasoning: false,
+			response_format: "structured",
+		},
+	});
+
+	const call = calls.find((c) => c.method === "query");
+
+	assert.equal(call?.args.additionalContext, "project Atlas");
+	assert.equal(call?.args.alpha, 0.3);
+	assert.equal(call?.args.queryBy, "hybrid");
+	assert.equal(call?.args.queryForcefulRelations, true);
+	assert.equal(call?.args.temporalReasoning, false);
+	assert.equal(call?.args.responseFormat, "structured");
+	await client.close();
+});
+
+test("hydradb_query sends none of the new fields when they are unset", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
+
+	const call = calls.find((c) => c.method === "query");
+
+	for (const field of ["additionalContext", "queryBy", "queryForcefulRelations", "temporalReasoning", "responseFormat"]) {
+		assert.equal(call?.args[field], undefined, field);
+	}
+
+	assert.equal(call?.args.alpha, 0.8, "the host default alpha is unchanged");
+	await client.close();
+});
+
+test("hydradb_query accepts alpha auto and refuses alpha outside 0 to 1", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	await client.callTool({ name: "hydradb_query", arguments: { query: "q", alpha: "auto" } });
+
+	assert.equal(calls.find((c) => c.method === "query")?.args.alpha, "auto");
+
+	const out = await client.callTool({ name: "hydradb_query", arguments: { query: "q", alpha: 1.5 } });
+
+	assert.equal(out.isError, true);
+	await client.close();
+});
+
+test("hydradb_query keyword retrieval gets no default alpha and refuses an explicit one", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	await client.callTool({ name: "hydradb_query", arguments: { query: "q", query_by: "text" } });
+
+	const call = calls.find((c) => c.method === "query");
+
+	assert.equal(call?.args.queryBy, "text");
+	assert.equal(call?.args.alpha, undefined, "alpha is a hybrid-only knob");
+
+	for (const extra of [{ query_by: "text" }, { operator: "and" }]) {
+		calls.length = 0;
+		const out = await client.callTool({ name: "hydradb_query", arguments: { query: "q", alpha: 0.5, ...extra } });
+
+		assert.equal(out.isError, true);
+		// SAFETY: every tool result here is text content.
+		assert.match((out.content as { text: string }[])[0]!.text, /alpha balances hybrid retrieval/);
+		assert.equal(calls.filter((c) => c.method === "query").length, 0, "refused before the wire");
+	}
+
+	await client.close();
+});
+
+test("hydradb_query response_format markdown returns Hydra DB's Markdown with scope and request id", async () => {
+	const { hydra, calls } = mockHydra({ query: "## Results\n\n- Alice joined Acme in January" });
+	const client = await connect(hydra);
+
+	const out = await client.callTool({
+		name: "hydradb_query",
+		arguments: { query: "who joined", response_format: "markdown" },
+	});
+
+	// SAFETY: every tool result here is text content.
+	const text = (out.content as { text: string }[])[0]!.text;
+
+	assert.notEqual(out.isError, true);
+	assert.equal(calls.find((c) => c.method === "query")?.args.responseFormat, "markdown");
+	assert.match(text, /## Results\n\n- Alice joined Acme in January/);
+	assert.match(text, /db_test/);
+	assert.match(text, /request_id: req-from-meta/);
+	await client.close();
+});
+
+test("hydradb_query markdown stays within the text cap when many collections are searched", async () => {
+	const { hydra } = mockHydra({ query: "x".repeat(60_000) });
+	const client = await connect(hydra);
+	const collections = Array.from({ length: 10 }, (_, i) => `collection-with-a-long-name-${String(i).padStart(2, "0")}`);
+
+	const out = await client.callTool({
+		name: "hydradb_query",
+		arguments: { query: "q", response_format: "markdown", collections },
+	});
+
+	// SAFETY: every tool result here is text content.
+	const text = (out.content as { text: string }[])[0]!.text;
+
+	assert.notEqual(out.isError, true, text);
+	assert.match(text, /collection-with-a-long-name-09/);
+	assert.match(text, /truncated: 60000 characters/);
+	assert.ok(text.length <= 40_000, `text is ${text.length} characters`);
+	await client.close();
+});
+
+test("hydradb_query response_format markdown refuses a response that is not Markdown", async () => {
+	const { hydra } = mockHydra({ query: { chunks: [] } });
+	const client = await connect(hydra);
+
+	const out = await client.callTool({
+		name: "hydradb_query",
+		arguments: { query: "q", response_format: "markdown" },
+	});
+
+	assert.equal(out.isError, true);
+	// SAFETY: every tool result here is text content.
+	assert.match((out.content as { text: string }[])[0]!.text, /expected a Markdown string/);
+	await client.close();
+});
+
+test("hydradb_query describes each new field in its schema", async () => {
+	const client = await connect(mockHydra().hydra);
+	const { tools } = await client.listTools();
+	const query = tools.find((tool) => tool.name === "hydradb_query");
+	// SAFETY: MCP tool input schemas are JSON Schema objects with `properties`.
+	const properties = query?.inputSchema.properties as Record<string, { description?: string }>;
+
+	for (const field of ["additional_context", "alpha", "query_by", "query_forceful_relations", "temporal_reasoning", "response_format"]) {
+		assert.ok(properties[field]?.description, field);
+	}
+
 	await client.close();
 });
 

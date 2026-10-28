@@ -12,7 +12,7 @@ import { renderRecalledContext } from "./context.js";
 import { COLLECTION_PATTERN, MAX_BODY_BYTES, renderRows } from "./cypher.js";
 import { SERVER_INSTRUCTIONS, TOOL_DESCRIPTIONS } from "./descriptions.js";
 import { HydraDB, assertCollectionAllowed, assertDatabaseAllowed, hasEntries } from "./hydra/index.js";
-import type { ContextKind, MetadataFilter, QueryKind } from "./hydra/index.js";
+import type { ContextKind, MetadataFilter, QueryKind, QueryParams } from "./hydra/index.js";
 import { logger } from "./logger.js";
 import { ALIAS_REPLACEMENTS, DEPRECATED_TOOL_NAMES, TOOL_NAMES } from "./tool-names.js";
 import type { MemoryResultItem } from "./types.js";
@@ -653,6 +653,12 @@ export function createHydraDBServer(
 		database?: string;
 		collection?: string;
 		collections?: string[];
+		additional_context?: string;
+		alpha?: number | "auto";
+		query_by?: "hybrid" | "text";
+		query_forceful_relations?: boolean;
+		temporal_reasoning?: boolean;
+		response_format?: "structured" | "markdown";
 	}, signal?: AbortSignal): Promise<ToolResult> {
 		// Host-owned default (CONTRACT §2 rule 5): search BOTH families. This tool
 		// used to pin `kind: "memory"`, which made every ingested knowledge source
@@ -709,12 +715,15 @@ export function createHydraDBServer(
 		// flight at once and a shared slot would hand one the other's id.
 		let requestId: string | undefined;
 
-		const send = () => hydra.context.query({
+		const textRetrieval = args.operator != null || args.query_by === "text";
+
+		const params: QueryParams = {
 			query: args.query,
 			kind,
 			maxResults,
 			mode: args.mode ?? "thinking",
 			operator: args.operator,
+			queryBy: args.query_by,
 			ids: args.source_ids,
 			titles: args.titles,
 			metadataFilters: args.metadata_filters,
@@ -727,32 +736,39 @@ export function createHydraDBServer(
 			collections: scopeCollections,
 			// Host-owned default (CONTRACT §2 rule 5), but only where it means
 			// something: alpha balances dense against sparse retrieval in HYBRID
-			// mode, and an `operator` switches the query to text retrieval (see
-			// the wrapper), where there are no two lanes to weigh. Injecting it
-			// there would send a hybrid-only knob on a request that is not hybrid.
-			alpha: args.operator != null ? undefined : 0.8,
+			// mode, and an `operator` or `query_by: "text"` switches the query to
+			// text retrieval (see the wrapper), where there are no two lanes to
+			// weigh. Injecting it there would send a hybrid-only knob on a request
+			// that is not hybrid. A caller's own alpha is always sent, and the
+			// wrapper refuses it on text retrieval.
+			alpha: args.alpha ?? (textRetrieval ? undefined : 0.8),
 			// Host-owned default (CONTRACT §2 rule 5), and 0 is also what the API
 			// applies when the field is omitted — so the default ranking is
 			// unchanged. It stops being a constant here because "what is the
 			// current state of X" is a different question from "what matches X",
 			// and only a caller that can raise this can ask the first one.
 			recencyBias: args.recency_bias ?? 0,
-		}, {
+			additionalContext: args.additional_context,
+			queryForcefulRelations: args.query_forceful_relations,
+			temporalReasoning: args.temporal_reasoning,
+		};
+
+		const requestOptions = {
 			signal,
-			onMeta: (meta) => {
+			onMeta: (meta: { requestId?: string }) => {
 				requestId = meta.requestId;
 			},
-		});
+		};
+
+		const send = () => hydra.context.query({
+			...params,
+			responseFormat: args.response_format === "structured" ? "structured" : undefined,
+		}, requestOptions);
 
 		// Once the search scope has been chosen, a failed query must remain a
 		// failure. Retrying in the workspace default silently changed the corpus
 		// and could turn malformed responses or inaccessible partitions into an
 		// apparently successful empty/partial answer.
-		const raw = await send();
-
-		// The renderer reads the SDK payload directly; there is no longer a
-		// snake_case mirror to convert into.
-		const res = raw;
 		const searchedCollections = scopeCollections != null
 			? Array.isArray(scopeCollections) ? scopeCollections : Object.keys(scopeCollections)
 			: undefined;
@@ -776,6 +792,43 @@ export function createHydraDBServer(
 				...(scopeWarning ? { scope_warning: scopeWarning } : {}),
 			});
 		};
+
+		// The API's own Markdown rendering is the answer as it stands: it carries
+		// no chunk objects to count, trim or attach source references to, so it is
+		// returned with the scope and the request id and capped at the same budget.
+		if (args.response_format === "markdown") {
+			const markdown = await hydra.context.queryMarkdown(params, requestOptions);
+
+			const feedback = requestId
+				? `\n\n---\nWas this useful? Report it with ${TOOL_NAMES.FEEDBACK} using request_id: ${requestId}`
+				: "";
+
+			// Everything around the Markdown counts against the cap: the scope line
+			// and its warning grow with the collections searched, so they are
+			// measured rather than guessed. The truncation note is sized for the
+			// largest number it could print.
+			const warning = scopeWarning ? `\n\nScope warning: ${scopeWarning}` : "";
+
+			const note = (showing: number) =>
+				`\n\n(truncated: ${markdown.length} characters, showing ${showing})`;
+
+			const framing =
+				`${scopeText(resolvedScope)}\n\n`.length + feedback.length + warning.length;
+
+			const budget = Math.max(QUERY_CHAR_BUDGET - framing - note(QUERY_CHAR_BUDGET).length, 0);
+
+			const shown = markdown.length > budget
+				? `${markdown.slice(0, budget)}${note(budget)}`
+				: markdown;
+
+			return queryResult(`${scopeText(resolvedScope)}\n\n${shown}${feedback}`);
+		}
+
+		const raw = await send();
+
+		// The renderer reads the SDK payload directly; there is no longer a
+		// snake_case mirror to convert into.
+		const res = raw;
 
 		// The server can return more chunks than were asked for — a live call with
 		// max_results=10 came back with 15, and all 15 were rendered. Honour the
@@ -935,9 +988,18 @@ export function createHydraDBServer(
 		);
 	}
 
-	/** Keep one server-supplied message from crowding out the rest of the result. */
+	/**
+	 * Keep one server-supplied message from crowding out the rest of the result.
+	 *
+	 * Redacted first, and here rather than at registration: these messages land
+	 * in results that are not errors (a partly failed ingest, a failed
+	 * document's status), and a credential cut in half by the shortening could
+	 * no longer be matched.
+	 */
 	function briefly(message: string): string {
-		return message.length > 200 ? `${message.slice(0, 200)}…` : message;
+		const safe = hydra.redact(message);
+
+		return safe.length > 200 ? `${safe.slice(0, 200)}…` : safe;
 	}
 
 	/**
@@ -1540,11 +1602,11 @@ export function createHydraDBServer(
 	 */
 	function inspectBody(
 		res: {
-			content?: string;
-			contentBase64?: string;
-			contentType?: string;
-			sizeBytes?: number;
-			inferredContent?: string;
+			content?: string | null;
+			contentBase64?: string | null;
+			contentType?: string | null;
+			sizeBytes?: number | null;
+			inferredContent?: string | null;
 		},
 		offset?: number,
 		limit?: number,
@@ -1965,7 +2027,10 @@ export function createHydraDBServer(
 		}
 
 		if (res.success === false) {
-			const reason = deleteFailureReason(res);
+			// Server text, and it also lands in structuredContent, which the
+			// error-text redaction at registration does not reach.
+			const refusal = deleteFailureReason(res);
+			const reason = refusal == null ? refusal : hydra.redact(refusal);
 
 			// A refusal that is ITSELF a not-found carries the same ambiguity as the
 			// success-removed-nothing branch below. Any other refusal ("still
@@ -2725,6 +2790,35 @@ export function createHydraDBServer(
 
 	// --- Registration helper ---
 
+	/**
+	 * The last stop before a failure reaches the model: strip this connection's
+	 * credential, and any credential-shaped text, from whatever the tool threw or
+	 * returned as an error. Errors are built in many places; this is the one
+	 * place every one of them passes, and the only one that knows the caller's
+	 * own key or token.
+	 */
+	async function redactFailure(run: () => Promise<ToolResult>): Promise<ToolResult> {
+		let result: ToolResult;
+
+		try {
+			result = await run();
+		} catch (err) {
+			if (err instanceof Error) {
+				err.message = hydra.redact(err.message);
+				throw err;
+			}
+
+			throw new Error(hydra.redact(String(err)));
+		}
+
+		if (!result.isError) return result;
+
+		return {
+			...result,
+			content: result.content.map((part) => ({ ...part, text: hydra.redact(part.text) })),
+		};
+	}
+
 	function register(
 		name: keyof typeof TOOL_DESCRIPTIONS,
 		inputSchema: Record<string, unknown>,
@@ -2746,7 +2840,7 @@ export function createHydraDBServer(
 		const counted = (
 			args: Record<string, unknown>,
 			extra?: { signal?: AbortSignal },
-		) => trackInFlight(() => handler(args, extra));
+		) => trackInFlight(() => redactFailure(() => handler(args, extra)));
 
 		const wrapped = isDeprecated
 			? (args: Record<string, unknown>, extra?: { signal?: AbortSignal }) => {
@@ -2856,6 +2950,31 @@ export function createHydraDBServer(
 			.array(z.string())
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.acl),
+		additional_context: z
+			.string()
+			.min(1)
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.additional_context),
+		alpha: z
+			.union([z.literal("auto"), z.number().min(0).max(1)])
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.alpha),
+		query_by: z
+			.enum(["hybrid", "text"])
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.query_by),
+		query_forceful_relations: z
+			.boolean()
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.query_forceful_relations),
+		temporal_reasoning: z
+			.boolean()
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.temporal_reasoning),
+		response_format: z
+			.enum(["structured", "markdown"])
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.response_format),
 		...scopeSchema,
 	};
 
