@@ -1,4 +1,5 @@
 import type { HydraDB as SDK } from "@hydradb/sdk";
+import { z } from "zod";
 
 /**
  * The renderer reads SDK payloads directly.
@@ -16,17 +17,26 @@ import type { HydraDB as SDK } from "@hydradb/sdk";
 type RecallResponse = SDK.SearchV2RetrievalResult;
 type ScoredPath = SDK.SearchScoredPathResponse;
 
+/**
+ * A path triplet as either SDK delivers it. SDK 2.1.8 types the relation and
+ * converts it to camelCase; earlier SDKs left it as the wire's snake_case. Both
+ * are read, the way the SDK's own `buildString` does.
+ */
 type PathTriplet = {
-	source?: { name?: string };
+	source?: { name?: string | null };
 	relation?: {
+		canonicalPredicate?: string;
 		canonical_predicate?: string;
+		rawPredicate?: string;
 		raw_predicate?: string;
 		context?: string;
+		chunkId?: string | null;
 		chunk_id?: string | null;
+		temporalDetails?: string | null;
 		temporal_details?: string | null;
-		timestamp?: number | string | null;
+		timestamp?: unknown;
 	};
-	target?: { name?: string };
+	target?: { name?: string | null };
 };
 
 /**
@@ -134,7 +144,7 @@ function extractChunkText(chunkContent: string | undefined): string {
  * relation's stored timestamp (unix seconds, milliseconds tolerated).
  */
 function relationWhen(rel: PathTriplet["relation"]): string | undefined {
-	const td = rel?.temporal_details;
+	const td = rel?.temporalDetails ?? rel?.temporal_details;
 	if (typeof td === "string" && td.trim()) return td.trim().slice(0, 10);
 	return epochDate(rel?.timestamp) ?? (typeof rel?.timestamp === "string" && rel.timestamp ? rel.timestamp.slice(0, 10) : undefined);
 }
@@ -160,7 +170,11 @@ function formatTriplet(triplet: PathTriplet, indent = "  "): string {
 	const src = triplet.source?.name ?? "?";
 	const rel = triplet.relation;
 	const predicate =
-		rel?.raw_predicate ?? rel?.canonical_predicate ?? "related to";
+		rel?.rawPredicate ??
+		rel?.raw_predicate ??
+		rel?.canonicalPredicate ??
+		rel?.canonical_predicate ??
+		"related to";
 	const tgt = triplet.target?.name ?? "?";
 	const when = relationWhen(rel);
 	const ctx = rel?.context?.trim();
@@ -206,7 +220,7 @@ function trailLines(chunk: Parameters<typeof metadataLine>[0]): string[] {
  * flags — and dropping them here discarded them one step before the model saw
  * them. `title` is skipped because it is already the `Source:` line.
  */
-function metadataLine(chunk: { additionalMetadata?: Record<string, unknown>; metadata?: Record<string, unknown> }): string | undefined {
+function metadataLine(chunk: Pick<SDK.SearchV2Chunk, "additionalMetadata" | "metadata">): string | undefined {
 	const merged: Record<string, unknown> = { ...(chunk.additionalMetadata ?? {}), ...(chunk.metadata ?? {}) };
 	const parts: string[] = [];
 	for (const key of Object.keys(merged).sort()) {
@@ -220,14 +234,31 @@ function metadataLine(chunk: { additionalMetadata?: Record<string, unknown>; met
 	return parts.length > 0 ? `Metadata: ${parts.join(" | ")}` : undefined;
 }
 
+const temporalFilterInfo = z.object({ applied: z.boolean().optional() });
+
+/** The older temporal diagnostic, under the SDK's spelling or the wire's. */
+const temporalDiagnostic = z.object({
+	temporalFilter: temporalFilterInfo.optional(),
+	temporal_filter: temporalFilterInfo.optional(),
+});
+
 /**
  * Dated facts from a temporal query, ported from `buildString`.
  *
- * Gated on `temporalFilter.applied`: a degraded lookup renders nothing rather
- * than implying no dated facts exist.
+ * A response that still carries the older `temporal_filter` diagnostic and
+ * says it was not applied renders nothing, rather than implying no dated facts
+ * exist. SDK 2.1.8 no longer types that diagnostic, and a response without it
+ * renders its facts, as the SDK's `buildString` does.
  */
 function formatTemporal(response: RecallResponse): string[] {
-	if (!response.temporalFilter?.applied) return [];
+	const diagnostic = temporalDiagnostic.safeParse(response);
+
+	const filter = diagnostic.success
+		? (diagnostic.data.temporalFilter ?? diagnostic.data.temporal_filter)
+		: undefined;
+
+	if (filter != null && !filter.applied) return [];
+
 	const lines: string[] = [];
 	const dur = response.temporalDuration;
 	if (dur?.days != null) {
@@ -535,9 +566,11 @@ function render(
 			direct.length === 0
 		) {
 			for (const [gid, rel] of Object.entries(relationIndex)) {
-				const triplets = rel.triplets ?? [];
+				// SAFETY: every PathTriplet field is optional and only read, and it
+				// covers both SDKs' relation spellings.
+				const triplets = (rel.triplets ?? []) as PathTriplet[];
 				const hasChunk = triplets.some(
-					(t) => t.relation?.chunk_id === chunkUuid,
+					(t) => (t.relation?.chunkId ?? t.relation?.chunk_id) === chunkUuid,
 				);
 				if (hasChunk) {
 					const occurrences = groupOccurrenceCounts[gid] ?? 0;

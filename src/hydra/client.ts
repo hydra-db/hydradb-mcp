@@ -109,6 +109,55 @@ function validateQueryResponse(response: unknown): void {
 	}
 }
 
+/** What `sdk.context.list` resolves to: the response envelope. */
+type ListResponse = Awaited<ReturnType<HydraDBClient["context"]["list"]>>;
+
+const successfulList = z.object({ success: z.literal(true).optional() });
+
+/**
+ * A list row with a usable ID, by the list adapters' first-string precedence,
+ * so a blank `id` cannot hide behind a valid legacy `source_id`.
+ */
+function listRow(identityKeys: readonly string[]) {
+	return z.object({}).passthrough().refine((row) => {
+		const id = identityKeys.map((key) => row[key]).find((value) => z.string().safeParse(value).success);
+
+		return z.string().trim().min(1).safeParse(id).success;
+	});
+}
+
+/** The rows of one list kind, under the SDK's name or the wire's. */
+function listPayload(kind: ListParams["kind"]) {
+	if (kind === "memory") {
+		const rows = z.array(listRow(["memoryId", "memory_id", "id", "source_id"]));
+
+		return z.union([
+			successfulList.extend({ userMemories: rows }),
+			successfulList.extend({ user_memories: rows }),
+		]);
+	}
+
+	return successfulList.extend({ sources: z.array(listRow(["id", "source_id"])) });
+}
+
+/**
+ * Reject a successful list that is not a real list, bare or enveloped, also
+ * accepting the historical `inner` nesting the list adapters understand.
+ */
+function validateListResponse(response: ListResponse, kind: ListParams["kind"]): void {
+	const payload = listPayload(kind);
+	const accepted = payload.or(successfulList.extend({ inner: payload }));
+
+	if (!successfulList.safeParse(response).success || !accepted.safeParse(unwrap(response)).success) {
+		throw new Error(
+			`Invalid successful list response: expected a ${kind === "memory" ? "user_memories" : "sources"} ` +
+			"array with nonempty row IDs and no failure flag.",
+		);
+	}
+}
+
+const markdownQueryResponse = z.object({ success: z.literal(true).optional(), data: z.string() });
+
 export interface HydraConfig {
 	/** Bearer token (the HydraDB API key). */
 	token: string;
@@ -158,8 +207,23 @@ export interface QueryParams {
 	maxResults?: number;
 	mode?: "fast" | "thinking" | "auto";
 	graphContext?: boolean;
-	alpha?: number;
+	/**
+	 * Hybrid balance between keyword and vector retrieval: 0 to 1, or "auto".
+	 * Hybrid only, so it is refused alongside keyword retrieval; see `query`.
+	 */
+	alpha?: SDK.SearchQueryRequestAlpha;
 	recencyBias?: number;
+	/** Text prepended to the query to improve retrieval. */
+	additionalContext?: string;
+	/** In thinking mode, follow relations declared at ingest. */
+	queryForcefulRelations?: boolean;
+	/** Resolve time-based questions using dated facts. The API defaults it on. */
+	temporalReasoning?: boolean;
+	/**
+	 * `structured` asks the API to leave out its `llm_prompt` rendering. The
+	 * Markdown form is a different response shape; see `queryMarkdown`.
+	 */
+	responseFormat?: "structured";
 	/**
 	 * Restrict retrieval to these source ids. A hard pre-filter: the server
 	 * returns nothing rather than widening when none match.
@@ -248,7 +312,8 @@ export interface IngestParams {
 }
 
 export interface ListParams {
-	kind?: ContextKind;
+	/** `all` lists memories and knowledge together, in one page (POST /context/list `type=all`). */
+	kind?: QueryKind;
 	ids?: string[];
 	page?: number;
 	pageSize?: number;
@@ -279,6 +344,47 @@ export interface ListParams {
 	sourceFields?: Record<string, string>;
 	/** Exact originating connector instance, stored in additional_metadata. */
 	connectorId?: string;
+	/** Exact-match filter on each item's `metadata` (`filters.metadata`). */
+	metadata?: MetadataFilter;
+	/**
+	 * Exact-match filter on each item's `additional_metadata`
+	 * (`filters.additional_metadata`). `connectorId` is merged into it.
+	 */
+	additionalMetadata?: MetadataFilter;
+	/** Return only these fields (plus id, database, collection). Knowledge rows only. */
+	includeFields?: string[];
+	/** Fold comment and reply rows under their parent row as `comments`. */
+	groupThreads?: boolean;
+}
+
+/** A value an exact-match metadata filter compares a stored value against. */
+export type MetadataFilterValue = string | number | boolean | null;
+
+/** `{key: value}` pairs an item's stored metadata must all match exactly. */
+export type MetadataFilter = Record<string, MetadataFilterValue>;
+
+/** `filters` on POST /context/list, in wire spelling. */
+interface ListFilters {
+	source_fields?: Record<string, string>;
+	metadata?: MetadataFilter;
+	additional_metadata?: MetadataFilter;
+}
+
+/** The POST /context/list body the passthrough sends, in wire spelling. */
+interface ListRequestBody extends ScopeFields {
+	type?: QueryKind;
+	ids?: string[];
+	page?: number;
+	page_size?: number;
+	acl?: string[];
+	filters?: ListFilters;
+	include_fields?: string[];
+	group_threads: boolean;
+}
+
+/** Whether a filter names at least one key; an empty one is no filter at all. */
+export function hasEntries(filter: MetadataFilter | undefined): boolean {
+	return filter != null && Object.keys(filter).length > 0;
 }
 
 export interface InspectParams {
@@ -613,15 +719,12 @@ export class ContextResource extends Resource {
 	}
 
 	/**
-	 * The single retrieval entry point (SDK `client.query`).
+	 * The `/query` request for `params`, refusing combinations the API rejects.
 	 *
-	 * `async` so the operator/retrieval validation below surfaces as a rejection,
-	 * for the same reason `ingest` is async.
+	 * Throws synchronously; both callers are `async`, so it surfaces as a
+	 * rejection, for the same reason `ingest` is async.
 	 */
-	async query(
-		params: QueryParams,
-		opts?: RequestOptions,
-	): Promise<SDK.SearchV2RetrievalResult> {
+	private queryRequest(params: QueryParams): SDK.SearchQueryRequest {
 		// `operator` is keyword syntax, and the API accepts it only when the
 		// request also asks for keyword retrieval. On hybrid it does not ignore
 		// the field, it refuses the whole call:
@@ -645,6 +748,17 @@ export class ContextResource extends Resource {
 		const queryBy =
 			params.queryBy ?? (params.operator != null ? "text" : undefined);
 
+		// alpha weighs the vector lane against the keyword lane, and keyword
+		// retrieval has only one. Sent there it is a hybrid-only knob on a request
+		// that is not hybrid, so it is refused like operator on hybrid.
+		if (params.alpha != null && queryBy === "text") {
+			throw new Error(
+				`alpha balances hybrid retrieval and does not apply to keyword ` +
+				`retrieval (queryBy "text", or any operator). Drop alpha, or drop ` +
+				`operator and queryBy "text" to search hybrid.`,
+			);
+		}
+
 		// One scope selector per request. The server rejects a multi-scope
 		// selector sent alongside the singular one it folds `collection` into, so
 		// a caller that sets both has stated two different scopes and only they
@@ -662,7 +776,7 @@ export class ContextResource extends Resource {
 				? this.multiScope(params.collections, params.database)
 				: this.scope(params.collection, params.database);
 
-		const request = {
+		return {
 			...scope,
 			query: params.query,
 			type: params.kind,
@@ -675,81 +789,60 @@ export class ContextResource extends Resource {
 			recencyBias: params.recencyBias,
 			queryApps: params.queryApps,
 			ids: params.ids,
+			// An empty list is no filter, not a filter that matches nothing.
+			titles: params.titles != null && params.titles.length > 0 ? params.titles : undefined,
 			metadataFilters: params.metadataFilters,
 			numRelatedChunks: params.numRelatedChunks,
 			acl: params.acl,
+			additionalContext: params.additionalContext,
+			queryForcefulRelations: params.queryForcefulRelations,
+			temporalReasoning: params.temporalReasoning,
+			responseFormat: params.responseFormat,
 		};
+	}
 
-		// @hydradb/sdk 2.1.4 predates the titles request field and its generated
-		// serializer drops unknown properties. Its authenticated passthrough still
-		// supplies the SDK's auth, retry, timeout and fetch configuration, including
-		// for a ContextResource constructed directly without our RawTransport. Once
-		// the generated request exposes titles this can collapse back into sdk.query.
-		if (params.titles != null && params.titles.length > 0) {
-			return this.call(
-				"/query",
-				async () => {
-				const response = await this.sdk.fetch(
-					"/query",
-					{
-						method: "POST",
-						headers: { "API-Version": "2", "Content-Type": "application/json" },
-						body: JSON.stringify({
-							...scope,
-							query: params.query,
-							type: params.kind,
-							operator: params.operator,
-							query_by: queryBy,
-							max_results: params.maxResults,
-							mode: params.mode,
-							graph_context: params.graphContext,
-							alpha: params.alpha,
-							recency_bias: params.recencyBias,
-							query_apps: params.queryApps,
-							ids: params.ids,
-							titles: params.titles,
-							metadata_filters: params.metadataFilters,
-							num_related_chunks: params.numRelatedChunks,
-							acl: params.acl,
-						}),
-					},
-					req(opts),
-				);
-				const text = await response.text();
-				let body: unknown = text;
-				try {
-					body = text === "" ? null : JSON.parse(text);
-				} catch {
-					// Preserve a non-JSON proxy response for the shared error formatter.
-				}
-				if (!response.ok) {
-					throw new HydraDBError({ statusCode: response.status, body });
-				}
-					validateQueryResponse(body);
-					// Use the SAME wire-to-SDK conversion as sdk.query, including nested
-					// graph context and metadata. Casting raw JSON loses their contents.
-					const envelope = unwrap<unknown>(body) === body ? { success: true, data: body } : body;
-					return serialization.HandlerEnvelopeSearchV2RetrievalResult.parseOrThrow(envelope, {
-						unrecognizedObjectKeys: "passthrough",
-						allowUnrecognizedUnionMembers: true,
-						allowUnrecognizedEnumValues: true,
-						skipValidation: true,
-						breadcrumbsPrefix: ["response"],
-					});
-				},
-				// The request id has to survive this path too. A query that used
-				// `titles` would otherwise print no id, and hydradb_feedback would
-				// have nothing to attach to for exactly the queries a title filter
-				// was used on. readRequestId reads both spellings, so the raw
-				// envelope's snake_case `meta.request_id` resolves here the same way
-				// the SDK's camelCase does.
-				opts?.onMeta,
-			);
-		}
+	/**
+	 * The single retrieval entry point (SDK `client.query`).
+	 *
+	 * `async` so the operator/retrieval validation surfaces as a rejection,
+	 * for the same reason `ingest` is async.
+	 */
+	async query(
+		params: QueryParams,
+		opts?: RequestOptions,
+	): Promise<SDK.SearchV2RetrievalResult> {
+		const request = this.queryRequest(params);
+
 
 		return this.call("/query", async () => {
 			const response = await this.sdk.query(request, req(opts));
 			validateQueryResponse(response);
+			return response;
+		}, opts?.onMeta);
+	}
+
+	/**
+	 * The same retrieval with `response_format=markdown`: the API's own Markdown
+	 * rendering of the results, as one string, instead of the result object.
+	 */
+	async queryMarkdown(
+		params: Omit<QueryParams, "responseFormat">,
+		opts?: RequestOptions,
+	): Promise<string> {
+		const request: SDK.SearchQueryRequest = { ...this.queryRequest(params), responseFormat: "markdown" };
+
+		return this.call("/query", async () => {
+			const response = await this.sdk.query(request, req(opts));
+
+			// The SDK types `data` as the result object and passes the string
+			// through unparsed. Anything else is not a successful Markdown answer.
+			if (!markdownQueryResponse.safeParse(response).success) {
+				throw new HydraDBError({ statusCode: 200, body: { error: {
+					code: "INVALID_QUERY_RESPONSE",
+					message: "Invalid successful query response: expected a Markdown string with response_format=markdown.",
+				} } });
+			}
+
 			return response;
 		}, opts?.onMeta);
 	}
@@ -841,13 +934,13 @@ export class ContextResource extends Resource {
 			// Knowledge is multipart with the document as a file part — never the
 			// `app_knowledge` JSON field (guards the DX-G-002 class of bug).
 			if (params.text != null) {
-				request.documents = {
+				request.documents = [{
 					data: Buffer.from(params.text, "utf-8"),
 					// The title rides on the filename; the server's
 					// document_metadata does not accept a `title` key.
 					filename: params.filename ?? `${params.title ?? "document"}.md`,
 					contentType: "text/markdown",
-				};
+				}];
 			}
 		}
 
@@ -865,13 +958,50 @@ export class ContextResource extends Resource {
 			params.sourceFields != null &&
 			Object.keys(params.sourceFields).length > 0;
 
-		// @hydradb/sdk 2.1.4 predates the list `filters` request field and its
-		// generated serializer drops unknown properties (same limitation the
-		// titles filter hit on /query). Its authenticated passthrough still
-		// supplies auth, retry, timeout and fetch config. Once the generated
-		// request exposes `filters` this can collapse back into sdk.context.list.
-		if (hasSourceFields || params.connectorId != null) {
-			const scope = this.scope(params.collection, params.database);
+		// Metadata filters, projected fields, nested threads and `all` keep the
+		// raw call: the SDK renames row fields (`additional_metadata` comes back
+		// as `additionalMetadata`), and a projection is looked up by the names
+		// the caller asked for. Plain and source-field lists go through the SDK.
+		const projected =
+			hasEntries(params.metadata) ||
+			hasEntries(params.additionalMetadata) ||
+			params.kind === "all" ||
+			(params.includeFields?.length ?? 0) > 0 ||
+			params.groupThreads === true;
+
+		if (projected) {
+			const filters: ListFilters = {};
+
+			if (params.sourceFields != null && hasSourceFields) {
+				filters.source_fields = params.sourceFields;
+			}
+
+			if (hasEntries(params.metadata)) filters.metadata = params.metadata;
+
+			const additionalMetadata = { ...params.additionalMetadata } satisfies MetadataFilter;
+
+			if (params.connectorId != null) additionalMetadata.connector_id = params.connectorId;
+
+			if (hasEntries(additionalMetadata)) filters.additional_metadata = additionalMetadata;
+
+			const filtered = Object.keys(filters).length > 0;
+
+			const request: ListRequestBody = {
+				...this.scope(params.collection, params.database),
+				type: params.kind,
+				ids: params.ids,
+				page: params.page,
+				page_size: params.pageSize,
+				acl: params.acl,
+				group_threads: params.groupThreads ?? false,
+			};
+
+			if (filtered) request.filters = filters;
+
+			if (params.includeFields != null && params.includeFields.length > 0) {
+				request.include_fields = params.includeFields;
+			}
+
 			return this.call<SDK.ListV2ListResponse, unknown>(
 				"/context/list",
 				async () => {
@@ -883,19 +1013,7 @@ export class ContextResource extends Resource {
 								"API-Version": "2",
 								"Content-Type": "application/json",
 							},
-							body: JSON.stringify({
-								...scope,
-								type: params.kind,
-								ids: params.ids,
-								page: params.page,
-								page_size: params.pageSize,
-								acl: params.acl,
-								filters: {
-									source_fields: params.sourceFields,
-									additional_metadata: params.connectorId != null ? { connector_id: params.connectorId } : undefined,
-								},
-								group_threads: false,
-							}),
+							body: JSON.stringify(request),
 						},
 						req(opts),
 					);
@@ -945,16 +1063,45 @@ export class ContextResource extends Resource {
 			);
 		}
 
-		return this.call("/context/list", () =>
-			this.sdk.context.list({
+		const filtered = hasSourceFields || params.connectorId != null;
+
+		return this.call<SDK.ListV2ListResponse, ListResponse>("/context/list", async () => {
+			const request: SDK.ListV2ListContentRequest = {
 				...this.scope(params.collection, params.database),
-				type: params.kind,
+				// `all` took the passthrough above; this narrows the type for the SDK.
+				type: params.kind === "all" ? undefined : params.kind,
 				ids: params.ids,
 				page: params.page,
 				pageSize: params.pageSize,
 				acl: params.acl,
-			}, req(opts)),
-		);
+			};
+
+			if (filtered) {
+				const filters: SDK.ListContentFilter = {};
+
+				// The tools build these with their wire names; the serializer maps
+				// them to the SDK's, and rejects a key the API does not define.
+				if (hasSourceFields) {
+					filters.sourceFields = serialization.ListSourceFieldFilters.parseOrThrow(params.sourceFields);
+				}
+
+				if (params.connectorId != null) {
+					filters.additionalMetadata = { connector_id: params.connectorId };
+				}
+
+				request.filters = filters;
+				request.groupThreads = false;
+			}
+
+			const response = await this.sdk.context.list(request, req(opts));
+
+			// A filtered list is a lookup: an empty answer reads as "that source
+			// does not exist", so a body that is not a real list (a proxy's login
+			// page, a failure flag) must be an error rather than no rows.
+			if (filtered) validateListResponse(response, params.kind);
+
+			return response;
+		}, opts?.onMeta);
 	}
 
 	/** Fetch a source's content (SDK `context.inspect`; was "fetch content"). */
@@ -1039,6 +1186,7 @@ export class ContextResource extends Resource {
 	/** Knowledge-graph relations (SDK `context.relations`). */
 	relations(
 		params: RelationsParams = {},
+		opts?: RequestOptions,
 	): Promise<SDK.GraphGraphRelationsResponse> {
 		return this.call("/context/relations", () =>
 			this.sdk.context.relations({
@@ -1048,7 +1196,7 @@ export class ContextResource extends Resource {
 				limit: params.limit,
 				cursor: params.cursor,
 				acl: params.acl,
-			}),
+			}, req(opts)),
 		);
 	}
 
@@ -1126,36 +1274,19 @@ export class DatabasesResource extends Resource {
 
 	/**
 	 * Permanently delete one collection and all of its data
-	 * (`DELETE /databases/collections`). Not yet on the pinned SDK, so this
-	 * is a hand-rolled path matching GraphResource.
+	 * (SDK `databases.deleteCollection`).
 	 */
 	async deleteCollection(
 		params: DeleteCollectionParams,
 		opts?: RequestOptions,
-	): Promise<{
-		database?: string;
-		collection?: string;
-		status?: string;
-		message?: string;
-	}> {
-		// Hand-rolled for the same reason `context.subgraph` is (CONTRACT §2
-		// rule 7): the pinned SDK has no `databases.delete_collection`. It goes
-		// through the same raw transport, so it shares the retry, envelope
-		// unwrap and error type of every other call here.
-		if (!this.raw) {
-			throw new HydraWrapperError(
-				"Hydra DB /databases/collections → ERR: no HTTP transport configured",
-				"/databases/collections",
-			);
-		}
-
+	): Promise<SDK.TenantsSubTenantDeleteResponse> {
 		// A caller who already cancelled is not waiting for the request to go
 		// out: reject a pre-aborted signal rather than send and then unwind.
 		if (opts?.signal?.aborted) {
 			throw translateError(
 				"/databases/collections",
 				opts.signal.reason ?? new Error("aborted"),
-				[this.raw.token],
+				[this.raw?.token ?? ""],
 			);
 		}
 
@@ -1168,15 +1299,14 @@ export class DatabasesResource extends Resource {
 
 		// scope() resolves the default database, enforces any confinement, and
 		// returns the canonical `database`/`collection` names the API expects.
-		const query = new URLSearchParams(this.scope(params.collection, params.database));
-		const path = `/databases/collections?${query.toString()}`;
+		const { database, collection } = this.scope(params.collection, params.database);
 
-		return sendRaw<{
-			database?: string;
-			collection?: string;
-			status?: string;
-			message?: string;
-		}>(this.raw, path, "DELETE", undefined, opts);
+		return this.call("/databases/collections", () =>
+			this.sdk.databases.deleteCollection(
+				{ database, collection: collection ?? params.collection.trim() },
+				req(opts),
+			),
+		);
 	}
 }
 
@@ -1413,9 +1543,6 @@ export class HydraDB {
 			sdk ??
 			new HydraDBClient({
 				token: config.token,
-				// SDK 2.1.4's generated methods apply this default, but its fetch
-				// passthrough does not. Set it for both title and source lookups so
-				// their relative paths work without HYDRADB_BASE_URL as well.
 				baseUrl: config.baseUrl ?? HydraDBEnvironment.Default,
 				// Both are stated rather than inherited. The SDK's defaults (60s,
 				// 2 retries) were never chosen by this server, and their product is

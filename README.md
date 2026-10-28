@@ -13,15 +13,16 @@ Run it two ways, same tools either way:
 |---|---|
 | `hydradb_query` | Search memories and knowledge together, with knowledge-graph context |
 | `hydradb_ingest` | Save a note, a document, or a conversation |
-| `hydradb_list` | Enumerate one family — every memory, or every knowledge source |
+| `hydradb_list` | Enumerate what is stored — memories, knowledge sources, or both in one page |
 | `hydradb_inspect` | Fetch one source's full content by id |
 | `hydradb_delete` | Remove one or more items by id, irreversibly |
 | `hydradb_status` | Check whether an ingested source has finished indexing |
 | `hydradb_subgraph` | Everything connected to one item — its thread, replies, parents, children, links |
+| `hydradb_relations` | The knowledge-graph relations of one item or a whole collection, page by page |
 | `hydradb_feedback` | Report whether a query's results were useful, by its `request_id` |
 
 Ids flow between these: `hydradb_query`, `hydradb_list` and `hydradb_subgraph` emit them;
-`hydradb_inspect`, `hydradb_delete`, `hydradb_status` and `hydradb_subgraph` accept them.
+`hydradb_inspect`, `hydradb_delete`, `hydradb_status`, `hydradb_subgraph` and `hydradb_relations` accept them.
 
 ### Graph tools (Cypher)
 
@@ -100,6 +101,12 @@ chunks with their source id, a relevance score, and knowledge-graph context.
 | `recency_bias` | number | No | Favour recently-updated sources when ranking, 0-1 (default: 0). Re-ranks only; it never excludes older sources |
 | `query_apps` | boolean | No | App-aware retrieval over connector sources — exact IDs and actors, thread reconstruction, linked and parent/child items (on by default: Hydra DB applies it when omitted; pass `false` to skip) |
 | `collections` | array | No | Search several collections at once. Pass either this or `collection`, never both |
+| `additional_context` | string | No | Background text prepended to the query to steer retrieval; not searched for itself |
+| `alpha` | number or `auto` | No | Hybrid balance, 0 (keyword) to 1 (vector), or `auto` (default: 0.8). Hybrid only: refused with `operator` or `query_by: text` |
+| `query_by` | string | No | `hybrid` (default) or `text` (keyword only). Setting `operator` implies `text` |
+| `query_forceful_relations` | boolean | No | In thinking mode, also follow relations declared at ingest and return their chunks |
+| `temporal_reasoning` | boolean | No | Resolve time-based questions using dated facts (Hydra DB default: true) |
+| `response_format` | string | No | `structured` (the default rendering, with source ids) or `markdown` (Hydra DB's own Markdown rendering, returned as-is, without per-chunk ids) |
 
 Results are text only by default: each chunk carries its source id and
 collection, and the header names the resolved scope. With `structured: true`,
@@ -135,12 +142,13 @@ saved. Use `hydradb_status` to confirm.
 
 ### **hydradb_list**
 
-Enumerates one family at a time. These are separate corpora: listing memories
-tells you nothing about which knowledge sources exist.
+Enumerates memories, knowledge sources, or both together (`kind: "all"`). These
+are separate corpora: listing memories tells you nothing about which knowledge
+sources exist.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `kind` | string | **Yes** | `memory` or `knowledge` |
+| `kind` | string | **Yes** | `memory`, `knowledge`, or `all` (both in one page, as source rows) |
 | `ids` | array | No | Restrict to these ids |
 | `source_ids` | array | No | Deprecated alias for `ids` |
 | `external_id` | string | No | Exact originating-system ID, such as a Confluence page ID or Drive file ID; knowledge only |
@@ -150,6 +158,10 @@ tells you nothing about which knowledge sources exist.
 | `provider` | string | No | Connector provider, such as `confluence` or `google_drive`; knowledge only |
 | `page` | number | No | Page to return, 1-indexed (default: 1) |
 | `page_size` | number | No | Items per page (1-100) |
+| `metadata` | object | No | Exact-match filter on each item's `metadata`, as `{key: value}` |
+| `additional_metadata` | object | No | Exact-match filter on each item's `additional_metadata`; merged with `connector_id` |
+| `include_fields` | array | No | Return only these fields per row (plus id): `title`, `type`, `description`, `note`, `timestamp`, `relations`, `metadata`, `additional_metadata`, `context_category`. Knowledge and `all` only |
+| `group_threads` | boolean | No | Nest comments and replies under the item they belong to (default false). Knowledge and `all` only |
 
 The response reports how many of the total it showed and how to reach the rest.
 
@@ -239,6 +251,26 @@ Feedback never changes the result of the query it describes and never alters
 stored data. Rows are labelled `source: agent`, because everything reaching this
 server came from a model — agent feedback is a different population from human
 feedback and is separated at write time.
+
+### **hydradb_relations**
+
+Returns the knowledge-graph relations Hydra DB extracted from stored content —
+`(entity) —predicate→ (entity)` triplets, each with the passage that evidences
+it — for one item, or for the whole collection when `id` is omitted
+(`GET /context/relations`).
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `id` | string | No | The item to read, from `hydradb_query` or `hydradb_list`. Omit for the whole collection |
+| `kind` | string | No | `knowledge` (default) or `memory` — the two graphs are separate |
+| `limit` | number | No | Relations per call (default 50, max 200) |
+| `cursor` | number | No | The `next_cursor` of the previous call, to read the next page |
+| `acl` | array | No | Principals to answer as; only relations from sources they may see are returned |
+| `database`, `collection` | string | No | Scope overrides |
+
+`structuredContent` carries each relation as `{from, from_type, predicate, to,
+to_type, evidence, chunk_id}`, plus `has_more`, `next_cursor` and ready-made
+`next_args` for the next page.
 
 ### **hydradb_subgraph**
 

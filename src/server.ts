@@ -4,15 +4,15 @@ import { createHash, randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
-import { toAddMemoryResponse, toMemoryList, toSourceList } from "./adapters.js";
-import type { PageInfo } from "./adapters.js";
+import { jsonValue, toAddMemoryResponse, toMemoryList, toRelationList, toSourceList } from "./adapters.js";
+import type { JsonValue, ListedFields, PageInfo, SourceListItem } from "./adapters.js";
 import { resolveConfig, resolveGraphConfig } from "./config.js";
 import type { GraphConfig } from "./config.js";
 import { renderRecalledContext } from "./context.js";
 import { COLLECTION_PATTERN, MAX_BODY_BYTES, renderRows } from "./cypher.js";
 import { SERVER_INSTRUCTIONS, TOOL_DESCRIPTIONS } from "./descriptions.js";
-import { HydraDB, assertCollectionAllowed, assertDatabaseAllowed } from "./hydra/index.js";
-import type { ContextKind, QueryKind } from "./hydra/index.js";
+import { HydraDB, assertCollectionAllowed, assertDatabaseAllowed, hasEntries } from "./hydra/index.js";
+import type { ContextKind, MetadataFilter, QueryKind, QueryParams } from "./hydra/index.js";
 import { logger } from "./logger.js";
 import { ALIAS_REPLACEMENTS, DEPRECATED_TOOL_NAMES, TOOL_NAMES } from "./tool-names.js";
 import type { MemoryResultItem } from "./types.js";
@@ -345,6 +345,169 @@ export function __setListCollectionsStatsTimeoutForTests(ms: number): void {
 const QUERY_FANOUT_MAX_COLLECTIONS = 10;
 
 /**
+ * The fields `include_fields` may name on POST /context/list. The server
+ * rejects anything else with a 400 (content, url and attachments live on
+ * /context/inspect), so the enum turns that round trip into a schema error.
+ */
+const LIST_INCLUDE_FIELDS = [
+	"title",
+	"type",
+	"description",
+	"note",
+	"timestamp",
+	"relations",
+	"metadata",
+	"additional_metadata",
+	"context_category",
+] as const;
+
+type ListIncludeField = (typeof LIST_INCLUDE_FIELDS)[number];
+
+/**
+ * A listed row as structuredContent carries it. `group_threads` nests comment
+ * rows of the same kind under their parent.
+ */
+interface ListedRow {
+	id: string;
+	title?: string;
+	type?: string;
+	fields?: ListedFields;
+	/** Some projected data was cut to fit the output budget; see fieldBudget. */
+	fields_truncated?: boolean;
+	comments?: ListedRow[];
+	comments_truncated?: boolean;
+}
+
+/**
+ * Characters of projected field data one row, and one listing page, may put
+ * into structuredContent. The text view clamps each field to a preview; the
+ * structured view keeps the JSON as returned, so it needs its own ceiling or
+ * one `relations` or metadata blob could carry megabytes.
+ */
+const LIST_FIELDS_ROW_CHARS = 2_000;
+
+const LIST_FIELDS_PAGE_CHARS = 20_000;
+
+/** What is left of the page's projected-field budget, and whether any was cut. */
+interface FieldBudget {
+	left: number;
+	truncated: boolean;
+}
+
+/**
+ * Copy `value` within `budget`, keeping its JSON structure: a long string is
+ * cut and ends in "…", and arrays and objects keep the leading entries that
+ * fit. Every cut sets `budget.truncated`.
+ */
+function boundJson(value: JsonValue, budget: FieldBudget): JsonValue {
+	const text = z.string().safeParse(value);
+
+	if (text.success) {
+		if (text.data.length <= budget.left) {
+			budget.left -= text.data.length;
+
+			return text.data;
+		}
+
+		budget.truncated = true;
+
+		const kept = text.data.slice(0, Math.max(budget.left, 0));
+
+		budget.left = 0;
+
+		return `${kept}…`;
+	}
+
+	if (Array.isArray(value)) {
+		const out: JsonValue[] = [];
+
+		for (const item of value) {
+			if (budget.left <= 0) {
+				budget.truncated = true;
+				break;
+			}
+
+			out.push(boundJson(item, budget));
+		}
+
+		return out;
+	}
+
+	// Shallow on purpose: `value` was checked as JSON where it came in, so its
+	// members are JSON already. Re-checking `jsonValue` here would walk the whole
+	// subtree again at every level, quadratic in depth on nested metadata.
+	const entries = z.record(z.custom<JsonValue>()).safeParse(value);
+
+	if (!entries.success) {
+		// A number, boolean or null: small, and kept whole.
+		budget.left -= String(value).length;
+
+		return value;
+	}
+
+	const out: ListedFields = {};
+
+	for (const [key, item] of Object.entries(entries.data)) {
+		if (budget.left <= 0) {
+			budget.truncated = true;
+			break;
+		}
+
+		budget.left -= key.length;
+		out[key] = boundJson(item, budget);
+	}
+
+	return out;
+}
+
+function toListedRow(src: SourceListItem, page: FieldBudget): ListedRow {
+	const row: ListedRow = { id: src.id };
+
+	if (src.title != null) row.title = src.title;
+
+	if (src.type != null) row.type = src.type;
+
+	if (src.fields != null) {
+		const allowance = Math.min(LIST_FIELDS_ROW_CHARS, page.left);
+		const budget: FieldBudget = { left: allowance, truncated: false };
+		const fields: ListedFields = {};
+
+		for (const [name, value] of Object.entries(src.fields)) {
+			if (budget.left <= 0) {
+				budget.truncated = true;
+				break;
+			}
+
+			fields[name] = boundJson(value, budget);
+		}
+
+		row.fields = fields;
+		page.left -= allowance - Math.max(budget.left, 0);
+
+		if (budget.truncated) row.fields_truncated = true;
+	}
+
+	if (src.comments != null) row.comments = src.comments.map((comment) => toListedRow(comment, page));
+
+	if (src.comments_truncated === true) row.comments_truncated = true;
+
+	return row;
+}
+
+/** An exact-match metadata filter: scalar values, compared as stored. */
+const metadataFilterSchema = z.record(z.union([z.string(), z.number(), z.boolean(), z.null()]));
+
+/**
+ * Relations read per call when the caller names no `limit`. The API defaults
+ * to 5000 triplets, far more than one tool result should put in context; a
+ * caller wanting more pages with `cursor` or raises `limit`.
+ */
+const RELATIONS_DEFAULT_LIMIT = 50;
+
+/** The most relations one call may ask for. */
+const RELATIONS_MAX_LIMIT = 200;
+
+/**
  * How long a query waits for the collection listing before searching the
  * default scope as it always did. The listing has been observed to hang on
  * some deployments, and it must never be the reason a search stalls.
@@ -354,6 +517,22 @@ let fanoutListTimeoutMs = 3000;
 /** Test hook: shorten the listing wait so the timeout path runs in milliseconds. */
 export function __setFanoutListTimeoutForTests(ms: number): void {
 	fanoutListTimeoutMs = ms;
+}
+
+/**
+ * The titles to match, including the form hydradb_ingest stored them under.
+ *
+ * Knowledge text is uploaded as the file `<title>.md`, and the server takes a
+ * document's title from its filename, so "Q3 Roadmap" is stored as
+ * "Q3 Roadmap.md", and "Plan.md" as "Plan.md.md". An agent filters by the
+ * title it chose, which then matched nothing. The filter matches ANY listed
+ * title, so each title is sent as given and with ".md" added: one of the two
+ * is the stored title whether the document came from hydradb_ingest or not.
+ */
+export function withStoredTitles(titles: string[] | undefined): string[] | undefined {
+	if (titles == null) return titles;
+
+	return [...new Set([...titles, ...titles.map((title) => `${title.trim()}.md`)])];
 }
 
 /** Collection names from a listing payload, or null when it is malformed. */
@@ -490,6 +669,12 @@ export function createHydraDBServer(
 		database?: string;
 		collection?: string;
 		collections?: string[];
+		additional_context?: string;
+		alpha?: number | "auto";
+		query_by?: "hybrid" | "text";
+		query_forceful_relations?: boolean;
+		temporal_reasoning?: boolean;
+		response_format?: "structured" | "markdown";
 	}, signal?: AbortSignal): Promise<ToolResult> {
 		// Host-owned default (CONTRACT §2 rule 5): search BOTH families. This tool
 		// used to pin `kind: "memory"`, which made every ingested knowledge source
@@ -546,14 +731,17 @@ export function createHydraDBServer(
 		// flight at once and a shared slot would hand one the other's id.
 		let requestId: string | undefined;
 
-		const send = () => hydra.context.query({
+		const textRetrieval = args.operator != null || args.query_by === "text";
+
+		const params: QueryParams = {
 			query: args.query,
 			kind,
 			maxResults,
 			mode: args.mode ?? "thinking",
 			operator: args.operator,
+			queryBy: args.query_by,
 			ids: args.source_ids,
-			titles: args.titles,
+			titles: withStoredTitles(args.titles),
 			metadataFilters: args.metadata_filters,
 			acl: args.acl,
 			numRelatedChunks: args.num_related_chunks,
@@ -564,32 +752,39 @@ export function createHydraDBServer(
 			collections: scopeCollections,
 			// Host-owned default (CONTRACT §2 rule 5), but only where it means
 			// something: alpha balances dense against sparse retrieval in HYBRID
-			// mode, and an `operator` switches the query to text retrieval (see
-			// the wrapper), where there are no two lanes to weigh. Injecting it
-			// there would send a hybrid-only knob on a request that is not hybrid.
-			alpha: args.operator != null ? undefined : 0.8,
+			// mode, and an `operator` or `query_by: "text"` switches the query to
+			// text retrieval (see the wrapper), where there are no two lanes to
+			// weigh. Injecting it there would send a hybrid-only knob on a request
+			// that is not hybrid. A caller's own alpha is always sent, and the
+			// wrapper refuses it on text retrieval.
+			alpha: args.alpha ?? (textRetrieval ? undefined : 0.8),
 			// Host-owned default (CONTRACT §2 rule 5), and 0 is also what the API
 			// applies when the field is omitted — so the default ranking is
 			// unchanged. It stops being a constant here because "what is the
 			// current state of X" is a different question from "what matches X",
 			// and only a caller that can raise this can ask the first one.
 			recencyBias: args.recency_bias ?? 0,
-		}, {
+			additionalContext: args.additional_context,
+			queryForcefulRelations: args.query_forceful_relations,
+			temporalReasoning: args.temporal_reasoning,
+		};
+
+		const requestOptions = {
 			signal,
-			onMeta: (meta) => {
+			onMeta: (meta: { requestId?: string }) => {
 				requestId = meta.requestId;
 			},
-		});
+		};
+
+		const send = () => hydra.context.query({
+			...params,
+			responseFormat: args.response_format === "structured" ? "structured" : undefined,
+		}, requestOptions);
 
 		// Once the search scope has been chosen, a failed query must remain a
 		// failure. Retrying in the workspace default silently changed the corpus
 		// and could turn malformed responses or inaccessible partitions into an
 		// apparently successful empty/partial answer.
-		const raw = await send();
-
-		// The renderer reads the SDK payload directly; there is no longer a
-		// snake_case mirror to convert into.
-		const res = raw;
 		const searchedCollections = scopeCollections != null
 			? Array.isArray(scopeCollections) ? scopeCollections : Object.keys(scopeCollections)
 			: undefined;
@@ -613,6 +808,43 @@ export function createHydraDBServer(
 				...(scopeWarning ? { scope_warning: scopeWarning } : {}),
 			});
 		};
+
+		// The API's own Markdown rendering is the answer as it stands: it carries
+		// no chunk objects to count, trim or attach source references to, so it is
+		// returned with the scope and the request id and capped at the same budget.
+		if (args.response_format === "markdown") {
+			const markdown = await hydra.context.queryMarkdown(params, requestOptions);
+
+			const feedback = requestId
+				? `\n\n---\nWas this useful? Report it with ${TOOL_NAMES.FEEDBACK} using request_id: ${requestId}`
+				: "";
+
+			// Everything around the Markdown counts against the cap: the scope line
+			// and its warning grow with the collections searched, so they are
+			// measured rather than guessed. The truncation note is sized for the
+			// largest number it could print.
+			const warning = scopeWarning ? `\n\nScope warning: ${scopeWarning}` : "";
+
+			const note = (showing: number) =>
+				`\n\n(truncated: ${markdown.length} characters, showing ${showing})`;
+
+			const framing =
+				`${scopeText(resolvedScope)}\n\n`.length + feedback.length + warning.length;
+
+			const budget = Math.max(QUERY_CHAR_BUDGET - framing - note(QUERY_CHAR_BUDGET).length, 0);
+
+			const shown = markdown.length > budget
+				? `${markdown.slice(0, budget)}${note(budget)}`
+				: markdown;
+
+			return queryResult(`${scopeText(resolvedScope)}\n\n${shown}${feedback}`);
+		}
+
+		const raw = await send();
+
+		// The renderer reads the SDK payload directly; there is no longer a
+		// snake_case mirror to convert into.
+		const res = raw;
 
 		// The server can return more chunks than were asked for — a live call with
 		// max_results=10 came back with 15, and all 15 were rendered. Honour the
@@ -983,6 +1215,8 @@ export function createHydraDBServer(
 		source_ids?: string[];
 		page?: number;
 		page_size?: number;
+		metadata?: MetadataFilter;
+		additional_metadata?: MetadataFilter;
 		acl?: string[];
 		database?: string;
 		collection?: string;
@@ -994,6 +1228,8 @@ export function createHydraDBServer(
 			ids: args.source_ids,
 			page: args.page,
 			pageSize: args.page_size,
+			metadata: args.metadata,
+			additionalMetadata: args.additional_metadata,
 			acl: args.acl,
 			database: args.database,
 			collection: args.collection,
@@ -1006,10 +1242,13 @@ export function createHydraDBServer(
 			// Declaring an outputSchema obliges EVERY return path to carry structured
 			// content, including this one — a caller branching on `items` should not
 			// have to special-case the empty result.
+			const filtered = hasEntries(args.metadata) || hasEntries(args.additional_metadata);
 			return structuredResult(
 				args.page != null && args.page > 1
 					? `No memories on page ${args.page}.`
-					: emptyListText("memories", args.database, args.collection),
+					: filtered
+						? "No memories match the supplied metadata filters."
+						: emptyListText("memories", args.database, args.collection),
 				{
 					kind: "memory",
 					resolved_scope: resolvedScope,
@@ -1072,6 +1311,7 @@ export function createHydraDBServer(
 	}
 
 	async function runListSources(args: {
+		kind: "knowledge" | "all";
 		source_ids?: string[];
 		external_id?: string;
 		parent_external_id?: string;
@@ -1080,6 +1320,10 @@ export function createHydraDBServer(
 		provider?: string;
 		page?: number;
 		page_size?: number;
+		metadata?: MetadataFilter;
+		additional_metadata?: MetadataFilter;
+		include_fields?: ListIncludeField[];
+		group_threads?: boolean;
 		acl?: string[];
 		database?: string;
 		collection?: string;
@@ -1093,10 +1337,14 @@ export function createHydraDBServer(
 		if (args.provider != null) sourceFields.app_provider = args.provider;
 
 		const raw = await hydra.context.list({
-			kind: "knowledge",
+			kind: args.kind,
 			ids: args.source_ids,
 			sourceFields: Object.keys(sourceFields).length > 0 ? sourceFields : undefined,
 			connectorId: args.connector_id,
+			metadata: args.metadata,
+			additionalMetadata: args.additional_metadata,
+			includeFields: args.include_fields,
+			groupThreads: args.group_threads,
 			page: args.page,
 			pageSize: args.page_size,
 			acl: args.acl,
@@ -1104,7 +1352,8 @@ export function createHydraDBServer(
 			collection: args.collection,
 		}, { signal });
 
-		const { sources, page } = toSourceList(raw);
+		const { sources, page } = toSourceList(raw, args.include_fields);
+		const noun = args.kind === "all" ? "items (memories and knowledge together)" : "sources";
 		const resolvedScope = singleScope(args);
 		const followScope = { database: resolvedScope.database, ...(resolvedScope.collection != null ? { collection: resolvedScope.collection } : {}), ...(args.acl != null ? { acl: args.acl } : {}) };
 
@@ -1112,8 +1361,12 @@ export function createHydraDBServer(
 			const collection = args.collection?.trim() || hydra.collection;
 			const lookupScope = `database ${JSON.stringify(args.database?.trim() || hydra.database)}, ` +
 				(collection == null ? "workspace default" : `collection ${JSON.stringify(collection)}`);
-			const emptyText = Object.keys(sourceFields).length > 0 || args.connector_id != null
-				? `No visible sources match the supplied source filters on page ${page.page ?? args.page ?? 1} in ${lookupScope}. ` +
+
+			const filtered = Object.keys(sourceFields).length > 0 || args.connector_id != null ||
+				hasEntries(args.metadata) || hasEntries(args.additional_metadata);
+
+			const emptyText = filtered
+				? `No visible ${args.kind === "all" ? "items" : "sources"} match the supplied filters on page ${page.page ?? args.page ?? 1} in ${lookupScope}. ` +
 					"This does not prove the document was never ingested. Check the scope, page and exact stored identity; keep the caller's ACL unchanged."
 				: args.page != null && args.page > 1
 					? `No sources on page ${args.page}.`
@@ -1122,7 +1375,7 @@ export function createHydraDBServer(
 			return structuredResult(
 				emptyText,
 				{
-					kind: "knowledge",
+					kind: args.kind,
 					resolved_scope: resolvedScope,
 					items: [],
 					shown: 0,
@@ -1133,27 +1386,51 @@ export function createHydraDBServer(
 			);
 		}
 
-		const lines = sources.map((s, i) => {
+		const rowText = (s: SourceListItem) => {
 			const title = s.title ? ` — ${s.title}` : "";
 			const type = s.type ? ` (${s.type})` : "";
 
 			const identity = [s.provider && `provider=${JSON.stringify(s.provider)}`, s.connector_id && `connector_id=${JSON.stringify(s.connector_id)}`, s.external_id && `external_id=${JSON.stringify(s.external_id)}`, s.parent_external_id && `parent_external_id=${JSON.stringify(s.parent_external_id)}`].filter(Boolean).join(", ");
-			return `${i + 1}. [${s.id}]${title}${type}${identity ? ` — ${identity}` : ""}`;
-		});
+
+			return `[${s.id}]${title}${type}${identity ? ` — ${identity}` : ""}`;
+		};
+
+		// Requested fields go on their own indented lines, each value bounded
+		// like every other listing preview: a `relations` or metadata blob
+		// must not turn one row into a page.
+		const fieldLines = (s: SourceListItem, indent: string) =>
+			Object.entries(s.fields ?? {})
+				.filter(([name]) => name !== "title" && name !== "type")
+				.map(([name, value]) => `${indent}${name}: ${clampPreview(JSON.stringify(value))}`);
+
+		const commentLines = (s: SourceListItem, indent: string): string[] => [
+			...(s.comments ?? []).flatMap((c) => [
+				`${indent}↳ ${rowText(c)}`,
+				...fieldLines(c, `${indent}   `),
+				...commentLines(c, `${indent}   `),
+			]),
+			...(s.comments_truncated ? [`${indent}↳ (the thread has more replies than shown here)`] : []),
+		];
+
+		const lines = sources.flatMap((s, i) => [
+			`${i + 1}. ${rowText(s)}`,
+			...fieldLines(s, "   "),
+			...commentLines(s, "   "),
+		]);
+
+		const fieldBudget: FieldBudget = { left: LIST_FIELDS_PAGE_CHARS, truncated: false };
 
 		// Was `${total} sources:` — the corpus-wide total printed above a single
 		// page of rows, so "412 sources:" sat over 50 lines with no marker and no
 		// way to reach the other 362.
 		return structuredResult(
-			`${coverage(sources.length, page, args.page)} sources:\n${scopeText(resolvedScope)}\n\n${lines.join("\n")}\n\nKeep this scope and your ACL when inspecting these ids.` +
+			`${coverage(sources.length, page, args.page)} ${noun}:\n${scopeText(resolvedScope)}\n\n${lines.join("\n")}\n\nKeep this scope and your ACL when inspecting these ids.` +
 				(args.parent_external_id ? " These are indexed direct children, not proof of the complete provider hierarchy. Paginate all results, then traverse each child's external_id explicitly for descendants." : ""),
 			{
-				kind: "knowledge",
+				kind: args.kind,
 				resolved_scope: resolvedScope,
 				items: sources.map((src) => ({
-					id: src.id,
-					...(src.title != null ? { title: src.title } : {}),
-					...(src.type != null ? { type: src.type } : {}),
+					...toListedRow(src, fieldBudget),
 					...(src.external_id != null ? { external_id: src.external_id } : {}),
 					...(src.provider != null ? { provider: src.provider } : {}),
 					...(src.parent_external_id != null ? { parent_external_id: src.parent_external_id } : {}),
@@ -1167,8 +1444,116 @@ export function createHydraDBServer(
 				total: page.total ?? sources.length,
 				page: page.page ?? args.page ?? 1,
 				has_more: hasMore(sources.length, page, args.page),
-				...(hasMore(sources.length, page, args.page) ? { next_args: { ...args, kind: "knowledge", ...followScope, page: (page.page ?? args.page ?? 1) + 1 } } : {}),
+				next_args: hasMore(sources.length, page, args.page)
+					? { ...args, ...followScope, page: (page.page ?? args.page ?? 1) + 1 }
+					: undefined,
 			},
+		);
+	}
+
+	async function runRelations(
+		args: {
+			id?: string;
+			kind?: "memory" | "knowledge";
+			limit?: number;
+			cursor?: number;
+			acl?: string[];
+			database?: string;
+			collection?: string;
+		},
+		signal?: AbortSignal,
+	): Promise<ToolResult> {
+		// Like subgraph: blank is refused, anything else goes out byte for byte.
+		// A blank id would otherwise read as "omitted" and return the whole
+		// collection's relations for what was meant as one item.
+		if (args.id != null && args.id.trim() === "") {
+			throw new Error(
+				`${TOOL_NAMES.RELATIONS}: \`id\` must not be blank. Omit it for the whole collection's relations.`,
+			);
+		}
+
+		logger.debug(`${TOOL_NAMES.RELATIONS}: ${args.id ?? "(collection)"}`);
+
+		const limit = args.limit ?? RELATIONS_DEFAULT_LIMIT;
+
+		const res = toRelationList(
+			await hydra.context.relations(
+				{
+					id: args.id,
+					kind: args.kind,
+					limit,
+					cursor: args.cursor,
+					acl: args.acl,
+					database: args.database,
+					collection: args.collection,
+				},
+				{ signal },
+			),
+		);
+
+		const resolvedScope = singleScope(args);
+
+		const subject = args.id != null ? args.id : "this collection";
+
+		// The server pages by timestamp: a truncated page always carries the
+		// cursor that continues it. Truncated without one cannot be continued,
+		// and saying "more exist" with no way to reach them is still the truth.
+		const hasMoreRelations = res.is_truncated && res.next_cursor != null;
+
+		const relations = res.relations.map((r) => ({
+			from: r.source.name ?? r.source.entity_id,
+			from_type: r.source.type,
+			predicate: r.predicate,
+			to: r.target.name ?? r.target.entity_id,
+			to_type: r.target.type,
+			evidence: r.context != null ? clampPreview(r.context) : null,
+			chunk_id: r.chunk_id,
+		}));
+
+		const structured = {
+			id: args.id ?? null,
+			resolved_scope: resolvedScope,
+			relations,
+			shown: relations.length,
+			structural_link_count: res.structural_count,
+			structural_truncated: res.structural_truncated,
+			has_more: hasMoreRelations,
+			next_cursor: hasMoreRelations ? res.next_cursor : null,
+			next_args: hasMoreRelations ? { ...args, limit, cursor: res.next_cursor } : undefined,
+		};
+
+		if (relations.length === 0) {
+			return structuredResult(
+				args.cursor != null
+					? `No more relations for ${subject}.`
+					: `No graph relations for ${subject}${args.id != null ? " — the item may not exist here, may have no extracted relations yet, or may still be indexing" : ""}.\n${scopeText(resolvedScope)}`,
+				structured,
+			);
+		}
+
+		const end = (name: string | null, type: string | null) =>
+			`(${name ?? "?"}${type ? `: ${type}` : ""})`;
+
+		const lines = relations.map((r, i) =>
+			`${i + 1}. ${end(r.from, r.from_type)} —${r.predicate ?? "related_to"}→ ${end(r.to, r.to_type)}` +
+				(r.evidence ? `\n   “${r.evidence}”` : ""),
+		);
+
+		const tail = hasMoreRelations
+			? `More relations exist: pass cursor=${res.next_cursor} for the next page.`
+			: res.is_truncated
+				? `More relations exist, but the server returned no cursor to continue; raise \`limit\` or pass an \`id\` to narrow.`
+				: "That is all of them.";
+
+		return structuredResult(
+			`${relations.length} relation${relations.length === 1 ? "" : "s"} for ${subject}:\n${scopeText(resolvedScope)}\n\n` +
+				`${lines.join("\n")}\n\n${tail}` +
+				(res.structural_count > 0
+					? ` ${res.structural_count} structural link(s) (entity presence, comments, attachments, people) were also returned` +
+						(res.structural_truncated ? ", clipped" : "") +
+						`; ${TOOL_NAMES.SUBGRAPH} shows the items they connect.`
+					: ""),
+			structured,
 		);
 	}
 
@@ -1233,11 +1618,11 @@ export function createHydraDBServer(
 	 */
 	function inspectBody(
 		res: {
-			content?: string;
-			contentBase64?: string;
-			contentType?: string;
-			sizeBytes?: number;
-			inferredContent?: string;
+			content?: string | null;
+			contentBase64?: string | null;
+			contentType?: string | null;
+			sizeBytes?: number | null;
+			inferredContent?: string | null;
 		},
 		offset?: number,
 		limit?: number,
@@ -2581,6 +2966,31 @@ export function createHydraDBServer(
 			.array(z.string())
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.acl),
+		additional_context: z
+			.string()
+			.min(1)
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.additional_context),
+		alpha: z
+			.union([z.literal("auto"), z.number().min(0).max(1)])
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.alpha),
+		query_by: z
+			.enum(["hybrid", "text"])
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.query_by),
+		query_forceful_relations: z
+			.boolean()
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.query_forceful_relations),
+		temporal_reasoning: z
+			.boolean()
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.temporal_reasoning),
+		response_format: z
+			.enum(["structured", "markdown"])
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.response_format),
 		...scopeSchema,
 	};
 
@@ -2686,7 +3096,7 @@ export function createHydraDBServer(
 		// DB have?" never saw the knowledge corpus — which hydradb_query searches
 		// by default. Same class of bug as the query `kind` pin, on the list path.
 		kind: z
-			.enum(["memory", "knowledge"])
+			.enum(["memory", "knowledge", "all"])
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.LIST].params.kind),
 		ids: z
 			.array(z.string())
@@ -2733,6 +3143,21 @@ export function createHydraDBServer(
 			.max(100)
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.LIST].params.page_size),
+		metadata: metadataFilterSchema
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.LIST].params.metadata),
+		additional_metadata: metadataFilterSchema
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.LIST].params.additional_metadata),
+		include_fields: z
+			.array(z.enum(LIST_INCLUDE_FIELDS))
+			.min(1)
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.LIST].params.include_fields),
+		group_threads: z
+			.boolean()
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.LIST].params.group_threads),
 		acl: z
 			.array(z.string())
 			.optional()
@@ -2785,6 +3210,52 @@ export function createHydraDBServer(
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.SUBGRAPH].params.acl),
 		...scopeSchema,
+	};
+
+	const relationsSchema = {
+		id: z.string().min(1).optional().describe(TOOL_DESCRIPTIONS[TOOL_NAMES.RELATIONS].params.id),
+		kind: z
+			.enum(["memory", "knowledge"])
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.RELATIONS].params.kind),
+		limit: z
+			.number()
+			.int()
+			.min(1)
+			.max(RELATIONS_MAX_LIMIT)
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.RELATIONS].params.limit),
+		cursor: z
+			.number()
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.RELATIONS].params.cursor),
+		acl: z
+			.array(z.string())
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.RELATIONS].params.acl),
+		...scopeSchema,
+	};
+
+	const relationsOutputSchema = {
+		id: z.string().nullable(),
+		resolved_scope: z.object({ database: z.string(), collection: z.string().nullable() }).optional(),
+		relations: z.array(
+			z.object({
+				from: z.string().nullable(),
+				from_type: z.string().nullable(),
+				predicate: z.string().nullable(),
+				to: z.string().nullable(),
+				to_type: z.string().nullable(),
+				evidence: z.string().nullable(),
+				chunk_id: z.string().nullable(),
+			}),
+		),
+		shown: z.number(),
+		structural_link_count: z.number(),
+		structural_truncated: z.boolean(),
+		has_more: z.boolean(),
+		next_cursor: z.number().nullable(),
+		next_args: z.record(z.unknown()).optional(),
 	};
 
 	const inspectSchema = {
@@ -2850,8 +3321,20 @@ export function createHydraDBServer(
 	// Output schemas, declared only where the result is genuinely structured.
 	// Query stays prose: its payload IS text, and forcing it into fields would
 	// duplicate the rendered context rather than replace it.
+	const listedRow: z.ZodType<ListedRow> = z.lazy(() =>
+		z.object({
+			id: z.string(),
+			title: z.string().optional(),
+			type: z.string().optional(),
+			fields: z.record(jsonValue).optional(),
+			fields_truncated: z.boolean().optional(),
+			comments: z.array(listedRow).optional(),
+			comments_truncated: z.boolean().optional(),
+		}),
+	);
+
 	const listOutputSchema = {
-		kind: z.enum(["memory", "knowledge"]),
+		kind: z.enum(["memory", "knowledge", "all"]),
 		resolved_scope: z.object({ database: z.string(), collection: z.string().nullable() }).optional(),
 		items: z.array(
 			z.object({
@@ -2863,6 +3346,10 @@ export function createHydraDBServer(
 				provider: z.string().optional(),
 				parent_external_id: z.string().optional(),
 				connector_id: z.string().optional(),
+				fields: z.record(jsonValue).optional(),
+				fields_truncated: z.boolean().optional(),
+				comments: z.array(listedRow).optional(),
+				comments_truncated: z.boolean().optional(),
 				children_args: z.record(z.unknown()).optional(),
 				inspect_args: z.object({ id: z.string(), database: z.string(), collection: z.string().optional(), acl: z.array(z.string()).optional() }).optional(),
 			}),
@@ -3141,8 +3628,10 @@ export function createHydraDBServer(
 		TOOL_NAMES.LIST,
 		listSchema,
 		(args, extra) => {
+			// SAFETY: the MCP SDK validated args against listSchema, which
+			// declares exactly these keys and types.
 			const a = args as {
-				kind?: "memory" | "knowledge";
+				kind?: "memory" | "knowledge" | "all";
 				ids?: string[];
 				source_ids?: string[];
 				external_id?: string;
@@ -3152,6 +3641,10 @@ export function createHydraDBServer(
 				provider?: string;
 				page?: number;
 				page_size?: number;
+				metadata?: MetadataFilter;
+				additional_metadata?: MetadataFilter;
+				include_fields?: ListIncludeField[];
+				group_threads?: boolean;
 				acl?: string[];
 				database?: string;
 				collection?: string;
@@ -3213,9 +3706,36 @@ export function createHydraDBServer(
 				);
 			}
 
-			if (a.kind === "knowledge") {
+			// The memory listing has no projection and no threads: the server
+			// applies both to source rows only. Refuse rather than return a
+			// listing that silently ignored what was asked.
+			const sourceRowOptions = [
+				a.include_fields != null ? "include_fields" : null,
+				a.group_threads === true ? "group_threads" : null,
+			].filter((s): s is string => s != null);
+
+			if (a.kind === "memory" && sourceRowOptions.length > 0) {
+				throw new Error(
+					`${TOOL_NAMES.LIST}: ${sourceRowOptions.join(" and ")} ${sourceRowOptions.length === 1 ? "applies" : "apply"} ` +
+					`to kind: "knowledge" or "all", not to memories.`,
+				);
+			}
+
+			// connector_id is stored at additional_metadata.connector_id, so the
+			// two would otherwise merge into one filter and one value would win.
+			const filterConnector = a.additional_metadata?.connector_id;
+
+			if (a.connector_id != null && filterConnector !== undefined && filterConnector !== a.connector_id) {
+				throw new Error(
+					`${TOOL_NAMES.LIST} received connector_id ${JSON.stringify(a.connector_id)} and ` +
+					`additional_metadata.connector_id ${JSON.stringify(filterConnector)}. Pass one of them.`,
+				);
+			}
+
+			if (a.kind === "knowledge" || a.kind === "all") {
 				return runListSources(
 					{
+						kind: a.kind,
 						source_ids: ids,
 						external_id: a.external_id,
 						parent_external_id: a.parent_external_id,
@@ -3224,6 +3744,10 @@ export function createHydraDBServer(
 						provider: a.provider,
 						page: a.page,
 						page_size: a.page_size,
+						metadata: a.metadata,
+						additional_metadata: a.additional_metadata,
+						include_fields: a.include_fields,
+						group_threads: a.group_threads,
 						acl: a.acl,
 						database: a.database,
 						collection: a.collection,
@@ -3237,6 +3761,8 @@ export function createHydraDBServer(
 					source_ids: ids,
 					page: a.page,
 					page_size: a.page_size,
+					metadata: a.metadata,
+					additional_metadata: a.additional_metadata,
 					acl: a.acl,
 					database: a.database,
 					collection: a.collection,
@@ -3260,6 +3786,16 @@ export function createHydraDBServer(
 		subgraphSchema,
 		(args, extra) => runSubgraph(args as Parameters<typeof runSubgraph>[0], extra?.signal),
 		readOnly,
+	);
+
+	register(
+		TOOL_NAMES.RELATIONS,
+		relationsSchema,
+		// SAFETY: the MCP SDK validated args against relationsSchema, whose keys
+		// and types are exactly runRelations' parameter.
+		(args, extra) => runRelations(args as Parameters<typeof runRelations>[0], extra?.signal),
+		readOnly,
+		relationsOutputSchema,
 	);
 
 	register(
@@ -3521,11 +4057,16 @@ export function createHydraDBServer(
 		listSourcesSchema,
 		(args, extra) =>
 			runListSources(
-				args as {
-					source_ids?: string[];
-					acl?: string[];
-					database?: string;
-					collection?: string;
+				{
+					kind: "knowledge",
+					// SAFETY: the MCP SDK validated args against listSourcesSchema,
+					// which declares exactly these keys.
+					...(args as {
+						source_ids?: string[];
+						acl?: string[];
+						database?: string;
+						collection?: string;
+					}),
 				},
 				extra?.signal,
 			),

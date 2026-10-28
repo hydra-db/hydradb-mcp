@@ -42,7 +42,10 @@ const PARAM = {
 		"The titles are resolved to source IDs first, then the normal semantic or keyword " +
 		"query runs inside those sources. Repeat values in the array for several titles; " +
 		"punctuation such as commas is part of the title. With source_ids, both filters " +
-		"must match. No title match returns an empty result rather than widening.",
+		"must match. No title match returns an empty result rather than widening. " +
+		"hydradb_ingest stores text under its title plus \".md\" (\"Plan\" becomes " +
+		"\"Plan.md\"), so each title is searched as given and with \".md\" added. " +
+		"Pass the title used when saving, or the exact title a listing shows.",
 	metadata_filters:
 		"Exact-match filters over stored metadata, as {key: value}. Exact match only — " +
 		"no ranges, no partial matches, no dates-since. Only useful for keys you know " +
@@ -72,6 +75,26 @@ const PARAM = {
 		"answer could live in more than one and you do not know which — otherwise " +
 		"prefer a single `collection`, which is both faster and more precise. " +
 		"Pass either this or `collection`, never both.",
+	additional_context:
+		"Background text prepended to the query to steer retrieval, such as the " +
+		"project or person the question is about. It is not searched for itself.",
+	alpha:
+		"Hybrid balance between keyword and vector search: 0 is keyword only, 1 is " +
+		"vector only, 'auto' lets Hydra DB choose (default: 0.8). Hybrid retrieval " +
+		"only; an error with operator or query_by 'text'.",
+	query_by:
+		"Retrieval method: 'hybrid' (default) searches keyword and vector together; " +
+		"'text' is keyword matching only. Setting operator implies 'text'.",
+	query_forceful_relations:
+		"In thinking mode, also follow the relations declared at ingest and return the " +
+		"chunks they point to alongside each match.",
+	temporal_reasoning:
+		"Resolve time-based questions ('when', 'how long', 'as of') using dated facts " +
+		"(default: true). Set false to skip it.",
+	response_format:
+		"'structured' (default rendering) shows each chunk with its source id for " +
+		"follow-up calls; 'markdown' returns Hydra DB's own Markdown rendering of the " +
+		"results as-is, without per-chunk ids.",
 	operator:
 		"Switches this query to KEYWORD retrieval (query_by=text) and says how to " +
 		"combine the terms: 'or' matches any, 'and' requires all, 'phrase' matches the " +
@@ -141,9 +164,10 @@ const PARAM = {
 		"you know their actual name, so extracted facts read as being about a person " +
 		"rather than about an anonymous participant. Applies to `turns` only.",
 	kind:
-		"Which family to list: 'memory' (stored memories) or 'knowledge' (ingested " +
-		"sources). REQUIRED — these are separate corpora with different output, and no " +
-		"single listing covers both. Call this twice to see everything.",
+		"Which family to list: 'memory' (stored memories), 'knowledge' (ingested " +
+		"sources), or 'all' (both in one page, rendered as source rows). REQUIRED. " +
+		"Use 'all' for a complete inventory in one pass; use 'memory' when you want " +
+		"memory text in the listing.",
 	source_ids:
 		"Optional array of specific source IDs to filter by. If omitted, lists all sources.",
 	list_external_id:
@@ -174,6 +198,31 @@ const PARAM = {
 		"Restrict the listing to one connector provider (e.g. \"confluence\", \"jira\", " +
 		"\"google_drive\", \"github\"). Only valid with kind: knowledge. Most useful paired " +
 		"with `external_id`; provider alone does not identify a unique source or site.",
+	list_metadata:
+		"Exact-match filter on each item's `metadata`, as {key: value} — the keys set at " +
+		"ingest (e.g. {\"project\": \"hydradb\"}). Several keys must all match.",
+	list_additional_metadata:
+		"Exact-match filter on each item's `additional_metadata`, as {key: value} — the " +
+		"per-document metadata connectors and ingest callers attach. Several keys must all match.",
+	list_include_fields:
+		"Return only these fields for each row, plus its id: title, type, description, note, " +
+		"timestamp, relations, metadata, additional_metadata, context_category. Use it to see " +
+		"metadata in the listing, or to keep rows small. Knowledge and 'all' listings only; " +
+		"content is never listed, use hydradb_inspect for it.",
+	list_group_threads:
+		"Fold comment and reply rows under the item they belong to (a Jira issue's comments, " +
+		"a Slack thread's replies), newest first, instead of listing each as its own row " +
+		"(default false). Knowledge and 'all' listings only.",
+	relations_id:
+		"The item whose graph relations to read — the value shown as [id: …] in hydradb_query " +
+		"or in [brackets] in hydradb_list output. Omit it to read the relations of the whole collection.",
+	relations_kind:
+		"Which graph to read: 'knowledge' (default) or 'memory'. The two graphs are separate.",
+	relations_limit:
+		"How many relations to return (1-200, default 50). The result says when more exist " +
+		"and which `cursor` reads the next page.",
+	relations_cursor:
+		"Where to continue from: the `next_cursor` the previous call returned. Omit it for the first page.",
 	page:
 		"Which page of results to return, 1-indexed (default: 1). The response reports how " +
 		"many of the total it showed; pass the next page to continue rather than assuming " +
@@ -329,6 +378,14 @@ An id nothing links to returns just that item. An unknown id returns an empty re
 
 Read-only; never changes anything.`;
 
+const RELATIONS_BODY = `Read the knowledge-graph relations Hydra DB extracted from stored content: (entity) —predicate→ (entity) triplets such as (Alice) —works_at→ (Acme), each with the passage that evidences it. Pass \`id\` for the relations of one item, or omit it for the whole collection.
+
+Use it to see what the graph knows about a document or a collection as a whole. For "what do you know about X", use hydradb_query instead — it already attaches the relevant graph paths to its results. For the items connected to one item (its thread, replies, links), use hydradb_subgraph.
+
+Results are paged, newest first. When \`has_more\` is true, pass \`next_cursor\` back as \`cursor\` for the next page. An item with no extracted relations returns an empty list, not an error.
+
+Read-only; never changes anything.`;
+
 const INSPECT_BODY = `Fetch the full original content of ONE stored item by its id. Use it after hydradb_query or hydradb_list when a truncated chunk or listing row is not enough and you need the whole document.
 
 The id is the value shown as \`[id: …]\` in hydradb_query results and in [brackets] in hydradb_list output. Ids are not guessable — take one from those tools rather than constructing it.
@@ -420,6 +477,12 @@ export const TOOL_DESCRIPTIONS = {
 			num_related_chunks: PARAM.num_related_chunks,
 			recency_bias: PARAM.recency_bias,
 			query_apps: PARAM.query_apps,
+			additional_context: PARAM.additional_context,
+			alpha: PARAM.alpha,
+			query_by: PARAM.query_by,
+			query_forceful_relations: PARAM.query_forceful_relations,
+			temporal_reasoning: PARAM.temporal_reasoning,
+			response_format: PARAM.response_format,
 			database: PARAM.database,
 			collection: PARAM.collection,
 			collections: PARAM.collections,
@@ -456,7 +519,7 @@ export const TOOL_DESCRIPTIONS = {
 
 	[TOOL_NAMES.LIST]: {
 		title: "List Hydra DB Context",
-		description: `Enumerate what is stored in Hydra DB — every memory (kind: "memory") or every knowledge source (kind: "knowledge"). These are SEPARATE corpora and this tool returns one at a time: listing memories tells you nothing about which knowledge sources exist, and vice versa. Call it twice to see everything.
+		description: `Enumerate what is stored in Hydra DB — every memory (kind: "memory"), every knowledge source (kind: "knowledge"), or both in one page (kind: "all"). Memories and knowledge are SEPARATE corpora: listing one tells you nothing about the other, so use "all" (or call twice) to see everything.
 
 Use it for inventory questions ("what do you remember about me?", "which documents are indexed?") and to obtain ids. For "what do you know about X", use hydradb_query instead — listing everything and reading it is far more expensive and loses relevance ranking.
 
@@ -466,7 +529,9 @@ Results are paginated. The response says how many of the total it showed and how
 
 INDEXED DIRECT CHILDREN: pass \`parent_external_id\` (the provider parent ID, NOT its Hydra DB source ID), \`provider\` and \`connector_id\`, with kind: "knowledge". Resolve the parent first and copy its stored connector ID; provider alone does not namespace sites/accounts, and missing connector metadata cannot be guessed. Follow \`next_args\` while \`has_more\` is true, then use each returned child's \`children_args\` to enumerate descendants, tracking visited identities. This reads indexed parent metadata, not a live provider tree; missing/stale metadata or permissions can omit children. Existing external-ID/URL lookups without connector_id may return multiple candidates; never assume uniqueness. Preserve \`resolved_scope\` and caller ACL on every list/query/inspect call; there is no inherited last scope.
 
-Memory rows come back as [id] content. Knowledge rows as [id] — title (type), with no content — pass an id to hydradb_inspect for the text.`,
+FILTERS AND SHAPE: \`metadata\` and \`additional_metadata\` narrow the listing to items whose stored metadata matches exactly ({key: value}, all keys must match). \`include_fields\` returns only the named fields for each row (use it to SEE metadata in the listing). \`group_threads\` folds comments and replies under the item they belong to instead of listing them as separate rows.
+
+Memory rows come back as [id] content. Knowledge and "all" rows as [id] — title (type), with no content — pass an id to hydradb_inspect for the text.`,
 		params: {
 			acl: PARAM.acl,
 			kind: PARAM.kind,
@@ -478,6 +543,24 @@ Memory rows come back as [id] content. Knowledge rows as [id] — title (type), 
 			provider: PARAM.list_provider,
 			page: PARAM.page,
 			page_size: PARAM.page_size,
+			metadata: PARAM.list_metadata,
+			additional_metadata: PARAM.list_additional_metadata,
+			include_fields: PARAM.list_include_fields,
+			group_threads: PARAM.list_group_threads,
+			database: PARAM.database,
+			collection: PARAM.collection,
+		},
+	},
+
+	[TOOL_NAMES.RELATIONS]: {
+		title: "Hydra DB Graph Relations",
+		description: RELATIONS_BODY,
+		params: {
+			id: PARAM.relations_id,
+			kind: PARAM.relations_kind,
+			limit: PARAM.relations_limit,
+			cursor: PARAM.relations_cursor,
+			acl: PARAM.acl,
 			database: PARAM.database,
 			collection: PARAM.collection,
 		},
@@ -749,13 +832,14 @@ THE TOOLS
 - ${TOOL_NAMES.INSPECT} — the complete original content of one source you already have an id for.
 - ${TOOL_NAMES.DELETE} — irreversible removal of one item by id.
 - ${TOOL_NAMES.STATUS} — whether an ingested source has finished indexing. Ingestion is asynchronous, so a query issued straight after a save can legitimately return nothing.
+- ${TOOL_NAMES.RELATIONS} — the knowledge-graph relations extracted from one item, or from a whole collection, page by page.
 - ${TOOL_NAMES.SUBGRAPH} — everything connected to one item you already have an id for: the rest of its thread, its replies, its parents and children, the items it links to. Reach for it when one result is not enough and you need what surrounds it.
 - ${TOOL_NAMES.DATABASES} — which databases this connection can address, with the default marked. Every tool takes an optional \`database\`; call this before naming one, or when a call was refused because the user confined this connection to a single database.
 - ${TOOL_NAMES.LIST_COLLECTIONS} — the collections inside a database, with this connection's default marked. Call it before choosing a collection when the connection has no default.
 - ${TOOL_NAMES.FEEDBACK} — report whether a query's results were actually useful, using the request_id that query printed. Say what the right answer was (\`ground_truth_answer\`) or which sources held it (\`ground_truth_source_ids\`) when you know — that is machine-checkable and worth far more than prose. It records a signal; it never changes the query's result or the stored data.
 - ${TOOL_NAMES.DELETE_COLLECTION} — irreversible removal of one collection and everything in it. Confirm first. Take the name from ${TOOL_NAMES.LIST_COLLECTIONS}.
 
-Ids flow between these: ${TOOL_NAMES.QUERY}, ${TOOL_NAMES.LIST} and ${TOOL_NAMES.SUBGRAPH} emit them; ${TOOL_NAMES.INSPECT}, ${TOOL_NAMES.DELETE}, ${TOOL_NAMES.STATUS} and ${TOOL_NAMES.SUBGRAPH} accept them. Never invent one.
+Ids flow between these: ${TOOL_NAMES.QUERY}, ${TOOL_NAMES.LIST} and ${TOOL_NAMES.SUBGRAPH} emit them; ${TOOL_NAMES.INSPECT}, ${TOOL_NAMES.DELETE}, ${TOOL_NAMES.RELATIONS}, ${TOOL_NAMES.STATUS} and ${TOOL_NAMES.SUBGRAPH} accept them. Never invent one.
 
 COLLECTIONS — WHO DECIDES THE SCOPE
 
