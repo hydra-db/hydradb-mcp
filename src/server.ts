@@ -1139,9 +1139,9 @@ export function createHydraDBServer(
 			...memoryOnly,
 			database: args.database,
 			collection: args.collection,
-			// Default stays true. The SDK retries POSTs, so upsert is what keeps a
-			// retried ingest from duplicating — flipping this default would trade a
-			// silent overwrite for a silent duplicate.
+			// Default stays true. An ingest is no longer retried after an unclear
+			// failure, but a caller who re-sends one after "outcome unknown" can
+			// still land it twice; upsert makes that an overwrite, not a duplicate.
 			upsert: args.overwrite ?? true,
 		}, { signal });
 
