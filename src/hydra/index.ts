@@ -23,6 +23,8 @@ export type {
 	QueryKind,
 	ConversationTurn,
 	QueryParams,
+	IngestGraph,
+	IngestItem,
 	IngestParams,
 	ListParams,
 	MetadataFilter,

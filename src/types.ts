@@ -46,4 +46,15 @@ export type IngestOutcome = {
 	success_count: number;
 	failed_count: number;
 	indexing_pending: boolean;
+	items?: IngestItemOutcome[];
+};
+
+export type IngestItemOutcome = {
+	index: number;
+	id: string;
+	status: string;
+	accepted: boolean;
+	error?: string;
+	error_code?: string;
+	relations_error?: string;
 };

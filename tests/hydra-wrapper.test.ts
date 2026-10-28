@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { type HydraDBClient, HydraDBError } from "@hydradb/sdk";
+import { z } from "zod";
 
 import {
 	DEFAULT_MAX_RETRIES,
@@ -164,6 +165,77 @@ test("knowledge ingest serializes every supported per-document field", async () 
 		evidence_kind: "record",
 		evidence_subject: "team:finance",
 	}]);
+});
+
+test("memory ingest sends caller instructions, additional metadata, and graph", async () => {
+	const { sdk, calls } = ingestSdk();
+	const hydra = new HydraDB({ token: "t", database: "db_test" }, sdk);
+
+	await hydra.context.ingest({
+		kind: "memory",
+		text: "Deploy on Friday",
+		sourceId: "memory-1",
+		customInstructions: "Extract only deadline dates",
+		additionalMetadata: { team: "infra" },
+		graph: {
+			entities: { alice: { name: "Alice", type: "Person" } },
+			relations: [],
+		},
+	});
+
+	const request = z.object({ memories: z.string(), graphPayload: z.string() }).parse(calls[0]);
+	const memories = JSON.parse(request.memories);
+
+	assert.deepEqual(memories, [{
+		text: "Deploy on Friday",
+		source_id: "memory-1",
+		infer: true,
+		is_markdown: false,
+		custom_instructions: "Extract only deadline dates",
+		additional_metadata: { team: "infra" },
+	}]);
+	assert.deepEqual(JSON.parse(request.graphPayload), {
+		"memory-1": {
+			entities: { alice: { name: "Alice", type: "Person" } },
+			relations: [],
+		},
+	});
+});
+
+test("memory ingest batches items into one SDK request", async () => {
+	const { sdk, calls } = ingestSdk();
+	const hydra = new HydraDB({ token: "t", database: "db_test" }, sdk);
+
+	await hydra.context.ingest({
+		kind: "memory",
+		items: [
+			{ text: "one", sourceId: "m1" },
+			{ pairs: [{ user: "two", assistant: "reply" }], sourceId: "m2" },
+			{ text: "three", sourceId: "m3" },
+		],
+	});
+
+	assert.equal(calls.length, 1);
+	const request = z.object({ memories: z.string() }).parse(calls[0]);
+	const memories = z.array(z.object({ source_id: z.string() })).parse(JSON.parse(request.memories));
+
+	assert.deepEqual(memories.map((item) => item.source_id), ["m1", "m2", "m3"]);
+});
+
+test("caller instructions with infer false are rejected", async () => {
+	const { sdk, calls } = ingestSdk();
+	const hydra = new HydraDB({ token: "t", database: "db_test" }, sdk);
+
+	await assert.rejects(
+		() => hydra.context.ingest({
+			kind: "memory",
+			text: "note",
+			infer: false,
+			customInstructions: "Extract dates",
+		}),
+		/customInstructions.*infer is false/i,
+	);
+	assert.equal(calls.length, 0);
 });
 
 test("memory ingest is unaffected by the knowledge guard", async () => {

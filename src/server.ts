@@ -12,10 +12,18 @@ import { renderRecalledContext } from "./context.js";
 import { COLLECTION_PATTERN, MAX_BODY_BYTES, renderRows } from "./cypher.js";
 import { SERVER_INSTRUCTIONS, TOOL_DESCRIPTIONS } from "./descriptions.js";
 import { HydraDB, assertCollectionAllowed, assertDatabaseAllowed, hasEntries } from "./hydra/index.js";
-import type { ContextKind, IngestParams, MetadataFilter, QueryKind, QueryParams } from "./hydra/index.js";
+import type {
+	ContextKind,
+	IngestGraph,
+	IngestItem,
+	IngestParams,
+	MetadataFilter,
+	QueryKind,
+	QueryParams,
+} from "./hydra/index.js";
 import { logger } from "./logger.js";
 import { ALIAS_REPLACEMENTS, DEPRECATED_TOOL_NAMES, TOOL_NAMES } from "./tool-names.js";
-import type { IngestOutcome, IngestRejectedItem, MemoryResultItem } from "./types.js";
+import type { IngestItemOutcome, IngestOutcome, IngestRejectedItem, MemoryResultItem } from "./types.js";
 import { SERVER_VERSION } from "./version.js";
 
 // Host-owned default: silently attached to ingest so Hydra DB extracts the kind
@@ -73,8 +81,8 @@ function defaultTitle(text: string): string {
  * The timestamp prefix is kept because it sorts and reads well; the suffix is
  * what makes it unique.
  */
-function generatedSourceId(): string {
-	return `mcp-conversation-${Date.now()}-${randomUUID().slice(0, 8)}`;
+function generatedSourceId(kind: "item" | "conversation" = "item"): string {
+	return `mcp-${kind}-${Date.now()}-${randomUUID().slice(0, 8)}`;
 }
 
 function textResult(text: string): ToolResult {
@@ -164,6 +172,12 @@ const MAX_TEXT_CHARS = 1_000_000;
 const MAX_TURNS = 500;
 
 const MAX_TURN_CHARS = 100_000;
+
+const MAX_INGEST_ITEMS = 100;
+
+const MAX_INGEST_BYTES = 8 * 1024 * 1024;
+
+const MAX_CUSTOM_INSTRUCTIONS_CHARS = 4_000;
 
 const turnSchema = z.object({
 	user: z
@@ -1097,6 +1111,8 @@ export function createHydraDBServer(
 		overwrite?: boolean;
 		metadata?: IngestParams["metadata"];
 		additional_metadata?: IngestParams["additionalMetadata"];
+		custom_instructions?: string;
+		graph?: IngestGraph;
 		relations?: IngestParams["relations"];
 		evidence_kind?: IngestParams["evidenceKind"];
 		evidence_subject?: string;
@@ -1105,6 +1121,11 @@ export function createHydraDBServer(
 		collection?: string;
 	}, signal?: AbortSignal): Promise<ToolResult> {
 		const kind = args.kind ?? "memory";
+		const sourceId = args.source_id ?? (args.graph == null ? undefined : generatedSourceId());
+
+		const customInstructions = args.custom_instructions ??
+			(args.infer === false ? undefined : INGEST_INSTRUCTIONS);
+
 		logger.debug(`${TOOL_NAMES.INGEST}: "${args.text.slice(0, 50)}..." (kind=${kind})`);
 
 		// The memory item shape has no counterpart on the knowledge path, which
@@ -1115,21 +1136,24 @@ export function createHydraDBServer(
 		const kindSpecific =
 			kind === "memory"
 				? {
-						sourceId: args.source_id,
+						sourceId,
 						infer: args.infer ?? true,
 						isMarkdown: args.is_markdown ?? false,
-						customInstructions: INGEST_INSTRUCTIONS,
+						customInstructions,
 						metadata: args.metadata,
+						additionalMetadata: args.additional_metadata,
 						observationDate: args.observation_date,
+						graph: args.graph,
 					}
 				: {
-						sourceId: args.source_id,
+						sourceId,
 						infer: args.infer,
 						metadata: args.metadata,
 						additionalMetadata: args.additional_metadata,
 						relations: args.relations,
 						evidenceKind: args.evidence_kind,
 						evidenceSubject: args.evidence_subject,
+						graph: args.graph,
 					};
 
 		const raw = await hydra.context.ingest({
@@ -1151,7 +1175,7 @@ export function createHydraDBServer(
 		// information back to them. The id is the thing they do not have and
 		// cannot derive, and it is what makes correcting this memory later
 		// possible at all.
-		const outcome = ingestOutcome(res, args.source_id);
+		const outcome = ingestOutcome(res, sourceId);
 		const allFailed = res.success_count === 0 && res.failed_count > 0;
 
 		const summary = allFailed
@@ -1181,6 +1205,9 @@ export function createHydraDBServer(
 			isMarkdown?: boolean;
 			overwrite?: boolean;
 			metadata?: IngestParams["metadata"];
+			additionalMetadata?: IngestParams["additionalMetadata"];
+			customInstructions?: string;
+			graph?: IngestGraph;
 			observationDate?: string;
 			database?: string;
 			collection?: string;
@@ -1191,6 +1218,9 @@ export function createHydraDBServer(
 			`${TOOL_NAMES.INGEST}: ${turns.length} turns -> ${sourceId}`,
 		);
 
+		const customInstructions = opts?.customInstructions ??
+			(opts?.infer === false ? undefined : INGEST_INSTRUCTIONS);
+
 		const raw = await hydra.context.ingest({
 			kind: "memory",
 			pairs: turns,
@@ -1199,9 +1229,11 @@ export function createHydraDBServer(
 			infer: opts?.infer ?? true,
 			title: opts?.title,
 			isMarkdown: opts?.isMarkdown,
-			customInstructions: INGEST_INSTRUCTIONS,
+			customInstructions,
 			metadata: opts?.metadata,
+			additionalMetadata: opts?.additionalMetadata,
 			observationDate: opts?.observationDate,
+			graph: opts?.graph,
 			upsert: opts?.overwrite ?? true,
 			database: opts?.database,
 			collection: opts?.collection,
@@ -1216,6 +1248,151 @@ export function createHydraDBServer(
 		const result = structuredResult(
 			`Ingested ${turns.length} conversation turn(s) into Hydra DB ` +
 			`(id: ${conversationId}, success: ${res.success_count}, failed: ${res.failed_count})` +
+			(outcome.indexing_pending ? indexingNote(res) : "") +
+			ingestIssues(res),
+			outcome,
+		);
+
+		return allFailed ? { ...result, isError: true } : result;
+	}
+
+	function ingestItemBytes(item: IngestToolItem): number {
+		let total = item.text == null ? 0 : Buffer.byteLength(item.text, "utf8");
+
+		for (const turn of item.turns ?? []) {
+			total += Buffer.byteLength(turn.user, "utf8");
+			total += Buffer.byteLength(turn.assistant, "utf8");
+		}
+
+		return total;
+	}
+
+	function batchItemOutcome(
+		items: IngestItem[],
+		results: MemoryResultItem[],
+	): IngestItemOutcome[] {
+		const byId = new Map(
+			results.flatMap((result) =>
+				result.source_id.length > 0 ? [[result.source_id, result] as const] : []
+			),
+		);
+
+		return items.map((item, index) => {
+			const id = item.sourceId ?? "";
+			const result = byId.get(id);
+			const accepted = result != null && result.status !== "failed" && !result.error;
+
+			const outcome: IngestItemOutcome = {
+				index,
+				id,
+				status: result?.status ?? "missing",
+				accepted,
+			};
+
+			if (result?.error) outcome.error = result.error;
+
+			if (result?.error_code) outcome.error_code = result.error_code;
+
+			if (result?.relations_error) outcome.relations_error = result.relations_error;
+
+			return outcome;
+		});
+	}
+
+	async function runIngestBatch(args: {
+		kind?: ContextKind;
+		items: IngestToolItem[];
+		custom_instructions?: string;
+		overwrite?: boolean;
+		database?: string;
+		collection?: string;
+	}, signal?: AbortSignal): Promise<ToolResult> {
+		const kind = args.kind ?? "memory";
+		const totalBytes = args.items.reduce((total, item) => total + ingestItemBytes(item), 0);
+
+		if (totalBytes > MAX_INGEST_BYTES) {
+			throw new Error(
+				`hydradb_ingest items contain ${totalBytes} UTF-8 bytes; the maximum is ` +
+				`${MAX_INGEST_BYTES}. Split the call.`,
+			);
+		}
+
+		const items: IngestItem[] = args.items.map((item, index) => {
+			const hasText = item.text != null;
+			const hasTurns = item.turns != null && item.turns.length > 0;
+
+			if (hasText === hasTurns) {
+				throw new Error(`items[${index}] requires exactly one of text or turns.`);
+			}
+
+			if (kind === "knowledge" && hasTurns) {
+				throw new Error(`items[${index}] cannot use turns with kind "knowledge".`);
+			}
+
+			const callerInstructions = item.custom_instructions ?? args.custom_instructions;
+
+			if (kind === "knowledge" && callerInstructions != null) {
+				throw new Error("custom_instructions applies to memory ingestion only.");
+			}
+
+			if (item.infer === false && callerInstructions != null) {
+				throw new Error(`items[${index}] cannot use custom_instructions when infer is false.`);
+			}
+
+			const sourceId = item.source_id ?? generatedSourceId();
+
+			const customInstructions = kind === "knowledge"
+				? undefined
+				: callerInstructions ?? (item.infer === false ? undefined : INGEST_INSTRUCTIONS);
+
+			const normalized: IngestItem = {
+				text: item.text,
+				pairs: item.turns,
+				title: item.title ?? (item.text == null ? undefined : defaultTitle(item.text)),
+				sourceId,
+				userName: item.user_name,
+				infer: item.infer,
+				isMarkdown: item.is_markdown,
+				customInstructions,
+				metadata: item.metadata,
+				additionalMetadata: item.additional_metadata,
+				relations: item.relations,
+				evidenceKind: item.evidence_kind,
+				evidenceSubject: item.evidence_subject,
+				observationDate: item.observation_date,
+				graph: item.graph,
+			};
+
+			return normalized;
+		});
+
+		const ids = items.map((item) => item.sourceId ?? "");
+
+		if (new Set(ids).size !== ids.length) {
+			throw new Error("hydradb_ingest item ids must be unique within one batch.");
+		}
+
+		const raw = await hydra.context.ingest({
+			kind,
+			items,
+			upsert: args.overwrite ?? true,
+			database: args.database,
+			collection: args.collection,
+		}, { signal });
+
+		const res = toAddMemoryResponse(raw);
+		const outcome = ingestOutcome(res);
+
+		outcome.items = batchItemOutcome(items, res.results);
+
+		const allFailed = res.success_count === 0 && res.failed_count > 0;
+
+		const summary = allFailed
+			? `Hydra DB rejected every ingest item (${res.failed_count} failed).`
+			: `Stored ${res.success_count} item(s); rejected ${res.failed_count}.`;
+
+		const result = structuredResult(
+			summary +
 			(outcome.indexing_pending ? indexingNote(res) : "") +
 			ingestIssues(res),
 			outcome,
@@ -3076,7 +3253,7 @@ export function createHydraDBServer(
 
 	const ingestMetadataSchema = {
 		metadata: z
-			.record(z.unknown())
+			.record(jsonValue)
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.metadata),
 		additional_metadata: z
@@ -3106,6 +3283,56 @@ export function createHydraDBServer(
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.observation_date),
 	};
+
+	const customInstructionsSchema = z
+		.string()
+		.max(MAX_CUSTOM_INSTRUCTIONS_CHARS, {
+			message: `custom_instructions must be at most ${MAX_CUSTOM_INSTRUCTIONS_CHARS} characters`,
+		})
+		.optional()
+		.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.custom_instructions);
+
+	const graphSchema = z.object({
+		entities: z
+			.record(z.object({
+				name: z.string(),
+				type: z.string(),
+				namespace: z.string().optional(),
+				identifier: z.string().optional(),
+			}))
+			.refine((entities) => Object.keys(entities).length > 0, {
+				message: "graph.entities must contain at least one entity",
+			}),
+		relations: z.array(z.object({
+			source: z.string(),
+			target: z.string(),
+			predicate: z.string(),
+			context: z.string().optional(),
+			temporal_details: jsonValue.optional(),
+		})),
+	});
+
+	const ingestItemSchema = z.object({
+		text: z
+			.string()
+			.max(MAX_TEXT_CHARS, {
+				message: `text must be at most ${MAX_TEXT_CHARS} characters`,
+			})
+			.optional(),
+		turns: z
+			.array(turnSchema)
+			.min(1)
+			.max(MAX_TURNS, { message: `at most ${MAX_TURNS} turns per ingest` })
+			.optional(),
+		title: storeSchema.title,
+		source_id: storeSchema.source_id,
+		infer: storeSchema.infer,
+		is_markdown: storeSchema.is_markdown,
+		user_name: z.string().optional(),
+		custom_instructions: customInstructionsSchema,
+		graph: graphSchema.optional(),
+		...ingestMetadataSchema,
+	});
 
 	const ingestSchema = {
 		...storeSchema,
@@ -3138,7 +3365,21 @@ export function createHydraDBServer(
 			.string()
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.user_name),
+		custom_instructions: customInstructionsSchema,
+		graph: graphSchema
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.graph),
+		items: z
+			.array(ingestItemSchema)
+			.min(1)
+			.max(MAX_INGEST_ITEMS, {
+				message: `items must contain at most ${MAX_INGEST_ITEMS} entries`,
+			})
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.items),
 	};
+
+	type IngestToolItem = z.infer<typeof ingestItemSchema>;
 
 	const conversationSchema = {
 		turns: z
@@ -3440,6 +3681,15 @@ export function createHydraDBServer(
 		success_count: z.number(),
 		failed_count: z.number(),
 		indexing_pending: z.boolean(),
+		items: z.array(z.object({
+			index: z.number(),
+			id: z.string(),
+			status: z.string(),
+			accepted: z.boolean(),
+			error: z.string().optional(),
+			error_code: z.string().optional(),
+			relations_error: z.string().optional(),
+		})).optional(),
 	};
 
 	const deleteOutputSchema = {
@@ -3597,6 +3847,9 @@ export function createHydraDBServer(
 			overwrite?: boolean;
 			metadata?: IngestParams["metadata"];
 			additional_metadata?: IngestParams["additionalMetadata"];
+			custom_instructions?: string;
+			graph?: IngestGraph;
+			items?: IngestToolItem[];
 			relations?: IngestParams["relations"];
 			evidence_kind?: IngestParams["evidenceKind"];
 			evidence_subject?: string;
@@ -3608,6 +3861,42 @@ export function createHydraDBServer(
 		};
 
 		const hasTurns = a.turns != null && a.turns.length > 0;
+		const hasFlatItem = a.text != null || hasTurns;
+
+		const otherFlatFields = [
+			a.title,
+			a.source_id,
+			a.infer,
+			a.is_markdown,
+			a.metadata,
+			a.additional_metadata,
+			a.relations,
+			a.evidence_kind,
+			a.evidence_subject,
+			a.observation_date,
+			a.user_name,
+			a.graph,
+		];
+
+		if (a.items != null && (hasFlatItem || otherFlatFields.some((value) => value != null))) {
+			throw new Error(
+				`${TOOL_NAMES.INGEST} accepts either \`items\` or the single-item fields, not both.`,
+			);
+		}
+
+		if (a.items != null) {
+			return runIngestBatch(
+				{
+					kind: a.kind,
+					items: a.items,
+					custom_instructions: a.custom_instructions,
+					overwrite: a.overwrite,
+					database: a.database,
+					collection: a.collection,
+				},
+				extra?.signal,
+			);
+		}
 
 		// A conversation is a memory by definition; there is no knowledge document
 		// made of user/assistant pairs. Reject rather than quietly ingesting it as
@@ -3629,6 +3918,7 @@ export function createHydraDBServer(
 					["is_markdown", a.is_markdown],
 					["user_name", a.user_name],
 					["observation_date", a.observation_date],
+					["custom_instructions", a.custom_instructions],
 				] as const
 			)
 				.filter(([, value]) => value != null)
@@ -3643,6 +3933,10 @@ export function createHydraDBServer(
 			}
 		}
 
+		if (a.infer === false && a.custom_instructions != null) {
+			throw new Error("custom_instructions cannot be used when infer is false.");
+		}
+
 		// `text` and `turns` are mutually exclusive — reject rather than silently
 		// dropping one (the documented "exactly one" contract).
 		if (hasTurns && a.text != null) {
@@ -3652,7 +3946,7 @@ export function createHydraDBServer(
 		}
 
 		if (a.turns != null && a.turns.length > 0) {
-			const sourceId = a.source_id ?? generatedSourceId();
+			const sourceId = a.source_id ?? generatedSourceId("conversation");
 
 			// Forward every option the canonical schema accepts so none is
 			// silently dropped on the conversation path.
@@ -3666,6 +3960,9 @@ export function createHydraDBServer(
 					isMarkdown: a.is_markdown,
 					overwrite: a.overwrite,
 					metadata: a.metadata,
+					additionalMetadata: a.additional_metadata,
+					customInstructions: a.custom_instructions,
+					graph: a.graph,
 					observationDate: a.observation_date,
 					database: a.database,
 					collection: a.collection,
@@ -3686,6 +3983,8 @@ export function createHydraDBServer(
 					overwrite: a.overwrite,
 					metadata: a.metadata,
 					additional_metadata: a.additional_metadata,
+					custom_instructions: a.custom_instructions,
+					graph: a.graph,
 					relations: a.relations,
 					evidence_kind: a.evidence_kind,
 					evidence_subject: a.evidence_subject,
@@ -3697,7 +3996,7 @@ export function createHydraDBServer(
 			);
 		}
 
-			throw new Error(
+		throw new Error(
 				`${TOOL_NAMES.INGEST} requires either \`text\` (a note) or \`turns\` (a conversation).`,
 			);
 		},

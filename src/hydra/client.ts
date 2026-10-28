@@ -278,8 +278,27 @@ export interface ConversationTurn {
 	assistant: string;
 }
 
-export interface IngestParams {
-	kind: ContextKind;
+export interface IngestGraphEntity {
+	name: string;
+	type: string;
+	namespace?: string;
+	identifier?: string;
+}
+
+export interface IngestGraphRelation {
+	source: string;
+	target: string;
+	predicate: string;
+	context?: string;
+	temporal_details?: JsonValue;
+}
+
+export interface IngestGraph {
+	entities: Record<string, IngestGraphEntity>;
+	relations: IngestGraphRelation[];
+}
+
+export interface IngestItem {
 	/** Free text to ingest (memory note or knowledge document body). */
 	text?: string;
 	/** Conversation turns to ingest as a memory. */
@@ -313,9 +332,32 @@ export interface IngestParams {
 	observationDate?: string;
 	/** Filename to attach when ingesting knowledge text as a document. */
 	filename?: string;
+	/** Caller-supplied entities and relations for this item. */
+	graph?: IngestGraph;
+}
+
+export interface IngestParams extends IngestItem {
+	kind: ContextKind;
+	/** Several same-kind items to send in one API request. */
+	items?: IngestItem[];
+	upsert?: boolean;
 	collection?: string;
 	/** Per-call database override. */
 	database?: string;
+}
+
+interface MemoryWireItem {
+	user_assistant_pairs?: ConversationTurn[];
+	text?: string;
+	infer: boolean;
+	is_markdown: boolean;
+	custom_instructions?: string;
+	source_id?: string;
+	title?: string;
+	user_name?: string;
+	metadata?: Record<string, JsonValue>;
+	additional_metadata?: Record<string, JsonValue>;
+	observation_date?: string;
 }
 
 export interface ListParams {
@@ -874,98 +916,139 @@ export class ContextResource extends Resource {
 			request.upsert = String(params.upsert);
 		}
 
+		const flatItemFields = [
+			params.text,
+			params.pairs,
+			params.title,
+			params.sourceId,
+			params.userName,
+			params.infer,
+			params.isMarkdown,
+			params.customInstructions,
+			params.metadata,
+			params.additionalMetadata,
+			params.relations,
+			params.evidenceKind,
+			params.evidenceSubject,
+			params.observationDate,
+			params.filename,
+			params.graph,
+		];
+
+		if (params.items != null && flatItemFields.some((value) => value != null)) {
+			throw new Error("Ingestion accepts items or flat item fields, not both.");
+		}
+
+		const items: IngestItem[] = params.items ?? [params];
+
+		if (items.length === 0) throw new Error("Ingestion requires at least one item.");
+
+		const graphPayload: Record<string, IngestGraph> = {};
+
 		if (params.kind === "memory") {
-			const infer = params.infer ?? true;
-			const item: Record<string, unknown> = {};
+			const memories = items.map((input): MemoryWireItem => {
+				const infer = input.infer ?? true;
 
-			if (params.pairs != null) item.user_assistant_pairs = params.pairs;
-
-			if (params.text != null) item.text = params.text;
-			item.infer = infer;
-			item.is_markdown = params.isMarkdown ?? false;
-
-			// Preserve the v1 omission behaviour: custom_instructions is only
-			// attached when inference is enabled.
-			if (infer && params.customInstructions != null) {
-				item.custom_instructions = params.customInstructions;
-			}
-
-			if (params.sourceId != null) item.source_id = params.sourceId;
-
-			if (params.title != null) item.title = params.title;
-
-			if (params.userName != null) item.user_name = params.userName;
-
-			if (params.metadata != null) item.metadata = params.metadata;
-
-			if (params.additionalMetadata != null) {
-				item.additional_metadata = params.additionalMetadata;
-			}
-
-			if (params.observationDate != null) {
-				item.observation_date = params.observationDate;
-			}
-
-			request.memories = JSON.stringify([item]);
-		} else {
-			// The knowledge path can only carry the document itself and its
-			// filename. Everything below belongs to the memory item shape and has
-			// nowhere to go here — so reject rather than accept and discard. A
-			// caller that sets `infer: true` on a knowledge write and is answered
-			// "success: 1, failed: 0" has been told its instruction was honoured
-			// when it was dropped on the floor.
-			const unsupported = (
-				[
-					["pairs", params.pairs],
-					["isMarkdown", params.isMarkdown],
-					["customInstructions", params.customInstructions],
-					["userName", params.userName],
-					["observationDate", params.observationDate],
-				] as const
-			)
-				.filter(([, value]) => value != null)
-				.map(([name]) => name);
-
-			if (unsupported.length > 0) {
-				throw new Error(
-					`Knowledge ingestion does not support ${unsupported.join(", ")} — ` +
-					`those apply to memory ingestion only. Pass kind "memory" instead, ` +
-					`or drop them.`,
-				);
-			}
-
-			// Knowledge is multipart with the document as a file part — never the
-			// `app_knowledge` JSON field (guards the DX-G-002 class of bug).
-			if (params.text != null) {
-				const title = params.title ?? "document";
-				const filename = params.filename ?? (/\.md$/i.test(title) ? title : `${title}.md`);
-				const documentMetadata: Record<string, JsonValue> = {};
-
-				if (params.sourceId != null) documentMetadata.id = params.sourceId;
-
-				if (params.metadata != null) documentMetadata.metadata = params.metadata;
-
-				if (params.additionalMetadata != null) {
-					documentMetadata.additional_metadata = params.additionalMetadata;
+				if (!infer && input.customInstructions != null) {
+					throw new Error("customInstructions cannot be used when infer is false.");
 				}
 
-				if (params.relations != null) documentMetadata.relations = params.relations;
+				const item: MemoryWireItem = {
+					infer,
+					is_markdown: input.isMarkdown ?? false,
+				};
 
-				if (params.infer != null) documentMetadata.infer = params.infer;
+				if (input.pairs != null) item.user_assistant_pairs = input.pairs;
 
-				if (params.evidenceKind != null) documentMetadata.evidence_kind = params.evidenceKind;
+				if (input.text != null) item.text = input.text;
 
-				if (params.evidenceSubject != null) documentMetadata.evidence_subject = params.evidenceSubject;
+				if (input.customInstructions != null) item.custom_instructions = input.customInstructions;
 
-				request.documents = [{
-					data: Buffer.from(params.text, "utf-8"),
-					// The title rides on the filename; the server's
-					// document_metadata does not accept a `title` key.
+				if (input.sourceId != null) item.source_id = input.sourceId;
+
+				if (input.title != null) item.title = input.title;
+
+				if (input.userName != null) item.user_name = input.userName;
+
+				if (input.metadata != null) item.metadata = input.metadata;
+
+				if (input.additionalMetadata != null) item.additional_metadata = input.additionalMetadata;
+
+				if (input.observationDate != null) item.observation_date = input.observationDate;
+
+				if (input.graph != null) {
+					if (input.sourceId == null) throw new Error("A memory graph requires sourceId.");
+
+					graphPayload[input.sourceId] = input.graph;
+				}
+
+				return item;
+			});
+
+			request.memories = JSON.stringify(memories);
+		} else {
+			const documentMetadataItems: Array<Record<string, JsonValue>> = [];
+
+			request.documents = items.map((input) => {
+				const unsupported = (
+					[
+						["pairs", input.pairs],
+						["isMarkdown", input.isMarkdown],
+						["customInstructions", input.customInstructions],
+						["userName", input.userName],
+						["observationDate", input.observationDate],
+					] as const
+				).flatMap(([name, value]) => value == null ? [] : [name]);
+
+				if (unsupported.length > 0) {
+					throw new Error(
+						`Knowledge ingestion does not support ${unsupported.join(", ")} — ` +
+						`those apply to memory ingestion only. Pass kind "memory" instead, ` +
+						`or drop them.`,
+					);
+				}
+
+				if (input.text == null) throw new Error("A knowledge item requires text.");
+
+				const title = input.title ?? "document";
+				const filename = input.filename ?? (/\.md$/i.test(title) ? title : `${title}.md`);
+				const metadataItem: Record<string, JsonValue> = {};
+
+				if (input.sourceId != null) metadataItem.id = input.sourceId;
+
+				if (input.metadata != null) metadataItem.metadata = input.metadata;
+
+				if (input.additionalMetadata != null) {
+					metadataItem.additional_metadata = input.additionalMetadata;
+				}
+
+				if (input.relations != null) metadataItem.relations = input.relations;
+
+				if (input.infer != null) metadataItem.infer = input.infer;
+
+				if (input.evidenceKind != null) metadataItem.evidence_kind = input.evidenceKind;
+
+				if (input.evidenceSubject != null) metadataItem.evidence_subject = input.evidenceSubject;
+
+				documentMetadataItems.push(metadataItem);
+
+				if (input.graph != null) {
+					if (input.sourceId == null) throw new Error("A knowledge graph requires sourceId.");
+
+					graphPayload[input.sourceId] = input.graph;
+				}
+
+				return {
+					data: Buffer.from(input.text, "utf-8"),
 					filename,
 					contentType: "text/markdown",
-				}];
-				request.documentMetadata = JSON.stringify([documentMetadata]);
-			}
+				};
+			});
+			request.documentMetadata = JSON.stringify(documentMetadataItems);
+		}
+
+		if (Object.keys(graphPayload).length > 0) {
+			request.graphPayload = JSON.stringify(graphPayload);
 		}
 
 		return this.call("/context/ingest", () =>

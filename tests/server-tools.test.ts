@@ -246,6 +246,8 @@ test("hydradb_ingest turns path forwards metadata and observation_date", async (
 			turns: [{ user: "hi", assistant: "hello" }],
 			source_id: "s1",
 			metadata: { team: "infra" },
+			additional_metadata: { source: "support" },
+			custom_instructions: "Extract only commitments",
 			observation_date: "2026-03-14",
 		},
 	});
@@ -256,6 +258,8 @@ test("hydradb_ingest turns path forwards metadata and observation_date", async (
 	const item = z.array(z.record(z.unknown())).parse(JSON.parse(String(ingest.args.memories)))[0]!;
 
 	assert.deepEqual(item.metadata, { team: "infra" });
+	assert.deepEqual(item.additional_metadata, { source: "support" });
+	assert.equal(item.custom_instructions, "Extract only commitments");
 	assert.equal(item.observation_date, "2026-03-14");
 
 	await client.close();
@@ -750,6 +754,225 @@ test("hydradb_ingest forwards every knowledge document field", async () => {
 		evidence_kind: "record",
 		evidence_subject: "team:finance",
 	}]);
+
+	await client.close();
+});
+
+test("hydradb_ingest batches memory items in one request", async () => {
+	const { hydra, calls } = mockHydra({
+		ingest: {
+			success: true,
+			successCount: 2,
+			failedCount: 1,
+			results: [
+				{ id: "m1", status: "queued" },
+				{ id: "m2", status: "failed", error: "bad item", errorCode: "INVALID" },
+				{ id: "m3", status: "queued", relationsError: "graph extraction failed" },
+			],
+		},
+	});
+
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_ingest",
+		arguments: {
+			kind: "memory",
+			custom_instructions: "Extract dates",
+			items: [
+				{ text: "one", source_id: "m1" },
+				{ turns: [{ user: "two", assistant: "reply" }], source_id: "m2" },
+				{
+					text: "three",
+					source_id: "m3",
+					custom_instructions: "Extract teams",
+					additional_metadata: { team: "infra" },
+				},
+			],
+		},
+	});
+
+	assert.notEqual(result.isError, true, "a partial batch is not an MCP error");
+	assert.equal(calls.filter((call) => call.method === "ingest").length, 1);
+
+	const request = z.object({ memories: z.string() }).parse(
+		calls.find((call) => call.method === "ingest")?.args,
+	);
+
+	const memories = z.array(z.object({
+		source_id: z.string(),
+		custom_instructions: z.string(),
+		additional_metadata: z.record(jsonValue).optional(),
+	})).parse(JSON.parse(request.memories));
+
+	assert.deepEqual(memories.map((item) => item.source_id), ["m1", "m2", "m3"]);
+	assert.deepEqual(
+		memories.map((item) => item.custom_instructions),
+		["Extract dates", "Extract dates", "Extract teams"],
+	);
+	assert.deepEqual(memories[2]?.additional_metadata, { team: "infra" });
+	assert.deepEqual(result.structuredContent?.items, [
+		{ index: 0, id: "m1", status: "queued", accepted: true },
+		{ index: 1, id: "m2", status: "failed", accepted: false, error: "bad item", error_code: "INVALID" },
+		{
+			index: 2,
+			id: "m3",
+			status: "queued",
+			accepted: true,
+			relations_error: "graph extraction failed",
+		},
+	]);
+
+	await client.close();
+});
+
+test("hydradb_ingest batches knowledge documents and keys their graphs by id", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	await client.callTool({
+		name: "hydradb_ingest",
+		arguments: {
+			kind: "knowledge",
+			items: [
+				{ text: "first document", title: "First", source_id: "k1" },
+				{
+					text: "Alice uses Postgres",
+					title: "Second.md",
+					source_id: "k2",
+					graph: {
+						entities: {
+							alice: { name: "Alice", type: "Person" },
+							postgres: { name: "Postgres", type: "Database" },
+						},
+						relations: [{ source: "alice", target: "postgres", predicate: "uses" }],
+					},
+				},
+			],
+		},
+	});
+
+	const request = z.object({
+		documents: z.array(z.object({ filename: z.string() })),
+		documentMetadata: z.string(),
+		graphPayload: z.string(),
+	}).parse(calls.find((call) => call.method === "ingest")?.args);
+
+	const metadata = z.array(z.object({ id: z.string() })).parse(JSON.parse(request.documentMetadata));
+	const graphPayload = z.record(jsonValue).parse(JSON.parse(request.graphPayload));
+
+	assert.deepEqual(request.documents.map((document) => document.filename), ["First.md", "Second.md"]);
+	assert.deepEqual(metadata.map((item) => item.id), ["k1", "k2"]);
+	assert.deepEqual(Object.keys(graphPayload), ["k2"]);
+	assert.equal(calls.filter((call) => call.method === "ingest").length, 1);
+
+	await client.close();
+});
+
+test("hydradb_ingest generates distinct ids for batch items without ids", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	await client.callTool({
+		name: "hydradb_ingest",
+		arguments: { items: [{ text: "one" }, { text: "two" }, { text: "three" }] },
+	});
+
+	const request = z.object({ memories: z.string() }).parse(
+		calls.find((call) => call.method === "ingest")?.args,
+	);
+
+	const ids = z.array(z.object({ source_id: z.string() }))
+		.parse(JSON.parse(request.memories))
+		.map((item) => item.source_id);
+
+	assert.equal(new Set(ids).size, 3);
+	assert.ok(ids.every((id) => id.startsWith("mcp-item-")));
+
+	await client.close();
+});
+
+test("hydradb_ingest rejects invalid batch shapes and limits", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	const cases = [
+		{ text: "single", items: [{ text: "batch" }] },
+		{ items: Array.from({ length: 101 }, (_, index) => ({ text: String(index) })) },
+		{ items: Array.from({ length: 5 }, () => ({ text: "é".repeat(900_000) })) },
+		{ text: "note", custom_instructions: "Extract dates", infer: false },
+		{ text: "note", custom_instructions: "x".repeat(4_001) },
+	];
+
+	for (const args of cases) {
+		const result = await client.callTool({ name: "hydradb_ingest", arguments: args });
+
+		assert.equal(result.isError, true);
+	}
+
+	assert.equal(calls.filter((call) => call.method === "ingest").length, 0);
+
+	await client.close();
+});
+
+test("hydradb_ingest marks an all-failed batch as an MCP error", async () => {
+	const { hydra } = mockHydra({
+		ingest: {
+			success: false,
+			successCount: 0,
+			failedCount: 2,
+			results: [
+				{ id: "m1", status: "failed", error: "bad one" },
+				{ id: "m2", status: "failed", error: "bad two" },
+			],
+		},
+	});
+
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_ingest",
+		arguments: { items: [{ text: "one", source_id: "m1" }, { text: "two", source_id: "m2" }] },
+	});
+
+	assert.equal(result.isError, true);
+	assert.deepEqual(
+		z.array(z.object({ accepted: z.boolean() }))
+			.parse(result.structuredContent?.items)
+			.map((item) => item.accepted),
+		[false, false],
+	);
+
+	await client.close();
+});
+
+test("hydradb_ingest generates an id for a graph and uses it as the payload key", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	await client.callTool({
+		name: "hydradb_ingest",
+		arguments: {
+			text: "Alice uses Postgres",
+			graph: {
+				entities: {
+					alice: { name: "Alice", type: "Person" },
+					postgres: { name: "Postgres", type: "Database" },
+				},
+				relations: [{ source: "alice", target: "postgres", predicate: "uses" }],
+			},
+		},
+	});
+
+	const request = z.object({ memories: z.string(), graphPayload: z.string() }).parse(
+		calls.find((call) => call.method === "ingest")?.args,
+	);
+
+	const memory = z.array(z.object({ source_id: z.string() })).parse(JSON.parse(request.memories))[0]!;
+	const graphPayload = z.record(jsonValue).parse(JSON.parse(request.graphPayload));
+
+	assert.match(memory.source_id, /^mcp-/);
+	assert.deepEqual(Object.keys(graphPayload), [memory.source_id]);
 
 	await client.close();
 });
@@ -1303,6 +1526,11 @@ test("hydradb_ingest still defaults to memory", async () => {
 	const call = calls.find((c) => c.method === "ingest");
 	assert.equal(call?.args.type, "memory");
 	assert.ok(call?.args.memories, "memory must still travel as a memory item");
+
+	const item = z.array(z.object({ custom_instructions: z.string() }))
+		.parse(JSON.parse(String(call?.args.memories)))[0]!;
+
+	assert.match(item.custom_instructions, /user preferences/);
 
 	await client.close();
 });

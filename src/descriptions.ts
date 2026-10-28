@@ -152,6 +152,15 @@ const PARAM = {
 	evidence_subject:
 		"Stable handle for the entity that a knowledge document describes, such as " +
 		"user:kiran@acme.com or team:finance.",
+	custom_instructions:
+		"Memory extraction instructions. Caller text replaces the MCP default. Do not " +
+		"send this with infer false or with kind knowledge. Maximum 4000 characters.",
+	graph:
+		"Caller-supplied graph for this item, as {entities, relations}. MCP keys the API " +
+		"graph payload by the item's source_id and generates an id when needed.",
+	items:
+		"Batch of 1 to 100 same-kind items. Each item requires exactly one of text or " +
+		"turns. Do not combine items with top-level text or turns.",
 	// The format is stated as the server's own, YYYY-MM-DD. This said "RFC3339",
 	// which is a date-TIME format: a caller that followed it sent
 	// "2026-08-17T00:00:00Z" and got 400 INVALID_INPUT back from /context/ingest.
@@ -355,7 +364,8 @@ const STORE_BODY = `Save information to Hydra DB so it outlives this session. Hy
 Provide EXACTLY ONE of:
   \`text\`  — a note, fact, decision, or document body
   \`turns\` — user/assistant pairs from a conversation
-Passing both is an error; passing neither is an error.
+  \`items\` — 1 to 100 same-kind items in one API request
+Combining \`items\` with \`text\` or \`turns\` is an error. Each item requires exactly one of \`text\` or \`turns\`.
 
 Save proactively: when the user states a preference, makes a decision, corrects you, or reveals a durable fact about themselves or their work, store it without being asked. Store the distilled fact rather than the raw exchange, and always set \`title\` — it is the only label shown next to this entry in later search results. Before saving something you suspect is already stored, query for it first rather than adding a near-duplicate.
 
@@ -364,6 +374,7 @@ Never store secrets, credentials, or anything the user asked you not to keep.
 Examples:
   {"text": "Prefers tabs over spaces in every language; rejected two prettier configs that used spaces.", "title": "Indentation preference"}
   {"turns": [{"user": "let's go with Postgres", "assistant": "Agreed, I'll set up the schema."}], "title": "Datastore decision"}
+  {"items": [{"text": "Deploy on Friday", "title": "Deadline"}, {"text": "Infra owns deploys", "additional_metadata": {"team": "infra"}}]}
   {"text": "# Runbook\\n\\nRestart order: api, worker, scheduler.", "kind": "knowledge", "title": "Restart runbook"}`;
 
 const CONVERSATION_BODY =
@@ -521,6 +532,9 @@ export const TOOL_DESCRIPTIONS = {
 			relations: PARAM.relations,
 			evidence_kind: PARAM.evidence_kind,
 			evidence_subject: PARAM.evidence_subject,
+			custom_instructions: PARAM.custom_instructions,
+			graph: PARAM.graph,
+			items: PARAM.items,
 			observation_date: PARAM.observation_date,
 			turns:
 				"The conversation to ingest, oldest first, as [{user, assistant}, ...]. Provide " +
@@ -843,7 +857,7 @@ WHEN TO USE IT
 THE TOOLS
 
 - ${TOOL_NAMES.QUERY} — semantic search across memory and knowledge, with knowledge-graph context. Your default read. Every result carries an id.
-- ${TOOL_NAMES.INGEST} — write. A note or document via 'text', or a conversation via 'turns' (exactly one of the two).
+- ${TOOL_NAMES.INGEST} — write. Send one note, document, or conversation, or up to 100 same-kind entries through 'items'.
 - ${TOOL_NAMES.LIST} — the full inventory of ONE family. Use it for "what do you have?"; for "what do you know about X" use ${TOOL_NAMES.QUERY} instead.
 - ${TOOL_NAMES.INSPECT} — the complete original content of one source you already have an id for.
 - ${TOOL_NAMES.DELETE} — irreversible removal of one item by id.

@@ -118,13 +118,15 @@ resolve the collection before inspecting. Explicit scope is never widened.
 
 ### **hydradb_ingest**
 
-Saves information so it outlives the session. Provide **exactly one** of `text`
-or `turns`.
+Saves information so it outlives the session. Provide **exactly one** of `text`,
+`turns`, or `items`. A batch contains 1 to 100 same-kind items and sends one API
+request. Batch text has an 8 MiB total UTF-8 limit.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `text` | string | No\* | A note, fact, decision, or document body |
 | `turns` | array | No\* | Conversation turns, each with `user` and `assistant` |
+| `items` | array | No\* | Batch of 1 to 100 items; each item has exactly one of `text` or `turns` |
 | `kind` | string | No | `memory` (default) or `knowledge` for a document |
 | `title` | string | No | Label shown in later search results — always set it |
 | `source_id` | string | No | Identifier for this entry. **Reusing one REPLACES what is stored under it** |
@@ -132,10 +134,15 @@ or `turns`.
 | `infer` | boolean | No | Extract insights and graph entities (default: true) |
 | `is_markdown` | boolean | No | Chunk on markdown structure (default: false) |
 | `metadata` | object | No | Key/value metadata, matchable later via `metadata_filters` |
+| `additional_metadata` | object | No | Free-form fields stored with the item; supported on memory and knowledge |
+| `custom_instructions` | string | No | Memory extraction guidance, up to 4000 characters; replaces the MCP default and requires inference |
+| `graph` | object | No | Caller-supplied `entities` and `relations`; MCP keys it by the item id |
 | `observation_date` | string | No | When the fact was true, as `YYYY-MM-DD` (e.g. `2026-07-04`), vs when it was stored |
 | `user_name` | string | No | What to call the user, used with `turns` (default: `User`) |
 
-\* Passing both is an error; passing neither is an error.
+\* Combining `items` with the single-item fields is an error. Each single item
+or batch item requires exactly one of `text` or `turns`. Knowledge items require
+`text`.
 
 Ingestion is **asynchronous** — content is not searchable the instant it is
 saved. Use `hydradb_status` to confirm.
@@ -566,7 +573,7 @@ owns scope injection, envelope unwrapping and error translation; the tools call
 it and render the results.
 
 - **hydradb_query** retrieves relevant memories and returns graph-enriched context (entity paths, chunk relations, extra context). Supports `fast` and `thinking` recall modes.
-- **hydradb_ingest** stores a note (`text`) or a conversation (`turns`) as a memory, with configurable `infer`, `is_markdown`, `title`, and `source_id`. Hydra DB extracts insights and builds a knowledge graph automatically.
+- **hydradb_ingest** stores one note, document, or conversation, or a batch of up to 100 items. It supports caller extraction instructions, additional metadata, and a caller-supplied graph.
 - **hydradb_list** browses stored memories (`kind: memory`) or ingested knowledge sources (`kind: knowledge`, with an optional `source_ids` filter).
 - **hydradb_inspect** retrieves the original ingested content of a source, with mode options (`content`, `url`, or `both`).
 - **hydradb_delete** removes a memory or knowledge source by ID.

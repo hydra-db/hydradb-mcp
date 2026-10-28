@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — batch ingest and caller-controlled extraction
+
+`hydradb_ingest` now accepts up to 100 same-kind items in one API request.
+Memory items accept caller extraction instructions and additional metadata.
+Memory and knowledge items accept a caller-supplied graph keyed by the item id.
+The tool generates missing batch ids and reports each item's status.
+
 ### Added — complete knowledge document metadata
 
 `hydradb_ingest` knowledge writes now preserve caller ids, metadata, additional
