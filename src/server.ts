@@ -10,6 +10,8 @@ import { resolveConfig, resolveGraphConfig } from "./config.js";
 import type { GraphConfig } from "./config.js";
 import { renderRecalledContext } from "./context.js";
 import { COLLECTION_PATTERN, MAX_BODY_BYTES, renderRows } from "./cypher.js";
+import { extname } from "node:path";
+
 import { decodeInline, type IngestFile, readLocal } from "./files.js";
 import { SERVER_INSTRUCTIONS, TOOL_DESCRIPTIONS } from "./descriptions.js";
 import {
@@ -1147,7 +1149,6 @@ export function createHydraDBServer(
 
 		const unsupported = (
 			[
-				["title", args.title],
 				["infer", args.infer],
 				["is_markdown", args.is_markdown],
 				["user_name", args.user_name],
@@ -1158,8 +1159,7 @@ export function createHydraDBServer(
 
 		if (unsupported.length > 0) {
 			throw new Error(
-				`${TOOL_NAMES.INGEST} does not support ${unsupported.join(", ")} with \`file\`. ` +
-				"A document's title is its filename: rename it through `file.filename`.",
+				`${TOOL_NAMES.INGEST} does not support ${unsupported.join(", ")} with \`file\`.`,
 			);
 		}
 
@@ -1185,6 +1185,15 @@ export function createHydraDBServer(
 			}
 
 			upload = decodeInline(file.filename, file.content_base64 ?? "");
+		}
+
+		// A document's title is its filename (the API takes no title), so a
+		// `title` renames the upload, keeping the extension the format needs.
+		if (args.title != null && args.title.trim() !== "") {
+			const ext = extname(upload.filename);
+			const title = args.title.trim();
+
+			upload.filename = title.toLowerCase().endsWith(ext.toLowerCase()) ? title : `${title}${ext}`;
 		}
 
 		logger.debug(`${TOOL_NAMES.INGEST}: file ${upload.filename} (${upload.data.length} bytes)`);

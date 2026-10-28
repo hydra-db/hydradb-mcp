@@ -136,8 +136,8 @@ const PARAM = {
 	file:
 		"A file to ingest as a knowledge document: PDF, Word (.doc/.docx), PowerPoint " +
 		"(.ppt/.pptx), Excel/CSV, OpenDocument, Pages/Numbers/Keynote, images (OCR) or " +
-		"text. Give `filename` with its real extension (it becomes the document's title) " +
-		"and EITHER `content_base64`, the file's bytes as base64, AT MOST 8 MB per file, " +
+		"text. Give `filename` with its real extension; the document's title is `title` if " +
+		"you set it, else the filename. Pass EITHER `content_base64`, the file's bytes as base64, AT MOST 8 MB per file, " +
 		"OR `path`, an absolute path to the file on this machine, AT MOST 50 MB, which " +
 		"works on the local (stdio) server only; the hosted server cannot read your disk. " +
 		"A larger file is refused before upload: split it. Use instead of `text` and " +

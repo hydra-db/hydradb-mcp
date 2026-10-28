@@ -11,8 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 `hydradb_ingest` has a new `file` argument for PDF, Word, PowerPoint,
 spreadsheets, OpenDocument, iWork, images and text files. They are uploaded as
-`documents` on POST /context/ingest and indexed as knowledge, with the filename
-as the title.
+`documents` on POST /context/ingest and indexed as knowledge. The title is
+`title` when given (the upload is renamed to it), otherwise the filename.
 
 - `file.content_base64` carries the bytes in the tool call, up to 8 MB. This is
   how files reach the hosted server, which cannot read the caller's disk.

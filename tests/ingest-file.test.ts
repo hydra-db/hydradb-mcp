@@ -200,7 +200,6 @@ test("file is exclusive with text and turns, is knowledge only, and takes no tit
 		[{ file, text: "x" }, /exactly one of `text`, `turns` or `file`/],
 		[{ file, turns: [{ user: "u", assistant: "a" }] }, /exactly one of `text`, `turns` or `file`/],
 		[{ file, kind: "memory" }, /as knowledge, not memory/],
-		[{ file, title: "T" }, /title is its filename/],
 		[{ file: { filename: "a.pdf" } }, /exactly one of `content_base64`/],
 		[{ file: { content_base64: "aGVsbG8=" } }, /filename` is required/],
 		[{ file: { filename: "a.pdf", content_base64: "not base64!" } }, /not valid base64/],
@@ -239,4 +238,37 @@ test("a local read stops when the call is cancelled", async () => {
 	controller.abort();
 
 	await assert.rejects(readLocal(DOCX, undefined, controller.signal), { name: "AbortError" });
+});
+
+// The API takes no title for a document; it uses the filename. So a `title`,
+// which the tool tells agents to always set, renames the upload.
+test("a title becomes the uploaded filename, keeping the extension", async (t) => {
+	const uploads = captureUploads(t);
+	const client = await connect();
+	const content_base64 = (await readFile(PDF)).toString("base64");
+
+	for (const [title, expected] of [["Tide log", "Tide log.pdf"], ["Tide log.PDF", "Tide log.PDF"]]) {
+		const result = await ingest(client, { file: { filename: "quillmoor-tide-log.pdf", content_base64 }, title });
+
+		assert.equal(result.isError, false, result.text);
+		assert.equal(uploads.at(-1)?.files[0]?.name, expected);
+	}
+});
+
+test("a local file that grows past the limit while read is refused", async (t) => {
+	const dir = await mkdtemp(join(tmpdir(), "hydradb-mcp-"));
+	const path = join(dir, "growing.pdf");
+
+	t.after(() => rm(dir, { recursive: true, force: true }));
+	await writeFile(path, "%PDF-1.4");
+
+	const read = readLocal(path, undefined, undefined);
+
+	// Grown after the size check, before the read: the read is bounded anyway.
+	await truncate(path, MAX_FILE_BYTES + 10);
+
+	await read.then(
+		(file) => assert.ok(file.data.length <= MAX_FILE_BYTES, "never more than the limit"),
+		(err: Error) => assert.match(err.message, /accepts files up to 50\.0 MB/),
+	);
 });

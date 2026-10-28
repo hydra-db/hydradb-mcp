@@ -138,8 +138,8 @@ Saves information so it outlives the session. Provide **exactly one** of `text`,
 
 \* Passing more than one is an error; passing none is an error.
 
-**Files.** `file` takes `filename` (with its real extension; it becomes the
-document's title) and one of:
+**Files.** `file` takes `filename` (with its real extension) and one of the two
+below. The document's title is `title` when set, otherwise the filename.
 
 - `content_base64`: the file's bytes as base64, **up to 8 MB**. Works on every
   transport, and is the only way on the hosted server, which cannot read your disk.
@@ -149,8 +149,8 @@ document's title) and one of:
 
 A larger file, or a format Hydra DB cannot read (`.heic`, `.html`, `.zip`, ...),
 is refused before anything is uploaded. `source_id` sets the document's id and
-`overwrite` applies as usual; `title`, `infer`, `metadata` and the other memory
-options do not apply to files.
+`overwrite` applies as usual; `infer`, `metadata` and the other memory options
+do not apply to files.
 
 Ingestion is **asynchronous** — content is not searchable the instant it is
 saved. Use `hydradb_status` to confirm.

@@ -17,7 +17,7 @@
  * message naming the problem instead of a remote error after the bytes moved.
  */
 
-import { readFile, stat } from "node:fs/promises";
+import { open } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, extname, isAbsolute, join } from "node:path";
 
@@ -75,6 +75,9 @@ const CONTENT_TYPES = new Map<string, string>([
 ]);
 
 export const SUPPORTED_EXTENSIONS = [...CONTENT_TYPES.keys()];
+
+/** How much of a local file is read between cancel checks. */
+const READ_CHUNK_BYTES = 1024 * 1024;
 
 /** A file ready to upload. */
 export interface IngestFile {
@@ -154,21 +157,48 @@ export async function readLocal(path: string, filename: string | undefined, sign
 	const name = filename ?? basename(resolved);
 	const contentType = contentTypeFor(name);
 
-	const info = await stat(resolved).catch(() => {
+	const tooBig = (size: number) =>
+		new Error(
+			`"${name}" is ${megabytes(size)}; Hydra DB accepts files up to ${megabytes(MAX_FILE_BYTES)}. ` +
+			"Split it into smaller files.",
+		);
+
+	// One handle for the size check and the read, so a file replaced in
+	// between cannot slip past the check.
+	const handle = await open(resolved, "r").catch(() => {
 		throw new Error(`No readable file at "${path}".`);
 	});
 
-	if (!info.isFile()) throw new Error(`"${path}" is not a file.`);
+	try {
+		const info = await handle.stat();
 
-	if (info.size > MAX_FILE_BYTES) {
-		throw new Error(
-			`"${name}" is ${megabytes(info.size)}; Hydra DB accepts files up to ${megabytes(MAX_FILE_BYTES)}. ` +
-			"Split it into smaller files.",
-		);
+		if (!info.isFile()) throw new Error(`"${path}" is not a file.`);
+
+		if (info.size > MAX_FILE_BYTES) throw tooBig(info.size);
+
+		if (info.size === 0) throw new Error(`"${path}" is empty.`);
+
+		// Read at most one byte past the limit, so a file that grows while it
+		// is read is refused rather than held whole in memory.
+		const buffer = Buffer.alloc(Math.min(info.size, MAX_FILE_BYTES) + 1);
+		let filled = 0;
+
+		while (filled < buffer.length) {
+			// The call's cancel and deadline end the read too, e.g. on a stalled mount.
+			signal?.throwIfAborted();
+
+			const { bytesRead } = await handle.read(buffer, filled, Math.min(READ_CHUNK_BYTES, buffer.length - filled), null);
+
+			if (bytesRead === 0) break;
+			filled += bytesRead;
+		}
+
+		if (filled > MAX_FILE_BYTES) throw tooBig(filled);
+
+		if (filled === 0) throw new Error(`"${path}" is empty.`);
+
+		return { data: buffer.subarray(0, filled), filename: name, contentType };
+	} finally {
+		await handle.close();
 	}
-
-	if (info.size === 0) throw new Error(`"${path}" is empty.`);
-
-	// The call's cancel and deadline end the read too, e.g. on a stalled mount.
-	return { data: await readFile(resolved, { signal }), filename: name, contentType };
 }
