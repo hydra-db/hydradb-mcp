@@ -207,12 +207,15 @@ function validateListResponse(response: ListResponse, kind: ListParams["kind"]):
 }
 
 function validateStatusResponse(response: StatusResponse): void {
-	const accepted = successfulResponse.extend({ statuses: z.array(z.unknown()) });
+	// The status tool prints each row by its id, so a row that is not an object
+	// with an id is a malformed body, not a status to show as "(unknown id)".
+	const row = z.object({ id: z.string().trim().min(1) }).passthrough();
+	const accepted = successfulResponse.extend({ statuses: z.array(row) });
 
 	if (!successfulResponse.safeParse(response).success || !accepted.safeParse(unwrap(response)).success) {
 		throw invalidSuccessfulResponse(
 			"INVALID_STATUS_RESPONSE",
-			"Invalid successful status response: expected a statuses array and no failure flag.",
+			"Invalid successful status response: expected a statuses array of rows with an id and no failure flag.",
 			response,
 		);
 	}

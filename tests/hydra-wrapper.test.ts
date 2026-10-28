@@ -682,6 +682,29 @@ test("status and database listing reject successful non-JSON bodies", async (t) 
 	assert.equal(fetchMock.mock.callCount(), 2);
 });
 
+test("status rejects rows that are not objects with an id", async (t) => {
+	const bodies = [
+		{ statuses: [null] },
+		{ statuses: ["source-1"] },
+		{ statuses: [{ indexing_status: "completed" }] },
+		{ statuses: [{ id: "", indexing_status: "completed" }] },
+	];
+
+	const fetchMock = t.mock.method(globalThis, "fetch", async () =>
+		new Response(JSON.stringify({ success: true, data: bodies.shift() }), { status: 200 }),
+	);
+
+	const hydra = new HydraDB({ token: "t", database: "db_test", maxRetries: 0 });
+
+	for (let i = 0; i < 4; i++) {
+		await assert.rejects(
+			() => hydra.context.ingestionStatus({ ids: ["source-1"] }),
+			/INVALID_STATUS_RESPONSE/,
+		);
+	}
+	assert.equal(fetchMock.mock.callCount(), 4);
+});
+
 test("status and database listing accept valid SDK-decoded arrays", async (t) => {
 	const bodies = [
 		{ statuses: [] },
