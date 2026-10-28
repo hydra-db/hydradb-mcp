@@ -555,7 +555,7 @@ test("source lookup rejects invalid successful bodies instead of reporting an em
 			() => hydra.context.list({ kind: "knowledge", sourceFields: { app_external_id: "1" } }),
 			// The SDK refuses a body that is not an object ("", null, []); the
 			// wrapper refuses an object that is not a real list.
-			/\/context\/list → ERR: (Invalid successful list response: expected a sources array|response: Expected object)/,
+			/\/context\/list → (200: INVALID_LIST_RESPONSE: Invalid successful list response: expected a sources array|ERR: response: Expected object)/,
 			body,
 		);
 		fetchMock.mock.restore();
@@ -626,6 +626,60 @@ test("a list with no source fields stays on the SDK list path", async () => {
 
 	await hydra.context.list({ kind: "knowledge" });
 	assert.equal(fetched, false, "a list goes through the generated method, not a raw fetch");
+});
+
+test("plain lists reject a successful HTML body instead of reporting no rows", async (t) => {
+	const fetchMock = t.mock.method(globalThis, "fetch", async () =>
+		new Response("<html><title>Login required</title></html>", { status: 200 }),
+	);
+
+	const hydra = new HydraDB({ token: "t", database: "db_test", maxRetries: 0 });
+
+	for (const kind of ["knowledge", "memory"] as const) {
+		await assert.rejects(
+			() => hydra.context.list({ kind }),
+			/Invalid successful list response/,
+		);
+	}
+
+	assert.equal(fetchMock.mock.callCount(), 2);
+});
+
+test("plain lists still accept real empty responses", async (t) => {
+	let kind: "knowledge" | "memory" = "knowledge";
+
+	const fetchMock = t.mock.method(globalThis, "fetch", async () => {
+		const data = kind === "memory" ? { user_memories: [], total: 0 } : { sources: [], total: 0 };
+
+		return new Response(JSON.stringify({ success: true, data }), { status: 200 });
+	});
+
+	const hydra = new HydraDB({ token: "t", database: "db_test", maxRetries: 0 });
+
+	assert.deepEqual(await hydra.context.list({ kind }), { sources: [], total: 0 });
+	kind = "memory";
+
+	assert.deepEqual(await hydra.context.list({ kind }), { userMemories: [], total: 0 });
+	assert.equal(fetchMock.mock.callCount(), 2);
+});
+
+test("status and database listing reject successful non-JSON bodies", async (t) => {
+	const fetchMock = t.mock.method(globalThis, "fetch", async () =>
+		new Response("<html><title>Login required</title></html>", { status: 200 }),
+	);
+
+	const hydra = new HydraDB({ token: "t", database: "db_test", maxRetries: 0 });
+
+	await assert.rejects(
+		() => hydra.context.ingestionStatus({ ids: ["source-1"] }),
+		/INVALID_STATUS_RESPONSE/,
+	);
+
+	await assert.rejects(
+		() => hydra.databases.list(),
+		/INVALID_DATABASES_RESPONSE/,
+	);
+	assert.equal(fetchMock.mock.callCount(), 2);
 });
 
 // --- Database confinement ---
@@ -900,7 +954,9 @@ test("context.subgraph carries acl principals to the wire", async () => {
 function captureSdk(seen: Record<string, unknown>) {
 	const grab = (key: string) => (req: unknown) => {
 		seen[key] = req;
-		return Promise.resolve(key === "query" ? { success: true, data: { chunks: [] } } : {});
+		const data = key === "query" ? { chunks: [] } : key === "list" ? { sources: [] } : {};
+
+		return Promise.resolve({ success: true, data });
 	};
 	return {
 		query: grab("query"),
