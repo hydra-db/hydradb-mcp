@@ -5,7 +5,7 @@
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, readFile, rm, truncate, writeFile } from "node:fs/promises";
+import { mkdtemp, open, readFile, rm, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -253,15 +253,19 @@ test("a cancel ends the wait on a local read that never completes", { skip: proc
 	const controller = new AbortController();
 	const read = readLocal(fifo, undefined, controller.signal);
 
-	setTimeout(() => controller.abort(), 100);
+	try {
+		setTimeout(() => controller.abort(), 100);
 
-	const started = Date.now();
+		const started = Date.now();
 
-	await assert.rejects(read, { name: "AbortError" });
-	assert.ok(Date.now() - started < 1000, "the cancel ended the wait");
-
-	// Unblock the pending open so the process can exit.
-	await writeFile(fifo, "x");
+		await assert.rejects(read, { name: "AbortError" });
+		assert.ok(Date.now() - started < 1000, "the cancel ended the wait");
+	} finally {
+		// Unblock the pending open with a writer that sends nothing, so the
+		// process can exit; writing bytes could fail with EPIPE once the
+		// abandoned reader closes.
+		await (await open(fifo, "w")).close();
+	}
 });
 
 // The API takes no title for a document; it uses the filename. So a `title`,
