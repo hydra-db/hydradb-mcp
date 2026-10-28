@@ -1035,7 +1035,7 @@ test("a chunk renders its metadata on one line, schema metadata winning", () => 
 	assert.doesNotMatch(out, /title: Doc/, "title is already the Source line");
 });
 
-test("dated facts render only when the temporal filter was applied", () => {
+test("dated facts render unless the response says the temporal filter was not applied", () => {
 	const base = {
 		chunks: [{ chunkUuid: "c1", id: "s1", chunkContent: "body" }],
 		temporalDuration: { days: 30, fromDate: "2026-01-01", toDate: "2026-01-31" },
@@ -1043,12 +1043,57 @@ test("dated facts render only when the temporal filter was applied", () => {
 			{ subject: "Alice", relation: "joined", object: "Acme", eventStart: 1767225600, datePrecision: "month", evidencePhrase: " in January " },
 		],
 	};
-	const applied = buildRecalledContext({ ...base, temporalFilter: { applied: true } } as never);
-	assert.match(applied, /=== DATED FACTS ===\nCOMPUTED DURATION: 30 days \(2026-01-01 → 2026-01-31\)/);
-	assert.match(applied, / {2}\[Alice\] → joined → \[Acme\] \| 2026-01-01 \(~month\) — "in January"/);
 
-	const degraded = buildRecalledContext({ ...base, temporalFilter: { applied: false } } as never);
-	assert.doesNotMatch(degraded, /DATED FACTS/);
+	// SDK 2.1.8 no longer carries the diagnostic: the facts are the answer.
+	for (const response of [base, { ...base, temporalFilter: { applied: true } }]) {
+		// SAFETY: the fixture carries exactly the fields formatTemporal reads.
+		const out = buildRecalledContext(response as never);
+		assert.match(out, /=== DATED FACTS ===\nCOMPUTED DURATION: 30 days \(2026-01-01 → 2026-01-31\)/);
+		assert.match(out, / {2}\[Alice\] → joined → \[Acme\] \| 2026-01-01 \(~month\) — "in January"/);
+	}
+
+	// An older response that says the filter degraded still renders nothing,
+	// under either spelling (SDK 2.1.8 passes the untyped key through as sent).
+	for (const degraded of [{ temporalFilter: { applied: false } }, { temporal_filter: { applied: false } }]) {
+		// SAFETY: the fixture carries exactly the fields formatTemporal reads.
+		assert.doesNotMatch(buildRecalledContext({ ...base, ...degraded } as never), /DATED FACTS/);
+	}
+});
+
+test("triplets render the same from SDK 2.1.8's camelCase relations", () => {
+	const response = {
+		chunks: [{ chunkUuid: "c1", id: "s1", chunkContent: "Chunk A" }],
+		graphContext: {
+			queryPaths: [],
+			chunkRelations: [
+				{
+					relevancyScore: 0.9,
+					groupId: "g1",
+					triplets: [
+						{
+							source: { name: "Bob", type: "person", entityId: "e1" },
+							relation: {
+								canonicalPredicate: "works_at",
+								rawPredicate: "works at",
+								context: "since the merger",
+								relationshipId: "r1",
+								chunkId: "c1",
+								temporalDetails: "2025-03-01T00:00:00Z",
+							},
+							target: { name: "Acme", type: "org", entityId: "e2" },
+						},
+					],
+				},
+			],
+		},
+	};
+
+	// SAFETY: the fixture carries exactly the chunk and relation fields read.
+	const out = buildRecalledContext(response as never);
+
+	// Matched to its chunk by chunkId (the fallback scan), worded by the raw
+	// predicate, dated by temporalDetails.
+	assert.match(out, /\[Bob\] → works at → \[Acme\] \(as of 2025-03-01\): since the merger/);
 });
 
 test("a named ticket lists its links and a linked ticket says how it is linked", () => {

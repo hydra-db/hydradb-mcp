@@ -18,6 +18,9 @@ export const TOOL_NAMES = {
 	// memory/knowledge corpora, so it belongs to this family and not to the
 	// BYOG graph tools below, which address a different store.
 	SUBGRAPH: "hydradb_subgraph",
+	// Knowledge-graph relations of one item or a whole collection
+	// (GET /context/relations). New capability, so no alias.
+	RELATIONS: "hydradb_relations",
 	// Discovery: which databases this connection can address. Exists so an
 	// agent working across several databases can find their names without
 	// asking the user, and so a confined connection can see its own limits.
@@ -59,6 +62,7 @@ export const CANONICAL_TOOL_NAMES = [
 	TOOL_NAMES.DELETE,
 	TOOL_NAMES.STATUS,
 	TOOL_NAMES.SUBGRAPH,
+	TOOL_NAMES.RELATIONS,
 	TOOL_NAMES.LIST_COLLECTIONS,
 	TOOL_NAMES.DELETE_COLLECTION,
 	TOOL_NAMES.FEEDBACK,

@@ -14,6 +14,86 @@ the filename, so "Q3 Roadmap" is stored as "Q3 Roadmap.md" and a title filter
 of "Q3 Roadmap" matched nothing (and "Plan.md" was stored as "Plan.md.md").
 Each title is now searched as given and with `.md` added.
 
+### Added — `hydradb_list` filters, field selection, threads and `kind: "all"`
+
+`hydradb_list` now takes the `/context/list` options it was missing:
+
+- `metadata` and `additional_metadata`: exact-match filters on stored metadata,
+  for memories and knowledge. `connector_id` is merged into
+  `additional_metadata`; two different connector ids are refused.
+- `include_fields`: return only the named fields per row, shown under each row
+  and in `structuredContent` as `fields`, bounded to 2,000 characters per
+  row and 20,000 per page with the JSON structure kept; a cut row carries
+  `fields_truncated: true`. Names the API does not project (such as
+  `content`) are refused before the call.
+- `group_threads`: comments and replies come back nested under their parent
+  row, in the text and in `structuredContent` as `comments`.
+- `kind: "all"`: memories and knowledge in one page, instead of two calls.
+
+`include_fields` and `group_threads` apply to source rows, so they are refused
+with `kind: "memory"` rather than ignored.
+
+A listing that uses any of these options still makes its own HTTP call rather
+than going through the SDK: SDK 2.1.8 renames row fields
+(`additional_metadata` comes back as `additionalMetadata`), while a projection
+is looked up by the names the caller asked for. Plain and source-field lists go
+through the SDK.
+
+### Added — `hydradb_relations`
+
+A new read-only tool over `GET /context/relations`: the knowledge-graph
+relations of one item, or of the whole collection when `id` is omitted, with
+the evidence passage for each. Pages with `cursor` (`next_cursor` from the
+previous call), takes `acl`, and asks for 50 relations by default (max 200)
+rather than the API's 5000.
+
+### Added — `hydradb_query` takes every documented query field
+
+`hydradb_query` now accepts the six `POST /query` fields it did not:
+`additional_context`, `alpha` (0 to 1, or `auto`), `query_by` (`hybrid` or
+`text`), `query_forceful_relations`, `temporal_reasoning` and `response_format`.
+
+- `alpha` is hybrid only. It is refused with `operator` or `query_by: "text"`,
+  and the 0.8 default is no longer sent on a `query_by: "text"` query.
+- `response_format: "markdown"` returns Hydra DB's own Markdown rendering as-is,
+  with the searched scope and the request id, under the same size cap. It has
+  no per-chunk source ids; use the default rendering when you need them.
+
+### Changed — `@hydradb/sdk` 2.1.8; no more hand-written API calls
+
+MCP now depends on `@hydradb/sdk` 2.1.8, which matches the public API spec.
+Title-filtered queries, filtered lists (`external_id`, `parent_external_id`,
+`url`, `provider`, `connector_id`) and deleting a collection used to bypass the
+SDK with their own HTTP calls, because 2.1.4 could not send those fields. They
+now go through the SDK like every other call. A title-filtered query still
+returns its request id.
+
+Along the way:
+
+- Graph relations render the same from 2.1.8's camelCase relation fields
+  (predicate, date and chunk matching), which 2.1.4 left as snake_case.
+- Dated facts render unless the response says the temporal filter was not
+  applied. 2.1.8 no longer carries that diagnostic, so requiring it would have
+  hidden every dated fact.
+- An error with no response (a cancelled or timed-out call) shows the SDK's
+  message instead of an empty one.
+
+### Security — tool errors no longer leak API key secrets or OAuth tokens
+
+Error text is scrubbed of credentials before the model sees it, but the scrub
+stopped at the `.` in a HydraDB key (`sk_<env>_<id>.<secret>`), so the secret
+half survived, and it did not know OAuth tokens (`hmat_` / `hmrt_`) at all. Now:
+
+- Full keys are removed, secret half included, however short the id.
+- OAuth access and refresh tokens, and credentials in a quoted query string, are removed.
+- The current connection's own key or token is removed from every tool error,
+  whatever its format, including the reason in a refused delete.
+- Network failures that quote the request are scrubbed too.
+- Server messages inside results that are not errors (a partly failed ingest,
+  a failed document's status) are scrubbed the same way.
+- The connection's credential is removed before an error body is cut to length,
+  so a credential crossing the cut leaves no fragment behind.
+
 ## [1.5.1] - 2026-09-25
 
 ### Added — `hydradb_query` shows a named ticket's links

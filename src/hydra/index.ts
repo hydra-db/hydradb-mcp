@@ -13,6 +13,7 @@ export {
 	FeedbackResource,
 	DEFAULT_TIMEOUT_SECONDS,
 	DEFAULT_MAX_RETRIES,
+	hasEntries,
 } from "./client.js";
 
 export type {
@@ -24,6 +25,8 @@ export type {
 	QueryParams,
 	IngestParams,
 	ListParams,
+	MetadataFilter,
+	MetadataFilterValue,
 	InspectParams,
 	IngestionStatusParams,
 	RelationsParams,
@@ -49,7 +52,7 @@ export type {
 	GraphRow,
 } from "./graph.js";
 
-export { HydraWrapperError, responseError, translateError } from "./errors.js";
+export { HydraWrapperError, responseError, scrub, translateError } from "./errors.js";
 
 export {
 	assertCollectionAllowed,
