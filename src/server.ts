@@ -433,7 +433,10 @@ function boundJson(value: JsonValue, budget: FieldBudget): JsonValue {
 		return out;
 	}
 
-	const entries = z.record(jsonValue).safeParse(value);
+	// Shallow on purpose: `value` was checked as JSON where it came in, so its
+	// members are JSON already. Re-checking `jsonValue` here would walk the whole
+	// subtree again at every level, quadratic in depth on nested metadata.
+	const entries = z.record(z.custom<JsonValue>()).safeParse(value);
 
 	if (!entries.success) {
 		// A number, boolean or null: small, and kept whole.
