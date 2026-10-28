@@ -34,7 +34,8 @@ Ids flow between these: `hydradb_query`, `hydradb_list` and `hydradb_subgraph` e
 | `hydradb_connector_status` | Explain connector and resource sync health in plain words |
 | `hydradb_connector_discover` | Discover resources visible through a connected provider account |
 | `hydradb_connector_resources` | List resources configured on a connector |
-| `hydradb_connector_update` | Update noncredential connector settings |
+| `hydradb_connector_create` | Return a secure dashboard link for connecting a provider |
+| `hydradb_connector_update` | Update noncredential settings, or return a secure reconnect link |
 | `hydradb_connector_delete` | Permanently delete a connector |
 | `hydradb_connector_sync` | Start a connector sync |
 | `hydradb_connector_pause` | Pause connector syncing |
@@ -63,7 +64,26 @@ unlisted resources remain unchanged.
 The provider-detail tool returns credential **schema metadata**, not credential
 values. Do not paste provider credentials into chat or any MCP tool argument.
 Defaults, examples, constants, and unknown schema extensions are removed before
-the schema reaches model context.
+the schema reaches model context. `hydradb_connector_create` accepts only a
+provider and returns `/connectors?connect=<provider>`. The mutually exclusive
+`reconnect: true` update action authorizes the connector and returns
+`/connectors?open=<connector_id>`; open the drawer and select **Reconnect**.
+Both flows set `completed: false` because the dashboard, not MCP, performs the
+credential-bearing request. `HYDRADB_DASHBOARD_URL` changes the dashboard origin.
+
+Run the local-only Inspector acceptance driver after building the package. The
+driver refuses non-loopback API and dashboard URLs. It checks completion links by
+default, checks one existing connector when `ENG3341_CONNECTOR_ID` is set, and only
+mutates run-owned fixtures when both `ENG3341_MUTATE=1` and
+`ENG3341_RUN_OWNED=1` are set:
+
+```bash
+npm run build
+HYDRADB_BASE_URL=http://127.0.0.1:9001 \
+HYDRADB_DASHBOARD_URL=http://127.0.0.1:3000 \
+HYDRADB_API_KEY=local-key HYDRADB_DATABASE=local-db \
+npm run e2e:connectors:local
+```
 
 ### Graph tools (Cypher)
 
@@ -383,6 +403,7 @@ Checks whether ingested sources have finished indexing.
 | `HYDRADB_GRAPH_COLLECTION` | Default graph collection | `default` |
 | `HYDRADB_MCP_GRAPH_TOOLS` | Register the graph tools (`0` withholds them) | *on* |
 | `HYDRADB_MCP_CONNECTOR_TOOLS` | Register the connector tools (`0` withholds them) | *on* |
+| `HYDRADB_DASHBOARD_URL` | Dashboard origin for connector create and reconnect links | `https://app.hydradb.com` |
 
 A graph database is a **different namespace** from the memory database: the same
 name can exist as both, and Cypher aimed at the wrong one reads an empty graph

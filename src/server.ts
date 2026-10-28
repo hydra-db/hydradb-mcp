@@ -596,7 +596,7 @@ export function createHydraDBServer(
 		);
 	}
 
-	const connectorTools = new ConnectorTools(hydra);
+	const connectorTools = new ConnectorTools(hydra, connectorConfig.dashboardUrl);
 
 	// --- Handlers (shared by canonical tools and their deprecated aliases) ---
 
@@ -4111,12 +4111,21 @@ export function createHydraDBServer(
 
 		const safeJsonObject = z.record(safeJsonKey, safeJsonValue);
 
+		const connectorCreateSchema = z
+			.object({
+				provider: z.string().trim().min(1).max(100)
+					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_CREATE].params.provider),
+			})
+			.strict();
+
 		const connectorUpdateObjectSchema = z
 			.object({
 				connector_id: z.string().trim().min(1)
 					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_UPDATE].params.connector_id),
 				custom_instructions: z.string().max(4000).optional()
 					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_UPDATE].params.custom_instructions),
+				reconnect: z.literal(true).optional()
+					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_UPDATE].params.reconnect),
 				sync_interval_seconds: z.number().int().min(0).optional()
 					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_UPDATE].params.sync_interval_seconds),
 			})
@@ -4124,8 +4133,11 @@ export function createHydraDBServer(
 
 		const connectorUpdateSchema = connectorUpdateObjectSchema
 			.refine(
-				(input) => input.custom_instructions !== undefined || input.sync_interval_seconds !== undefined,
-				{ message: "Set custom_instructions or sync_interval_seconds." },
+				(input) =>
+					input.reconnect === true
+						? input.custom_instructions === undefined && input.sync_interval_seconds === undefined
+						: input.custom_instructions !== undefined || input.sync_interval_seconds !== undefined,
+				{ message: "Set reconnect by itself, or set custom_instructions or sync_interval_seconds." },
 			);
 
 		const configureResourceSchema = z
@@ -4307,6 +4319,18 @@ export function createHydraDBServer(
 		);
 
 		register(
+			TOOL_NAMES.CONNECTOR_CREATE,
+			connectorCreateSchema,
+			async (args) => {
+				const input = connectorCreateSchema.parse(args);
+				const result = await connectorTools.create(input.provider);
+
+				return structuredResult(result.text, result.data);
+			},
+			idempotentWrite,
+		);
+
+		register(
 			TOOL_NAMES.CONNECTOR_UPDATE,
 			connectorUpdateObjectSchema,
 			async (args, extra) => {
@@ -4316,6 +4340,7 @@ export function createHydraDBServer(
 					{
 						connectorId: input.connector_id,
 						customInstructions: input.custom_instructions,
+						reconnect: input.reconnect,
 						syncIntervalSeconds: input.sync_interval_seconds,
 					},
 					{ signal: extra?.signal },

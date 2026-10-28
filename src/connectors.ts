@@ -25,7 +25,7 @@ export type ConnectorListInput = ConnectorListParams;
 
 export type ConnectorDiscoverInput = ConnectorDiscoverParams;
 
-export type ConnectorUpdateInput = ConnectorUpdateRequest;
+export type ConnectorUpdateInput = ConnectorUpdateRequest & { reconnect?: true };
 
 export type ConnectorConfigureResourceInput = ConnectorResourceMapping;
 
@@ -446,7 +446,17 @@ function renderStatus(data: Record<string, unknown>): string {
 
 /** MCP-facing connector operations, including database confinement and safe projection. */
 export class ConnectorTools {
-	constructor(private readonly hydra: HydraDB) {}
+	constructor(
+		private readonly hydra: HydraDB,
+		private readonly dashboardUrl: string,
+	) {}
+
+	private dashboardLink(parameter: "connect" | "open", value: string): string {
+		const url = new URL("/connectors", this.dashboardUrl);
+		url.searchParams.set(parameter, value);
+
+		return url.toString();
+	}
 
 	private assertMutationAllowed(): void {
 		// Connector endpoints do not atomically enforce MCP database or collection grants.
@@ -588,7 +598,35 @@ export class ConnectorTools {
 		};
 	}
 
+	async create(provider: string): Promise<ConnectorToolResponse> {
+		return {
+			text:
+				"No connector was created by this call. Open the dashboard link to connect the provider securely. " +
+				"Do not paste provider credentials into chat or any MCP tool.",
+			data: {
+				provider,
+				completed: false,
+				dashboard_url: this.dashboardLink("connect", provider),
+			},
+		};
+	}
+
 	async update(input: ConnectorUpdateInput, opts?: RequestOptions): Promise<ConnectorToolResponse> {
+		if (input.reconnect === true) {
+			await this.authorizedConnector(input.connectorId, opts);
+
+			return {
+				text:
+					"No credentials were changed by this call. Open the connector drawer with the dashboard link, " +
+					"then select Reconnect. Do not paste provider credentials into chat or any MCP tool.",
+				data: {
+					connector_id: input.connectorId,
+					completed: false,
+					dashboard_url: this.dashboardLink("open", input.connectorId),
+				},
+			};
+		}
+
 		this.assertMutationAllowed();
 		const result = await this.hydra.connectors.update(input, opts);
 

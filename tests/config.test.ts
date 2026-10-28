@@ -34,7 +34,7 @@ test("canonical HYDRADB_* names are read as primary with no warning", () => {
 			database: "db",
 			collection: "default",
 		},
-		connectors: { enabled: true },
+		connectors: { enabled: true, dashboardUrl: "https://app.hydradb.com" },
 	});
 	assert.deepEqual(messages, []);
 });
@@ -187,12 +187,27 @@ test("malformed timeout and retry values fall back rather than throwing", () => 
 
 test("connector tools are enabled by default and accept normal false spellings", () => {
 	assert.equal(resolveConnectorConfig({}).enabled, true);
+	assert.equal(resolveConnectorConfig({}).dashboardUrl, "https://app.hydradb.com");
 
 	for (const value of ["0", "false", "FALSE", "no", "off", " off "]) {
 		assert.equal(
 			resolveConnectorConfig({ HYDRADB_MCP_CONNECTOR_TOOLS: value }).enabled,
 			false,
 			`"${value}" should disable connector tools`,
+		);
+	}
+});
+
+test("connector dashboard links use one validated configurable origin", () => {
+	assert.equal(
+		resolveConnectorConfig({ HYDRADB_DASHBOARD_URL: " http://127.0.0.1:3000/ " }).dashboardUrl,
+		"http://127.0.0.1:3000",
+	);
+
+	for (const value of ["javascript:alert(1)", "not-a-url", "ftp://dashboard.example.com"]) {
+		assert.throws(
+			() => resolveConnectorConfig({ HYDRADB_DASHBOARD_URL: value }),
+			/HYDRADB_DASHBOARD_URL/,
 		);
 	}
 });
