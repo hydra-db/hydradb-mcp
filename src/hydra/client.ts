@@ -42,13 +42,23 @@ export const DEFAULT_MAX_RETRIES = 2;
  * MCP tool call leaves the outbound HTTP request in flight: the caller has given
  * up, and the process keeps working and keeps retrying on its behalf.
  */
+export interface ResponseWarning {
+	code: string;
+	message: string;
+}
+
+export interface ResponseMeta {
+	requestId?: string;
+	warnings?: ResponseWarning[];
+}
+
 export interface RequestOptions {
 	signal?: AbortSignal;
 	/**
 	 * Receives the envelope's `meta` for this one call.
 	 *
 	 * `unwrap` keeps only `data`, which is right for every caller that just wants
-	 * the payload — but it drops `request_id`, and that is the ONLY key
+	 * the payload — but it drops warnings and `request_id`, which is the ONLY key
 	 * POST /feedback accepts to correlate a submission with the query it is
 	 * about. Without it an agent can run a query and then have nothing to say
 	 * feedback ON.
@@ -57,7 +67,7 @@ export interface RequestOptions {
 	 * be in flight at once, and a `lastRequestId` would hand one of them the
 	 * other's id. Opt-in, so no existing caller changes.
 	 */
-	onMeta?: (meta: { requestId?: string }) => void;
+	onMeta?: (meta: ResponseMeta) => void;
 }
 
 /**
@@ -590,22 +600,31 @@ export function assertCollectionAllowed(
  * silently returns undefined on the rest.
  */
 const requestMetaEnvelopeSchema = z.object({
-	meta: z
-		.object({
-			requestId: z.string().optional(),
-			request_id: z.string().optional(),
-		})
-		.optional(),
+	meta: z.object({
+		requestId: z.unknown().optional(),
+		request_id: z.unknown().optional(),
+		warnings: z.unknown().optional(),
+	}).optional(),
 });
+// SDK 2.1.8 has no generated warnings field, but its parser currently passes
+// unknown fields through. Validate that untyped field at this boundary.
+const responseWarningSchema = z.object({ code: z.string(), message: z.string() });
 
-function readRequestId<T>(value: T): string | undefined {
+function readResponseMeta(value: unknown): ResponseMeta {
 	const parsed = requestMetaEnvelopeSchema.safeParse(value);
-
-	if (!parsed.success) return undefined;
-
-	const id = parsed.data.meta?.requestId ?? parsed.data.meta?.request_id;
-
-	return id !== "" ? id : undefined;
+	if (!parsed.success) return { requestId: undefined };
+	const meta = parsed.data.meta;
+	const id = typeof meta?.requestId === "string" ? meta.requestId : meta?.request_id;
+	const warnings = Array.isArray(meta?.warnings)
+		? meta.warnings.flatMap((entry: unknown) => {
+			const warning = responseWarningSchema.safeParse(entry);
+			return warning.success ? [warning.data] : [];
+		})
+		: [];
+	return {
+		requestId: typeof id === "string" && id !== "" ? id : undefined,
+		...(warnings.length ? { warnings } : {}),
+	};
 }
 
 abstract class Resource {
@@ -684,12 +703,12 @@ abstract class Resource {
 	protected async call<T, Response>(
 		path: string,
 		fn: () => Promise<Response>,
-		onMeta?: (meta: { requestId?: string }) => void,
+		onMeta?: (meta: ResponseMeta) => void,
 	): Promise<T> {
 		try {
 			const raw = await fn();
 
-			if (onMeta) onMeta({ requestId: readRequestId(raw) });
+			if (onMeta) onMeta(readResponseMeta(raw));
 
 			return unwrap<T>(raw);
 		} catch (err) {
@@ -1117,6 +1136,7 @@ export class ContextResource extends Resource {
 				expirySeconds: params.expirySeconds,
 				acl: params.acl,
 			}, req(opts)),
+			opts?.onMeta,
 		);
 	}
 
@@ -1180,7 +1200,10 @@ export class ContextResource extends Resource {
 		for (const principal of params.acl ?? []) query.append("acl", principal);
 		const path = `/context/${encodeURIComponent(params.id)}/subgraph?${query.toString()}`;
 
-		return sendRaw<SubgraphResult>(this.raw, path, "GET", undefined, opts);
+		return sendRaw<SubgraphResult>(this.raw, path, "GET", undefined, {
+			signal: opts?.signal,
+			onResponse: (value) => opts?.onMeta?.(readResponseMeta(value)),
+		});
 	}
 
 	/** Knowledge-graph relations (SDK `context.relations`). */
@@ -1197,6 +1220,7 @@ export class ContextResource extends Resource {
 				cursor: params.cursor,
 				acl: params.acl,
 			}, req(opts)),
+			opts?.onMeta,
 		);
 	}
 

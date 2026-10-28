@@ -1127,3 +1127,72 @@ test("real SDK markdown query sends response_format=markdown and returns the str
 	assert.equal(markdown, "## Results");
 	assert.equal(requestId, "r-md");
 });
+
+test("query metadata retains warnings for camelCase and snake_case envelopes", async () => {
+	const warning = { code: "acl_ignored_by_connector_enforcement", message: "Request ACL ignored." };
+	for (const meta of [{ requestId: "r1", warnings: [warning] }, { request_id: "r1", warnings: [warning] }]) {
+		const sdk = { query: async () => ({ success: true, data: { chunks: [] }, meta }) } as unknown as HydraDBClient;
+		const hydra = new HydraDB({ token: "t", database: "db_test" }, sdk);
+		let received: unknown;
+		await hydra.context.query({ query: "q" }, { onMeta: (value) => { received = value; } });
+		assert.deepEqual(received, { requestId: "r1", warnings: [warning] });
+	}
+});
+
+test("malformed warning entries do not discard the request id or valid warnings", async () => {
+	const sdk = { query: async () => ({ success: true, data: { chunks: [] }, meta: {
+		request_id: "r1", warnings: [null, { code: 42 }, { code: "notice", message: "ok" }],
+	} }) } as unknown as HydraDBClient;
+	const hydra = new HydraDB({ token: "t", database: "db_test" }, sdk);
+	let received: unknown;
+	await hydra.context.query({ query: "q" }, { onMeta: (value) => { received = value; } });
+	assert.deepEqual(received, { requestId: "r1", warnings: [{ code: "notice", message: "ok" }] });
+});
+
+test("released SDK query retains wire warning metadata", async (t) => {
+	const warning = { code: "acl_ignored_by_connector_enforcement", message: "Request ACL ignored." };
+	t.mock.method(globalThis, "fetch", async () => new Response(JSON.stringify({
+		success: true, data: { chunks: [] }, meta: { request_id: "r-wire", warnings: [warning] },
+	}), { status: 200, headers: { "content-type": "application/json" } }));
+	const hydra = new HydraDB({ token: "t", database: "db_test", maxRetries: 0 });
+	let received: unknown;
+	await hydra.context.query({ query: "q" }, { onMeta: (value) => { received = value; } });
+	assert.deepEqual(received, { requestId: "r-wire", warnings: [warning] });
+});
+
+test("every ACL-bearing context read retains response warnings", async () => {
+	const warning = { code: "acl_ignored_by_connector_enforcement", message: "Request ACL ignored." };
+	const envelope = (data: unknown) => ({ success: true, data, meta: { request_id: "r", warnings: [warning] } });
+	const sdk = {
+		context: {
+			list: async () => envelope({ inner: { sources: [] } }),
+			inspect: async () => envelope({ success: true, content: "body" }),
+			relations: async () => envelope({ relations: [], isTruncated: false }),
+		},
+	} as unknown as HydraDBClient;
+	const { fetchFn } = fakeRawFetch(() => ({
+		status: 200,
+		body: envelope({
+			success: true,
+			seed_source_id: "s1",
+			sources: [],
+			relations: [],
+			auxiliary_relations: [],
+			is_truncated: false,
+			auxiliary_truncated: false,
+			max_depth_reached: 0,
+		}),
+	}));
+	const hydra = new HydraDB({ token: "t", database: "db_test", baseUrl: "https://h.test", fetchFn }, sdk);
+
+	for (const call of [
+		(onMeta: (meta: unknown) => void) => hydra.context.list({ kind: "knowledge" }, { onMeta }),
+		(onMeta: (meta: unknown) => void) => hydra.context.inspect({ id: "s1" }, { onMeta }),
+		(onMeta: (meta: unknown) => void) => hydra.context.relations({ id: "s1" }, { onMeta }),
+		(onMeta: (meta: unknown) => void) => hydra.context.subgraph({ id: "s1" }, { onMeta }),
+	]) {
+		let received: unknown;
+		await call((meta) => { received = meta; });
+		assert.deepEqual(received, { requestId: "r", warnings: [warning] });
+	}
+});
