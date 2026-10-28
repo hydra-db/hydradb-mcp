@@ -183,6 +183,7 @@ const resourceId = process.env.ENG3341_RESOURCE_ID?.trim();
 const fullLifecycle = process.env.ENG3341_FULL_LIFECYCLE === "1";
 const cleanup = process.env.ENG3341_CLEANUP === "1";
 const runOwned = process.env.ENG3341_RUN_OWNED === "1";
+const skipProviderFailure = process.env.ENG3341_SKIP_PROVIDER_FAILURE === "1";
 const fakeVendorControl = fullLifecycle ? localUrl("ENG3341_FAKE_VENDOR_CONTROL_URL") : undefined;
 const pollTimeoutSeconds = Number(process.env.ENG3341_POLL_TIMEOUT_SECONDS ?? "360");
 const passedCases = [];
@@ -379,21 +380,27 @@ if (fullLifecycle) {
 	call("hydradb_connector_resume", { connector_id: connectorId });
 	passedCases.push("resource lifecycle and successful sync");
 
-	let failed;
+	if (skipProviderFailure) {
+		skippedCases.push(
+			"provider failure: not run — local backend does not surface a stopped-vendor failure within 6 minutes; sync stayed healthy and idle",
+		);
+	} else {
+		let failed;
 
-	try {
-		await setFakeVendorMode("terminal_failure");
-		call("hydradb_connector_sync", { connector_id: connectorId });
-		failed = await pollStatus((status) => status.data.error != null, "a safe provider failure");
-	} finally {
-		await setFakeVendorMode("healthy");
-	}
-	const secretMarker = process.env.ENG3341_SECRET_MARKER?.trim();
+		try {
+			await setFakeVendorMode("terminal_failure");
+			call("hydradb_connector_sync", { connector_id: connectorId });
+			failed = await pollStatus((status) => status.data.error != null, "a safe provider failure");
+		} finally {
+			await setFakeVendorMode("healthy");
+		}
+		const secretMarker = process.env.ENG3341_SECRET_MARKER?.trim();
 
-	if (!failed.data.error?.action || (secretMarker && failed.text.includes(secretMarker))) {
-		throw new Error("Provider failure output was not safe and actionable");
+		if (!failed.data.error?.action || (secretMarker && failed.text.includes(secretMarker))) {
+			throw new Error("Provider failure output was not safe and actionable");
+		}
+		passedCases.push("safe provider failure");
 	}
-	passedCases.push("safe provider failure");
 
 	const allowedResult = await callHttp(
 		"ENG3341_OAUTH_ALLOWED_MCP_URL",
@@ -447,7 +454,7 @@ if (cleanup) {
 }
 
 console.log(JSON.stringify({
-	status: fullLifecycle && cleanup ? "complete" : "partial",
+	status: fullLifecycle && cleanup && skippedCases.length === 0 ? "complete" : "partial",
 	inspector_version: INSPECTOR_VERSION,
 	passed_cases: passedCases,
 	skipped_cases: skippedCases,
