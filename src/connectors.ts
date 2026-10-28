@@ -5,7 +5,11 @@ import type {
 	ConnectorProviderCatalog,
 	ConnectorProviderDetail,
 	ConnectorResource,
+	ConnectorResourceCreateRequest,
+	ConnectorResourceMapping,
+	ConnectorResourceUpdateRequest,
 	ConnectorStatus,
+	ConnectorUpdateRequest,
 	ConnectorView,
 	DiscoveredConnectorResources,
 	HydraDB,
@@ -21,24 +25,9 @@ export type ConnectorListInput = ConnectorListParams;
 
 export type ConnectorDiscoverInput = ConnectorDiscoverParams;
 
-export interface ConnectorUpdateInput {
-	connectorId: string;
-	customInstructions?: string;
-	syncIntervalSeconds?: number;
-}
+export type ConnectorUpdateInput = ConnectorUpdateRequest;
 
-export interface ConnectorConfigureResourceInput {
-	resourceId: string;
-	resourceType?: string;
-	name?: string;
-	database?: string;
-	collection?: string;
-	acl?: string[];
-	customInstructions?: string;
-	metadata?: Record<string, unknown>;
-	additionalMetadata?: Record<string, unknown>;
-	syncMode?: "rescan" | "new_only";
-}
+export type ConnectorConfigureResourceInput = ConnectorResourceMapping;
 
 export interface ConnectorConfigureInput {
 	connectorId: string;
@@ -52,44 +41,19 @@ export interface ConnectorConfigureInput {
 	}>;
 }
 
-export interface ConnectorResourceCreateInput {
-	connectorId: string;
-	resourceId: string;
-	resourceType?: string;
-	displayName?: string;
-	databaseOverride?: string;
-	collectionOverride?: string;
-	acl?: string[];
-	customInstructions?: string;
-	metadata?: Record<string, unknown>;
-	additionalMetadata?: Record<string, unknown>;
-	filters?: Record<string, unknown>;
-	providerMetadata?: Record<string, unknown>;
-}
+export type ConnectorResourceCreateInput = ConnectorResourceCreateRequest;
 
-export interface ConnectorResourceUpdateInput {
-	connectorId: string;
-	resourceId: string;
-	acl?: string[];
-	customInstructions?: string;
-}
+export type ConnectorResourceUpdateInput = ConnectorResourceUpdateRequest;
 
 /** A connector ID exists, but this OAuth grant cannot prove access to it. */
 export class ConnectorScopeNotAllowedError extends Error {
-	constructor() {
+	constructor(message?: string) {
 		super(
-			"This connection is confined to specific databases or collections " +
+			message ?? ("This connection is confined to specific databases or collections " +
 				"and cannot access that connector because its destination is outside that scope or is not set. " +
-				"Reconnect with wider database access to use it.",
+				"Reconnect with wider database access to use it."),
 		);
 		this.name = "ConnectorScopeNotAllowedError";
-	}
-}
-
-export class ConnectorResourceNotFoundError extends Error {
-	constructor() {
-		super("The connector resource was not found.");
-		this.name = "ConnectorResourceNotFoundError";
 	}
 }
 
@@ -269,25 +233,6 @@ function effectiveCollection(resource: ConnectorResource, connector: ConnectorVi
 function canAccessResource(resource: ConnectorResource, connector: ConnectorView, hydra: HydraDB): boolean {
 	return canAccessDatabase(effectiveDatabase(resource, connector), hydra.allowedDatabases)
 		&& canAccessCollection(effectiveCollection(resource, connector), hydra.allowedCollections);
-}
-
-function assertResourceAllowed(resource: ConnectorResource, connector: ConnectorView, hydra: HydraDB): void {
-	if (!canAccessResource(resource, connector, hydra)) {
-		throw new ConnectorScopeNotAllowedError();
-	}
-}
-
-function assertDestinationAllowed(
-	database: string | undefined,
-	collection: string | undefined,
-	hydra: HydraDB,
-): void {
-	if (
-		!canAccessDatabase(database, hydra.allowedDatabases)
-		|| !canAccessCollection(collection, hydra.allowedCollections)
-	) {
-		throw new ConnectorScopeNotAllowedError();
-	}
 }
 
 function projectResource(resource: ConnectorResource): Record<string, unknown> {
@@ -503,43 +448,21 @@ function renderStatus(data: Record<string, unknown>): string {
 export class ConnectorTools {
 	constructor(private readonly hydra: HydraDB) {}
 
+	private assertMutationAllowed(): void {
+		// Connector endpoints do not atomically enforce MCP database or collection grants.
+		// Refuse every scoped mutation so a concurrent destination change cannot cross the grant.
+		if (this.hydra.allowedDatabases !== undefined || this.hydra.allowedCollections !== undefined) {
+			throw new ConnectorScopeNotAllowedError(
+				"Scoped OAuth connections cannot modify connectors. Use an organization-wide connection.",
+			);
+		}
+	}
+
 	private async authorizedConnector(id: string, opts?: RequestOptions): Promise<ConnectorView> {
 		const connector = await this.hydra.connectors.get(id, opts);
 		assertConnectorAllowed(connector, this.hydra.allowedDatabases, this.hydra.allowedCollections);
 
 		return connector;
-	}
-
-	private async authorizedConnectorResources(
-		id: string,
-		opts?: RequestOptions,
-	): Promise<{ connector: ConnectorView; resources: ConnectorResource[] }> {
-		const connector = await this.authorizedConnector(id, opts);
-		const result = await this.hydra.connectors.listResources(id, opts);
-
-		for (const resource of result.resources) {
-			assertResourceAllowed(resource, connector, this.hydra);
-		}
-
-		return { connector, resources: result.resources };
-	}
-
-	private async authorizedResource(
-		connectorId: string,
-		resourceId: string,
-		opts?: RequestOptions,
-	): Promise<{ connector: ConnectorView; resource: ConnectorResource }> {
-		const connector = await this.authorizedConnector(connectorId, opts);
-		const result = await this.hydra.connectors.listResources(connectorId, opts);
-		const resource = result.resources.find((candidate) => candidate.resourceId === resourceId);
-
-		if (!resource) {
-			throw new ConnectorResourceNotFoundError();
-		}
-
-		assertResourceAllowed(resource, connector, this.hydra);
-
-		return { connector, resource };
 	}
 
 	async providers(provider?: string, opts?: RequestOptions): Promise<ConnectorToolResponse> {
@@ -666,7 +589,7 @@ export class ConnectorTools {
 	}
 
 	async update(input: ConnectorUpdateInput, opts?: RequestOptions): Promise<ConnectorToolResponse> {
-		await this.authorizedConnectorResources(input.connectorId, opts);
+		this.assertMutationAllowed();
 		const result = await this.hydra.connectors.update(input, opts);
 
 		return {
@@ -683,7 +606,7 @@ export class ConnectorTools {
 	}
 
 	async delete(id: string, opts?: RequestOptions): Promise<ConnectorToolResponse> {
-		await this.authorizedConnectorResources(id, opts);
+		this.assertMutationAllowed();
 		const result = await this.hydra.connectors.delete(id, opts);
 
 		return {
@@ -695,7 +618,7 @@ export class ConnectorTools {
 	}
 
 	async sync(id: string, opts?: RequestOptions): Promise<ConnectorToolResponse> {
-		await this.authorizedConnectorResources(id, opts);
+		this.assertMutationAllowed();
 		const result = await this.hydra.connectors.sync(id, opts);
 
 		return {
@@ -707,7 +630,7 @@ export class ConnectorTools {
 	}
 
 	async pause(id: string, opts?: RequestOptions): Promise<ConnectorToolResponse> {
-		await this.authorizedConnectorResources(id, opts);
+		this.assertMutationAllowed();
 		const result = await this.hydra.connectors.pause(id, opts);
 
 		return {
@@ -719,7 +642,7 @@ export class ConnectorTools {
 	}
 
 	async resume(id: string, opts?: RequestOptions): Promise<ConnectorToolResponse> {
-		await this.authorizedConnectorResources(id, opts);
+		this.assertMutationAllowed();
 		const result = await this.hydra.connectors.resume(id, opts);
 
 		return {
@@ -731,16 +654,7 @@ export class ConnectorTools {
 	}
 
 	async configure(input: ConnectorConfigureInput, opts?: RequestOptions): Promise<ConnectorToolResponse> {
-		const { connector } = await this.authorizedConnectorResources(input.connectorId, opts);
-
-		for (const resource of input.resources) {
-			assertDestinationAllowed(
-				resource.database?.trim() || connectorDatabase(connector),
-				resource.collection?.trim() || connectorCollection(connector),
-				this.hydra,
-			);
-		}
-
+		this.assertMutationAllowed();
 		const result = await this.hydra.connectors.configure(input, opts);
 
 		return {
@@ -757,18 +671,14 @@ export class ConnectorTools {
 	}
 
 	async addResource(input: ConnectorResourceCreateInput, opts?: RequestOptions): Promise<ConnectorToolResponse> {
-		const connector = await this.authorizedConnector(input.connectorId, opts);
-
-		assertDestinationAllowed(
-			input.databaseOverride?.trim() || connectorDatabase(connector),
-			input.collectionOverride?.trim() || connectorCollection(connector),
-			this.hydra,
-		);
-
+		this.assertMutationAllowed();
 		const result = await this.hydra.connectors.createResource(input, opts);
+		const needsReview = (result.warnings?.length ?? 0) > 0 || (result.unverified?.length ?? 0) > 0;
 
 		return {
-			text: "The connector resource was added.",
+			text: needsReview
+				? "The connector resource was added, but provider verification needs review. Check connector status after its first sync."
+				: "The connector resource was added.",
 			data: cleanObject({
 				connector_id: result.connectorId ?? input.connectorId,
 				resource_id: result.resourceId ?? input.resourceId,
@@ -779,12 +689,14 @@ export class ConnectorTools {
 				status: result.status,
 				acl: result.acl,
 				custom_instructions: result.customInstructions,
+				unverified_resource_ids: result.unverified,
+				warning_resource_ids: result.warnings,
 			}),
 		};
 	}
 
 	async updateResource(input: ConnectorResourceUpdateInput, opts?: RequestOptions): Promise<ConnectorToolResponse> {
-		await this.authorizedResource(input.connectorId, input.resourceId, opts);
+		this.assertMutationAllowed();
 		const result = await this.hydra.connectors.updateResource(input, opts);
 
 		return {
@@ -804,7 +716,7 @@ export class ConnectorTools {
 		resourceId: string,
 		opts?: RequestOptions,
 	): Promise<ConnectorToolResponse> {
-		await this.authorizedResource(connectorId, resourceId, opts);
+		this.assertMutationAllowed();
 		const result = await this.hydra.connectors.deleteResource(connectorId, resourceId, opts);
 
 		return {

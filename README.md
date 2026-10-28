@@ -51,13 +51,14 @@ hidden, and every by-ID read checks the connector before reading status,
 discovery, or resources. Resource listings also check each resource's
 `database_override` and `collection_override`, then inherit the connector destination.
 
-Write tools apply the same checks before every mutation. Connector-wide writes
-refuse a connector with any resource outside the grant. Resource writes load and
-authorize the target first. Configure and add-resource inputs validate each effective
-destination. Connector deletion, configure, connector settings, resource updates,
-and resource deletion are marked destructive; sync, pause, resume, and add-resource
-are non-destructive writes. Configure updates submitted resources; unlisted resources
-remain unchanged.
+Connector endpoints cannot enforce database or collection grants atomically with a
+mutation. Write tools therefore fail closed for every database- or collection-confined
+OAuth connection and send no connector API request. Use an organization-wide
+connection for connector mutations. Connector deletion, configure, connector settings,
+resource updates, and resource deletion are marked destructive; configure is also
+non-idempotent because it can start time-relative work. Sync, pause, resume, and
+add-resource are non-destructive writes. Configure updates submitted resources;
+unlisted resources remain unchanged.
 
 The provider-detail tool returns credential **schema metadata**, not credential
 values. Do not paste provider credentials into chat or any MCP tool argument.

@@ -165,6 +165,7 @@ test("all nine credential-free write tools declare explicit write safety annotat
 
 	const nonIdempotent = new Set([
 		"hydradb_connector_sync",
+		"hydradb_connector_configure",
 		"hydradb_connector_add_resource",
 	]);
 
@@ -185,6 +186,39 @@ test("all nine credential-free write tools declare explicit write safety annotat
 		assert.equal(tool.annotations?.destructiveHint, !additive.has(name));
 		assert.equal(tool.annotations?.idempotentHint, !nonIdempotent.has(name));
 		assert.equal(tool.annotations?.openWorldHint, true);
+	}
+
+	await client.close();
+});
+
+test("every connector write input field has client-visible help", async () => {
+	const client = await connect(mockHydra().hydra);
+	const { tools } = await client.listTools();
+
+	const missingDescriptions = (schema: unknown, path: string): string[] => {
+		if (schema == null || typeof schema !== "object") return [];
+
+		const value = schema as Record<string, unknown>;
+
+		const properties = value.properties && typeof value.properties === "object"
+			? value.properties as Record<string, unknown>
+			: {};
+
+		const missing = Object.entries(properties).flatMap(([name, property]) => {
+			const field = property as Record<string, unknown>;
+			const fieldPath = path ? `${path}.${name}` : name;
+			const own = typeof field.description === "string" && field.description.length > 0 ? [] : [fieldPath];
+
+			return [...own, ...missingDescriptions(field, fieldPath)];
+		});
+
+		return [...missing, ...missingDescriptions(value.items, `${path}[]`)];
+	};
+
+	for (const name of CONNECTOR_TOOL_NAMES.slice(6)) {
+		const tool = tools.find((candidate) => candidate.name === name);
+		assert.ok(tool, `${name} should be registered`);
+		assert.deepEqual(missingDescriptions(tool.inputSchema, ""), [], `${name} has undocumented fields`);
 	}
 
 	await client.close();
@@ -250,18 +284,38 @@ test("connector write metadata rejects credential-like keys before mutation", as
 	const { hydra, calls } = mockHydra();
 	const client = await connect(hydra);
 
-	const result = await client.callTool({
-		name: "hydradb_connector_add_resource",
-		arguments: {
-			connector_id: "allowed",
-			resource_id: "r-new",
-			metadata: { access_token: "must-not-pass" },
+	for (const request of [
+		{
+			name: "hydradb_connector_add_resource",
+			arguments: {
+				connector_id: "allowed",
+				resource_id: "r-new",
+				metadata: { access_token: "must-not-pass" },
+			},
 		},
-	});
+		{
+			name: "hydradb_connector_configure",
+			arguments: {
+				connector_id: "allowed",
+				resources: [{ resource_id: "r-new", metadata: { private_key: "must-not-pass" } }],
+			},
+		},
+		{
+			name: "hydradb_connector_add_resource",
+			arguments: {
+				connector_id: "allowed",
+				resource_id: "r-new",
+				metadata: { nested: { ssh_key: "must-not-pass" } },
+			},
+		},
+	]) {
+		const result = await client.callTool(request);
 
-	assert.equal(result.isError, true);
-	assert.equal(calls.some((call) => call.method === "add-resource"), false);
-	assert.doesNotMatch(text(result), /must-not-pass/);
+		assert.equal(result.isError, true);
+		assert.doesNotMatch(text(result), /must-not-pass/);
+	}
+
+	assert.equal(calls.some((call) => call.method === "add-resource" || call.method === "configure"), false);
 
 	await client.close();
 });
@@ -595,6 +649,27 @@ test("credential-free connector writes map every public mutation with safe resul
 	await client.close();
 });
 
+test("add resource preserves safe warning and verification indicators", async () => {
+	const fixture = mockHydra();
+	fixture.connectorApi.createResource = async () => ({
+		connectorId: "allowed",
+		resourceId: "r-new",
+		warnings: ["r-new"],
+		unverified: ["r-later"],
+	});
+	const client = await connect(fixture.hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_connector_add_resource",
+		arguments: { connector_id: "allowed", resource_id: "r-new" },
+	});
+
+	assert.deepEqual(structured(result).warning_resource_ids, ["r-new"]);
+	assert.deepEqual(structured(result).unverified_resource_ids, ["r-later"]);
+	assert.match(text(result), /verification needs review/i);
+	await client.close();
+});
+
 test("every credential-free connector write redacts representative upstream failures", async () => {
 	const cases = [
 		["hydradb_connector_update", { connector_id: "allowed", custom_instructions: "safe" }, "update"],
@@ -635,54 +710,46 @@ test("every credential-free connector write redacts representative upstream fail
 	}
 });
 
-test("confined connector-wide writes refuse cross-scope resources without mutation", async () => {
+test("scoped connector writes fail closed before any authorization read or mutation", async () => {
 	const { hydra, calls } = mockHydra(["db-a"], ["public"]);
 	const client = await connect(hydra);
 
-	const mutationNames = [
-		"hydradb_connector_update",
-		"hydradb_connector_delete",
-		"hydradb_connector_sync",
-		"hydradb_connector_pause",
-		"hydradb_connector_resume",
-		"hydradb_connector_configure",
+	const requests = [
+		{ name: "hydradb_connector_update", arguments: { connector_id: "allowed", custom_instructions: "safe" } },
+		{ name: "hydradb_connector_delete", arguments: { connector_id: "allowed" } },
+		{ name: "hydradb_connector_sync", arguments: { connector_id: "allowed" } },
+		{ name: "hydradb_connector_pause", arguments: { connector_id: "allowed" } },
+		{ name: "hydradb_connector_resume", arguments: { connector_id: "allowed" } },
+		{ name: "hydradb_connector_configure", arguments: { connector_id: "allowed", resources: [{ resource_id: "r-a" }] } },
+		{ name: "hydradb_connector_add_resource", arguments: { connector_id: "allowed", resource_id: "r-new" } },
+		{ name: "hydradb_connector_update_resource", arguments: { connector_id: "allowed", resource_id: "r-a", acl: [] } },
+		{ name: "hydradb_connector_delete_resource", arguments: { connector_id: "allowed", resource_id: "r-a" } },
 	];
 
-	for (const name of mutationNames) {
-		const argumentsByName: Record<string, unknown> = name === "hydradb_connector_update"
-			? { connector_id: "allowed", custom_instructions: "safe" }
-			: name === "hydradb_connector_configure"
-				? { connector_id: "allowed", resources: [{ resource_id: "r-a", database: "db-a", collection: "public" }] }
-				: { connector_id: "allowed" };
+	for (const request of requests) {
+		const result = await client.callTool(request);
 
-		const result = await client.callTool({ name, arguments: argumentsByName });
-
-		assert.equal(result.isError, true, `${name} should refuse a connector with cross-scope resources`);
+		assert.equal(result.isError, true, `${request.name} should refuse every scoped mutation`);
+		assert.match(text(result), /Scoped OAuth connections cannot modify connectors/);
 	}
 
-	for (const method of ["update", "delete", "sync", "pause", "resume", "configure"]) {
-		assert.equal(calls.some((call) => call.method === method), false, `${method} must not mutate`);
-	}
+	assert.deepEqual(calls, [], "scoped mutations must make no connector API request");
 
 	await client.close();
 });
 
-test("resource writes enforce effective database and collection before mutation", async () => {
-	const { hydra, calls } = mockHydra(["db-a"], ["public"]);
+test("collection-only confinement also refuses resource mutations", async () => {
+	const { hydra, calls } = mockHydra(undefined, ["public"]);
 	const client = await connect(hydra);
 
 	const requests = [
 		{
 			name: "hydradb_connector_add_resource",
-			arguments: { connector_id: "allowed", resource_id: "new", database_override: "db-b" },
-		},
-		{
-			name: "hydradb_connector_add_resource",
-			arguments: { connector_id: "allowed", resource_id: "new", collection_override: "private" },
+			arguments: { connector_id: "allowed", resource_id: "new" },
 		},
 		{
 			name: "hydradb_connector_update_resource",
-			arguments: { connector_id: "allowed", resource_id: "r-b", acl: ["user@example.com"] },
+			arguments: { connector_id: "allowed", resource_id: "r-a", acl: [] },
 		},
 		{
 			name: "hydradb_connector_delete_resource",
@@ -693,7 +760,7 @@ test("resource writes enforce effective database and collection before mutation"
 	for (const request of requests) {
 		const result = await client.callTool(request);
 
-		assert.equal(result.isError, true, `${request.name} should refuse the forbidden destination`);
+		assert.equal(result.isError, true, `${request.name} should refuse collection-scoped mutation`);
 	}
 
 	for (const method of ["add-resource", "update-resource", "delete-resource"]) {
@@ -703,9 +770,8 @@ test("resource writes enforce effective database and collection before mutation"
 	await client.close();
 });
 
-test("configure refuses a submitted destination outside scope before mutation", async () => {
-	const fixture = mockHydra(["db-a"], ["public"]);
-	fixture.resources.splice(1, 1);
+test("database-only confinement refuses configure before mutation", async () => {
+	const fixture = mockHydra(["db-a"]);
 	const client = await connect(fixture.hydra);
 
 	const result = await client.callTool({
@@ -717,6 +783,6 @@ test("configure refuses a submitted destination outside scope before mutation", 
 	});
 
 	assert.equal(result.isError, true);
-	assert.equal(fixture.calls.some((call) => call.method === "configure"), false);
+	assert.deepEqual(fixture.calls, []);
 	await client.close();
 });
