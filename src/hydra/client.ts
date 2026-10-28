@@ -529,6 +529,14 @@ export interface CreateDatabaseParams {
 	embeddingsDimension?: number;
 }
 
+export interface DatabaseParams {
+	database: string;
+}
+
+export interface UpdateMetadataSchemaParams extends DatabaseParams {
+	addFields: SDK.TenantsCustomPropertyDefinition[];
+}
+
 export interface DeleteCollectionParams {
 	database: string;
 	collection: string;
@@ -1281,20 +1289,36 @@ export class DatabasesResource extends Resource {
 		super(sdk, database, collection, allowedDatabases, allowedCollections, raw);
 	}
 
-	create(
+	async create(
 		params: CreateDatabaseParams,
+		opts?: RequestOptions,
 	): Promise<SDK.TenantsTenantCreateAcceptedResponse> {
-		return this.call("/databases", "unsafe", undefined, (o) =>
+		const database = this.scope(undefined, params.database).database;
+
+		return this.call("/databases", "unsafe", opts, (o) =>
 			this.sdk.databases.create({
-				database: params.database,
+				database,
 				databaseMetadataSchema: params.databaseMetadataSchema,
 				embeddingsDimension: params.embeddingsDimension,
 			}, o),
 		);
 	}
 
-	delete(database: string): Promise<SDK.TenantsTenantDeleteResponse> {
-		return this.call("/databases", "unsafe", undefined, (o) =>
+	async delete(
+		params: DatabaseParams,
+		opts?: RequestOptions,
+	): Promise<SDK.TenantsTenantDeleteResponse> {
+		const database = this.scope(undefined, params.database).database;
+		const connectionDefault = this.scope().database;
+
+		if (database === connectionDefault) {
+			throw new Error(
+				`Refusing to delete database "${database}" because it is this connection's ` +
+					"default database. Connect through a different default database, then retry the deletion.",
+			);
+		}
+
+		return this.call("/databases", "unsafe", opts, (o) =>
 			this.sdk.databases.delete({ database }, o),
 		);
 	}
@@ -1312,16 +1336,48 @@ export class DatabasesResource extends Resource {
 		);
 	}
 
-	stats(database: string, opts?: RequestOptions): Promise<SDK.TenantsTenantStatsResponse> {
+	async stats(params: DatabaseParams, opts?: RequestOptions): Promise<SDK.TenantsTenantStatsResponse> {
+		const database = this.scope(undefined, params.database).database;
+
 		return this.call("/databases/stats", "idempotent", opts, (o) =>
 			this.sdk.databases.stats({ database }, o),
 		);
 	}
 
 	/** Infra provisioning readiness — renamed away from `status` (SDK `databases.status`). */
-	readiness(database: string): Promise<SDK.TenantsInfraStatusResponseV2> {
-		return this.call("/databases/status", "idempotent", undefined, (o) =>
+	async readiness(
+		params: DatabaseParams,
+		opts?: RequestOptions,
+	): Promise<SDK.TenantsInfraStatusResponseV2> {
+		const database = this.scope(undefined, params.database).database;
+
+		return this.call("/databases/status", "idempotent", opts, (o) =>
 			this.sdk.databases.status({ database }, o),
+		);
+	}
+
+	async getMetadataSchema(
+		params: DatabaseParams,
+		opts?: RequestOptions,
+	): Promise<SDK.TenantsTenantMetadataSchemaResponse> {
+		const database = this.scope(undefined, params.database).database;
+
+		return this.call("/databases/metadata-schema", "idempotent", opts, (o) =>
+			this.sdk.databases.getMetadataSchema({ database }, o),
+		);
+	}
+
+	async updateMetadataSchema(
+		params: UpdateMetadataSchemaParams,
+		opts?: RequestOptions,
+	): Promise<SDK.HandlerMetadataSchemaUpdateResponse> {
+		const database = this.scope(undefined, params.database).database;
+
+		return this.call("/databases/metadata-schema", "unsafe", opts, (o) =>
+			this.sdk.databases.updateMetadataSchema({
+				database,
+				addFields: params.addFields,
+			}, o),
 		);
 	}
 

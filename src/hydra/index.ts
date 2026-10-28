@@ -36,6 +36,8 @@ export type {
 	SubgraphResult,
 	DeleteParams,
 	CreateDatabaseParams,
+	DatabaseParams,
+	UpdateMetadataSchemaParams,
 	DeleteCollectionParams,
 	FeedbackParams,
 	FeedbackResult,
