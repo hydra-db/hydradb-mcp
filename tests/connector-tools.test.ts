@@ -195,6 +195,49 @@ test("every connector write input field has client-visible help", async () => {
 	const client = await connect(mockHydra().hydra);
 	const { tools } = await client.listTools();
 
+	const expectedFields: Record<string, string[]> = {
+		hydradb_connector_update: ["connector_id", "custom_instructions", "sync_interval_seconds"],
+		hydradb_connector_delete: ["connector_id"],
+		hydradb_connector_sync: ["connector_id"],
+		hydradb_connector_pause: ["connector_id"],
+		hydradb_connector_resume: ["connector_id"],
+		hydradb_connector_configure: [
+			"connector_id",
+			"full_visibility_roles",
+			"lookback_days",
+			"resources",
+			"table_configs",
+		],
+		hydradb_connector_add_resource: [
+			"acl",
+			"additional_metadata",
+			"collection_override",
+			"connector_id",
+			"custom_instructions",
+			"database_override",
+			"display_name",
+			"filters",
+			"metadata",
+			"provider_metadata",
+			"resource_id",
+			"resource_type",
+		],
+		hydradb_connector_update_resource: ["acl", "connector_id", "custom_instructions", "resource_id"],
+		hydradb_connector_delete_resource: ["connector_id", "resource_id"],
+	};
+
+	const expectedRequired: Record<string, string[]> = {
+		hydradb_connector_update: ["connector_id"],
+		hydradb_connector_delete: ["connector_id"],
+		hydradb_connector_sync: ["connector_id"],
+		hydradb_connector_pause: ["connector_id"],
+		hydradb_connector_resume: ["connector_id"],
+		hydradb_connector_configure: ["connector_id", "resources"],
+		hydradb_connector_add_resource: ["connector_id", "resource_id"],
+		hydradb_connector_update_resource: ["connector_id", "resource_id"],
+		hydradb_connector_delete_resource: ["connector_id", "resource_id"],
+	};
+
 	const missingDescriptions = (schema: unknown, path: string): string[] => {
 		if (schema == null || typeof schema !== "object") return [];
 
@@ -218,6 +261,9 @@ test("every connector write input field has client-visible help", async () => {
 	for (const name of CONNECTOR_TOOL_NAMES.slice(6)) {
 		const tool = tools.find((candidate) => candidate.name === name);
 		assert.ok(tool, `${name} should be registered`);
+		assert.deepEqual(Object.keys(tool.inputSchema.properties ?? {}).sort(), expectedFields[name], `${name} fields`);
+		assert.deepEqual([...(tool.inputSchema.required ?? [])].sort(), expectedRequired[name], `${name} required fields`);
+		assert.equal(tool.inputSchema.additionalProperties, false, `${name} should reject unknown fields`);
 		assert.deepEqual(missingDescriptions(tool.inputSchema, ""), [], `${name} has undocumented fields`);
 	}
 

@@ -4111,7 +4111,7 @@ export function createHydraDBServer(
 
 		const safeJsonObject = z.record(safeJsonKey, safeJsonValue);
 
-		const connectorUpdateSchema = z
+		const connectorUpdateObjectSchema = z
 			.object({
 				connector_id: z.string().trim().min(1)
 					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_UPDATE].params.connector_id),
@@ -4120,7 +4120,9 @@ export function createHydraDBServer(
 				sync_interval_seconds: z.number().int().min(0).optional()
 					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_UPDATE].params.sync_interval_seconds),
 			})
-			.strict()
+			.strict();
+
+		const connectorUpdateSchema = connectorUpdateObjectSchema
 			.refine(
 				(input) => input.custom_instructions !== undefined || input.sync_interval_seconds !== undefined,
 				{ message: "Set custom_instructions or sync_interval_seconds." },
@@ -4209,7 +4211,7 @@ export function createHydraDBServer(
 			})
 			.strict();
 
-		const connectorUpdateResourceSchema = z
+		const connectorUpdateResourceObjectSchema = z
 			.object({
 				connector_id: z.string().trim().min(1)
 					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_UPDATE_RESOURCE].params.connector_id),
@@ -4220,7 +4222,9 @@ export function createHydraDBServer(
 				custom_instructions: z.string().max(4000).optional()
 					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_UPDATE_RESOURCE].params.custom_instructions),
 			})
-			.strict()
+			.strict();
+
+		const connectorUpdateResourceSchema = connectorUpdateResourceObjectSchema
 			.refine(
 				(input) => input.acl !== undefined || input.custom_instructions !== undefined,
 				{ message: "Set acl or custom_instructions." },
@@ -4304,7 +4308,7 @@ export function createHydraDBServer(
 
 		register(
 			TOOL_NAMES.CONNECTOR_UPDATE,
-			connectorUpdateSchema,
+			connectorUpdateObjectSchema,
 			async (args, extra) => {
 				const input = connectorUpdateSchema.parse(args);
 
@@ -4409,7 +4413,7 @@ export function createHydraDBServer(
 
 		register(
 			TOOL_NAMES.CONNECTOR_UPDATE_RESOURCE,
-			connectorUpdateResourceSchema,
+			connectorUpdateResourceObjectSchema,
 			async (args, extra) => {
 				const input = connectorUpdateResourceSchema.parse(args);
 
