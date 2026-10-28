@@ -24,6 +24,7 @@ export type {
 	ConversationTurn,
 	QueryParams,
 	IngestParams,
+	IngestDocument,
 	ListParams,
 	MetadataFilter,
 	MetadataFilterValue,

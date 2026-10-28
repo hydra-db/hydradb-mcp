@@ -307,9 +307,23 @@ export interface IngestParams {
 	observationDate?: string;
 	/** Filename to attach when ingesting knowledge text as a document. */
 	filename?: string;
+	/**
+	 * A file to upload as a knowledge document (PDF, DOCX, slides, ...), in
+	 * place of `text`. Its title is its filename; the API does not take one.
+	 */
+	file?: IngestDocument;
 	collection?: string;
 	/** Per-call database override. */
 	database?: string;
+}
+
+/** One uploaded document: its bytes, its name and type, and optionally its id. */
+export interface IngestDocument {
+	data: Buffer;
+	filename: string;
+	contentType: string;
+	/** The document's id (`document_metadata[].id`); the API assigns one when absent. */
+	id?: string;
 }
 
 export interface ListParams {
@@ -949,6 +963,19 @@ export class ContextResource extends Resource {
 					`those apply to memory ingestion only. Pass kind "memory" instead, ` +
 					`or drop them.`,
 				);
+			}
+
+			if (params.file != null && params.text != null) {
+				throw new Error("Knowledge ingestion takes `text` or `file`, not both.");
+			}
+
+			if (params.file != null) {
+				const { data, filename, contentType, id } = params.file;
+
+				request.documents = [{ data, filename, contentType }];
+
+				// One entry per document, in order; only `id` is set here.
+				if (id != null) request.documentMetadata = JSON.stringify([{ id }]);
 			}
 
 			// Knowledge is multipart with the document as a file part — never the

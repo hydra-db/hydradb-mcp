@@ -60,13 +60,13 @@ import {
 /**
  * The largest request body accepted before parsing.
  *
- * Sized above the tool layer's own ceilings — memory ingest caps `text` at 1M
- * characters (~4 MB as UTF-8 with a JSON envelope), which is the biggest
- * legitimate body — so a valid large ingest is not rejected at the door while an
- * unbounded body cannot exhaust memory. Anything genuinely oversized is still
- * refused by the per-tool checks with a message naming the real limit.
+ * Sized above the tool layer's own ceilings — a file sent inline to
+ * `hydradb_ingest` is at most 8 MB, which as base64 in a JSON envelope is about
+ * 11 MB, the biggest legitimate body — so a valid upload is not rejected at the
+ * door while an unbounded body cannot exhaust memory. A file somewhat over its
+ * limit still reaches the tool and is refused with a message naming the limit.
  */
-const MAX_REQUEST_BODY = "8mb";
+const MAX_REQUEST_BODY = "16mb";
 
 /**
  * Startup banners and security warnings go straight to stderr, not through
