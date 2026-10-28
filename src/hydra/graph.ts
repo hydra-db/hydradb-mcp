@@ -19,7 +19,7 @@
  * insulated from yet.
  */
 
-import { HydraWrapperError } from "./errors.js";
+import { HydraWrapperError, scrub } from "./errors.js";
 import { newRawTransport, type RawTransport, sendRaw } from "./transport.js";
 
 export interface GraphConfig {
@@ -67,13 +67,22 @@ export interface RequestOptions {
  * caller cannot debug. The `path` and a bounded preview of what actually
  * arrived are carried through so the failure is actionable.
  */
-function unexpectedShape(path: string, expected: string, got: unknown): HydraWrapperError {
+function unexpectedShape(
+	path: string,
+	expected: string,
+	got: unknown,
+	known: readonly string[],
+): HydraWrapperError {
 	let preview: string;
 	try {
 		preview = JSON.stringify(got) ?? String(got);
 	} catch {
 		preview = String(got);
 	}
+
+	// Before the cut, so a credential crossing it is still whole when matched.
+	preview = scrub(preview, known);
+
 	if (preview.length > 200) preview = `${preview.slice(0, 200)}…`;
 	return new HydraWrapperError(
 		`Hydra DB ${path} → ERR: expected ${expected}, got ${preview}. ` +
@@ -114,7 +123,7 @@ export class GraphResource {
 		// present that as a legitimate "no rows matched": the caller would read a
 		// broken integration as an empty graph and act on it. Fail loudly instead.
 		if (!Array.isArray(rows)) {
-			throw unexpectedShape("/byog/query", "an array of row objects", rows);
+			throw unexpectedShape("/byog/query", "an array of row objects", rows, [this.transport.token]);
 		}
 		// Element-wise, not just the container. `renderRows` calls `Object.keys`
 		// on each row, which throws a bare TypeError on `null` and on a string —
@@ -128,6 +137,7 @@ export class GraphResource {
 				"/byog/query",
 				`an array of row objects (row ${bad} is not one)`,
 				rows[bad],
+				[this.transport.token],
 			);
 		}
 		return rows as GraphRow[];
@@ -160,6 +170,7 @@ export class GraphResource {
 				"/byog/collections",
 				"an object with a `collections` array",
 				res,
+				[this.transport.token],
 			);
 		}
 		// A non-string element would be rendered as a collection name the caller
@@ -170,6 +181,7 @@ export class GraphResource {
 				"/byog/collections",
 				`an array of collection names (index ${notAName} is not a string)`,
 				res.collections[notAName],
+				[this.transport.token],
 			);
 		}
 		return res.collections as string[];

@@ -20,7 +20,7 @@ import type { HydraDB as SDK } from "@hydradb/sdk";
 import { z } from "zod";
 
 import { unwrap } from "./envelope.js";
-import { HydraWrapperError, translateError } from "./errors.js";
+import { HydraWrapperError, scrub, translateError } from "./errors.js";
 import { type GraphConfig, GraphResource } from "./graph.js";
 import { type RawTransport, mcpHeaders, newRawTransport, sendRaw } from "./transport.js";
 
@@ -637,7 +637,9 @@ abstract class Resource {
 			// A refused database is a decision the user made, not a transport
 			// failure from `path`; it keeps its own type and message.
 			if (err instanceof ScopeNotAllowedError) throw err;
-			throw translateError(path, err);
+			// The SDK and the raw transport share one token; tests without a raw
+			// transport pass none, and an empty credential is never matched.
+			throw translateError(path, err, [this.raw?.token ?? ""]);
 		}
 	}
 }
@@ -1066,6 +1068,7 @@ export class DatabasesResource extends Resource {
 			throw translateError(
 				"/databases/collections",
 				opts.signal.reason ?? new Error("aborted"),
+				[this.raw?.token ?? ""],
 			);
 		}
 
@@ -1314,6 +1317,8 @@ export class HydraDB {
 	 * but exposed here so callers reach every HydraDB surface through one object.
 	 */
 	readonly graph: GraphResource;
+	/** This connection's credential, kept only so `redact` can remove it. */
+	private readonly token: string;
 
 	constructor(config: HydraConfig, sdk?: HydraDBClient, rawOverride?: RawTransport) {
 		const client =
@@ -1333,6 +1338,7 @@ export class HydraDB {
 				headers: mcpHeaders(config),
 			});
 
+		this.token = config.token;
 		this.database = config.database;
 		this.collection = config.collection;
 		this.allowedDatabases = config.allowedDatabases;
@@ -1380,5 +1386,13 @@ export class HydraDB {
 		if (config.oauthUserId) graphConfig.oauthUserId = config.oauthUserId;
 
 		this.graph = new GraphResource(graphConfig);
+	}
+
+	/**
+	 * Remove credentials, including this connection's own key or token in any
+	 * format, from text bound for the model.
+	 */
+	redact(text: string): string {
+		return scrub(text, [this.token]);
 	}
 }

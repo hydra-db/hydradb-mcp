@@ -163,7 +163,7 @@ async function attemptRaw<T>(
 			// Hand the parsed envelope to the shared formatter so a raw-path
 			// failure reads exactly like an SDK one, error code and request id
 			// and all.
-			throw responseError(path, response.status, parsed);
+			throw responseError(path, response.status, parsed, [t.token]);
 		}
 
 		return unwrap<T>(parsed);
@@ -187,7 +187,7 @@ async function attemptRaw<T>(
 			);
 		}
 
-		throw translateError(path, err);
+		throw translateError(path, err, [t.token]);
 	} finally {
 		clearTimeout(timer);
 		opts?.signal?.removeEventListener("abort", onAbort);

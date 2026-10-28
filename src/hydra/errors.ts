@@ -58,15 +58,47 @@ const MAX_BODY_CHARS = 512;
  */
 const SECRET_PATTERNS: [RegExp, string][] = [
 	[/\bBearer\s+\S+/gi, "Bearer [redacted]"],
-	[/\b(sk|hdb|key|tok)[-_][A-Za-z0-9_-]{16,}/g, "[redacted]"],
+	// HydraDB keys are `sk_<env>_<id>.<secret>`. The secret is the half after
+	// the dot, so the match has to run through it, however short the id is.
+	[/\bsk_[A-Za-z0-9]+_[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, "[redacted]"],
+	// OAuth access (`hmat_`) and refresh (`hmrt_`) tokens the dashboard issues.
+	[/\bhm[ar]t_[A-Za-z0-9_.~+=-]+/g, "[redacted]"],
+	[/\b(sk|hdb|key|tok)[-_][A-Za-z0-9_-]{16,}(?:\.[A-Za-z0-9_-]+)?/g, "[redacted]"],
 	[
-		/("(?:api[-_]?key|token|authorization|password|secret)"\s*:\s*)"[^"]*"/gi,
+		/([?&](?:api[-_]?key|access[-_]?token|refresh[-_]?token|token|client[-_]?secret|secret)=)[^&\s"']+/gi,
+		"$1[redacted]",
+	],
+	[
+		/("(?:api[-_]?key|token|access[-_]?token|refresh[-_]?token|authorization|password|secret)"\s*:\s*)"[^"]*"/gi,
 		'$1"[redacted]"',
 	],
 ];
 
-function scrub(text: string): string {
+/**
+ * Shorter than this, an exact-match credential would blank ordinary words in
+ * the message, and no real key or token is this short.
+ */
+const MIN_KNOWN_SECRET_CHARS = 8;
+
+/**
+ * Remove credentials from text a model may see.
+ *
+ * `known` are the exact credentials of the current request. They are removed
+ * whatever their format, which the patterns alone cannot promise: a legacy or
+ * foreign key matches none of them. A key's secret half is removed on its own
+ * too, since a body can echo it apart from the id.
+ */
+export function scrub(text: string, known: readonly string[] = []): string {
 	let out = text;
+
+	for (const secret of known) {
+		const parts = [secret, secret.slice(secret.indexOf(".") + 1)];
+
+		for (const part of parts) {
+			if (part.length >= MIN_KNOWN_SECRET_CHARS) out = out.split(part).join("[redacted]");
+		}
+	}
+
 	for (const [pattern, replacement] of SECRET_PATTERNS) {
 		out = out.replace(pattern, replacement);
 	}
@@ -119,13 +151,15 @@ function fromEnvelope(body: unknown): string | undefined {
 	return `${parts.join(": ")}${trailer}`;
 }
 
-function bodyToString(body: unknown): string {
+function bodyToString(body: unknown, known: readonly string[]): string {
 	if (body == null) return "";
 
 	const structured = fromEnvelope(body);
-	if (structured != null) return truncate(scrub(structured));
+
+	if (structured != null) return truncate(scrub(structured, known));
 
 	let raw: string;
+
 	if (typeof body === "string") {
 		raw = body;
 	} else {
@@ -135,7 +169,8 @@ function bodyToString(body: unknown): string {
 			raw = String(body);
 		}
 	}
-	return truncate(scrub(stripMarkup(raw)));
+
+	return truncate(scrub(stripMarkup(raw), known));
 }
 
 function truncate(text: string): string {
@@ -155,14 +190,19 @@ function truncate(text: string): string {
  *
  * Routing them here instead keeps ONE formatting path, so a BYOG failure and an
  * SDK failure are indistinguishable to everything above the wrapper.
+ *
+ * `known` is the connection's own credential. It is scrubbed here, before the
+ * body is cut to length: after the cut, a credential crossing the boundary
+ * would survive as a prefix no exact match can find.
  */
 export function responseError(
 	path: string,
 	status: number,
 	body: unknown,
+	known: readonly string[] = [],
 ): HydraWrapperError {
 	return new HydraWrapperError(
-		`Hydra DB ${path} → ${status}: ${bodyToString(body)}`,
+		`Hydra DB ${path} → ${status}: ${bodyToString(body, known)}`,
 		path,
 		{ status, body },
 	);
@@ -171,14 +211,19 @@ export function responseError(
 /**
  * Translate any error thrown by an SDK call into a `HydraWrapperError` carrying
  * the byte-identical `Hydra DB ${path} → ${status}: ${body}` message.
+ * `known` is scrubbed before any cut, as in `responseError`.
  */
-export function translateError(path: string, err: unknown): HydraWrapperError {
+export function translateError(
+	path: string,
+	err: unknown,
+	known: readonly string[] = [],
+): HydraWrapperError {
 	if (err instanceof HydraDBError) {
 		const status = err.statusCode;
 		const statusText = status != null ? String(status) : "ERR";
 		// A failure with no response (an abort, a timeout, a dropped connection)
 		// has no body to show; the SDK's own message is then the diagnosis.
-		const detail = bodyToString(err.body) || scrub(err.message);
+		const detail = bodyToString(err.body, known) || scrub(err.message, known);
 		return new HydraWrapperError(
 			`Hydra DB ${path} → ${statusText}: ${detail}`,
 			path,
@@ -187,7 +232,8 @@ export function translateError(path: string, err: unknown): HydraWrapperError {
 	}
 
 	// Non-SDK failure (network error, aborted request, unexpected throw).
-	const message = err instanceof Error ? err.message : String(err);
+	// A network or proxy failure can quote the request it failed on.
+	const message = scrub(err instanceof Error ? err.message : String(err), known);
 	return new HydraWrapperError(`Hydra DB ${path} → ERR: ${message}`, path, {
 		cause: err,
 	});
