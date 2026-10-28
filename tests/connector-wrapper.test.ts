@@ -35,6 +35,31 @@ function fixture() {
 			);
 		},
 		connectors: {
+			update: response("update", {
+				connectorId: "c1",
+				syncIntervalSeconds: 0,
+				customInstructionsUpdated: false,
+			}),
+			delete: response("delete", { connectorId: "c1", deleted: true }),
+			sync: response("sync", { runId: "" }),
+			pause: response("pause", { connectorId: "c1", paused: true }),
+			resume: response("resume", { connectorId: "c1", paused: false }),
+			configure: response("configure", {
+				connectorId: "c1",
+				configured: 0,
+				backfill: false,
+				warnings: [],
+			}),
+			createResource: response("createResource", { resourceId: "r1", acl: [] }),
+			updateResourceAcl: response("updateResourceAcl", {
+				resourceId: "r1",
+				acl: [],
+				customInstructions: "",
+			}),
+			deleteResource: response("deleteResource", {
+				resourceId: "r1",
+				deleted: true,
+			}),
 			list: response("list", {
 				connectors: [{ connectorId: "c1", provider: "slack", database: "db-a" }],
 			}),
@@ -173,4 +198,193 @@ test("connector wrapper preserves false, zero, empty strings and empty arrays", 
 		customInstructions: "",
 	});
 	assert.deepEqual((await resource.status("c1")).resources, []);
+});
+
+test("connector writes map requests and forward cancellation, including falsy values", async () => {
+	const { resource, calls } = fixture();
+	const signal = new AbortController().signal;
+	const opts = { signal };
+	assert.equal(
+		(
+			await resource.update(
+				{ connectorId: "c1", syncIntervalSeconds: 0, customInstructions: "" },
+				opts,
+			)
+		).syncIntervalSeconds,
+		0,
+	);
+	await resource.delete("c1", opts);
+	assert.equal((await resource.sync("c1", opts)).runId, "");
+	await resource.pause("c1", opts);
+	assert.equal((await resource.resume("c1", opts)).paused, false);
+	assert.deepEqual(
+		await resource.configure(
+			{
+				connectorId: "c1",
+				resources: [],
+				fullVisibilityRoles: [],
+				lookbackDays: 0,
+				tableConfigs: [],
+			},
+			opts,
+		),
+		{ connectorId: "c1", configured: 0, backfill: false, warnings: [] },
+	);
+	await resource.createResource(
+		{
+			connectorId: "c1",
+			resourceId: "r1",
+			acl: [],
+			customInstructions: "",
+			databaseOverride: "",
+		},
+		opts,
+	);
+	await resource.updateResource(
+		{ connectorId: "c1", resourceId: "r1", acl: [], customInstructions: "" },
+		opts,
+	);
+	await resource.deleteResource("c1", "r1", opts);
+	assert.deepEqual(
+		calls.map(({ method, request }) => ({ method, request })),
+		[
+			{
+				method: "update",
+				request: { id: "c1", syncIntervalSeconds: 0, customInstructions: "" },
+			},
+			{ method: "delete", request: { id: "c1" } },
+			{ method: "sync", request: { id: "c1" } },
+			{ method: "pause", request: { id: "c1" } },
+			{ method: "resume", request: { id: "c1" } },
+			{
+				method: "configure",
+				request: {
+					id: "c1",
+					resources: [],
+					fullVisibilityRoles: [],
+					lookbackDays: 0,
+					tableConfigs: [],
+				},
+			},
+			{
+				method: "createResource",
+				request: {
+					id: "c1",
+					resourceId: "r1",
+					acl: [],
+					customInstructions: "",
+					databaseOverride: "",
+				},
+			},
+			{
+				method: "updateResourceAcl",
+				request: {
+					id: "c1",
+					resourceId: "r1",
+					acl: [],
+					customInstructions: "",
+				},
+			},
+			{ method: "deleteResource", request: { id: "c1", resourceId: "r1" } },
+		],
+	);
+	assert.ok(calls.every((call) => call.signal === signal));
+});
+
+test("connector writes validate success and translate errors with encoded paths", async () => {
+	const invalid = new ConnectorsResource({
+		connectors: { sync: () => Promise.resolve({ runId: 42 }) },
+	} as unknown as HydraDBClient);
+
+	await assert.rejects(
+		() => invalid.sync("c/1"),
+		/Invalid successful connector sync response/,
+	);
+
+	const failing = new ConnectorsResource({
+		connectors: { deleteResource: () => Promise.reject(new Error("failed")) },
+	} as unknown as HydraDBClient);
+
+	await assert.rejects(
+		() => failing.deleteResource("c/1", "r/2"),
+		/\/connectors\/c%2F1\/resources\/r%2F2 → ERR: failed/,
+	);
+});
+
+test("write responses unwrap envelopes and reject invalid field types", async () => {
+	const methods = [
+		"update",
+		"delete",
+		"sync",
+		"pause",
+		"resume",
+		"configure",
+		"createResource",
+		"updateResourceAcl",
+		"deleteResource",
+	] as const;
+
+	const valid = [
+		{ connectorId: "c1" },
+		{ deleted: false },
+		{ runId: "" },
+		{ paused: false },
+		{ paused: false },
+		{ configured: 0 },
+		{ resourceId: "r1" },
+		{ acl: [] },
+		{ deleted: false },
+	];
+
+	const invalid = [
+		{ syncIntervalSeconds: "0" },
+		{ deleted: "yes" },
+		{ runId: 1 },
+		{ paused: 0 },
+		{ paused: 0 },
+		{ configured: "0" },
+		{ resourceId: 1 },
+		{ acl: "public" },
+		{ deleted: "yes" },
+	];
+
+	const invoke = (resource: ConnectorsResource, index: number) =>
+		[
+			() => resource.update({ connectorId: "c1" }),
+			() => resource.delete("c1"),
+			() => resource.sync("c1"),
+			() => resource.pause("c1"),
+			() => resource.resume("c1"),
+			() => resource.configure({ connectorId: "c1", resources: [] }),
+			() => resource.createResource({ connectorId: "c1", resourceId: "r1" }),
+			() => resource.updateResource({ connectorId: "c1", resourceId: "r1" }),
+			() => resource.deleteResource("c1", "r1"),
+		][index]!();
+
+	for (const [index, method] of methods.entries()) {
+		const ok = new ConnectorsResource({
+			connectors: {
+				[method]: () => Promise.resolve({ success: true, data: valid[index] }),
+			},
+		} as unknown as HydraDBClient);
+
+		assert.deepEqual(await invoke(ok, index), valid[index]);
+
+		const bad = new ConnectorsResource({
+			connectors: { [method]: () => Promise.resolve(invalid[index]) },
+		} as unknown as HydraDBClient);
+
+		await assert.rejects(() => invoke(bad, index), /Invalid successful/);
+	}
+});
+
+test("resource create accepts the SDK contract's all-optional response", async () => {
+	const resource = new ConnectorsResource({
+		connectors: { createResource: () => Promise.resolve({}) },
+	} as unknown as HydraDBClient);
+
+	assert.deepEqual(
+		await resource.createResource({ connectorId: "c1", resourceId: "r1" }),
+		{},
+	);
 });

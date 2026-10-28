@@ -48,6 +48,20 @@ export { GraphResource } from "./graph.js";
 export { ConnectorsResource } from "./connectors.js";
 
 export type {
+	ConnectorUpdateRequest,
+	ConnectorConfigureRequest,
+	ConnectorResourceCreateRequest,
+	ConnectorResourceUpdateRequest,
+	ConnectorUpdateResponse,
+	ConnectorDeleteResponse,
+	ConnectorSyncResponse,
+	ConnectorPauseResponse,
+	ConnectorResumeResponse,
+	ConnectorResourceMapping,
+	ConnectorConfigureResponse,
+	ConnectorResourceCreateResponse,
+	ConnectorResourceUpdateResponse,
+	ConnectorResourceDeleteResponse,
 	ConnectorDiscoverParams,
 	ConnectorListParams,
 	ConnectorList,

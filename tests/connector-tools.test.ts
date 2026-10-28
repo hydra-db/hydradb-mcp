@@ -68,6 +68,28 @@ function mockHydra(allowedDatabases?: string[], allowedCollections?: string[]) {
 			hasMore: false,
 		}),
 		listResources: record("resources", { resources }),
+		update: record("update", { connectorId: "allowed", customInstructionsUpdated: true }),
+		delete: record("delete", { connectorId: "allowed", deleted: true }),
+		sync: record("sync", { runId: "run-1", workflowId: "workflow-1" }),
+		pause: record("pause", { connectorId: "allowed", paused: true }),
+		resume: record("resume", { connectorId: "allowed", paused: false }),
+		configure: record("configure", { connectorId: "allowed", configured: 1, backfill: false }),
+		createResource: record("add-resource", {
+			connectorId: "allowed",
+			resourceId: "r-new",
+			databaseOverride: "db-a",
+			collectionOverride: "public",
+		}),
+		updateResource: record("update-resource", {
+			connectorId: "allowed",
+			resourceId: "r-a",
+			customInstructionsUpdated: true,
+		}),
+		deleteResource: record("delete-resource", {
+			connectorId: "allowed",
+			resourceId: "r-a",
+			deleted: true,
+		}),
 	};
 
 	const sdk = { query: () => Promise.resolve({ success: true, chunks: [] }), context: {} } as unknown as HydraDBClient;
@@ -109,7 +131,14 @@ test("all six connector read tools are registered by default and explicitly read
 	const client = await connect(mockHydra().hydra);
 	const { tools } = await client.listTools();
 
-	for (const name of CONNECTOR_TOOL_NAMES) {
+	for (const name of [
+		"hydradb_connector_providers",
+		"hydradb_connector_list",
+		"hydradb_connector_get",
+		"hydradb_connector_status",
+		"hydradb_connector_discover",
+		"hydradb_connector_resources",
+	]) {
 		const tool = tools.find((candidate) => candidate.name === name);
 		assert.ok(tool, `${name} should be registered`);
 		assert.deepEqual(tool.annotations, {
@@ -118,6 +147,44 @@ test("all six connector read tools are registered by default and explicitly read
 			idempotentHint: true,
 			openWorldHint: true,
 		});
+	}
+
+	await client.close();
+});
+
+test("all nine credential-free write tools declare explicit write safety annotations", async () => {
+	const client = await connect(mockHydra().hydra);
+	const { tools } = await client.listTools();
+
+	const additive = new Set([
+		"hydradb_connector_sync",
+		"hydradb_connector_pause",
+		"hydradb_connector_resume",
+		"hydradb_connector_add_resource",
+	]);
+
+	const nonIdempotent = new Set([
+		"hydradb_connector_sync",
+		"hydradb_connector_add_resource",
+	]);
+
+	for (const name of [
+		"hydradb_connector_update",
+		"hydradb_connector_delete",
+		"hydradb_connector_sync",
+		"hydradb_connector_pause",
+		"hydradb_connector_resume",
+		"hydradb_connector_configure",
+		"hydradb_connector_add_resource",
+		"hydradb_connector_update_resource",
+		"hydradb_connector_delete_resource",
+	]) {
+		const tool = tools.find((candidate) => candidate.name === name);
+		assert.ok(tool, `${name} should be registered`);
+		assert.equal(tool.annotations?.readOnlyHint, false);
+		assert.equal(tool.annotations?.destructiveHint, !additive.has(name));
+		assert.equal(tool.annotations?.idempotentHint, !nonIdempotent.has(name));
+		assert.equal(tool.annotations?.openWorldHint, true);
 	}
 
 	await client.close();
@@ -174,6 +241,26 @@ test("connector schemas reject unknown fields before an API call", async () => {
 
 	assert.equal(result.isError, true);
 	assert.equal(calls.length, 0);
+	assert.doesNotMatch(text(result), /must-not-pass/);
+
+	await client.close();
+});
+
+test("connector write metadata rejects credential-like keys before mutation", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_connector_add_resource",
+		arguments: {
+			connector_id: "allowed",
+			resource_id: "r-new",
+			metadata: { access_token: "must-not-pass" },
+		},
+	});
+
+	assert.equal(result.isError, true);
+	assert.equal(calls.some((call) => call.method === "add-resource"), false);
 	assert.doesNotMatch(text(result), /must-not-pass/);
 
 	await client.close();
@@ -446,5 +533,190 @@ test("discover validates pagination and forwards allowed calls", async () => {
 		args: { connectorId: "allowed", cursor: "next", limit: 25 },
 	});
 
+	await client.close();
+});
+
+test("credential-free connector writes map every public mutation with safe results", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	const cases = [
+		{
+			name: "hydradb_connector_update",
+			arguments: { connector_id: "allowed", custom_instructions: "Index decisions", sync_interval_seconds: 300 },
+			method: "update",
+		},
+		{ name: "hydradb_connector_sync", arguments: { connector_id: "allowed" }, method: "sync" },
+		{ name: "hydradb_connector_pause", arguments: { connector_id: "allowed" }, method: "pause" },
+		{ name: "hydradb_connector_resume", arguments: { connector_id: "allowed" }, method: "resume" },
+		{
+			name: "hydradb_connector_configure",
+			arguments: {
+				connector_id: "allowed",
+				lookback_days: 30,
+				resources: [{ resource_id: "r-a", resource_type: "channel", name: "General", database: "db-a", collection: "public" }],
+			},
+			method: "configure",
+		},
+		{
+			name: "hydradb_connector_add_resource",
+			arguments: {
+				connector_id: "allowed",
+				resource_id: "r-new",
+				resource_type: "channel",
+				display_name: "New channel",
+				database_override: "db-a",
+				collection_override: "public",
+				acl: ["user@example.com"],
+			},
+			method: "add-resource",
+		},
+		{
+			name: "hydradb_connector_update_resource",
+			arguments: { connector_id: "allowed", resource_id: "r-a", custom_instructions: "Only decisions" },
+			method: "update-resource",
+		},
+		{
+			name: "hydradb_connector_delete_resource",
+			arguments: { connector_id: "allowed", resource_id: "r-a" },
+			method: "delete-resource",
+		},
+		{ name: "hydradb_connector_delete", arguments: { connector_id: "allowed" }, method: "delete" },
+	];
+
+	for (const item of cases) {
+		const result = await client.callTool({ name: item.name, arguments: item.arguments });
+
+		assert.notEqual(result.isError, true, `${item.name} should succeed`);
+		assert.ok(calls.some((call) => call.method === item.method), `${item.name} should call ${item.method}`);
+		assert.doesNotMatch(JSON.stringify(structured(result)), /top-secret-token|credentials/i);
+	}
+
+	await client.close();
+});
+
+test("every credential-free connector write redacts representative upstream failures", async () => {
+	const cases = [
+		["hydradb_connector_update", { connector_id: "allowed", custom_instructions: "safe" }, "update"],
+		["hydradb_connector_delete", { connector_id: "allowed" }, "delete"],
+		["hydradb_connector_sync", { connector_id: "allowed" }, "sync"],
+		["hydradb_connector_pause", { connector_id: "allowed" }, "pause"],
+		["hydradb_connector_resume", { connector_id: "allowed" }, "resume"],
+		[
+			"hydradb_connector_configure",
+			{ connector_id: "allowed", resources: [{ resource_id: "r-a" }] },
+			"configure",
+		],
+		["hydradb_connector_add_resource", { connector_id: "allowed", resource_id: "r-new" }, "createResource"],
+		[
+			"hydradb_connector_update_resource",
+			{ connector_id: "allowed", resource_id: "r-a", acl: [] },
+			"updateResource",
+		],
+		[
+			"hydradb_connector_delete_resource",
+			{ connector_id: "allowed", resource_id: "r-a" },
+			"deleteResource",
+		],
+	] as const;
+
+	for (const [name, arguments_, method] of cases) {
+		const fixture = mockHydra();
+		(fixture.connectorApi as unknown as Record<string, unknown>)[method] = async () => {
+			throw new Error("provider leaked top-secret-token");
+		};
+
+		const client = await connect(fixture.hydra);
+		const result = await client.callTool({ name, arguments: arguments_ });
+
+		assert.equal(result.isError, true, `${name} should return a tool error`);
+		assert.doesNotMatch(text(result), /top-secret-token|provider leaked/);
+		await client.close();
+	}
+});
+
+test("confined connector-wide writes refuse cross-scope resources without mutation", async () => {
+	const { hydra, calls } = mockHydra(["db-a"], ["public"]);
+	const client = await connect(hydra);
+
+	const mutationNames = [
+		"hydradb_connector_update",
+		"hydradb_connector_delete",
+		"hydradb_connector_sync",
+		"hydradb_connector_pause",
+		"hydradb_connector_resume",
+		"hydradb_connector_configure",
+	];
+
+	for (const name of mutationNames) {
+		const argumentsByName: Record<string, unknown> = name === "hydradb_connector_update"
+			? { connector_id: "allowed", custom_instructions: "safe" }
+			: name === "hydradb_connector_configure"
+				? { connector_id: "allowed", resources: [{ resource_id: "r-a", database: "db-a", collection: "public" }] }
+				: { connector_id: "allowed" };
+
+		const result = await client.callTool({ name, arguments: argumentsByName });
+
+		assert.equal(result.isError, true, `${name} should refuse a connector with cross-scope resources`);
+	}
+
+	for (const method of ["update", "delete", "sync", "pause", "resume", "configure"]) {
+		assert.equal(calls.some((call) => call.method === method), false, `${method} must not mutate`);
+	}
+
+	await client.close();
+});
+
+test("resource writes enforce effective database and collection before mutation", async () => {
+	const { hydra, calls } = mockHydra(["db-a"], ["public"]);
+	const client = await connect(hydra);
+
+	const requests = [
+		{
+			name: "hydradb_connector_add_resource",
+			arguments: { connector_id: "allowed", resource_id: "new", database_override: "db-b" },
+		},
+		{
+			name: "hydradb_connector_add_resource",
+			arguments: { connector_id: "allowed", resource_id: "new", collection_override: "private" },
+		},
+		{
+			name: "hydradb_connector_update_resource",
+			arguments: { connector_id: "allowed", resource_id: "r-b", acl: ["user@example.com"] },
+		},
+		{
+			name: "hydradb_connector_delete_resource",
+			arguments: { connector_id: "allowed", resource_id: "r-b" },
+		},
+	];
+
+	for (const request of requests) {
+		const result = await client.callTool(request);
+
+		assert.equal(result.isError, true, `${request.name} should refuse the forbidden destination`);
+	}
+
+	for (const method of ["add-resource", "update-resource", "delete-resource"]) {
+		assert.equal(calls.some((call) => call.method === method), false, `${method} must not mutate`);
+	}
+
+	await client.close();
+});
+
+test("configure refuses a submitted destination outside scope before mutation", async () => {
+	const fixture = mockHydra(["db-a"], ["public"]);
+	fixture.resources.splice(1, 1);
+	const client = await connect(fixture.hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_connector_configure",
+		arguments: {
+			connector_id: "allowed",
+			resources: [{ resource_id: "r-new", database: "db-b", collection: "public" }],
+		},
+	});
+
+	assert.equal(result.isError, true);
+	assert.equal(fixture.calls.some((call) => call.method === "configure"), false);
 	await client.close();
 });

@@ -21,6 +21,59 @@ export type ConnectorListInput = ConnectorListParams;
 
 export type ConnectorDiscoverInput = ConnectorDiscoverParams;
 
+export interface ConnectorUpdateInput {
+	connectorId: string;
+	customInstructions?: string;
+	syncIntervalSeconds?: number;
+}
+
+export interface ConnectorConfigureResourceInput {
+	resourceId: string;
+	resourceType?: string;
+	name?: string;
+	database?: string;
+	collection?: string;
+	acl?: string[];
+	customInstructions?: string;
+	metadata?: Record<string, unknown>;
+	additionalMetadata?: Record<string, unknown>;
+	syncMode?: "rescan" | "new_only";
+}
+
+export interface ConnectorConfigureInput {
+	connectorId: string;
+	resources: ConnectorConfigureResourceInput[];
+	lookbackDays?: number;
+	fullVisibilityRoles?: string[];
+	tableConfigs?: Array<{
+		table: string;
+		replicationKey?: string;
+		changeHistory?: string;
+	}>;
+}
+
+export interface ConnectorResourceCreateInput {
+	connectorId: string;
+	resourceId: string;
+	resourceType?: string;
+	displayName?: string;
+	databaseOverride?: string;
+	collectionOverride?: string;
+	acl?: string[];
+	customInstructions?: string;
+	metadata?: Record<string, unknown>;
+	additionalMetadata?: Record<string, unknown>;
+	filters?: Record<string, unknown>;
+	providerMetadata?: Record<string, unknown>;
+}
+
+export interface ConnectorResourceUpdateInput {
+	connectorId: string;
+	resourceId: string;
+	acl?: string[];
+	customInstructions?: string;
+}
+
 /** A connector ID exists, but this OAuth grant cannot prove access to it. */
 export class ConnectorScopeNotAllowedError extends Error {
 	constructor() {
@@ -30,6 +83,13 @@ export class ConnectorScopeNotAllowedError extends Error {
 				"Reconnect with wider database access to use it.",
 		);
 		this.name = "ConnectorScopeNotAllowedError";
+	}
+}
+
+export class ConnectorResourceNotFoundError extends Error {
+	constructor() {
+		super("The connector resource was not found.");
+		this.name = "ConnectorResourceNotFoundError";
 	}
 }
 
@@ -209,6 +269,25 @@ function effectiveCollection(resource: ConnectorResource, connector: ConnectorVi
 function canAccessResource(resource: ConnectorResource, connector: ConnectorView, hydra: HydraDB): boolean {
 	return canAccessDatabase(effectiveDatabase(resource, connector), hydra.allowedDatabases)
 		&& canAccessCollection(effectiveCollection(resource, connector), hydra.allowedCollections);
+}
+
+function assertResourceAllowed(resource: ConnectorResource, connector: ConnectorView, hydra: HydraDB): void {
+	if (!canAccessResource(resource, connector, hydra)) {
+		throw new ConnectorScopeNotAllowedError();
+	}
+}
+
+function assertDestinationAllowed(
+	database: string | undefined,
+	collection: string | undefined,
+	hydra: HydraDB,
+): void {
+	if (
+		!canAccessDatabase(database, hydra.allowedDatabases)
+		|| !canAccessCollection(collection, hydra.allowedCollections)
+	) {
+		throw new ConnectorScopeNotAllowedError();
+	}
 }
 
 function projectResource(resource: ConnectorResource): Record<string, unknown> {
@@ -431,6 +510,38 @@ export class ConnectorTools {
 		return connector;
 	}
 
+	private async authorizedConnectorResources(
+		id: string,
+		opts?: RequestOptions,
+	): Promise<{ connector: ConnectorView; resources: ConnectorResource[] }> {
+		const connector = await this.authorizedConnector(id, opts);
+		const result = await this.hydra.connectors.listResources(id, opts);
+
+		for (const resource of result.resources) {
+			assertResourceAllowed(resource, connector, this.hydra);
+		}
+
+		return { connector, resources: result.resources };
+	}
+
+	private async authorizedResource(
+		connectorId: string,
+		resourceId: string,
+		opts?: RequestOptions,
+	): Promise<{ connector: ConnectorView; resource: ConnectorResource }> {
+		const connector = await this.authorizedConnector(connectorId, opts);
+		const result = await this.hydra.connectors.listResources(connectorId, opts);
+		const resource = result.resources.find((candidate) => candidate.resourceId === resourceId);
+
+		if (!resource) {
+			throw new ConnectorResourceNotFoundError();
+		}
+
+		assertResourceAllowed(resource, connector, this.hydra);
+
+		return { connector, resource };
+	}
+
 	async providers(provider?: string, opts?: RequestOptions): Promise<ConnectorToolResponse> {
 		const result = await this.hydra.connectors.listProviders(provider, opts);
 
@@ -551,6 +662,160 @@ export class ConnectorTools {
 				? "No configured resources are visible to this connection."
 				: `Visible configured resources: ${resources.length}.`,
 			data: { resources },
+		};
+	}
+
+	async update(input: ConnectorUpdateInput, opts?: RequestOptions): Promise<ConnectorToolResponse> {
+		await this.authorizedConnectorResources(input.connectorId, opts);
+		const result = await this.hydra.connectors.update(input, opts);
+
+		return {
+			text: "Connector settings were updated. Credential settings were not accepted or changed by this tool.",
+			data: cleanObject({
+				connector_id: result.connectorId ?? input.connectorId,
+				custom_instructions_updated: result.customInstructionsUpdated,
+				sync_interval_seconds: result.syncIntervalSeconds,
+				min_sync_interval_seconds: result.minSyncIntervalSeconds,
+				max_sync_interval_seconds: result.maxSyncIntervalSeconds,
+				next_sync_at: result.nextSyncAt,
+			}),
+		};
+	}
+
+	async delete(id: string, opts?: RequestOptions): Promise<ConnectorToolResponse> {
+		await this.authorizedConnectorResources(id, opts);
+		const result = await this.hydra.connectors.delete(id, opts);
+
+		return {
+			text: result.deleted === true
+				? "The connector was deleted."
+				: "The connector delete request completed, but the response did not confirm deletion.",
+			data: cleanObject({ connector_id: result.connectorId ?? id, deleted: result.deleted }),
+		};
+	}
+
+	async sync(id: string, opts?: RequestOptions): Promise<ConnectorToolResponse> {
+		await this.authorizedConnectorResources(id, opts);
+		const result = await this.hydra.connectors.sync(id, opts);
+
+		return {
+			text: result.runId
+				? "A connector sync was accepted. Use connector status to monitor it."
+				: "A connector sync request was accepted. An existing run may still be active.",
+			data: cleanObject({ connector_id: id, run_id: result.runId, workflow_id: result.workflowId }),
+		};
+	}
+
+	async pause(id: string, opts?: RequestOptions): Promise<ConnectorToolResponse> {
+		await this.authorizedConnectorResources(id, opts);
+		const result = await this.hydra.connectors.pause(id, opts);
+
+		return {
+			text: result.paused === true
+				? "The connector is paused."
+				: "The pause request completed, but the response did not confirm a paused state.",
+			data: cleanObject({ connector_id: result.connectorId ?? id, paused: result.paused, paused_at: result.pausedAt }),
+		};
+	}
+
+	async resume(id: string, opts?: RequestOptions): Promise<ConnectorToolResponse> {
+		await this.authorizedConnectorResources(id, opts);
+		const result = await this.hydra.connectors.resume(id, opts);
+
+		return {
+			text: result.paused === false
+				? "The connector resumed."
+				: "The resume request completed, but the response did not confirm an active state.",
+			data: cleanObject({ connector_id: result.connectorId ?? id, paused: result.paused }),
+		};
+	}
+
+	async configure(input: ConnectorConfigureInput, opts?: RequestOptions): Promise<ConnectorToolResponse> {
+		const { connector } = await this.authorizedConnectorResources(input.connectorId, opts);
+
+		for (const resource of input.resources) {
+			assertDestinationAllowed(
+				resource.database?.trim() || connectorDatabase(connector),
+				resource.collection?.trim() || connectorCollection(connector),
+				this.hydra,
+			);
+		}
+
+		const result = await this.hydra.connectors.configure(input, opts);
+
+		return {
+			text: "Connector resources were configured. Unlisted resources remain unchanged. A sync may have started.",
+			data: cleanObject({
+				connector_id: result.connectorId ?? input.connectorId,
+				configured: result.configured,
+				backfill: result.backfill,
+				first_sync_at: result.firstSyncAt,
+				unverified_resource_ids: result.unverified,
+				warning_resource_ids: result.warnings,
+			}),
+		};
+	}
+
+	async addResource(input: ConnectorResourceCreateInput, opts?: RequestOptions): Promise<ConnectorToolResponse> {
+		const connector = await this.authorizedConnector(input.connectorId, opts);
+
+		assertDestinationAllowed(
+			input.databaseOverride?.trim() || connectorDatabase(connector),
+			input.collectionOverride?.trim() || connectorCollection(connector),
+			this.hydra,
+		);
+
+		const result = await this.hydra.connectors.createResource(input, opts);
+
+		return {
+			text: "The connector resource was added.",
+			data: cleanObject({
+				connector_id: result.connectorId ?? input.connectorId,
+				resource_id: result.resourceId ?? input.resourceId,
+				resource_type: result.resourceType,
+				display_name: result.displayName,
+				database_override: result.databaseOverride,
+				collection_override: result.collectionOverride,
+				status: result.status,
+				acl: result.acl,
+				custom_instructions: result.customInstructions,
+			}),
+		};
+	}
+
+	async updateResource(input: ConnectorResourceUpdateInput, opts?: RequestOptions): Promise<ConnectorToolResponse> {
+		await this.authorizedResource(input.connectorId, input.resourceId, opts);
+		const result = await this.hydra.connectors.updateResource(input, opts);
+
+		return {
+			text: "The connector resource access rule or instructions were updated.",
+			data: cleanObject({
+				connector_id: result.connectorId ?? input.connectorId,
+				resource_id: result.resourceId ?? input.resourceId,
+				acl: result.acl,
+				custom_instructions: result.customInstructions,
+				custom_instructions_updated: result.customInstructionsUpdated,
+			}),
+		};
+	}
+
+	async deleteResource(
+		connectorId: string,
+		resourceId: string,
+		opts?: RequestOptions,
+	): Promise<ConnectorToolResponse> {
+		await this.authorizedResource(connectorId, resourceId, opts);
+		const result = await this.hydra.connectors.deleteResource(connectorId, resourceId, opts);
+
+		return {
+			text: result.deleted === true
+				? "The connector resource was deleted."
+				: "The resource delete request completed, but the response did not confirm deletion.",
+			data: cleanObject({
+				connector_id: result.connectorId ?? connectorId,
+				resource_id: result.resourceId ?? resourceId,
+				deleted: result.deleted,
+			}),
 		};
 	}
 }
