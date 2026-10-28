@@ -117,3 +117,19 @@ test("full lifecycle rejects poll timeouts outside its bounded range", () => {
 		assert.match(result.stderr, /between 30 and 900/);
 	}
 });
+
+test("provider-failure skip mode reports the exact reason and a partial lifecycle", () => {
+	const result = spawnSync(process.execPath, ["scripts/e2e-connectors.local.mjs", "--report-self-test"], {
+		cwd: process.cwd(),
+		encoding: "utf8",
+		timeout: 10_000,
+	});
+
+	assert.equal(result.status, 0, result.stderr);
+	const report = JSON.parse(result.stdout);
+	assert.equal(report.status, "partial");
+	assert.deepEqual(report.passed_cases, []);
+	assert.deepEqual(report.skipped_cases, [
+		"provider failure: not run — local backend does not surface a stopped-vendor failure within 6 minutes; sync stayed healthy and idle",
+	]);
+});

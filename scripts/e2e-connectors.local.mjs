@@ -13,6 +13,8 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
 const INSPECTOR_VERSION = "2.13.0";
+const PROVIDER_FAILURE_SKIP_REASON =
+	"provider failure: not run — local backend does not surface a stopped-vendor failure within 6 minutes; sync stayed healthy and idle";
 const temporaryDirectory = mkdtempSync(join(tmpdir(), "hydradb-connector-e2e-"));
 const childProcesses = new Set();
 
@@ -40,6 +42,20 @@ function localUrl(name) {
 	}
 
 	return url;
+}
+
+function lifecycleReport(fullLifecycle, cleanup, passedCases, skippedCases) {
+	return {
+		status: fullLifecycle && cleanup && skippedCases.length === 0 ? "complete" : "partial",
+		inspector_version: INSPECTOR_VERSION,
+		passed_cases: passedCases,
+		skipped_cases: skippedCases,
+	};
+}
+
+if (process.argv.includes("--report-self-test")) {
+	console.log(JSON.stringify(lifecycleReport(true, true, [], [PROVIDER_FAILURE_SKIP_REASON])));
+	process.exit(0);
 }
 
 async function startGuardedProxy(target) {
@@ -381,9 +397,7 @@ if (fullLifecycle) {
 	passedCases.push("resource lifecycle and successful sync");
 
 	if (skipProviderFailure) {
-		skippedCases.push(
-			"provider failure: not run — local backend does not surface a stopped-vendor failure within 6 minutes; sync stayed healthy and idle",
-		);
+		skippedCases.push(PROVIDER_FAILURE_SKIP_REASON);
 	} else {
 		let failed;
 
@@ -453,10 +467,5 @@ if (cleanup) {
 	skippedCases.push("cleanup: ENG3341_CLEANUP not set");
 }
 
-console.log(JSON.stringify({
-	status: fullLifecycle && cleanup && skippedCases.length === 0 ? "complete" : "partial",
-	inspector_version: INSPECTOR_VERSION,
-	passed_cases: passedCases,
-	skipped_cases: skippedCases,
-}, null, 2));
+console.log(JSON.stringify(lifecycleReport(fullLifecycle, cleanup, passedCases, skippedCases), null, 2));
 cleanUp();
