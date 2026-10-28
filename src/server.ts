@@ -24,7 +24,7 @@ import {
 	assertDatabaseAllowed,
 	hasEntries,
 } from "./hydra/index.js";
-import type { ContextKind, MetadataFilter, QueryKind, QueryParams } from "./hydra/index.js";
+import type { ContextKind, CreateDatabaseParams, MetadataFilter, QueryKind, QueryParams } from "./hydra/index.js";
 import { logger } from "./logger.js";
 import { ALIAS_REPLACEMENTS, CONNECTOR_TOOL_NAMES, DEPRECATED_TOOL_NAMES, TOOL_NAMES } from "./tool-names.js";
 import type { MemoryResultItem } from "./types.js";
@@ -2424,23 +2424,9 @@ export function createHydraDBServer(
 		);
 	}
 
-	type MetadataFieldInput = {
-		name: string;
-		data_type: "BOOL" | "INT8" | "INT16" | "INT32" | "INT64" | "FLOAT" | "DOUBLE" | "VARCHAR" | "JSON";
-		max_length?: number;
-		enable_match?: boolean;
-		enable_dense_embedding?: boolean;
-		enable_sparse_embedding?: boolean;
-	};
+	type MetadataFieldInput = z.infer<typeof metadataFieldSchema>;
 
-	type SDKMetadataField = {
-		name: string;
-		dataType: MetadataFieldInput["data_type"];
-		maxLength?: number;
-		enableMatch?: boolean;
-		enableDenseEmbedding?: boolean;
-		enableSparseEmbedding?: boolean;
-	};
+	type SDKMetadataField = NonNullable<CreateDatabaseParams["databaseMetadataSchema"]>[number];
 
 	function metadataField(field: MetadataFieldInput): SDKMetadataField {
 		const mapped: SDKMetadataField = {
@@ -2463,14 +2449,7 @@ export function createHydraDBServer(
 		return mapped;
 	}
 
-	function renderMetadataField(field: {
-		name?: string;
-		dataType?: string;
-		maxLength?: number;
-		enableMatch?: boolean;
-		enableDenseEmbedding?: boolean;
-		enableSparseEmbedding?: boolean;
-	}) {
+	function renderMetadataField(field: SDKMetadataField) {
 		return {
 			name: field.name,
 			data_type: field.dataType,
@@ -2487,8 +2466,9 @@ export function createHydraDBServer(
 		} catch (error) {
 			if (error instanceof HydraWrapperError && error.status === 403) {
 				throw new Error(
-					`${error.message}. This credential does not have write access. ` +
-					"Use a writable API key or reconnect with write permission.",
+					`${error.message}. This operation requires database write permission. ` +
+					"Read-only credentials cannot perform it; verify this credential's permissions " +
+					"or reconnect with write permission.",
 				);
 			}
 
@@ -3405,10 +3385,7 @@ export function createHydraDBServer(
 	});
 
 	const optionalDatabaseSchema = {
-		database: z
-			.string()
-			.trim()
-			.min(1)
+		database: databaseNameSchema
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.DATABASE_READINESS].params.database),
 	};
