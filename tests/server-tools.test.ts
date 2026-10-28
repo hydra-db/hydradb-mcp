@@ -946,6 +946,161 @@ test("hydradb_ingest marks an all-failed batch as an MCP error", async () => {
 	await client.close();
 });
 
+test("hydradb_ingest sends all app knowledge kinds and ACL fields", async () => {
+	const kinds = ["email", "message", "ticket", "knowledge_base", "comment", "meeting", "custom"];
+
+	const { hydra, calls } = mockHydra({
+		ingest: {
+			success: true,
+			successCount: kinds.length,
+			failedCount: 0,
+			results: kinds.map((kind, index) => ({ id: `${kind}-${index}`, status: "queued" })),
+		},
+	});
+
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_ingest",
+		arguments: {
+			app_knowledge: kinds.map((kind, index) => ({
+				id: `${kind}-${index}`,
+				title: `Title ${index}`,
+				description: "Description",
+				url: `https://example.test/${index}`,
+				timestamp: "2026-10-28T20:00:00Z",
+				kind,
+				provider: "test",
+				external_id: String(index),
+				fields: { body: `Body ${index}` },
+				metadata: { index },
+				additional_metadata: { team: "infra" },
+				attachments: [{ url: "https://example.test/file" }],
+				relations: [{ ids: ["parent-1"] }],
+				acl: [" grace@acme.com "],
+			})),
+		},
+	});
+
+	assert.notEqual(result.isError, true);
+
+	const request = z.object({ type: z.literal("knowledge"), appKnowledge: z.string() }).parse(
+		calls.find((call) => call.method === "ingest")?.args,
+	);
+
+	const items = z.array(z.object({
+		kind: z.string(),
+		fields: z.object({ kind: z.string(), body: z.string() }),
+		acl: z.array(z.string()),
+	})).parse(JSON.parse(request.appKnowledge));
+
+	assert.deepEqual(items.map((item) => item.kind), kinds);
+	assert.ok(items.every((item) => item.fields.kind === item.kind));
+	assert.deepEqual(items[0]?.acl, ["grace@acme.com"]);
+
+	await client.close();
+});
+
+test("hydradb_ingest validates app knowledge ACLs and input exclusivity", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+	const appItem = { kind: "message", fields: { body: "hello" } };
+
+	const cases = [
+		{ app_knowledge: [{ ...appItem, acl: [] }] },
+		{ app_knowledge: [{ ...appItem, acl: [""] }] },
+		{ app_knowledge: [{ ...appItem, acl: ["x".repeat(257)] }] },
+		{ app_knowledge: [{ ...appItem, acl: Array.from({ length: 1_001 }, (_, index) => `user-${index}`) }] },
+		{ app_knowledge: [{ ...appItem, kind: "contact" }] },
+		{ app_knowledge: [appItem], text: "also a document" },
+		{ app_knowledge: [appItem], kind: "memory" },
+		{ app_knowledge: [{ ...appItem, database: "other" }] },
+	];
+
+	for (const args of cases) {
+		const result = await client.callTool({ name: "hydradb_ingest", arguments: args });
+
+		assert.equal(result.isError, true);
+	}
+
+	assert.equal(calls.filter((call) => call.method === "ingest").length, 0);
+
+	await client.close();
+});
+
+test("hydradb_ingest warns when app knowledge is unrestricted or public", async () => {
+	const { hydra } = mockHydra({
+		ingest: {
+			success: true,
+			successCount: 2,
+			failedCount: 0,
+			results: [{ id: "open-1", status: "queued" }, { id: "public-1", status: "queued" }],
+		},
+	});
+
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_ingest",
+		arguments: {
+			app_knowledge: [
+				{ id: "open-1", kind: "ticket", fields: { title: "Open" } },
+				{
+					id: "public-1",
+					kind: "message",
+					fields: { body: "Public" },
+					acl: ["__public__", "grace@acme.com"],
+				},
+			],
+		},
+	});
+
+	const text = z.array(z.object({ text: z.string() })).parse(result.content)[0]!.text;
+
+	assert.match(text, /without an access list.*every caller/is);
+	assert.match(text, /__public__.*other principals are dropped/is);
+
+	await client.close();
+});
+
+test("hydradb_ingest surfaces app knowledge ACL and unified-database errors", async () => {
+	for (const testCase of [
+		{
+			code: "INVALID_ACL",
+			message: "app_knowledge item acl: malformed principal bob",
+			expected: /malformed principal bob/,
+		},
+		{
+			code: "CORPUS_TYPE_UNSUPPORTED",
+			message: "app_knowledge is not supported for this corpus",
+			expected: /works only on split databases.*unified/is,
+		},
+	]) {
+		const { hydra } = mockHydra({
+			ingest: () => Promise.reject(new HydraDBError({
+				statusCode: 400,
+				body: { error: { code: testCase.code, message: testCase.message } },
+			})),
+		});
+
+		const client = await connect(hydra);
+
+		const result = await client.callTool({
+			name: "hydradb_ingest",
+			arguments: {
+				app_knowledge: [{ kind: "message", fields: { body: "hello" }, acl: ["bob"] }],
+			},
+		});
+
+		const text = z.array(z.object({ text: z.string() })).parse(result.content)[0]!.text;
+
+		assert.equal(result.isError, true);
+		assert.match(text, testCase.expected);
+
+		await client.close();
+	}
+});
+
 test("hydradb_ingest generates an id for a graph and uses it as the payload key", async () => {
 	const { hydra, calls } = mockHydra();
 	const client = await connect(hydra);

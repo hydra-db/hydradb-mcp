@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — structured app knowledge with access lists
+
+`hydradb_ingest` now accepts structured email, message, ticket, knowledge-base,
+comment, meeting, and custom records through `app_knowledge` on split databases.
+Each record preserves its provider fields, attachments, relations, metadata, and
+access list. The tool documents private, public, unrestricted, and re-ingest ACL
+semantics and reports ambiguous public access.
+
 ### Added — batch ingest and caller-controlled extraction
 
 `hydradb_ingest` now accepts up to 100 same-kind items in one API request.

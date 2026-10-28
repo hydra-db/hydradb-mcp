@@ -70,6 +70,15 @@
       }
     },
     {
+      "id": "ingest-app-knowledge-acl",
+      "$comment": "Structured app knowledge is a multipart form field. The ACL must travel with the item so the server can enforce document visibility.",
+      "call": { "op": "ingest", "args": { "kind": "knowledge", "app_knowledge": [{ "id": "slack-C1-1", "kind": "message", "fields": { "body": "Q3 bands" }, "acl": ["grace@acme.com"] }] } },
+      "expect": {
+        "wrapper_method": "context.ingest",
+        "sdk": { "method": "ingest", "content_type": "multipart/form-data", "args_include": { "type": "knowledge" }, "source_field_in": ["app_knowledge"] }
+      }
+    },
+    {
       "id": "list-memory",
       "call": { "op": "list", "args": { "kind": "memory" } },
       "expect": {

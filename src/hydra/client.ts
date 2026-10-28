@@ -298,6 +298,32 @@ export interface IngestGraph {
 	relations: IngestGraphRelation[];
 }
 
+export type AppKnowledgeKind =
+	| "email"
+	| "message"
+	| "ticket"
+	| "knowledge_base"
+	| "comment"
+	| "meeting"
+	| "custom";
+
+export interface AppKnowledgeItem {
+	id?: string;
+	title?: string;
+	description?: string;
+	url?: string;
+	timestamp?: string;
+	kind: AppKnowledgeKind;
+	provider?: string;
+	external_id?: string;
+	fields: Record<string, JsonValue>;
+	metadata?: Record<string, JsonValue>;
+	additional_metadata?: Record<string, JsonValue>;
+	attachments?: Array<Record<string, JsonValue>>;
+	relations?: { ids: string[]; properties?: Record<string, JsonValue> } | Array<Record<string, JsonValue>>;
+	acl?: string[];
+}
+
 export interface IngestItem {
 	/** Free text to ingest (memory note or knowledge document body). */
 	text?: string;
@@ -340,6 +366,8 @@ export interface IngestParams extends IngestItem {
 	kind: ContextKind;
 	/** Several same-kind items to send in one API request. */
 	items?: IngestItem[];
+	/** Structured app records such as messages, email, tickets, and meetings. */
+	appKnowledge?: AppKnowledgeItem[];
 	upsert?: boolean;
 	collection?: string;
 	/** Per-call database override. */
@@ -935,7 +963,45 @@ export class ContextResource extends Resource {
 			params.graph,
 		];
 
-		if (params.items != null && flatItemFields.some((value) => value != null)) {
+		const hasFlatItemFields = flatItemFields.some((value) => value != null);
+
+		if (params.appKnowledge != null) {
+			if (params.kind !== "knowledge") {
+				throw new Error("appKnowledge requires kind knowledge.");
+			}
+
+			if (params.appKnowledge.length === 0) {
+				throw new Error("appKnowledge requires at least one item.");
+			}
+
+			if (params.items != null || hasFlatItemFields) {
+				throw new Error("appKnowledge cannot be combined with documents, memories, or items.");
+			}
+
+			const appItems = params.appKnowledge.map((item) => {
+				const fieldKind = item.fields.kind;
+
+				if (fieldKind != null && fieldKind !== item.kind) {
+					throw new Error(
+						`appKnowledge fields.kind must equal kind ${item.kind}; received ${String(fieldKind)}.`,
+					);
+				}
+
+				return {
+					...item,
+					id: item.id ?? "",
+					fields: { ...item.fields, kind: item.kind },
+				};
+			});
+
+			request.appKnowledge = JSON.stringify(appItems);
+
+			return this.call("/context/ingest", () =>
+				this.sdk.context.ingest(request, req(opts)),
+			);
+		}
+
+		if (params.items != null && hasFlatItemFields) {
 			throw new Error("Ingestion accepts items or flat item fields, not both.");
 		}
 

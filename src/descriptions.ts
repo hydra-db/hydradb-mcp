@@ -161,6 +161,14 @@ const PARAM = {
 	items:
 		"Batch of 1 to 100 same-kind items. Each item requires exactly one of text or " +
 		"turns. Do not combine items with top-level text or turns.",
+	app_knowledge:
+		"Structured app items such as email, messages, tickets, pages, comments, or meetings. " +
+		"Use text with kind knowledge for a plain document. App knowledge works only in split " +
+		"databases. Each item can include its app fields and an access list.",
+	app_acl:
+		"Principals that can read this item. Omit acl for unrestricted access. Send " +
+		'["__private__"] for private storage; an empty list is refused. Re-ingest replaces the ' +
+		"old access list. A normal API-key read with no acl filter still sees the item.",
 	// The format is stated as the server's own, YYYY-MM-DD. This said "RFC3339",
 	// which is a date-TIME format: a caller that followed it sent
 	// "2026-08-17T00:00:00Z" and got 400 INVALID_INPUT back from /context/ingest.
@@ -364,10 +372,14 @@ const STORE_BODY = `Save information to Hydra DB so it outlives this session. Hy
 Provide EXACTLY ONE of:
   \`text\`  — a note, fact, decision, or document body
   \`turns\` — user/assistant pairs from a conversation
-  \`items\` — 1 to 100 same-kind items in one API request
-Combining \`items\` with \`text\` or \`turns\` is an error. Each item requires exactly one of \`text\` or \`turns\`.
+  \`items\` — 1 to 100 same-kind memory or document items in one API request
+  \`app_knowledge\` — 1 to 100 structured app items with optional access lists
+Combining these choices is an error. Each \`items\` entry requires exactly one of \`text\` or \`turns\`.
 
 Save proactively: when the user states a preference, makes a decision, corrects you, or reveals a durable fact about themselves or their work, store it without being asked. Store the distilled fact rather than the raw exchange, and always set \`title\` — it is the only label shown next to this entry in later search results. Before saving something you suspect is already stored, query for it first rather than adding a near-duplicate.
+
+Use \`app_knowledge\` for structured email, message, ticket, knowledge-base, comment, meeting, or custom records. This mode works only on split databases. Use plain \`text\` with \`kind: "knowledge"\` for unstructured documents.
+Omit an app item's \`acl\` for unrestricted access. Use \`["__private__"]\` for private ingest or \`["__public__"]\` for public ingest. Re-ingesting an existing id without \`acl\` removes its previous access list; \`acl: []\` is refused.
 
 Never store secrets, credentials, or anything the user asked you not to keep.
 
@@ -375,7 +387,8 @@ Examples:
   {"text": "Prefers tabs over spaces in every language; rejected two prettier configs that used spaces.", "title": "Indentation preference"}
   {"turns": [{"user": "let's go with Postgres", "assistant": "Agreed, I'll set up the schema."}], "title": "Datastore decision"}
   {"items": [{"text": "Deploy on Friday", "title": "Deadline"}, {"text": "Infra owns deploys", "additional_metadata": {"team": "infra"}}]}
-  {"text": "# Runbook\\n\\nRestart order: api, worker, scheduler.", "kind": "knowledge", "title": "Restart runbook"}`;
+  {"text": "# Runbook\\n\\nRestart order: api, worker, scheduler.", "kind": "knowledge", "title": "Restart runbook"}
+  {"app_knowledge": [{"id": "slack-C1-1", "kind": "message", "fields": {"body": "Deploy is Friday"}, "acl": ["eng@acme.com"]}]}`;
 
 const CONVERSATION_BODY =
 	"Ingest one or more user-assistant conversation turns into Hydra DB memory. " +
@@ -535,6 +548,8 @@ export const TOOL_DESCRIPTIONS = {
 			custom_instructions: PARAM.custom_instructions,
 			graph: PARAM.graph,
 			items: PARAM.items,
+			app_knowledge: PARAM.app_knowledge,
+			app_acl: PARAM.app_acl,
 			observation_date: PARAM.observation_date,
 			turns:
 				"The conversation to ingest, oldest first, as [{user, assistant}, ...]. Provide " +

@@ -119,14 +119,15 @@ resolve the collection before inspecting. Explicit scope is never widened.
 ### **hydradb_ingest**
 
 Saves information so it outlives the session. Provide **exactly one** of `text`,
-`turns`, or `items`. A batch contains 1 to 100 same-kind items and sends one API
-request. Batch text has an 8 MiB total UTF-8 limit.
+`turns`, `items`, or `app_knowledge`. A batch contains 1 to 100 same-kind items and
+sends one API request. Batch text has an 8 MiB total UTF-8 limit.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `text` | string | No\* | A note, fact, decision, or document body |
 | `turns` | array | No\* | Conversation turns, each with `user` and `assistant` |
 | `items` | array | No\* | Batch of 1 to 100 items; each item has exactly one of `text` or `turns` |
+| `app_knowledge` | array | No\* | Batch of 1 to 100 structured app records with `kind`, `fields`, and optional ACL data; split databases only |
 | `kind` | string | No | `memory` (default) or `knowledge` for a document |
 | `title` | string | No | Label shown in later search results — always set it |
 | `source_id` | string | No | Identifier for this entry. **Reusing one REPLACES what is stored under it** |
@@ -140,9 +141,20 @@ request. Batch text has an 8 MiB total UTF-8 limit.
 | `observation_date` | string | No | When the fact was true, as `YYYY-MM-DD` (e.g. `2026-07-04`), vs when it was stored |
 | `user_name` | string | No | What to call the user, used with `turns` (default: `User`) |
 
-\* Combining `items` with the single-item fields is an error. Each single item
-or batch item requires exactly one of `text` or `turns`. Knowledge items require
-`text`.
+\* Combining any input modes is an error. Each single item or `items` entry requires
+exactly one of `text` or `turns`. Knowledge items require `text`.
+
+Use plain `text` with `kind: "knowledge"` for an unstructured document. Use
+`app_knowledge` for structured `email`, `message`, `ticket`, `knowledge_base`,
+`comment`, `meeting`, or `custom` records. Each app record supports `id`, `title`,
+`description`, `url`, `timestamp`, `provider`, `external_id`, `fields`, `metadata`,
+`additional_metadata`, `attachments`, `relations`, and `acl`.
+
+An omitted app-record `acl` makes the item unrestricted. Send `["__private__"]`
+for private ingest or `["__public__"]` for public ingest. An empty list is refused.
+Re-ingesting an existing `id` without `acl` removes its previous access list. If
+`__public__` appears with other principals, the item is public and HydraDB drops the
+other principals.
 
 Ingestion is **asynchronous** — content is not searchable the instant it is
 saved. Use `hydradb_status` to confirm.

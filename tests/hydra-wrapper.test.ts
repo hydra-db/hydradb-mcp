@@ -238,6 +238,69 @@ test("caller instructions with infer false are rejected", async () => {
 	assert.equal(calls.length, 0);
 });
 
+test("app knowledge reaches the SDK with its ACL and normalized fields", async () => {
+	const { sdk, calls } = ingestSdk();
+	const hydra = new HydraDB({ token: "t", database: "db_test" }, sdk);
+
+	await hydra.context.ingest({
+		kind: "knowledge",
+		appKnowledge: [{
+			id: "slack-C1-1",
+			title: "Comp bands",
+			kind: "message",
+			provider: "slack",
+			external_id: "1.1",
+			fields: { body: "Q3 bands" },
+			acl: ["grace@acme.com", "group:slack:C1"],
+		}],
+	});
+
+	const request = z.object({
+		type: z.literal("knowledge"),
+		appKnowledge: z.string(),
+		documents: z.undefined().optional(),
+	}).parse(calls[0]);
+
+	const items = z.array(z.object({
+		id: z.string(),
+		kind: z.literal("message"),
+		fields: z.object({ kind: z.literal("message"), body: z.string() }),
+		acl: z.array(z.string()),
+	})).parse(JSON.parse(request.appKnowledge));
+
+	assert.deepEqual(items[0]?.acl, ["grace@acme.com", "group:slack:C1"]);
+	assert.equal(items[0]?.fields.kind, "message");
+});
+
+test("app knowledge rejects a fields.kind mismatch before the SDK call", async () => {
+	const { sdk, calls } = ingestSdk();
+	const hydra = new HydraDB({ token: "t", database: "db_test" }, sdk);
+
+	await assert.rejects(
+		() => hydra.context.ingest({
+			kind: "knowledge",
+			appKnowledge: [{ kind: "ticket", fields: { kind: "message", title: "AUTH-1" } }],
+		}),
+		/fields\.kind.*ticket/i,
+	);
+	assert.equal(calls.length, 0);
+});
+
+test("app knowledge sends an empty id when the caller omits it", async () => {
+	const { sdk, calls } = ingestSdk();
+	const hydra = new HydraDB({ token: "t", database: "db_test" }, sdk);
+
+	await hydra.context.ingest({
+		kind: "knowledge",
+		appKnowledge: [{ kind: "ticket", fields: { title: "AUTH-1" } }],
+	});
+
+	const request = z.object({ appKnowledge: z.string() }).parse(calls[0]);
+	const items = z.array(z.object({ id: z.string() })).parse(JSON.parse(request.appKnowledge));
+
+	assert.equal(items[0]?.id, "");
+});
+
 test("memory ingest is unaffected by the knowledge guard", async () => {
 	const { sdk, calls } = ingestSdk();
 	const hydra = new HydraDB({ token: "t", database: "db_test" }, sdk);

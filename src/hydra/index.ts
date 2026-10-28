@@ -23,6 +23,8 @@ export type {
 	QueryKind,
 	ConversationTurn,
 	QueryParams,
+	AppKnowledgeItem,
+	AppKnowledgeKind,
 	IngestGraph,
 	IngestItem,
 	IngestParams,

@@ -18,6 +18,7 @@ import { fileURLToPath } from "node:url";
 import type { HydraDBClient } from "@hydradb/sdk";
 
 import { HydraDB } from "../src/hydra/index.js";
+import type { AppKnowledgeItem } from "../src/hydra/index.js";
 import { ALIAS_REPLACEMENTS, CANONICAL_TOOL_NAMES } from "../src/tool-names.js";
 
 // This repo's identity within the shared fixture. Vectors whose `optional_for`
@@ -124,10 +125,12 @@ function invoke(hydra: HydraDB, op: string, args: Record<string, unknown>): Prom
 				mode: a.mode as never,
 			});
 		case "ingest":
+			// SAFETY: vectors.json defines app_knowledge as an array of AppKnowledgeItem objects.
 			return hydra.context.ingest({
 				kind: a.kind as never,
 				text: a.text,
 				title: a.title,
+				appKnowledge: args.app_knowledge as AppKnowledgeItem[] | undefined,
 			});
 		case "list":
 			return hydra.context.list({ kind: a.kind as never, ids: a.ids ?? a.source_ids });

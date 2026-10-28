@@ -4,6 +4,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
+import { ingestAclSchema } from "./acl.js";
 import { jsonValue, toAddMemoryResponse, toMemoryList, toRelationList, toSourceList } from "./adapters.js";
 import type { JsonValue, ListedFields, PageInfo, SourceListItem } from "./adapters.js";
 import { resolveConfig, resolveGraphConfig } from "./config.js";
@@ -14,6 +15,7 @@ import { SERVER_INSTRUCTIONS, TOOL_DESCRIPTIONS } from "./descriptions.js";
 import { HydraDB, assertCollectionAllowed, assertDatabaseAllowed, hasEntries } from "./hydra/index.js";
 import type {
 	ContextKind,
+	AppKnowledgeItem,
 	IngestGraph,
 	IngestItem,
 	IngestParams,
@@ -1395,6 +1397,97 @@ export function createHydraDBServer(
 			summary +
 			(outcome.indexing_pending ? indexingNote(res) : "") +
 			ingestIssues(res),
+			outcome,
+		);
+
+		return allFailed ? { ...result, isError: true } : result;
+	}
+
+	function appKnowledgeNotes(items: AppKnowledgeItem[]): string {
+		const notes: string[] = [];
+
+		for (const item of items) {
+			if (item.id && item.acl == null) {
+				notes.push(
+					`Item ${item.id} was stored without an access list. Every caller of this collection ` +
+					"can read it. If this id had an access list before, that list is now removed.",
+				);
+			}
+
+			if (item.acl?.includes("__public__") && item.acl.length > 1) {
+				notes.push(
+					`Item ${item.id || "(server-assigned id)"}: __public__ makes the item readable by ` +
+					"every caller; the other principals are dropped.",
+				);
+			}
+		}
+
+		return notes.length === 0 ? "" : `\n\n${notes.join("\n")}`;
+	}
+
+	async function runIngestAppKnowledge(args: {
+		items: AppKnowledgeItem[];
+		overwrite?: boolean;
+		database?: string;
+		collection?: string;
+	}, signal?: AbortSignal): Promise<ToolResult> {
+		let raw: Awaited<ReturnType<typeof hydra.context.ingest>>;
+
+		try {
+			raw = await hydra.context.ingest({
+				kind: "knowledge",
+				appKnowledge: args.items,
+				upsert: args.overwrite ?? true,
+				database: args.database,
+				collection: args.collection,
+			}, { signal });
+		} catch (error) {
+			if (error instanceof Error && /CORPUS_TYPE_UNSUPPORTED/.test(error.message)) {
+				throw new Error(
+					`${error.message} app_knowledge works only on split databases. This database is unified.`,
+				);
+			}
+
+			throw error;
+		}
+
+		const res = toAddMemoryResponse(raw);
+		const outcome = ingestOutcome(res);
+
+		const resultsById = new Map(
+			res.results.flatMap((result) =>
+				result.source_id.length > 0 ? [[result.source_id, result] as const] : []
+			),
+		);
+
+		outcome.items = args.items.map((item, index) => {
+			const result = item.id ? resultsById.get(item.id) : res.results[index];
+			const accepted = result != null && result.status !== "failed" && !result.error;
+
+			const itemOutcome: IngestItemOutcome = {
+				index,
+				id: result?.source_id ?? item.id ?? "",
+				status: result?.status ?? "missing",
+				accepted,
+			};
+
+			if (result?.error) itemOutcome.error = result.error;
+
+			if (result?.error_code) itemOutcome.error_code = result.error_code;
+
+			if (result?.relations_error) itemOutcome.relations_error = result.relations_error;
+
+			return itemOutcome;
+		});
+
+		const allFailed = res.success_count === 0 && res.failed_count > 0;
+
+		const result = structuredResult(
+			`Ingested ${args.items.length} app item(s) ` +
+			`(${res.success_count} success, ${res.failed_count} failed).` +
+			(outcome.indexing_pending ? indexingNote(res) : "") +
+			ingestIssues(res) +
+			appKnowledgeNotes(args.items),
 			outcome,
 		);
 
@@ -3334,6 +3427,39 @@ export function createHydraDBServer(
 		...ingestMetadataSchema,
 	});
 
+	const appKnowledgeKindSchema = z.enum([
+		"email",
+		"message",
+		"ticket",
+		"knowledge_base",
+		"comment",
+		"meeting",
+		"custom",
+	]);
+
+	const appKnowledgeItemSchema = z.object({
+		id: z.string().optional(),
+		title: z.string().optional(),
+		description: z.string().optional(),
+		url: z.string().optional(),
+		timestamp: z.string().optional(),
+		kind: appKnowledgeKindSchema,
+		provider: z.string().optional(),
+		external_id: z.string().optional(),
+		fields: z.record(jsonValue),
+		metadata: z.record(jsonValue).optional(),
+		additional_metadata: z.record(jsonValue).optional(),
+		attachments: z.array(z.record(jsonValue)).optional(),
+		relations: z.union([
+			z.object({
+				ids: z.array(z.string()),
+				properties: z.record(jsonValue).optional(),
+			}),
+			z.array(z.record(jsonValue)),
+		]).optional(),
+		acl: ingestAclSchema.optional().describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.app_acl),
+	}).strict();
+
 	const ingestSchema = {
 		...storeSchema,
 		...ingestMetadataSchema,
@@ -3377,6 +3503,14 @@ export function createHydraDBServer(
 			})
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.items),
+		app_knowledge: z
+			.array(appKnowledgeItemSchema)
+			.min(1)
+			.max(MAX_INGEST_ITEMS, {
+				message: `app_knowledge must contain at most ${MAX_INGEST_ITEMS} entries`,
+			})
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.app_knowledge),
 	};
 
 	type IngestToolItem = z.infer<typeof ingestItemSchema>;
@@ -3850,6 +3984,7 @@ export function createHydraDBServer(
 			custom_instructions?: string;
 			graph?: IngestGraph;
 			items?: IngestToolItem[];
+			app_knowledge?: AppKnowledgeItem[];
 			relations?: IngestParams["relations"];
 			evidence_kind?: IngestParams["evidenceKind"];
 			evidence_subject?: string;
@@ -3878,7 +4013,31 @@ export function createHydraDBServer(
 			a.graph,
 		];
 
-		if (a.items != null && (hasFlatItem || otherFlatFields.some((value) => value != null))) {
+		const hasOtherFlatFields = otherFlatFields.some((value) => value != null);
+
+		if (a.app_knowledge != null) {
+			if (a.kind === "memory") {
+				throw new Error("app_knowledge requires kind knowledge; omit kind or set it to knowledge.");
+			}
+
+			if (a.items != null || hasFlatItem || hasOtherFlatFields || a.custom_instructions != null) {
+				throw new Error(
+					`${TOOL_NAMES.INGEST} accepts app_knowledge or memory/document item fields, not both.`,
+				);
+			}
+
+			return runIngestAppKnowledge(
+				{
+					items: a.app_knowledge,
+					overwrite: a.overwrite,
+					database: a.database,
+					collection: a.collection,
+				},
+				extra?.signal,
+			);
+		}
+
+		if (a.items != null && (hasFlatItem || hasOtherFlatFields)) {
 			throw new Error(
 				`${TOOL_NAMES.INGEST} accepts either \`items\` or the single-item fields, not both.`,
 			);
