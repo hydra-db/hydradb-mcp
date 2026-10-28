@@ -129,6 +129,9 @@ function within<T>(ms: number, promise: Promise<T>, what: string): Promise<T> {
 }
 
 test("a cancel sent as its own HTTP request stops the running call and its upstream request", async () => {
+	// Short, so nothing the cancelled request left behind outlives the test file.
+	process.env.HYDRADB_TIMEOUT_SECONDS = "3";
+
 	const arrived = upstream.nextRequest();
 	const call = callQuery(7);
 	const { closed } = await within(3000, arrived, "the upstream request");
@@ -141,6 +144,7 @@ test("a cancel sent as its own HTTP request stops the running call and its upstr
 	assert.equal(res.status, 200);
 	assert.match(res.body, /cancelled by the caller/);
 	assert.match(res.body, /"isError":true/);
+	delete process.env.HYDRADB_TIMEOUT_SECONDS;
 });
 
 test("a cancel from another credential does not touch the call", async () => {

@@ -1298,8 +1298,8 @@ export class DatabasesResource extends Resource {
 		);
 	}
 
-	list(): Promise<SDK.TenantsTenantIdsResponse> {
-		return this.call("/databases", "idempotent", undefined, (o) => this.sdk.databases.list(o));
+	list(opts?: RequestOptions): Promise<SDK.TenantsTenantIdsResponse> {
+		return this.call("/databases", "idempotent", opts, (o) => this.sdk.databases.list(o));
 	}
 
 	collections(
