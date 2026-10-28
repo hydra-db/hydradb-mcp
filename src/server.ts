@@ -2371,11 +2371,13 @@ export function createHydraDBServer(
 		const database = args.database?.trim() || hydra.database;
 		const result = await hydra.databases.stats({ database }, { signal });
 		const name = result.database ?? result.tenantId ?? database;
-		const knowledgeRows = result.knowledgeCollection?.rowCount ?? 0;
-		const memoryRows = result.memoryCollection?.rowCount ?? 0;
+		const knowledgeRows = result.knowledgeCollection?.rowCount ?? null;
+		const memoryRows = result.memoryCollection?.rowCount ?? null;
+		const knowledgeText = knowledgeRows == null ? "knowledge row count is unknown" : `${knowledgeRows} knowledge row(s)`;
+		const memoryText = memoryRows == null ? "memory row count is unknown" : `${memoryRows} memory row(s)`;
 
 		return structuredResult(
-			`Database "${name}" has ${knowledgeRows} knowledge row(s) and ${memoryRows} memory row(s).`,
+			`Database "${name}" reports ${knowledgeText}; ${memoryText}.`,
 			{ database: name, knowledge_rows: knowledgeRows, memory_rows: memoryRows },
 		);
 	}

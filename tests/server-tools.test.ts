@@ -230,6 +230,25 @@ test("database tools expose the complete successful lifecycle", async () => {
 	await client.close();
 });
 
+test("database stats preserve missing counts as unknown", async () => {
+	const { hydra } = mockHydra({
+		stats: { database: "db_test", knowledgeCollection: { rowCount: 265 } },
+	});
+
+	const client = await connect(hydra);
+	const result = await client.callTool({ name: "hydradb_database_stats", arguments: {} });
+
+	assert.notEqual(result.isError, true);
+	assert.match(toolText(result), /265 knowledge row/);
+	assert.match(toolText(result), /memory row count is unknown/);
+	assert.deepEqual(result.structuredContent, {
+		database: "db_test",
+		knowledge_rows: 265,
+		memory_rows: null,
+	});
+	await client.close();
+});
+
 test("database write tools validate required inputs before an API call", async () => {
 	const { hydra, calls } = mockHydra();
 	const client = await connect(hydra);

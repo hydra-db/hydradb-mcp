@@ -1248,6 +1248,16 @@ export class DatabasesResource extends Resource {
 		opts?: RequestOptions,
 	): Promise<SDK.TenantsTenantCreateAcceptedResponse> {
 		const database = this.scope(undefined, params.database).database;
+		const allowedCollections = this.collectionConfinement();
+
+		if (allowedCollections) {
+			throw new Error(
+				`This connection is confined to collection ${allowedCollections
+					.map((collection) => `"${collection}"`)
+					.join(", ")}, and creating a database changes state outside those collections. ` +
+					"Nothing was created. Reconnect without collection confinement before creating a database.",
+			);
+		}
 
 		return this.call("/databases", () =>
 			this.sdk.databases.create({
@@ -1338,6 +1348,17 @@ export class DatabasesResource extends Resource {
 		opts?: RequestOptions,
 	): Promise<SDK.HandlerMetadataSchemaUpdateResponse> {
 		const database = this.scope(undefined, params.database).database;
+		const allowedCollections = this.collectionConfinement();
+
+		if (allowedCollections) {
+			throw new Error(
+				`This connection is confined to collection ${allowedCollections
+					.map((collection) => `"${collection}"`)
+					.join(", ")}, and adding metadata fields changes the database-wide schema for ` +
+					`"${database}", including collections this connection was not granted. Nothing was changed. ` +
+					"Reconnect without collection confinement before changing a database metadata schema.",
+			);
+		}
 
 		return this.call("/databases/metadata-schema", () =>
 			this.sdk.databases.updateMetadataSchema({

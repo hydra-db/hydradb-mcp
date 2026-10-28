@@ -472,6 +472,73 @@ test("a collection-confined OAuth connection cannot delete an approved database"
 	assert.match(result.content[0].text, /nothing was deleted/i);
 });
 
+test("a collection-confined OAuth connection cannot change the database metadata schema", async () => {
+	__resetIntrospectionCache();
+	introspectAnswer = () => ({
+		status: 200,
+		body: active({
+			database: "personal",
+			databases: ["personal"],
+			collection: "own",
+			collections: ["own"],
+		}),
+	});
+
+	const res = await request(
+		"POST",
+		"/",
+		{ host: `127.0.0.1:${port}`, ...JSON_HEADERS, authorization: "Bearer hmat_database_schema" },
+		JSON.stringify({
+			jsonrpc: "2.0",
+			id: 1,
+			method: "tools/call",
+			params: {
+				name: "hydradb_add_metadata_fields",
+				arguments: { database: "personal", add_fields: [{ name: "region", data_type: "VARCHAR" }] },
+			},
+		}),
+	);
+
+	const result = JSON.parse(res.body).result;
+
+	assert.equal(result.isError, true);
+	assert.match(result.content[0].text, /confined to collection "own"/);
+	assert.match(result.content[0].text, /database-wide schema/);
+	assert.match(result.content[0].text, /nothing was changed/i);
+});
+
+test("a collection-confined OAuth connection cannot create an approved database", async () => {
+	__resetIntrospectionCache();
+	introspectAnswer = () => ({
+		status: 200,
+		body: active({
+			database: "personal",
+			databases: ["personal", "archive"],
+			collection: "own",
+			collections: ["own"],
+		}),
+	});
+
+	const res = await request(
+		"POST",
+		"/",
+		{ host: `127.0.0.1:${port}`, ...JSON_HEADERS, authorization: "Bearer hmat_database_create" },
+		JSON.stringify({
+			jsonrpc: "2.0",
+			id: 1,
+			method: "tools/call",
+			params: { name: "hydradb_create_database", arguments: { database: "archive" } },
+		}),
+	);
+
+	const result = JSON.parse(res.body).result;
+
+	assert.equal(result.isError, true);
+	assert.match(result.content[0].text, /confined to collection "own"/);
+	assert.match(result.content[0].text, /creating a database/);
+	assert.match(result.content[0].text, /nothing was created/i);
+});
+
 test("the 401 challenge is readable cross-origin, so browser clients can discover the issuer", async () => {
 	const res = await request(
 		"OPTIONS",

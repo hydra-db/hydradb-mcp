@@ -30,21 +30,33 @@ const POLL_INTERVAL_MS = 5_000;
 
 const liveBaseUrl = process.env.HYDRADB_BASE_URL ?? process.env.HYDRA_DB_BASE_URL;
 
+function isLocalDatabaseBaseUrl(value: string): boolean {
+	try {
+		const host = new URL(value).hostname;
+
+		return host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]";
+	} catch {
+		return false;
+	}
+}
+
 const localDatabaseSkipReason = (() => {
 	if (skipReason) return skipReason;
 
 	if (!liveBaseUrl) return "HYDRADB_BASE_URL must name the local API for database lifecycle tests";
 
-	try {
-		const host = new URL(liveBaseUrl).hostname;
-
-		return host === "localhost" || host === "127.0.0.1" || host === "::1"
-			? false
-			: "Database lifecycle tests refuse non-local HYDRADB_BASE_URL values";
-	} catch {
-		return "HYDRADB_BASE_URL must be a valid local URL";
-	}
+	return isLocalDatabaseBaseUrl(liveBaseUrl)
+		? false
+		: "Database lifecycle tests refuse invalid or non-local HYDRADB_BASE_URL values";
 })();
+
+test("database lifecycle URL guard accepts loopback URLs only", () => {
+	assert.equal(isLocalDatabaseBaseUrl("http://localhost:8080"), true);
+	assert.equal(isLocalDatabaseBaseUrl("http://127.0.0.1:8080"), true);
+	assert.equal(isLocalDatabaseBaseUrl("http://[::1]:8080"), true);
+	assert.equal(isLocalDatabaseBaseUrl("https://api.hydradb.com"), false);
+	assert.equal(isLocalDatabaseBaseUrl("not-a-url"), false);
+});
 
 /**
  * Is this failure worth another attempt inside the polling window?

@@ -93,7 +93,8 @@ HYDRADB_MCP_LEGACY_TOOLS=1
 Database tools are available over stdio, API-key HTTP, and OAuth HTTP connections.
 `hydradb_databases` marks the connection default. On a confined OAuth connection,
 it returns only approved databases, and every database tool refuses other names
-before sending an API request.
+before sending an API request. A connection limited to specific collections cannot
+create or delete a whole database or change its database-wide metadata schema.
 
 | Tool | Required input | Notes |
 |---|---|---|

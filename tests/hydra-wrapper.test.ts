@@ -859,6 +859,71 @@ test("database deletion refuses collection confinement before the SDK call", asy
 	assert.equal(called, false);
 });
 
+test("database creation refuses collection confinement before the SDK call", async () => {
+	let called = false;
+
+	const sdk = {
+		databases: {
+			create: () => {
+				called = true;
+
+				return Promise.resolve({ data: {}, success: true });
+			},
+		},
+	};
+	// SAFETY: The create method is the only SDK member this test can reach.
+
+	const hydra = new HydraDB(
+		{
+			token: "t",
+			database: "primary",
+			allowedDatabases: ["primary", "archive"],
+			allowedCollections: ["own"],
+		},
+		sdk as HydraDBClient,
+	);
+
+	await assert.rejects(
+		() => hydra.databases.create({ database: "archive" }),
+		/confined to collection "own".*creating a database.*nothing was created/i,
+	);
+	assert.equal(called, false);
+});
+
+test("metadata schema updates refuse collection confinement before the SDK call", async () => {
+	let called = false;
+
+	const sdk = {
+		databases: {
+			updateMetadataSchema: () => {
+				called = true;
+
+				return Promise.resolve({ data: {}, success: true });
+			},
+		},
+	};
+	// SAFETY: The metadata update method is the only SDK member this test can reach.
+
+	const hydra = new HydraDB(
+		{
+			token: "t",
+			database: "primary",
+			allowedDatabases: ["primary"],
+			allowedCollections: ["own"],
+		},
+		sdk as HydraDBClient,
+	);
+
+	await assert.rejects(
+		() => hydra.databases.updateMetadataSchema({
+			database: "primary",
+			addFields: [{ name: "region", dataType: "VARCHAR" }],
+		}),
+		/confined to collection "own".*database-wide schema.*nothing was changed/i,
+	);
+	assert.equal(called, false);
+});
+
 test("collections and collection cannot be sent together", async () => {
 	const calls: string[] = [];
 	const sdk = {
