@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — ingest outcomes and supported fields are preserved
+
+`hydradb_ingest` now reports accepted ids, rejected items, and stored titles.
+An all-failed ingest is an MCP error, while partial success keeps the stored
+items available to the caller. Conversation ingest now forwards `metadata` and
+`observation_date`. Knowledge titles that already end in `.md` no longer get a
+second extension; queries still search the historical doubled form.
+
 ## [1.6.0] - 2026-10-28
 
 ### Fixed — `hydradb_query` title filter missed documents saved through `hydradb_ingest`

@@ -12,10 +12,10 @@ import { renderRecalledContext } from "./context.js";
 import { COLLECTION_PATTERN, MAX_BODY_BYTES, renderRows } from "./cypher.js";
 import { SERVER_INSTRUCTIONS, TOOL_DESCRIPTIONS } from "./descriptions.js";
 import { HydraDB, assertCollectionAllowed, assertDatabaseAllowed, hasEntries } from "./hydra/index.js";
-import type { ContextKind, MetadataFilter, QueryKind, QueryParams } from "./hydra/index.js";
+import type { ContextKind, IngestParams, MetadataFilter, QueryKind, QueryParams } from "./hydra/index.js";
 import { logger } from "./logger.js";
 import { ALIAS_REPLACEMENTS, DEPRECATED_TOOL_NAMES, TOOL_NAMES } from "./tool-names.js";
-import type { MemoryResultItem } from "./types.js";
+import type { IngestOutcome, IngestRejectedItem, MemoryResultItem } from "./types.js";
 import { SERVER_VERSION } from "./version.js";
 
 // Host-owned default: silently attached to ingest so Hydra DB extracts the kind
@@ -966,22 +966,6 @@ export function createHydraDBServer(
 	}
 
 	/**
-	 * The id the server assigned to the item it just stored.
-	 *
-	 * On the memory path the caller may supply `source_id`, but when it does not
-	 * the server assigns one — and that value appeared nowhere in the tool result,
-	 * so the caller could not later inspect, correct or delete what it had
-	 * written. Reads the first successful item; ingest here is always one item.
-	 */
-	function createdId(res: { results: MemoryResultItem[] }): string | undefined {
-		for (const item of res.results) {
-			if (item.source_id && !item.error) return item.source_id;
-		}
-
-		return undefined;
-	}
-
-	/**
 	 * Ingestion is asynchronous, and the caller has no way to know that.
 	 *
 	 * The upload returns as soon as the source is queued; indexing then runs
@@ -1039,8 +1023,7 @@ export function createHydraDBServer(
 		for (const item of res.results) {
 			const label = item.source_id || item.title || "(unnamed item)";
 
-			const failure =
-				item.error ?? (item.status === "failed" ? "ingestion failed" : null);
+			const failure = item.error ?? (item.status === "failed" ? "ingestion failed" : null);
 
 			if (failure) {
 				const code = item.error_code ? ` [${item.error_code}]` : "";
@@ -1054,6 +1037,54 @@ export function createHydraDBServer(
 		}
 
 		return lines.length > 0 ? `\n\nIssues:\n${lines.join("\n")}` : "";
+	}
+
+	function ingestOutcome(
+		res: ReturnType<typeof toAddMemoryResponse>,
+		fallbackId?: string,
+	): IngestOutcome {
+		const accepted = res.results.filter(
+			(item) => item.status !== "failed" && !item.error,
+		);
+
+		const acceptedIds = accepted.map((item) => item.source_id).filter(Boolean);
+
+		if (acceptedIds.length === 0 && res.success_count > 0 && fallbackId) {
+			acceptedIds.push(fallbackId);
+		}
+
+		const rejectedItems = res.results.flatMap((item) => {
+			const error = item.error ?? (item.status === "failed" ? "ingestion failed" : null);
+
+			if (!error) return [];
+
+			const rejected: IngestRejectedItem = {
+				id: item.source_id || "(unnamed item)",
+				error,
+			};
+
+			if (item.stored_title) rejected.stored_title = item.stored_title;
+
+			if (item.error_code) rejected.error_code = item.error_code;
+
+			return [rejected];
+		});
+
+		const firstAccepted = accepted[0];
+
+		const outcome: IngestOutcome = {
+			accepted_ids: acceptedIds,
+			rejected_items: rejectedItems,
+			success_count: res.success_count,
+			failed_count: res.failed_count,
+			indexing_pending: acceptedIds.length > 0 || res.success_count > 0,
+		};
+
+		if (acceptedIds[0]) outcome.id = acceptedIds[0];
+
+		if (firstAccepted?.stored_title) outcome.stored_title = firstAccepted.stored_title;
+
+		return outcome;
 	}
 
 	async function runStore(args: {
@@ -1108,20 +1139,24 @@ export function createHydraDBServer(
 		// information back to them. The id is the thing they do not have and
 		// cannot derive, and it is what makes correcting this memory later
 		// possible at all.
-		const id = createdId(res) ?? args.source_id;
+		const outcome = ingestOutcome(res, args.source_id);
+		const allFailed = res.success_count === 0 && res.failed_count > 0;
 
-		return structuredResult(
-			`Saved to Hydra DB${id ? ` (id: ${id})` : ""} ` +
-			`(${res.success_count} success, ${res.failed_count} failed).` +
-			indexingNote(res) +
+		const summary = allFailed
+			? `Hydra DB rejected every ingest item (${res.failed_count} failed).`
+			: res.failed_count > 0
+				? `Stored ${res.success_count} item(s); rejected ${res.failed_count}.`
+				: `Saved to Hydra DB${outcome.id ? ` (id: ${outcome.id})` : ""} ` +
+					`(${res.success_count} success, ${res.failed_count} failed).`;
+
+		const result = structuredResult(
+			summary +
+			(outcome.indexing_pending ? indexingNote(res) : "") +
 			ingestIssues(res),
-			{
-				...(id != null ? { id } : {}),
-				success_count: res.success_count,
-				failed_count: res.failed_count,
-				indexing_pending: true,
-			},
+			outcome,
 		);
+
+		return allFailed ? { ...result, isError: true } : result;
 	}
 
 	async function runIngestConversation(
@@ -1133,6 +1168,8 @@ export function createHydraDBServer(
 			title?: string;
 			isMarkdown?: boolean;
 			overwrite?: boolean;
+			metadata?: IngestParams["metadata"];
+			observationDate?: string;
 			database?: string;
 			collection?: string;
 		},
@@ -1151,6 +1188,8 @@ export function createHydraDBServer(
 			title: opts?.title,
 			isMarkdown: opts?.isMarkdown,
 			customInstructions: INGEST_INSTRUCTIONS,
+			metadata: opts?.metadata,
+			observationDate: opts?.observationDate,
 			upsert: opts?.overwrite ?? true,
 			database: opts?.database,
 			collection: opts?.collection,
@@ -1158,20 +1197,19 @@ export function createHydraDBServer(
 
 		const res = toAddMemoryResponse(raw);
 
-		const conversationId = createdId(res) ?? sourceId;
+		const outcome = ingestOutcome(res, sourceId);
+		const conversationId = outcome.id ?? sourceId;
+		const allFailed = res.success_count === 0 && res.failed_count > 0;
 
-		return structuredResult(
+		const result = structuredResult(
 			`Ingested ${turns.length} conversation turn(s) into Hydra DB ` +
 			`(id: ${conversationId}, success: ${res.success_count}, failed: ${res.failed_count})` +
-			indexingNote(res) +
+			(outcome.indexing_pending ? indexingNote(res) : "") +
 			ingestIssues(res),
-			{
-				id: conversationId,
-				success_count: res.success_count,
-				failed_count: res.failed_count,
-				indexing_pending: true,
-			},
+			outcome,
 		);
+
+		return allFailed ? { ...result, isError: true } : result;
 	}
 
 	/**
@@ -3363,6 +3401,14 @@ export function createHydraDBServer(
 
 	const ingestOutputSchema = {
 		id: z.string().optional(),
+		stored_title: z.string().optional(),
+		accepted_ids: z.array(z.string()),
+		rejected_items: z.array(z.object({
+			id: z.string(),
+			stored_title: z.string().optional(),
+			error: z.string(),
+			error_code: z.string().optional(),
+		})),
 		success_count: z.number(),
 		failed_count: z.number(),
 		indexing_pending: z.boolean(),
@@ -3590,6 +3636,8 @@ export function createHydraDBServer(
 					title: a.title,
 					isMarkdown: a.is_markdown,
 					overwrite: a.overwrite,
+					metadata: a.metadata,
+					observationDate: a.observation_date,
 					database: a.database,
 					collection: a.collection,
 				},

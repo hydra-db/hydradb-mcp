@@ -934,11 +934,14 @@ export class ContextResource extends Resource {
 			// Knowledge is multipart with the document as a file part — never the
 			// `app_knowledge` JSON field (guards the DX-G-002 class of bug).
 			if (params.text != null) {
+				const title = params.title ?? "document";
+				const filename = params.filename ?? (/\.md$/i.test(title) ? title : `${title}.md`);
+
 				request.documents = [{
 					data: Buffer.from(params.text, "utf-8"),
 					// The title rides on the filename; the server's
 					// document_metadata does not accept a `title` key.
-					filename: params.filename ?? `${params.title ?? "document"}.md`,
+					filename,
 					contentType: "text/markdown",
 				}];
 			}

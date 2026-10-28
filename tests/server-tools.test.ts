@@ -236,6 +236,31 @@ test("hydradb_ingest turns path forwards infer/title/is_markdown (no silent drop
 	await client.close();
 });
 
+test("hydradb_ingest turns path forwards metadata and observation_date", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	await client.callTool({
+		name: "hydradb_ingest",
+		arguments: {
+			turns: [{ user: "hi", assistant: "hello" }],
+			source_id: "s1",
+			metadata: { team: "infra" },
+			observation_date: "2026-03-14",
+		},
+	});
+
+	const ingest = calls.find((call) => call.method === "ingest");
+	assert.ok(ingest, "wrapper should have called context.ingest");
+
+	const item = z.array(z.record(z.unknown())).parse(JSON.parse(String(ingest.args.memories)))[0]!;
+
+	assert.deepEqual(item.metadata, { team: "infra" });
+	assert.equal(item.observation_date, "2026-03-14");
+
+	await client.close();
+});
+
 test("hydradb_ingest rejects both text and turns rather than dropping one", async () => {
 	const { hydra, calls } = mockHydra();
 	const client = await connect(hydra);
@@ -575,6 +600,115 @@ test("hydradb_ingest stays quiet when everything succeeded", async () => {
 	);
 
 	assert.doesNotMatch(text, /Issues:/);
+});
+
+test("hydradb_ingest marks an all-failed response as an MCP error", async () => {
+	const { hydra } = mockHydra({
+		ingest: {
+			success: false,
+			successCount: 0,
+			failedCount: 1,
+			results: [{
+				id: "s-bad",
+				filename: "Rejected.md",
+				status: "failed",
+				error: "content exceeds maximum size",
+				errorCode: "TOO_LARGE",
+			}],
+		},
+	});
+
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_ingest",
+		arguments: { text: "some note" },
+	});
+
+	const text = z.array(z.object({ text: z.string() })).parse(result.content)[0]!.text;
+
+	assert.equal(result.isError, true);
+	assert.doesNotMatch(text, /Saved to Hydra DB/);
+	assert.match(text, /s-bad/);
+	assert.match(text, /content exceeds maximum size/);
+
+	await client.close();
+});
+
+test("hydradb_ingest returns accepted ids, rejected items, and stored titles", async () => {
+	const { hydra } = mockHydra({
+		ingest: {
+			success: false,
+			successCount: 1,
+			failedCount: 1,
+			results: [
+				{
+					id: "s-ok",
+					filename: "Accepted.md",
+					status: "completed",
+					error: "",
+					relationsError: "graph unavailable",
+				},
+				{
+					id: "s-bad",
+					filename: "Rejected.md",
+					status: "failed",
+					error: "bad content",
+					errorCode: "INVALID_CONTENT",
+				},
+			],
+		},
+	});
+
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_ingest",
+		arguments: { text: "some note" },
+	});
+
+	const output = z.object({
+		id: z.string().optional(),
+		stored_title: z.string().optional(),
+		accepted_ids: z.array(z.string()),
+		rejected_items: z.array(z.object({
+			id: z.string(),
+			stored_title: z.string().optional(),
+			error: z.string(),
+			error_code: z.string().optional(),
+		})),
+	}).parse(result.structuredContent);
+
+	assert.notEqual(result.isError, true);
+	assert.equal(output.id, "s-ok");
+	assert.equal(output.stored_title, "Accepted.md");
+	assert.deepEqual(output.accepted_ids, ["s-ok"]);
+	assert.deepEqual(output.rejected_items, [{
+		id: "s-bad",
+		stored_title: "Rejected.md",
+		error: "bad content",
+		error_code: "INVALID_CONTENT",
+	}]);
+
+	await client.close();
+});
+
+test("hydradb_ingest does not append a second markdown extension", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	await client.callTool({
+		name: "hydradb_ingest",
+		arguments: { kind: "knowledge", title: "notes.md", text: "body" },
+	});
+
+	const ingest = calls.find((call) => call.method === "ingest");
+	assert.ok(ingest, "wrapper should have called context.ingest");
+	const documents = z.array(z.object({ filename: z.string() })).parse(ingest.args.documents);
+
+	assert.equal(documents[0]!.filename, "notes.md");
+
+	await client.close();
 });
 
 // Every audit of this server reached the same finding independently: a recall
@@ -2518,8 +2652,8 @@ test("withStoredTitles sends each title as given and with .md added", () => {
 });
 
 test("a title saved with .md is found by that same title", async () => {
-	// hydradb_ingest appends ".md" to every title, so "Plan.md" is stored as
-	// "Plan.md.md"; the query must reach that stored title from "Plan.md".
+	// New ingests keep an existing extension, while the query still searches the
+	// historical doubled form so documents stored before ENG-3327 remain findable.
 	const { hydra, calls } = mockHydra();
 	const client = await connect(hydra);
 
@@ -2534,8 +2668,9 @@ test("a title saved with .md is found by that same title", async () => {
 	// SAFETY: the query tool always sends titles as a string array.
 	const searched = calls.find((c) => c.method === "query")?.args.titles as string[];
 
-	assert.equal(storedTitle, "Plan.md.md");
+	assert.equal(storedTitle, "Plan.md");
 	assert.ok(searched.includes(storedTitle), `searched ${JSON.stringify(searched)}`);
+	assert.ok(searched.includes("Plan.md.md"), "historical doubled titles remain searchable");
 	await client.close();
 });
 
