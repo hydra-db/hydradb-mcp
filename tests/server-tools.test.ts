@@ -236,6 +236,35 @@ test("hydradb_ingest turns path forwards infer/title/is_markdown (no silent drop
 	await client.close();
 });
 
+test("hydradb_ingest turns path forwards metadata and observation_date", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	await client.callTool({
+		name: "hydradb_ingest",
+		arguments: {
+			turns: [{ user: "hi", assistant: "hello" }],
+			source_id: "s1",
+			metadata: { team: "infra" },
+			additional_metadata: { source: "support" },
+			custom_instructions: "Extract only commitments",
+			observation_date: "2026-03-14",
+		},
+	});
+
+	const ingest = calls.find((call) => call.method === "ingest");
+	assert.ok(ingest, "wrapper should have called context.ingest");
+
+	const item = z.array(z.record(z.unknown())).parse(JSON.parse(String(ingest.args.memories)))[0]!;
+
+	assert.deepEqual(item.metadata, { team: "infra" });
+	assert.deepEqual(item.additional_metadata, { source: "support" });
+	assert.equal(item.custom_instructions, "Extract only commitments");
+	assert.equal(item.observation_date, "2026-03-14");
+
+	await client.close();
+});
+
 test("hydradb_ingest rejects both text and turns rather than dropping one", async () => {
 	const { hydra, calls } = mockHydra();
 	const client = await connect(hydra);
@@ -575,6 +604,634 @@ test("hydradb_ingest stays quiet when everything succeeded", async () => {
 	);
 
 	assert.doesNotMatch(text, /Issues:/);
+});
+
+test("hydradb_ingest marks an all-failed response as an MCP error", async () => {
+	const { hydra } = mockHydra({
+		ingest: {
+			success: false,
+			successCount: 0,
+			failedCount: 1,
+			results: [{
+				id: "s-bad",
+				filename: "Rejected.md",
+				status: "failed",
+				error: "content exceeds maximum size",
+				errorCode: "TOO_LARGE",
+			}],
+		},
+	});
+
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_ingest",
+		arguments: { text: "some note" },
+	});
+
+	const text = z.array(z.object({ text: z.string() })).parse(result.content)[0]!.text;
+
+	assert.equal(result.isError, true);
+	assert.doesNotMatch(text, /Saved to Hydra DB/);
+	assert.match(text, /s-bad/);
+	assert.match(text, /content exceeds maximum size/);
+
+	await client.close();
+});
+
+test("hydradb_ingest returns accepted ids, rejected items, and stored titles", async () => {
+	const { hydra } = mockHydra({
+		ingest: {
+			success: false,
+			successCount: 1,
+			failedCount: 1,
+			results: [
+				{
+					id: "s-ok",
+					filename: "Accepted.md",
+					status: "completed",
+					error: "",
+					relationsError: "graph unavailable",
+				},
+				{
+					id: "s-bad",
+					filename: "Rejected.md",
+					status: "failed",
+					error: "bad content",
+					errorCode: "INVALID_CONTENT",
+				},
+			],
+		},
+	});
+
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_ingest",
+		arguments: { text: "some note" },
+	});
+
+	const output = z.object({
+		id: z.string().optional(),
+		stored_title: z.string().optional(),
+		accepted_ids: z.array(z.string()),
+		rejected_items: z.array(z.object({
+			id: z.string(),
+			stored_title: z.string().optional(),
+			error: z.string(),
+			error_code: z.string().optional(),
+		})),
+	}).parse(result.structuredContent);
+
+	assert.notEqual(result.isError, true);
+	assert.equal(output.id, "s-ok");
+	assert.equal(output.stored_title, "Accepted.md");
+	assert.deepEqual(output.accepted_ids, ["s-ok"]);
+	assert.deepEqual(output.rejected_items, [{
+		id: "s-bad",
+		stored_title: "Rejected.md",
+		error: "bad content",
+		error_code: "INVALID_CONTENT",
+	}]);
+
+	await client.close();
+});
+
+test("hydradb_ingest does not append a second markdown extension", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	await client.callTool({
+		name: "hydradb_ingest",
+		arguments: { kind: "knowledge", title: "notes.md", text: "body" },
+	});
+
+	const ingest = calls.find((call) => call.method === "ingest");
+	assert.ok(ingest, "wrapper should have called context.ingest");
+	const documents = z.array(z.object({ filename: z.string() })).parse(ingest.args.documents);
+
+	assert.equal(documents[0]!.filename, "notes.md");
+
+	await client.close();
+});
+
+test("hydradb_ingest forwards every knowledge document field", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	await client.callTool({
+		name: "hydradb_ingest",
+		arguments: {
+			kind: "knowledge",
+			text: "quarterly report",
+			title: "Q3.md",
+			source_id: "report-q3",
+			metadata: { department: "finance" },
+			additional_metadata: { author: "Ada" },
+			relations: { ids: ["budget-2026"], properties: { type: "supports" } },
+			infer: false,
+			evidence_kind: "record",
+			evidence_subject: "team:finance",
+		},
+	});
+
+	const call = calls.find((entry) => entry.method === "ingest");
+
+	const request = z.object({
+		type: z.literal("knowledge"),
+		upsert: z.literal("true"),
+		documentMetadata: z.string(),
+		documents: z.array(z.object({ filename: z.string() })),
+	}).parse(call?.args);
+
+	assert.equal(request.documents[0]?.filename, "Q3.md");
+	assert.deepEqual(JSON.parse(request.documentMetadata), [{
+		id: "report-q3",
+		metadata: { department: "finance" },
+		additional_metadata: { author: "Ada" },
+		relations: { ids: ["budget-2026"], properties: { type: "supports" } },
+		infer: false,
+		evidence_kind: "record",
+		evidence_subject: "team:finance",
+	}]);
+
+	await client.close();
+});
+
+test("hydradb_ingest batches memory items in one request", async () => {
+	const { hydra, calls } = mockHydra({
+		ingest: {
+			success: true,
+			successCount: 2,
+			failedCount: 1,
+			results: [
+				{ id: "m1", status: "queued" },
+				{ id: "m2", status: "failed", error: "bad item", errorCode: "INVALID" },
+				{ id: "m3", status: "queued", relationsError: "graph extraction failed" },
+			],
+		},
+	});
+
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_ingest",
+		arguments: {
+			kind: "memory",
+			custom_instructions: "Extract dates",
+			items: [
+				{ text: "one", source_id: "m1" },
+				{ turns: [{ user: "two", assistant: "reply" }], source_id: "m2" },
+				{
+					text: "three",
+					source_id: "m3",
+					custom_instructions: "Extract teams",
+					additional_metadata: { team: "infra" },
+				},
+			],
+		},
+	});
+
+	assert.notEqual(result.isError, true, "a partial batch is not an MCP error");
+	assert.equal(calls.filter((call) => call.method === "ingest").length, 1);
+
+	const request = z.object({ memories: z.string() }).parse(
+		calls.find((call) => call.method === "ingest")?.args,
+	);
+
+	const memories = z.array(z.object({
+		source_id: z.string(),
+		custom_instructions: z.string(),
+		additional_metadata: z.record(jsonValue).optional(),
+	})).parse(JSON.parse(request.memories));
+
+	assert.deepEqual(memories.map((item) => item.source_id), ["m1", "m2", "m3"]);
+	assert.deepEqual(
+		memories.map((item) => item.custom_instructions),
+		["Extract dates", "Extract dates", "Extract teams"],
+	);
+	assert.deepEqual(memories[2]?.additional_metadata, { team: "infra" });
+	assert.deepEqual(result.structuredContent?.items, [
+		{ index: 0, id: "m1", status: "queued", accepted: true },
+		{ index: 1, id: "m2", status: "failed", accepted: false, error: "bad item", error_code: "INVALID" },
+		{
+			index: 2,
+			id: "m3",
+			status: "queued",
+			accepted: true,
+			relations_error: "graph extraction failed",
+		},
+	]);
+
+	await client.close();
+});
+
+test("hydradb_ingest batches knowledge documents and keys their graphs by id", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	await client.callTool({
+		name: "hydradb_ingest",
+		arguments: {
+			kind: "knowledge",
+			items: [
+				{ text: "first document", title: "First", source_id: "k1" },
+				{
+					text: "Alice uses Postgres",
+					title: "Second.md",
+					source_id: "k2",
+					graph: {
+						entities: {
+							alice: { name: "Alice", type: "Person" },
+							postgres: { name: "Postgres", type: "Database" },
+						},
+						relations: [{ source: "alice", target: "postgres", predicate: "uses" }],
+					},
+				},
+			],
+		},
+	});
+
+	const request = z.object({
+		documents: z.array(z.object({ filename: z.string() })),
+		documentMetadata: z.string(),
+		graphPayload: z.string(),
+	}).parse(calls.find((call) => call.method === "ingest")?.args);
+
+	const metadata = z.array(z.object({ id: z.string() })).parse(JSON.parse(request.documentMetadata));
+	const graphPayload = z.record(jsonValue).parse(JSON.parse(request.graphPayload));
+
+	assert.deepEqual(request.documents.map((document) => document.filename), ["First.md", "Second.md"]);
+	assert.deepEqual(metadata.map((item) => item.id), ["k1", "k2"]);
+	assert.deepEqual(Object.keys(graphPayload), ["k2"]);
+	assert.equal(calls.filter((call) => call.method === "ingest").length, 1);
+
+	await client.close();
+});
+
+test("hydradb_ingest generates distinct ids for batch items without usable ids", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	await client.callTool({
+		name: "hydradb_ingest",
+		arguments: { items: [{ text: "one" }, { text: "two" }, { text: "three" }, { text: "four", source_id: "" }] },
+	});
+
+	const request = z.object({ memories: z.string() }).parse(
+		calls.find((call) => call.method === "ingest")?.args,
+	);
+
+	const ids = z.array(z.object({ source_id: z.string() }))
+		.parse(JSON.parse(request.memories))
+		.map((item) => item.source_id);
+
+	assert.equal(new Set(ids).size, 4);
+	assert.ok(ids.every((id) => id.startsWith("mcp-item-")));
+
+	await client.close();
+});
+
+test("hydradb_ingest rejects invalid batch shapes and limits", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	const cases = [
+		{ text: "single", items: [{ text: "batch" }] },
+		{ items: Array.from({ length: 101 }, (_, index) => ({ text: String(index) })) },
+		{ items: Array.from({ length: 5 }, () => ({ text: "é".repeat(900_000) })) },
+		{ text: "note", custom_instructions: "Extract dates", infer: false },
+		{ text: "note", custom_instructions: "x".repeat(4_001) },
+		{ text: "note", relations: { ids: ["source-1"] } },
+		{ turns: [{ user: "claim", assistant: "noted" }], evidence_kind: "record" },
+		{ items: [{ text: "claim", evidence_subject: "invoice-1" }] },
+		{ app_knowledge: [{ kind: "message", fields: { body: "x".repeat(8 * 1024 * 1024) } }] },
+		{
+			items: [{
+				text: "small",
+				graph: {
+					entities: { oversized: { name: "name", type: "Thing", identifier: "x".repeat(8 * 1024 * 1024) } },
+					relations: [],
+				},
+			}],
+		},
+	];
+
+	for (const [index, args] of cases.entries()) {
+		const result = await client.callTool({ name: "hydradb_ingest", arguments: args });
+
+		assert.equal(result.isError, true, `case ${index} must fail`);
+	}
+
+	assert.equal(calls.filter((call) => call.method === "ingest").length, 0);
+
+	await client.close();
+});
+
+test("hydradb_ingest marks an all-failed batch as an MCP error", async () => {
+	const { hydra } = mockHydra({
+		ingest: {
+			success: false,
+			successCount: 0,
+			failedCount: 2,
+			results: [
+				{ id: "m1", status: "failed", error: "bad one" },
+				{ id: "m2", status: "failed", error: "bad two" },
+			],
+		},
+	});
+
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_ingest",
+		arguments: { items: [{ text: "one", source_id: "m1" }, { text: "two", source_id: "m2" }] },
+	});
+
+	assert.equal(result.isError, true);
+	assert.deepEqual(
+		z.array(z.object({ accepted: z.boolean() }))
+			.parse(result.structuredContent?.items)
+			.map((item) => item.accepted),
+		[false, false],
+	);
+
+	await client.close();
+});
+
+test("hydradb_ingest reports count-only batch results as unknown, not rejected", async () => {
+	const { hydra } = mockHydra({
+		ingest: { success: true, successCount: 2, failedCount: 0 },
+	});
+
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_ingest",
+		arguments: { items: [{ text: "one", source_id: "m1" }, { text: "two", source_id: "m2" }] },
+	});
+
+	assert.ok(result.structuredContent, JSON.stringify(result));
+	assert.deepEqual(result.structuredContent.items, [
+		{ index: 0, id: "m1", status: "unknown", accepted: null },
+		{ index: 1, id: "m2", status: "unknown", accepted: null },
+	]);
+
+	await client.close();
+});
+
+test("hydradb_ingest redacts structured partial and all-failed diagnostics", async () => {
+	const credential = "hmat_9fJ2kL5mN8pQ1rS4tU7vW0xY3zA6bC";
+
+	for (const response of [
+		{
+			success: true,
+			successCount: 2,
+			failedCount: 1,
+			results: [
+				{ id: "m1", status: "queued" },
+				{ id: "m2", status: "failed", error: `Bearer ${credential}` },
+				{ id: "m3", status: "queued", relationsError: `graph echoed ${credential}` },
+			],
+		},
+		{
+			success: false,
+			successCount: 0,
+			failedCount: 1,
+			results: [{ id: "m1", status: "failed", error: `Bearer ${credential}` }],
+		},
+	]) {
+		const { hydra } = mockHydra({ ingest: response });
+		const client = await connect(hydra);
+
+		const result = await client.callTool({
+			name: "hydradb_ingest",
+			arguments: {
+				items: response.results.map((_, index) => ({ text: `item ${index}`, source_id: `m${index + 1}` })),
+			},
+		});
+
+		const output = JSON.stringify(result);
+
+		assert.doesNotMatch(output, new RegExp(credential));
+		assert.match(output, /\[redacted\]/);
+
+		await client.close();
+	}
+});
+
+test("hydradb_ingest sends all app knowledge kinds and ACL fields", async () => {
+	const kinds = ["email", "message", "ticket", "knowledge_base", "comment", "meeting", "custom"];
+
+	const { hydra, calls } = mockHydra({
+		ingest: {
+			success: true,
+			successCount: kinds.length,
+			failedCount: 0,
+			results: kinds.map((kind, index) => ({ id: `${kind}-${index}`, status: "queued" })),
+		},
+	});
+
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_ingest",
+		arguments: {
+			app_knowledge: kinds.map((kind, index) => ({
+				id: `${kind}-${index}`,
+				title: `Title ${index}`,
+				description: "Description",
+				url: `https://example.test/${index}`,
+				timestamp: "2026-10-28T20:00:00Z",
+				kind,
+				provider: "test",
+				external_id: String(index),
+				fields: { body: `Body ${index}` },
+				metadata: { index },
+				additional_metadata: { team: "infra" },
+				attachments: [{ url: "https://example.test/file" }],
+				relations: [{ ids: ["parent-1"] }],
+				acl: [" grace@acme.com "],
+			})),
+		},
+	});
+
+	assert.notEqual(result.isError, true);
+
+	const request = z.object({ type: z.literal("knowledge"), appKnowledge: z.string() }).parse(
+		calls.find((call) => call.method === "ingest")?.args,
+	);
+
+	const items = z.array(z.object({
+		kind: z.string(),
+		fields: z.object({ kind: z.string(), body: z.string() }),
+		acl: z.array(z.string()),
+	})).parse(JSON.parse(request.appKnowledge));
+
+	assert.deepEqual(items.map((item) => item.kind), kinds);
+	assert.ok(items.every((item) => item.fields.kind === item.kind));
+	assert.deepEqual(items[0]?.acl, ["grace@acme.com"]);
+
+	await client.close();
+});
+
+test("hydradb_ingest validates app knowledge ACLs and input exclusivity", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+	const appItem = { kind: "message", fields: { body: "hello" } };
+
+	const cases = [
+		{ app_knowledge: [{ ...appItem, acl: [] }] },
+		{ app_knowledge: [{ ...appItem, acl: [""] }] },
+		{ app_knowledge: [{ ...appItem, acl: ["x".repeat(257)] }] },
+		{ app_knowledge: [{ ...appItem, acl: Array.from({ length: 1_001 }, (_, index) => `user-${index}`) }] },
+		{ app_knowledge: [{ ...appItem, kind: "contact" }] },
+		{ app_knowledge: [appItem], text: "also a document" },
+		{ app_knowledge: [appItem], kind: "memory" },
+		{ app_knowledge: [{ ...appItem, id: "duplicate" }, { ...appItem, id: "duplicate" }] },
+		{ app_knowledge: [{ ...appItem, database: "other" }] },
+	];
+
+	for (const [index, args] of cases.entries()) {
+		const result = await client.callTool({ name: "hydradb_ingest", arguments: args });
+
+		assert.equal(result.isError, true, `case ${index} must fail`);
+	}
+
+	assert.equal(calls.filter((call) => call.method === "ingest").length, 0);
+
+	await client.close();
+});
+
+test("hydradb_ingest warns when app knowledge is unrestricted or public", async () => {
+	const { hydra } = mockHydra({
+		ingest: {
+			success: true,
+			successCount: 2,
+			failedCount: 0,
+			results: [{ id: "open-1", status: "queued" }, { id: "public-1", status: "queued" }],
+		},
+	});
+
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_ingest",
+		arguments: {
+			app_knowledge: [
+				{ id: "open-1", kind: "ticket", fields: { title: "Open" } },
+				{
+					id: "public-1",
+					kind: "message",
+					fields: { body: "Public" },
+					acl: ["__public__", "grace@acme.com"],
+				},
+			],
+		},
+	});
+
+	const text = z.array(z.object({ text: z.string() })).parse(result.content)[0]!.text;
+
+	assert.match(text, /without an access list.*every caller/is);
+	assert.match(text, /__public__.*other principals are dropped/is);
+
+	await client.close();
+});
+
+test("hydradb_ingest does not claim that rejected app knowledge was stored", async () => {
+	const { hydra } = mockHydra({
+		ingest: {
+			success: false,
+			successCount: 0,
+			failedCount: 1,
+			results: [{ id: "rejected-1", status: "failed", error: "invalid item" }],
+		},
+	});
+
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_ingest",
+		arguments: {
+			app_knowledge: [{ id: "rejected-1", kind: "ticket", fields: { title: "Rejected" } }],
+		},
+	});
+
+	const text = z.array(z.object({ text: z.string() })).parse(result.content)[0]!.text;
+
+	assert.equal(result.isError, true);
+	assert.doesNotMatch(text, /stored without an access list/);
+
+	await client.close();
+});
+
+test("hydradb_ingest surfaces app knowledge ACL and unified-database errors", async () => {
+	for (const testCase of [
+		{
+			code: "INVALID_ACL",
+			message: "app_knowledge item acl: malformed principal bob",
+			expected: /malformed principal bob/,
+		},
+		{
+			code: "CORPUS_TYPE_UNSUPPORTED",
+			message: "app_knowledge is not supported for this corpus",
+			expected: /works only on split databases.*unified/is,
+		},
+	]) {
+		const { hydra } = mockHydra({
+			ingest: () => Promise.reject(new HydraDBError({
+				statusCode: 400,
+				body: { error: { code: testCase.code, message: testCase.message } },
+			})),
+		});
+
+		const client = await connect(hydra);
+
+		const result = await client.callTool({
+			name: "hydradb_ingest",
+			arguments: {
+				app_knowledge: [{ kind: "message", fields: { body: "hello" }, acl: ["bob"] }],
+			},
+		});
+
+		const text = z.array(z.object({ text: z.string() })).parse(result.content)[0]!.text;
+
+		assert.equal(result.isError, true);
+		assert.match(text, testCase.expected);
+
+		await client.close();
+	}
+});
+
+test("hydradb_ingest generates an id for a graph and uses it as the payload key", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	await client.callTool({
+		name: "hydradb_ingest",
+		arguments: {
+			text: "Alice uses Postgres",
+			graph: {
+				entities: {
+					alice: { name: "Alice", type: "Person" },
+					postgres: { name: "Postgres", type: "Database" },
+				},
+				relations: [{ source: "alice", target: "postgres", predicate: "uses" }],
+			},
+		},
+	});
+
+	const request = z.object({ memories: z.string(), graphPayload: z.string() }).parse(
+		calls.find((call) => call.method === "ingest")?.args,
+	);
+
+	const memory = z.array(z.object({ source_id: z.string() })).parse(JSON.parse(request.memories))[0]!;
+	const graphPayload = z.record(jsonValue).parse(JSON.parse(request.graphPayload));
+
+	assert.match(memory.source_id, /^mcp-/);
+	assert.deepEqual(Object.keys(graphPayload), [memory.source_id]);
+
+	await client.close();
 });
 
 // Every audit of this server reached the same finding independently: a recall
@@ -1126,6 +1783,11 @@ test("hydradb_ingest still defaults to memory", async () => {
 	const call = calls.find((c) => c.method === "ingest");
 	assert.equal(call?.args.type, "memory");
 	assert.ok(call?.args.memories, "memory must still travel as a memory item");
+
+	const item = z.array(z.object({ custom_instructions: z.string() }))
+		.parse(JSON.parse(String(call?.args.memories)))[0]!;
+
+	assert.match(item.custom_instructions, /user preferences/);
 
 	await client.close();
 });
@@ -2518,8 +3180,8 @@ test("withStoredTitles sends each title as given and with .md added", () => {
 });
 
 test("a title saved with .md is found by that same title", async () => {
-	// hydradb_ingest appends ".md" to every title, so "Plan.md" is stored as
-	// "Plan.md.md"; the query must reach that stored title from "Plan.md".
+	// New ingests keep an existing extension, while the query still searches the
+	// historical doubled form so documents stored before ENG-3327 remain findable.
 	const { hydra, calls } = mockHydra();
 	const client = await connect(hydra);
 
@@ -2534,8 +3196,9 @@ test("a title saved with .md is found by that same title", async () => {
 	// SAFETY: the query tool always sends titles as a string array.
 	const searched = calls.find((c) => c.method === "query")?.args.titles as string[];
 
-	assert.equal(storedTitle, "Plan.md.md");
+	assert.equal(storedTitle, "Plan.md");
 	assert.ok(searched.includes(storedTitle), `searched ${JSON.stringify(searched)}`);
+	assert.ok(searched.includes("Plan.md.md"), "historical doubled titles remain searchable");
 	await client.close();
 });
 
@@ -2858,19 +3521,21 @@ test("observation_date advertises its format in the input schema", async () => {
 	assert.match(String(observationDate.description), /YYYY-MM-DD/);
 });
 
-// They belong to the memory item shape, so the knowledge branch must reject
-// them rather than drop them — same rule as every other memory-only field.
-test("knowledge ingest rejects metadata rather than dropping it", async () => {
+// Observation dates belong to the memory item shape, so the knowledge branch
+// must reject one rather than drop it.
+test("knowledge ingest rejects observation_date rather than dropping it", async () => {
 	const { hydra } = mockHydra();
 	const client = await connect(hydra);
 
 	const result = await client.callTool({
 		name: "hydradb_ingest",
-		arguments: { text: "doc body", kind: "knowledge", metadata: { a: 1 } },
+		arguments: { text: "doc body", kind: "knowledge", observation_date: "2026-10-28" },
 	});
 
 	assert.equal(result.isError, true);
-	assert.match((result.content as { text: string }[])[0]!.text, /metadata/);
+	const content = z.array(z.object({ text: z.string() })).parse(result.content);
+
+	assert.match(content[0]!.text, /observation_date/);
 	await client.close();
 });
 

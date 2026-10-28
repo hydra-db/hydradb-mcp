@@ -19,6 +19,7 @@ import { HydraDBClient, HydraDBEnvironment, HydraDBError, serialization } from "
 import type { HydraDB as SDK } from "@hydradb/sdk";
 import { z } from "zod";
 
+import type { JsonValue } from "../adapters.js";
 import { unwrap } from "./envelope.js";
 import { HydraWrapperError, scrub, translateError } from "./errors.js";
 import { type GraphConfig, GraphResource } from "./graph.js";
@@ -277,8 +278,53 @@ export interface ConversationTurn {
 	assistant: string;
 }
 
-export interface IngestParams {
-	kind: ContextKind;
+export interface IngestGraphEntity {
+	name: string;
+	type: string;
+	namespace?: string;
+	identifier?: string;
+}
+
+export interface IngestGraphRelation {
+	source: string;
+	target: string;
+	predicate: string;
+	context?: string;
+	temporal_details?: JsonValue;
+}
+
+export interface IngestGraph {
+	entities: Record<string, IngestGraphEntity>;
+	relations: IngestGraphRelation[];
+}
+
+export type AppKnowledgeKind =
+	| "email"
+	| "message"
+	| "ticket"
+	| "knowledge_base"
+	| "comment"
+	| "meeting"
+	| "custom";
+
+export interface AppKnowledgeItem {
+	id?: string;
+	title?: string;
+	description?: string;
+	url?: string;
+	timestamp?: string;
+	kind: AppKnowledgeKind;
+	provider?: string;
+	external_id?: string;
+	fields: Record<string, JsonValue>;
+	metadata?: Record<string, JsonValue>;
+	additional_metadata?: Record<string, JsonValue>;
+	attachments?: Array<Record<string, JsonValue>>;
+	relations?: { ids: string[]; properties?: Record<string, JsonValue> } | Array<Record<string, JsonValue>>;
+	acl?: string[];
+}
+
+export interface IngestItem {
 	/** Free text to ingest (memory note or knowledge document body). */
 	text?: string;
 	/** Conversation turns to ingest as a memory. */
@@ -299,16 +345,47 @@ export interface IngestParams {
 	 * generated SDK request type, which is why the wrapper carries it explicitly
 	 * inside the memory item rather than as a typed field.
 	 */
-	metadata?: Record<string, unknown>;
+	metadata?: Record<string, JsonValue>;
 	/** Document-level metadata, matchable via `additional_metadata`. */
-	additionalMetadata?: Record<string, unknown>;
+	additionalMetadata?: Record<string, JsonValue>;
+	/** Explicit forceful relationships attached to this document. */
+	relations?: { ids: string[]; properties?: Record<string, JsonValue> };
+	/** Caller-declared provenance class for this document. */
+	evidenceKind?: "assertion" | "record" | "said" | "done" | "third_party" | "inferred";
+	/** Caller-stable handle for the entity this document describes. */
+	evidenceSubject?: string;
 	/** When the fact was true, as opposed to when it was stored (RFC3339 date). */
 	observationDate?: string;
 	/** Filename to attach when ingesting knowledge text as a document. */
 	filename?: string;
+	/** Caller-supplied entities and relations for this item. */
+	graph?: IngestGraph;
+}
+
+export interface IngestParams extends IngestItem {
+	kind: ContextKind;
+	/** Several same-kind items to send in one API request. */
+	items?: IngestItem[];
+	/** Structured app records such as messages, email, tickets, and meetings. */
+	appKnowledge?: AppKnowledgeItem[];
+	upsert?: boolean;
 	collection?: string;
 	/** Per-call database override. */
 	database?: string;
+}
+
+interface MemoryWireItem {
+	user_assistant_pairs?: ConversationTurn[];
+	text?: string;
+	infer: boolean;
+	is_markdown: boolean;
+	custom_instructions?: string;
+	source_id?: string;
+	title?: string;
+	user_name?: string;
+	metadata?: Record<string, JsonValue>;
+	additional_metadata?: Record<string, JsonValue>;
+	observation_date?: string;
 }
 
 export interface ListParams {
@@ -867,81 +944,193 @@ export class ContextResource extends Resource {
 			request.upsert = String(params.upsert);
 		}
 
+		const flatItemFields = [
+			params.text,
+			params.pairs,
+			params.title,
+			params.sourceId,
+			params.userName,
+			params.infer,
+			params.isMarkdown,
+			params.customInstructions,
+			params.metadata,
+			params.additionalMetadata,
+			params.relations,
+			params.evidenceKind,
+			params.evidenceSubject,
+			params.observationDate,
+			params.filename,
+			params.graph,
+		];
+
+		const hasFlatItemFields = flatItemFields.some((value) => value != null);
+
+		if (params.appKnowledge != null) {
+			if (params.kind !== "knowledge") {
+				throw new Error("appKnowledge requires kind knowledge.");
+			}
+
+			if (params.appKnowledge.length === 0) {
+				throw new Error("appKnowledge requires at least one item.");
+			}
+
+			if (params.items != null || hasFlatItemFields) {
+				throw new Error("appKnowledge cannot be combined with documents, memories, or items.");
+			}
+
+			const appItems = params.appKnowledge.map((item) => {
+				const fieldKind = item.fields.kind;
+
+				if (fieldKind != null && fieldKind !== item.kind) {
+					throw new Error(
+						`appKnowledge fields.kind must equal kind ${item.kind}; received ${String(fieldKind)}.`,
+					);
+				}
+
+				return {
+					...item,
+					id: item.id ?? "",
+					fields: { ...item.fields, kind: item.kind },
+				};
+			});
+
+			request.appKnowledge = JSON.stringify(appItems);
+
+			return this.call("/context/ingest", () =>
+				this.sdk.context.ingest(request, req(opts)),
+			);
+		}
+
+		if (params.items != null && hasFlatItemFields) {
+			throw new Error("Ingestion accepts items or flat item fields, not both.");
+		}
+
+		const items: IngestItem[] = params.items ?? [params];
+
+		if (items.length === 0) throw new Error("Ingestion requires at least one item.");
+
+		const graphPayload: Record<string, IngestGraph> = Object.create(null);
+
 		if (params.kind === "memory") {
-			const infer = params.infer ?? true;
-			const item: Record<string, unknown> = {};
+			const memories = items.map((input): MemoryWireItem => {
+				const unsupported = (
+					[
+						["relations", input.relations],
+						["evidenceKind", input.evidenceKind],
+						["evidenceSubject", input.evidenceSubject],
+					] as const
+				).flatMap(([name, value]) => value == null ? [] : [name]);
 
-			if (params.pairs != null) item.user_assistant_pairs = params.pairs;
+				if (unsupported.length > 0) {
+					throw new Error(
+						`Memory ingestion does not support ${unsupported.join(", ")} — ` +
+						"those apply to knowledge ingestion only. Pass kind \"knowledge\" instead, " +
+						"or drop them.",
+					);
+				}
 
-			if (params.text != null) item.text = params.text;
-			item.infer = infer;
-			item.is_markdown = params.isMarkdown ?? false;
+				const infer = input.infer ?? true;
 
-			// Preserve the v1 omission behaviour: custom_instructions is only
-			// attached when inference is enabled.
-			if (infer && params.customInstructions != null) {
-				item.custom_instructions = params.customInstructions;
-			}
+				if (!infer && input.customInstructions != null) {
+					throw new Error("customInstructions cannot be used when infer is false.");
+				}
 
-			if (params.sourceId != null) item.source_id = params.sourceId;
+				const item: MemoryWireItem = {
+					infer,
+					is_markdown: input.isMarkdown ?? false,
+				};
 
-			if (params.title != null) item.title = params.title;
+				if (input.pairs != null) item.user_assistant_pairs = input.pairs;
 
-			if (params.userName != null) item.user_name = params.userName;
+				if (input.text != null) item.text = input.text;
 
-			if (params.metadata != null) item.metadata = params.metadata;
+				if (input.customInstructions != null) item.custom_instructions = input.customInstructions;
 
-			if (params.additionalMetadata != null) {
-				item.additional_metadata = params.additionalMetadata;
-			}
+				if (input.sourceId != null) item.source_id = input.sourceId;
 
-			if (params.observationDate != null) {
-				item.observation_date = params.observationDate;
-			}
+				if (input.title != null) item.title = input.title;
 
-			request.memories = JSON.stringify([item]);
+				if (input.userName != null) item.user_name = input.userName;
+
+				if (input.metadata != null) item.metadata = input.metadata;
+
+				if (input.additionalMetadata != null) item.additional_metadata = input.additionalMetadata;
+
+				if (input.observationDate != null) item.observation_date = input.observationDate;
+
+				if (input.graph != null) {
+					if (input.sourceId == null) throw new Error("A memory graph requires sourceId.");
+
+					graphPayload[input.sourceId] = input.graph;
+				}
+
+				return item;
+			});
+
+			request.memories = JSON.stringify(memories);
 		} else {
-			// The knowledge path can only carry the document itself and its
-			// filename. Everything below belongs to the memory item shape and has
-			// nowhere to go here — so reject rather than accept and discard. A
-			// caller that sets `infer: true` on a knowledge write and is answered
-			// "success: 1, failed: 0" has been told its instruction was honoured
-			// when it was dropped on the floor.
-			const unsupported = (
-				[
-					["pairs", params.pairs],
-					["sourceId", params.sourceId],
-					["infer", params.infer],
-					["isMarkdown", params.isMarkdown],
-					["customInstructions", params.customInstructions],
-					["userName", params.userName],
-					["metadata", params.metadata],
-					["additionalMetadata", params.additionalMetadata],
-					["observationDate", params.observationDate],
-				] as const
-			)
-				.filter(([, value]) => value != null)
-				.map(([name]) => name);
+			const documentMetadataItems: Array<Record<string, JsonValue>> = [];
 
-			if (unsupported.length > 0) {
-				throw new Error(
-					`Knowledge ingestion does not support ${unsupported.join(", ")} — ` +
-					`those apply to memory ingestion only. Pass kind "memory" instead, ` +
-					`or drop them.`,
-				);
-			}
+			request.documents = items.map((input) => {
+				const unsupported = (
+					[
+						["pairs", input.pairs],
+						["isMarkdown", input.isMarkdown],
+						["customInstructions", input.customInstructions],
+						["userName", input.userName],
+						["observationDate", input.observationDate],
+					] as const
+				).flatMap(([name, value]) => value == null ? [] : [name]);
 
-			// Knowledge is multipart with the document as a file part — never the
-			// `app_knowledge` JSON field (guards the DX-G-002 class of bug).
-			if (params.text != null) {
-				request.documents = [{
-					data: Buffer.from(params.text, "utf-8"),
-					// The title rides on the filename; the server's
-					// document_metadata does not accept a `title` key.
-					filename: params.filename ?? `${params.title ?? "document"}.md`,
+				if (unsupported.length > 0) {
+					throw new Error(
+						`Knowledge ingestion does not support ${unsupported.join(", ")} — ` +
+						`those apply to memory ingestion only. Pass kind "memory" instead, ` +
+						`or drop them.`,
+					);
+				}
+
+				if (input.text == null) throw new Error("A knowledge item requires text.");
+
+				const title = input.title ?? "document";
+				const filename = input.filename ?? (/\.md$/i.test(title) ? title : `${title}.md`);
+				const metadataItem: Record<string, JsonValue> = {};
+
+				if (input.sourceId != null) metadataItem.id = input.sourceId;
+
+				if (input.metadata != null) metadataItem.metadata = input.metadata;
+
+				if (input.additionalMetadata != null) {
+					metadataItem.additional_metadata = input.additionalMetadata;
+				}
+
+				if (input.relations != null) metadataItem.relations = input.relations;
+
+				if (input.infer != null) metadataItem.infer = input.infer;
+
+				if (input.evidenceKind != null) metadataItem.evidence_kind = input.evidenceKind;
+
+				if (input.evidenceSubject != null) metadataItem.evidence_subject = input.evidenceSubject;
+
+				documentMetadataItems.push(metadataItem);
+
+				if (input.graph != null) {
+					if (input.sourceId == null) throw new Error("A knowledge graph requires sourceId.");
+
+					graphPayload[input.sourceId] = input.graph;
+				}
+
+				return {
+					data: Buffer.from(input.text, "utf-8"),
+					filename,
 					contentType: "text/markdown",
-				}];
-			}
+				};
+			});
+			request.documentMetadata = JSON.stringify(documentMetadataItems);
+		}
+
+		if (Object.keys(graphPayload).length > 0) {
+			request.graphPayload = JSON.stringify(graphPayload);
 		}
 
 		return this.call("/context/ingest", () =>

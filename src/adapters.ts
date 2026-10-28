@@ -26,9 +26,12 @@ import type { AddMemoryResponse, MemoryResultItem } from "./types.js";
 function toMemoryResultItem(
 	item: SDK.IngestionV2IngestResultItem,
 ): MemoryResultItem {
+	const storedTitle = item.filename ?? item.title ?? null;
+
 	return {
 		source_id: item.id ?? "",
-		title: item.filename ?? null,
+		title: storedTitle,
+		stored_title: storedTitle,
 		status: item.status ?? "unknown",
 		// The server sends "" rather than omitting these on success; normalise to
 		// null so callers can test presence instead of emptiness.

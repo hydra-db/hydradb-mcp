@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — structured app knowledge with access lists
+
+`hydradb_ingest` now accepts structured email, message, ticket, knowledge-base,
+comment, meeting, and custom records through `app_knowledge` on split databases.
+Each record preserves its provider fields, attachments, relations, metadata, and
+access list. The tool documents private, public, unrestricted, and re-ingest ACL
+semantics and reports ambiguous public access.
+
+### Added — batch ingest and caller-controlled extraction
+
+`hydradb_ingest` now accepts up to 100 same-kind items in one API request.
+Memory items accept caller extraction instructions and additional metadata.
+Memory and knowledge items accept a caller-supplied graph keyed by the item id.
+The tool generates missing batch ids and reports each item's status.
+
+### Added — complete knowledge document metadata
+
+`hydradb_ingest` knowledge writes now preserve caller ids, metadata, additional
+metadata, explicit relations, inference control, evidence kind, and evidence
+subject in the API's per-document metadata.
+
+### Fixed — ingest outcomes and supported fields are preserved
+
+`hydradb_ingest` now reports accepted ids, rejected items, and stored titles.
+An all-failed ingest is an MCP error, while partial success keeps the stored
+items available to the caller. Conversation ingest now forwards `metadata` and
+`observation_date`. Knowledge titles that already end in `.md` no longer get a
+second extension; queries still search the historical doubled form.
+
 ## [1.6.0] - 2026-10-28
 
 ### Fixed — `hydradb_query` title filter missed documents saved through `hydradb_ingest`

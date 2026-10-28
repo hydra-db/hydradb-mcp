@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { type HydraDBClient, HydraDBError } from "@hydradb/sdk";
+import { z } from "zod";
 
 import {
 	DEFAULT_MAX_RETRIES,
@@ -11,6 +12,7 @@ import {
 	translateError,
 	unwrap,
 } from "../src/hydra/index.js";
+import type { IngestGraph } from "../src/hydra/index.js";
 import { mcpUser } from "../src/hydra/transport.js";
 import { SERVER_VERSION } from "../src/version.js";
 
@@ -103,8 +105,6 @@ function ingestSdk(): { sdk: HydraDBClient; calls: unknown[] } {
 test("knowledge ingest rejects memory-only params instead of dropping them", async () => {
 	for (const [name, extra] of [
 		["pairs", { pairs: [{ user: "hi", assistant: "hello" }] }],
-		["sourceId", { sourceId: "s1" }],
-		["infer", { infer: true }],
 		["isMarkdown", { isMarkdown: true }],
 		["customInstructions", { customInstructions: "focus on X" }],
 		["userName", { userName: "Ada" }],
@@ -136,6 +136,208 @@ test("knowledge ingest still accepts the params it can carry", async () => {
 	});
 
 	assert.equal(calls.length, 1, "knowledge ingest should still reach the SDK");
+});
+
+test("knowledge ingest serializes every supported per-document field", async () => {
+	const { sdk, calls } = ingestSdk();
+	const hydra = new HydraDB({ token: "t", database: "db_test" }, sdk);
+
+	await hydra.context.ingest({
+		kind: "knowledge",
+		text: "quarterly report body",
+		title: "Q3",
+		sourceId: "report-q3",
+		metadata: { department: "finance" },
+		additionalMetadata: { author: "Ada" },
+		relations: { ids: ["budget-2026"], properties: { type: "supports" } },
+		infer: false,
+		evidenceKind: "record",
+		evidenceSubject: "team:finance",
+	});
+
+	const request = z.object({ documentMetadata: z.string() }).parse(calls[0]);
+
+	assert.deepEqual(JSON.parse(request.documentMetadata), [{
+		id: "report-q3",
+		metadata: { department: "finance" },
+		additional_metadata: { author: "Ada" },
+		relations: { ids: ["budget-2026"], properties: { type: "supports" } },
+		infer: false,
+		evidence_kind: "record",
+		evidence_subject: "team:finance",
+	}]);
+});
+
+test("memory ingest sends caller instructions, additional metadata, and graph", async () => {
+	const { sdk, calls } = ingestSdk();
+	const hydra = new HydraDB({ token: "t", database: "db_test" }, sdk);
+
+	await hydra.context.ingest({
+		kind: "memory",
+		text: "Deploy on Friday",
+		sourceId: "memory-1",
+		customInstructions: "Extract only deadline dates",
+		additionalMetadata: { team: "infra" },
+		graph: {
+			entities: { alice: { name: "Alice", type: "Person" } },
+			relations: [],
+		},
+	});
+
+	const request = z.object({ memories: z.string(), graphPayload: z.string() }).parse(calls[0]);
+	const memories = JSON.parse(request.memories);
+
+	assert.deepEqual(memories, [{
+		text: "Deploy on Friday",
+		source_id: "memory-1",
+		infer: true,
+		is_markdown: false,
+		custom_instructions: "Extract only deadline dates",
+		additional_metadata: { team: "infra" },
+	}]);
+	assert.deepEqual(JSON.parse(request.graphPayload), {
+		"memory-1": {
+			entities: { alice: { name: "Alice", type: "Person" } },
+			relations: [],
+		},
+	});
+});
+
+test("memory ingest preserves a graph keyed by the __proto__ source id", async () => {
+	const { sdk, calls } = ingestSdk();
+	const hydra = new HydraDB({ token: "t", database: "db_test" }, sdk);
+
+	await hydra.context.ingest({
+		kind: "memory",
+		text: "special id",
+		sourceId: "__proto__",
+		graph: {
+			entities: { thing: { name: "Thing", type: "Object" } },
+			relations: [],
+		},
+	});
+
+	const request = z.object({ graphPayload: z.string() }).parse(calls[0]);
+	// SAFETY: graphPayload is JSON encoded by ContextResource from IngestGraph values.
+	const graphPayload = JSON.parse(request.graphPayload) as { "__proto__"?: IngestGraph };
+
+	assert.deepEqual(Object.keys(graphPayload), ["__proto__"]);
+});
+
+test("memory ingest rejects knowledge-only provenance fields", async () => {
+	for (const item of [
+		{ text: "claim", relations: { ids: ["source-1"] } },
+		{ pairs: [{ user: "claim", assistant: "noted" }], evidenceKind: "third_party" },
+		{ text: "claim", evidenceSubject: "invoice-1" },
+	] as const) {
+		const { sdk, calls } = ingestSdk();
+		const hydra = new HydraDB({ token: "t", database: "db_test" }, sdk);
+
+		await assert.rejects(
+			hydra.context.ingest({ kind: "memory", ...item }),
+			/Memory ingestion does not support/,
+		);
+		assert.equal(calls.length, 0);
+	}
+});
+
+test("memory ingest batches items into one SDK request", async () => {
+	const { sdk, calls } = ingestSdk();
+	const hydra = new HydraDB({ token: "t", database: "db_test" }, sdk);
+
+	await hydra.context.ingest({
+		kind: "memory",
+		items: [
+			{ text: "one", sourceId: "m1" },
+			{ pairs: [{ user: "two", assistant: "reply" }], sourceId: "m2" },
+			{ text: "three", sourceId: "m3" },
+		],
+	});
+
+	assert.equal(calls.length, 1);
+	const request = z.object({ memories: z.string() }).parse(calls[0]);
+	const memories = z.array(z.object({ source_id: z.string() })).parse(JSON.parse(request.memories));
+
+	assert.deepEqual(memories.map((item) => item.source_id), ["m1", "m2", "m3"]);
+});
+
+test("caller instructions with infer false are rejected", async () => {
+	const { sdk, calls } = ingestSdk();
+	const hydra = new HydraDB({ token: "t", database: "db_test" }, sdk);
+
+	await assert.rejects(
+		() => hydra.context.ingest({
+			kind: "memory",
+			text: "note",
+			infer: false,
+			customInstructions: "Extract dates",
+		}),
+		/customInstructions.*infer is false/i,
+	);
+	assert.equal(calls.length, 0);
+});
+
+test("app knowledge reaches the SDK with its ACL and normalized fields", async () => {
+	const { sdk, calls } = ingestSdk();
+	const hydra = new HydraDB({ token: "t", database: "db_test" }, sdk);
+
+	await hydra.context.ingest({
+		kind: "knowledge",
+		appKnowledge: [{
+			id: "slack-C1-1",
+			title: "Comp bands",
+			kind: "message",
+			provider: "slack",
+			external_id: "1.1",
+			fields: { body: "Q3 bands" },
+			acl: ["grace@acme.com", "group:slack:C1"],
+		}],
+	});
+
+	const request = z.object({
+		type: z.literal("knowledge"),
+		appKnowledge: z.string(),
+		documents: z.undefined().optional(),
+	}).parse(calls[0]);
+
+	const items = z.array(z.object({
+		id: z.string(),
+		kind: z.literal("message"),
+		fields: z.object({ kind: z.literal("message"), body: z.string() }),
+		acl: z.array(z.string()),
+	})).parse(JSON.parse(request.appKnowledge));
+
+	assert.deepEqual(items[0]?.acl, ["grace@acme.com", "group:slack:C1"]);
+	assert.equal(items[0]?.fields.kind, "message");
+});
+
+test("app knowledge rejects a fields.kind mismatch before the SDK call", async () => {
+	const { sdk, calls } = ingestSdk();
+	const hydra = new HydraDB({ token: "t", database: "db_test" }, sdk);
+
+	await assert.rejects(
+		() => hydra.context.ingest({
+			kind: "knowledge",
+			appKnowledge: [{ kind: "ticket", fields: { kind: "message", title: "AUTH-1" } }],
+		}),
+		/fields\.kind.*ticket/i,
+	);
+	assert.equal(calls.length, 0);
+});
+
+test("app knowledge sends an empty id when the caller omits it", async () => {
+	const { sdk, calls } = ingestSdk();
+	const hydra = new HydraDB({ token: "t", database: "db_test" }, sdk);
+
+	await hydra.context.ingest({
+		kind: "knowledge",
+		appKnowledge: [{ kind: "ticket", fields: { title: "AUTH-1" } }],
+	});
+
+	const request = z.object({ appKnowledge: z.string() }).parse(calls[0]);
+	const items = z.array(z.object({ id: z.string() })).parse(JSON.parse(request.appKnowledge));
+
+	assert.equal(items[0]?.id, "");
 });
 
 test("memory ingest is unaffected by the knowledge guard", async () => {
