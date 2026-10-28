@@ -178,9 +178,10 @@ export async function readLocal(path: string, filename: string | undefined, sign
 
 		if (info.size === 0) throw new Error(`"${path}" is empty.`);
 
-		// Read at most one byte past the limit, so a file that grows while it
-		// is read is refused rather than held whole in memory.
-		const buffer = Buffer.alloc(Math.min(info.size, MAX_FILE_BYTES) + 1);
+		// Read one byte more than the size the check saw. Any other count means
+		// the file changed between the check and the read: refuse it rather
+		// than upload part of it, or hold more than the limit in memory.
+		const buffer = Buffer.alloc(info.size + 1);
 		let filled = 0;
 
 		while (filled < buffer.length) {
@@ -193,9 +194,9 @@ export async function readLocal(path: string, filename: string | undefined, sign
 			filled += bytesRead;
 		}
 
-		if (filled > MAX_FILE_BYTES) throw tooBig(filled);
-
-		if (filled === 0) throw new Error(`"${path}" is empty.`);
+		if (filled !== info.size) {
+			throw new Error(`"${path}" changed while it was being read. Send it again once it is complete.`);
+		}
 
 		return { data: buffer.subarray(0, filled), filename: name, contentType };
 	} finally {

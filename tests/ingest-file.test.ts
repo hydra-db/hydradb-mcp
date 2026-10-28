@@ -255,7 +255,7 @@ test("a title becomes the uploaded filename, keeping the extension", async (t) =
 	}
 });
 
-test("a local file that grows past the limit while read is refused", async (t) => {
+test("a local file that changes while it is read is refused, never sent in part", async (t) => {
 	const dir = await mkdtemp(join(tmpdir(), "hydradb-mcp-"));
 	const path = join(dir, "growing.pdf");
 
@@ -264,11 +264,11 @@ test("a local file that grows past the limit while read is refused", async (t) =
 
 	const read = readLocal(path, undefined, undefined);
 
-	// Grown after the size check, before the read: the read is bounded anyway.
-	await truncate(path, MAX_FILE_BYTES + 10);
+	// Grows after the read starts; depending on timing, before or after the size check.
+	await truncate(path, 2 * 1024 * 1024);
 
 	await read.then(
-		(file) => assert.ok(file.data.length <= MAX_FILE_BYTES, "never more than the limit"),
-		(err: Error) => assert.match(err.message, /accepts files up to 50\.0 MB/),
+		(file) => assert.ok(file.data.length === 8 || file.data.length === 2 * 1024 * 1024, "a whole file, either version"),
+		(err: Error) => assert.match(err.message, /changed while it was being read/),
 	);
 });
