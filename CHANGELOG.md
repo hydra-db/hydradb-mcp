@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security — tool errors no longer leak API key secrets or OAuth tokens
+
+Error text is scrubbed of credentials before the model sees it, but the scrub
+stopped at the `.` in a HydraDB key (`sk_<env>_<id>.<secret>`), so the secret
+half survived, and it did not know OAuth tokens (`hmat_` / `hmrt_`) at all. Now:
+
+- Full keys are removed, secret half included, however short the id.
+- OAuth access and refresh tokens, and credentials in a quoted query string, are removed.
+- The current connection's own key or token is removed from every tool error,
+  whatever its format, including the reason in a refused delete.
+- Network failures that quote the request are scrubbed too.
+- Server messages inside results that are not errors (a partly failed ingest,
+  a failed document's status) are scrubbed the same way.
+- The connection's credential is removed before an error body is cut to length,
+  so a credential crossing the cut leaves no fragment behind.
+
 ## [1.5.1] - 2026-09-25
 
 ### Added — `hydradb_query` shows a named ticket's links
