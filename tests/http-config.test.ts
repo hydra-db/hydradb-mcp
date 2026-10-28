@@ -42,7 +42,9 @@ test("resolveHttpServerConfig reads PORT, BIND_ADDRESS and the allowlists", () =
 test("complete OAuth config rejects unsupported HYDRADB_MCP_PUBLIC_URL layouts", () => {
 	for (const [url, reason] of [
 		["https://mcp.test/path?tenant=a", /query string/],
+		["https://mcp.test/path?", /query string/],
 		["https://mcp.test/path#fragment", /fragment/],
+		["https://mcp.test/path#", /fragment/],
 		["https://user@mcp.test/path", /credentials/],
 		["https://mcp.test/path%2Fmcp", /percent-encoded path characters/],
 		["https://mcp.test/a/../mcp", /dot path segments/],
