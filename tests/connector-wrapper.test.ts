@@ -107,6 +107,35 @@ test("connector wrapper rejects malformed successful responses", async () => {
 	await assert.rejects(() => resource.list(), /Invalid successful connector list response/);
 });
 
+test("connector wrapper rejects missing result arrays instead of reporting empty results", async () => {
+	const listResource = new ConnectorsResource({
+		connectors: { list: () => Promise.resolve({}) },
+	} as unknown as HydraDBClient);
+
+	const statusResource = new ConnectorsResource({
+		connectors: { status: () => Promise.resolve({ connectorId: "c1" }) },
+	} as unknown as HydraDBClient);
+
+	const configuredResource = new ConnectorsResource({
+		connectors: { listResources: () => Promise.resolve({}) },
+	} as unknown as HydraDBClient);
+
+	await assert.rejects(
+		() => listResource.list(),
+		/Invalid successful connector list response/,
+	);
+
+	await assert.rejects(
+		() => statusResource.status("c1"),
+		/Invalid successful connector status response/,
+	);
+
+	await assert.rejects(
+		() => configuredResource.listResources("c1"),
+		/Invalid successful connector resources response/,
+	);
+});
+
 test("connector wrapper preserves false, zero, empty strings and empty arrays", async () => {
 	const sdk = {
 		connectors: {

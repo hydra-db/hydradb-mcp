@@ -12,12 +12,12 @@ import { CONNECTOR_TOOL_NAMES, TOOL_NAMES } from "../src/tool-names.js";
 
 type Call = { method: string; args: Record<string, unknown> };
 
-function mockHydra(allowedDatabases?: string[]) {
+function mockHydra(allowedDatabases?: string[], allowedCollections?: string[]) {
 	const calls: Call[] = [];
 
 	const connectors = [
-		{ connectorId: "allowed", name: "Allowed", provider: "slack", database: "db-a" },
-		{ connectorId: "blocked", name: "Blocked secret", provider: "github", database: "db-b" },
+		{ connectorId: "allowed", name: "Allowed", provider: "slack", database: "db-a", collection: "public" },
+		{ connectorId: "blocked", name: "Blocked secret", provider: "github", database: "db-b", collection: "private" },
 		{ connectorId: "org-wide", name: "Org wide", provider: "notion" },
 	];
 
@@ -33,6 +33,21 @@ function mockHydra(allowedDatabases?: string[]) {
 		return Promise.resolve(value);
 	};
 
+	const status = {
+		connectorId: "allowed",
+		provider: "slack",
+		status: "degraded",
+		lifecycle: "active",
+		syncStatus: "idle",
+		lastAttemptedSyncAt: "2026-10-28T18:00:00Z",
+		lastSuccessfulSyncAt: "2026-10-28T17:00:00Z",
+		error: { message: "provider echoed top-secret-token", retryable: true },
+		resources: [
+			{ resourceId: "r-a", displayName: "A", status: "failed", retryable: true, message: "secret" },
+			{ resourceId: "r-inherited", displayName: "Inherited", status: "ok", aclWarning: "private detail" },
+		],
+	};
+
 	const connectorApi = {
 		listProviders: record("providers", {
 			providers: [{ provider: "slack", category: "Communication", supported: true }],
@@ -46,20 +61,7 @@ function mockHydra(allowedDatabases?: string[]) {
 
 			return connectors.find((connector) => connector.connectorId === id) ?? {};
 		},
-		status: record("status", {
-			connectorId: "allowed",
-			provider: "slack",
-			status: "degraded",
-			lifecycle: "active",
-			syncStatus: "idle",
-			lastAttemptedSyncAt: "2026-10-28T18:00:00Z",
-			lastSuccessfulSyncAt: "2026-10-28T17:00:00Z",
-			error: { message: "provider echoed top-secret-token", retryable: true },
-			resources: [
-				{ resourceId: "r-a", displayName: "A", status: "failed", retryable: true, message: "secret" },
-				{ resourceId: "r-inherited", displayName: "Inherited", status: "ok", aclWarning: "private detail" },
-			],
-		}),
+		status: record("status", status),
 		discover: record("discover", {
 			provider: "slack",
 			resources: [{ id: "r-a", name: "general", resourceType: "channel", metadata: { topic: "safe" } }],
@@ -69,10 +71,17 @@ function mockHydra(allowedDatabases?: string[]) {
 	};
 
 	const sdk = { query: () => Promise.resolve({ success: true, chunks: [] }), context: {} } as unknown as HydraDBClient;
-	const hydra = new HydraDB({ token: "t", database: "db-a", ...(allowedDatabases ? { allowedDatabases } : {}) }, sdk);
+
+	const hydra = new HydraDB({
+		token: "t",
+		database: "db-a",
+		...(allowedDatabases ? { allowedDatabases } : {}),
+		...(allowedCollections ? { allowedCollections } : {}),
+	}, sdk);
+
 	(hydra as unknown as { connectors: unknown }).connectors = connectorApi;
 
-	return { hydra, calls, connectorApi };
+	return { hydra, calls, connectorApi, connectors, resources, status };
 }
 
 async function connect(hydra: HydraDB) {
@@ -210,7 +219,13 @@ test("confined list hides other databases and org-wide connectors", async () => 
 	});
 
 	assert.deepEqual(structured(result).connectors, [
-		{ connector_id: "allowed", name: "Allowed", provider: "slack", database: "db-a" },
+		{
+			connector_id: "allowed",
+			name: "Allowed",
+			provider: "slack",
+			database: "db-a",
+			collection: "public",
+		},
 	]);
 	assert.deepEqual(structured(result).health, { allowed: "healthy" });
 	assert.doesNotMatch(text(result), /Blocked secret|Org wide/);
@@ -269,6 +284,144 @@ test("resource listing filters by each resource's effective destination database
 	);
 
 	await client.close();
+});
+
+test("connector reads enforce collection confinement and resource collection overrides", async () => {
+	const fixture = mockHydra(["db-a"], ["public"]);
+	fixture.connectors.push({
+		connectorId: "private-collection",
+		name: "Private collection",
+		provider: "slack",
+		database: "db-a",
+		collection: "private",
+	});
+	fixture.resources.push({
+		connectorId: "allowed",
+		resourceId: "r-private",
+		displayName: "Private resource",
+		databaseOverride: "db-a",
+		collectionOverride: "private",
+	});
+	const client = await connect(fixture.hydra);
+
+	const list = await client.callTool({ name: TOOL_NAMES.CONNECTOR_LIST, arguments: {} });
+	assert.deepEqual(
+		(structured(list).connectors as { connector_id: string }[]).map((connector) => connector.connector_id),
+		["allowed"],
+	);
+
+	const denied = await client.callTool({
+		name: TOOL_NAMES.CONNECTOR_GET,
+		arguments: { connector_id: "private-collection" },
+	});
+
+	assert.equal(denied.isError, true);
+	assert.doesNotMatch(text(denied), /Private collection|private-collection|private/);
+
+	const resources = await client.callTool({
+		name: TOOL_NAMES.CONNECTOR_RESOURCES,
+		arguments: { connector_id: "allowed" },
+	});
+
+	assert.deepEqual(
+		(structured(resources).resources as { resource_id: string }[]).map((resource) => resource.resource_id),
+		["r-a", "r-inherited"],
+	);
+
+	await client.close();
+});
+
+test("connector status filters resources outside the effective database or collection scope", async () => {
+	const fixture = mockHydra(["db-a"], ["public"]);
+	fixture.resources.push({
+		connectorId: "allowed",
+		resourceId: "r-private",
+		displayName: "Private configured resource",
+		databaseOverride: "db-a",
+		collectionOverride: "private",
+	});
+	fixture.status.resources.push({
+		resourceId: "r-b",
+		displayName: "Forbidden database status",
+		status: "failed",
+		retryable: false,
+	});
+
+	fixture.status.resources.push({
+		resourceId: "r-private",
+		displayName: "Private status secret",
+		status: "failed",
+		retryable: false,
+	});
+	fixture.status.resources.push({
+		resourceId: "r-unknown",
+		displayName: "Unknown destination secret",
+		status: "failed",
+		retryable: false,
+	});
+	const client = await connect(fixture.hydra);
+
+	const result = await client.callTool({
+		name: TOOL_NAMES.CONNECTOR_STATUS,
+		arguments: { connector_id: "allowed" },
+	});
+
+	const rendered = JSON.stringify(structured(result));
+
+	assert.match(rendered, /r-a|r-inherited/);
+	assert.doesNotMatch(
+		rendered,
+		/r-b|Forbidden database status|r-private|Private status secret|r-unknown|Unknown destination secret/,
+	);
+	assert.doesNotMatch(
+		text(result),
+		/Forbidden database status|Private status secret|Unknown destination secret/,
+	);
+
+	await client.close();
+});
+
+test("connector status maps typed failures to fixed credential-safe guidance", async () => {
+	const cases = [
+		{
+			error: { code: "credentials_rejected", message: "secret credential detail", retryable: false },
+			kind: "credentials",
+			text: /Reconnect the connector/,
+		},
+		{
+			error: { code: "database_missing", message: "secret database detail", retryable: false },
+			kind: "destination",
+			text: /destination database is missing/i,
+		},
+		{
+			error: { code: "sync_service_failed", failureClass: "internal", message: "internal trace", retryable: false },
+			kind: "internal",
+			text: /Contact HydraDB support/,
+		},
+		{
+			error: { failureClass: "transient", message: "provider secret", retryable: true },
+			kind: "transient",
+			text: /HydraDB will retry/,
+		},
+	];
+
+	for (const item of cases) {
+		const fixture = mockHydra(["db-a"]);
+		fixture.status.error = item.error;
+		const client = await connect(fixture.hydra);
+
+		const result = await client.callTool({
+			name: TOOL_NAMES.CONNECTOR_STATUS,
+			arguments: { connector_id: "allowed" },
+		});
+
+		const error = structured(result).error as { kind: string };
+
+		assert.equal(error.kind, item.kind);
+		assert.match(text(result), item.text);
+		assert.doesNotMatch(JSON.stringify(structured(result)), /secret|internal trace/);
+		await client.close();
+	}
 });
 
 test("discover validates pagination and forwards allowed calls", async () => {

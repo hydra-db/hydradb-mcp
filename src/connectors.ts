@@ -1,5 +1,7 @@
 /* oxlint-disable anti-slop/no-unsafe-dictionary-type, anti-slop/no-unknown-parameters, anti-slop/no-unknown-returns, anti-slop/no-runtime-typeof, anti-slop/require-safety-comment-for-type-assertion, anti-slop/no-known-value-widening, anti-slop/no-conditional-empty-object-spread -- Connector results and provider JSON Schema are dynamic JSON, parsed and projected at this boundary. */
 import type {
+	ConnectorDiscoverParams,
+	ConnectorListParams,
 	ConnectorProviderCatalog,
 	ConnectorProviderDetail,
 	ConnectorResource,
@@ -15,22 +17,15 @@ export interface ConnectorToolResponse {
 	data: Record<string, unknown>;
 }
 
-export interface ConnectorListInput {
-	provider?: string;
-	includeHealth?: boolean;
-}
+export type ConnectorListInput = ConnectorListParams;
 
-export interface ConnectorDiscoverInput {
-	connectorId: string;
-	cursor?: string;
-	limit?: number;
-}
+export type ConnectorDiscoverInput = ConnectorDiscoverParams;
 
 /** A connector ID exists, but this OAuth grant cannot prove access to it. */
 export class ConnectorScopeNotAllowedError extends Error {
-	constructor(allowed: readonly string[]) {
+	constructor() {
 		super(
-			`This connection is confined to ${allowed.length === 1 ? "one allowed database" : "allowed databases"} ` +
+			"This connection is confined to specific databases or collections " +
 				"and cannot access that connector because its destination is outside that scope or is not set. " +
 				"Reconnect with wider database access to use it.",
 		);
@@ -44,13 +39,36 @@ function connectorDatabase(connector: ConnectorView): string | undefined {
 	return database ? database : undefined;
 }
 
+function connectorCollection(connector: ConnectorView): string | undefined {
+	const collection = connector.collection?.trim();
+
+	return collection ? collection : undefined;
+}
+
 function canAccessDatabase(database: string | undefined, allowed: readonly string[] | undefined): boolean {
 	return allowed == null || (database != null && allowed.includes(database));
 }
 
-function assertConnectorAllowed(connector: ConnectorView, allowed: readonly string[] | undefined): void {
-	if (!canAccessDatabase(connectorDatabase(connector), allowed)) {
-		throw new ConnectorScopeNotAllowedError(allowed ?? []);
+function canAccessCollection(collection: string | undefined, allowed: readonly string[] | undefined): boolean {
+	return allowed == null || (collection != null && allowed.includes(collection));
+}
+
+function canAccessConnector(
+	connector: ConnectorView,
+	allowedDatabases: readonly string[] | undefined,
+	allowedCollections: readonly string[] | undefined,
+): boolean {
+	return canAccessDatabase(connectorDatabase(connector), allowedDatabases)
+		&& canAccessCollection(connectorCollection(connector), allowedCollections);
+}
+
+function assertConnectorAllowed(
+	connector: ConnectorView,
+	allowedDatabases: readonly string[] | undefined,
+	allowedCollections: readonly string[] | undefined,
+): void {
+	if (!canAccessConnector(connector, allowedDatabases, allowedCollections)) {
+		throw new ConnectorScopeNotAllowedError();
 	}
 }
 
@@ -184,6 +202,15 @@ function effectiveDatabase(resource: ConnectorResource, connector: ConnectorView
 	return resource.databaseOverride?.trim() || connectorDatabase(connector);
 }
 
+function effectiveCollection(resource: ConnectorResource, connector: ConnectorView): string | undefined {
+	return resource.collectionOverride?.trim() || connectorCollection(connector);
+}
+
+function canAccessResource(resource: ConnectorResource, connector: ConnectorView, hydra: HydraDB): boolean {
+	return canAccessDatabase(effectiveDatabase(resource, connector), hydra.allowedDatabases)
+		&& canAccessCollection(effectiveCollection(resource, connector), hydra.allowedCollections);
+}
+
 function projectResource(resource: ConnectorResource): Record<string, unknown> {
 	return cleanObject({
 		connector_id: resource.connectorId,
@@ -205,7 +232,7 @@ function projectResource(resource: ConnectorResource): Record<string, unknown> {
 	});
 }
 
-function statusAction(retryable: boolean | undefined): string {
+function resourceStatusAction(retryable: boolean | undefined): string {
 	if (retryable === true) return "HydraDB will retry this failure. Check the next sync result.";
 
 	if (retryable === false) return "User action is required. Review the connector configuration or reconnect it.";
@@ -234,12 +261,85 @@ function resourceAction(resource: ConnectorStatus["resources"][number]): string 
 		return "The provider was unavailable. HydraDB can retry it.";
 	}
 
-	if (resource.status === "failed") return statusAction(resource.retryable);
+	if (resource.status === "failed") return resourceStatusAction(resource.retryable);
 
 	return undefined;
 }
 
+interface ConnectorFailureGuidance {
+	kind: "credentials" | "destination" | "internal" | "transient" | "user_action" | "unknown";
+	action: string;
+}
+
+function connectorFailureGuidance(
+	error: NonNullable<ConnectorStatus["error"]>,
+): ConnectorFailureGuidance {
+	const code = error.code?.trim().toLowerCase();
+	const failureClass = error.failureClass?.trim().toLowerCase();
+
+	if (
+		code === "credentials_rejected"
+		|| code === "rejected_credentials"
+		|| code === "authentication_failed"
+		|| code === "reauth_required"
+		|| failureClass === "credentials"
+		|| failureClass === "authentication"
+	) {
+		return {
+			kind: "credentials",
+			action: "The provider rejected the connector credentials. Reconnect the connector.",
+		};
+	}
+
+	if (
+		code === "database_missing"
+		|| code === "destination_database_missing"
+		|| failureClass === "destination"
+		|| failureClass === "database"
+	) {
+		return {
+			kind: "destination",
+			action: "The destination database is missing. Restore it, recreate it, or update the connector destination.",
+		};
+	}
+
+	if (
+		code === "sync_service_failed"
+		|| code === "internal_failure"
+		|| failureClass === "internal"
+		|| failureClass === "terminal_internal"
+	) {
+		return {
+			kind: "internal",
+			action: error.retryable === true
+				? "HydraDB will retry the internal sync failure. Contact HydraDB support if it continues."
+				: "The HydraDB sync service failed. Contact HydraDB support; reconnecting will not fix this failure.",
+		};
+	}
+
+	if (error.retryable === true || failureClass === "transient") {
+		return {
+			kind: "transient",
+			action: "HydraDB will retry this failure. Check the next sync result.",
+		};
+	}
+
+	if (error.retryable === false) {
+		return {
+			kind: "user_action",
+			action: "User action is required. Review the connector configuration and destination.",
+		};
+	}
+
+	return {
+		kind: "unknown",
+		action: "Review the connector configuration and the next sync result.",
+	};
+}
+
 function projectStatus(status: ConnectorStatus): Record<string, unknown> {
+	const failure = status.error ? connectorFailureGuidance(status.error) : undefined;
+
 	return cleanObject({
 		connector_id: status.connectorId,
 		provider: status.provider,
@@ -256,7 +356,8 @@ function projectStatus(status: ConnectorStatus): Record<string, unknown> {
 			? cleanObject({
 				detected_at: status.error.detectedAt,
 				retryable: status.error.retryable,
-				action: statusAction(status.error.retryable),
+				kind: failure?.kind,
+				action: failure?.action,
 			})
 			: undefined,
 		resources: status.resources.map((resource) =>
@@ -325,7 +426,7 @@ export class ConnectorTools {
 
 	private async authorizedConnector(id: string, opts?: RequestOptions): Promise<ConnectorView> {
 		const connector = await this.hydra.connectors.get(id, opts);
-		assertConnectorAllowed(connector, this.hydra.allowedDatabases);
+		assertConnectorAllowed(connector, this.hydra.allowedDatabases, this.hydra.allowedCollections);
 
 		return connector;
 	}
@@ -356,7 +457,7 @@ export class ConnectorTools {
 		const result = await this.hydra.connectors.list(input, opts);
 
 		const visible = result.connectors.filter((connector) =>
-			canAccessDatabase(connectorDatabase(connector), this.hydra.allowedDatabases),
+			canAccessConnector(connector, this.hydra.allowedDatabases, this.hydra.allowedCollections),
 		);
 
 		const connectors = visible.map(projectConnector);
@@ -402,8 +503,25 @@ export class ConnectorTools {
 	}
 
 	async status(id: string, opts?: RequestOptions): Promise<ConnectorToolResponse> {
-		await this.authorizedConnector(id, opts);
-		const data = projectStatus(await this.hydra.connectors.status(id, opts));
+		const connector = await this.authorizedConnector(id, opts);
+
+		const [status, configured] = await Promise.all([
+			this.hydra.connectors.status(id, opts),
+			this.hydra.connectors.listResources(id, opts),
+		]);
+
+		const visibleResourceIds = new Set(
+			configured.resources
+				.filter((resource) => canAccessResource(resource, connector, this.hydra))
+				.map((resource) => resource.resourceId),
+		);
+
+		const data = projectStatus({
+			...status,
+			resources: status.resources.filter((resource) =>
+				resource.resourceId != null && visibleResourceIds.has(resource.resourceId),
+			),
+		});
 
 		return { text: renderStatus(data), data };
 	}
@@ -412,14 +530,7 @@ export class ConnectorTools {
 		await this.authorizedConnector(input.connectorId, opts);
 
 		const data = projectDiscovered(
-			await this.hydra.connectors.discover(
-				{
-					connectorId: input.connectorId,
-					...(input.cursor ? { cursor: input.cursor } : {}),
-					...(input.limit != null ? { limit: input.limit } : {}),
-				},
-				opts,
-			),
+			await this.hydra.connectors.discover(input, opts),
 		);
 
 		const count = (data.resources as unknown[]).length;
@@ -432,9 +543,7 @@ export class ConnectorTools {
 		const result = await this.hydra.connectors.listResources(id, opts);
 
 		const resources = result.resources
-			.filter((resource) =>
-				canAccessDatabase(effectiveDatabase(resource, connector), this.hydra.allowedDatabases),
-			)
+			.filter((resource) => canAccessResource(resource, connector, this.hydra))
 			.map(projectResource);
 
 		return {

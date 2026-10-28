@@ -64,8 +64,14 @@ const connectorSchema = z.object({
 	syncStatus: z.string().optional(),
 });
 
+const planCapSchema = z.object({
+	message: z.string().optional(),
+	meter: z.string().optional(),
+	plan: z.string().optional(),
+});
+
 const connectorListSchema = z.object({
-	connectors: z.array(connectorSchema).default([]),
+	connectors: z.array(connectorSchema),
 	health: z.record(z.string()).optional(),
 	connectorLimit: z
 		.object({
@@ -75,13 +81,7 @@ const connectorListSchema = z.object({
 			plan: z.string().optional(),
 		})
 		.optional(),
-	planCap: z
-		.object({
-			message: z.string().optional(),
-			meter: z.string().optional(),
-			plan: z.string().optional(),
-		})
-		.optional(),
+	planCap: planCapSchema.optional(),
 });
 
 const statusResourceSchema = z.object({
@@ -122,15 +122,9 @@ const connectorStatusSchema = z.object({
 	lastSuccessfulSyncAt: z.string().optional(),
 	lifecycle: z.string().optional(),
 	nextSyncAt: z.string().optional(),
-	planCap: z
-		.object({
-			message: z.string().optional(),
-			meter: z.string().optional(),
-			plan: z.string().optional(),
-		})
-		.optional(),
+	planCap: planCapSchema.optional(),
 	provider: z.string().optional(),
-	resources: z.array(statusResourceSchema).default([]),
+	resources: z.array(statusResourceSchema),
 	status: z.string().optional(),
 	syncStatus: z.string().optional(),
 });
@@ -175,7 +169,7 @@ const configuredResourceSchema = z.object({
 	syncBlockedReason: z.string().optional(),
 });
 
-const resourcesSchema = z.object({ resources: z.array(configuredResourceSchema).default([]) });
+const resourcesSchema = z.object({ resources: z.array(configuredResourceSchema) });
 
 export type ConnectorProviderCatalog = z.infer<typeof providerCatalogSchema>;
 
