@@ -144,8 +144,8 @@ const PARAM = {
 		"Document metadata for knowledge ingestion, as {key: value}. Use it for descriptive " +
 		"fields that should travel with the document but are not scalar query filters.",
 	relations:
-		"Explicit graph relationships for a knowledge document. Each object describes one " +
-		"relationship in the format accepted by the Hydra DB ingest API.",
+		"Explicit forceful relationships for a knowledge document, as {ids: [source_id], " +
+		"properties?: {...}} in the Hydra DB ingest API format.",
 	evidence_kind:
 		"Provenance class for a knowledge document: assertion, record, said, done, " +
 		"third_party, or inferred.",

@@ -53,7 +53,7 @@ export type IngestItemOutcome = {
 	index: number;
 	id: string;
 	status: string;
-	accepted: boolean;
+	accepted: boolean | null;
 	error?: string;
 	error_code?: string;
 	relations_error?: string;

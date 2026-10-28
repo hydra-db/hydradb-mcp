@@ -348,8 +348,8 @@ export interface IngestItem {
 	metadata?: Record<string, JsonValue>;
 	/** Document-level metadata, matchable via `additional_metadata`. */
 	additionalMetadata?: Record<string, JsonValue>;
-	/** Explicit graph relationships attached to this document. */
-	relations?: Array<Record<string, JsonValue>>;
+	/** Explicit forceful relationships attached to this document. */
+	relations?: { ids: string[]; properties?: Record<string, JsonValue> };
 	/** Caller-declared provenance class for this document. */
 	evidenceKind?: "assertion" | "record" | "said" | "done" | "third_party" | "inferred";
 	/** Caller-stable handle for the entity this document describes. */
@@ -1009,10 +1009,26 @@ export class ContextResource extends Resource {
 
 		if (items.length === 0) throw new Error("Ingestion requires at least one item.");
 
-		const graphPayload: Record<string, IngestGraph> = {};
+		const graphPayload: Record<string, IngestGraph> = Object.create(null);
 
 		if (params.kind === "memory") {
 			const memories = items.map((input): MemoryWireItem => {
+				const unsupported = (
+					[
+						["relations", input.relations],
+						["evidenceKind", input.evidenceKind],
+						["evidenceSubject", input.evidenceSubject],
+					] as const
+				).flatMap(([name, value]) => value == null ? [] : [name]);
+
+				if (unsupported.length > 0) {
+					throw new Error(
+						`Memory ingestion does not support ${unsupported.join(", ")} — ` +
+						"those apply to knowledge ingestion only. Pass kind \"knowledge\" instead, " +
+						"or drop them.",
+					);
+				}
+
 				const infer = input.infer ?? true;
 
 				if (!infer && input.customInstructions != null) {

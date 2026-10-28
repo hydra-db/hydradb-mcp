@@ -12,6 +12,7 @@ import {
 	translateError,
 	unwrap,
 } from "../src/hydra/index.js";
+import type { IngestGraph } from "../src/hydra/index.js";
 import { mcpUser } from "../src/hydra/transport.js";
 import { SERVER_VERSION } from "../src/version.js";
 
@@ -148,7 +149,7 @@ test("knowledge ingest serializes every supported per-document field", async () 
 		sourceId: "report-q3",
 		metadata: { department: "finance" },
 		additionalMetadata: { author: "Ada" },
-		relations: [{ target: "budget-2026", type: "supports" }],
+		relations: { ids: ["budget-2026"], properties: { type: "supports" } },
 		infer: false,
 		evidenceKind: "record",
 		evidenceSubject: "team:finance",
@@ -160,7 +161,7 @@ test("knowledge ingest serializes every supported per-document field", async () 
 		id: "report-q3",
 		metadata: { department: "finance" },
 		additional_metadata: { author: "Ada" },
-		relations: [{ target: "budget-2026", type: "supports" }],
+		relations: { ids: ["budget-2026"], properties: { type: "supports" } },
 		infer: false,
 		evidence_kind: "record",
 		evidence_subject: "team:finance",
@@ -200,6 +201,44 @@ test("memory ingest sends caller instructions, additional metadata, and graph", 
 			relations: [],
 		},
 	});
+});
+
+test("memory ingest preserves a graph keyed by the __proto__ source id", async () => {
+	const { sdk, calls } = ingestSdk();
+	const hydra = new HydraDB({ token: "t", database: "db_test" }, sdk);
+
+	await hydra.context.ingest({
+		kind: "memory",
+		text: "special id",
+		sourceId: "__proto__",
+		graph: {
+			entities: { thing: { name: "Thing", type: "Object" } },
+			relations: [],
+		},
+	});
+
+	const request = z.object({ graphPayload: z.string() }).parse(calls[0]);
+	// SAFETY: graphPayload is JSON encoded by ContextResource from IngestGraph values.
+	const graphPayload = JSON.parse(request.graphPayload) as { "__proto__"?: IngestGraph };
+
+	assert.deepEqual(Object.keys(graphPayload), ["__proto__"]);
+});
+
+test("memory ingest rejects knowledge-only provenance fields", async () => {
+	for (const item of [
+		{ text: "claim", relations: { ids: ["source-1"] } },
+		{ pairs: [{ user: "claim", assistant: "noted" }], evidenceKind: "third_party" },
+		{ text: "claim", evidenceSubject: "invoice-1" },
+	] as const) {
+		const { sdk, calls } = ingestSdk();
+		const hydra = new HydraDB({ token: "t", database: "db_test" }, sdk);
+
+		await assert.rejects(
+			hydra.context.ingest({ kind: "memory", ...item }),
+			/Memory ingestion does not support/,
+		);
+		assert.equal(calls.length, 0);
+	}
 });
 
 test("memory ingest batches items into one SDK request", async () => {

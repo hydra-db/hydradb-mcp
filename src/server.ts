@@ -1076,7 +1076,7 @@ export function createHydraDBServer(
 
 			const rejected: IngestRejectedItem = {
 				id: item.source_id || "(unnamed item)",
-				error,
+				error: hydra.redact(error),
 			};
 
 			if (item.stored_title) rejected.stored_title = item.stored_title;
@@ -1258,15 +1258,40 @@ export function createHydraDBServer(
 		return allFailed ? { ...result, isError: true } : result;
 	}
 
-	function ingestItemBytes(item: IngestToolItem): number {
-		let total = item.text == null ? 0 : Buffer.byteLength(item.text, "utf8");
+	function assertIngestPayloadSize(value: IngestToolArguments): void {
+		const totalBytes = Buffer.byteLength(JSON.stringify(value), "utf8");
 
-		for (const turn of item.turns ?? []) {
-			total += Buffer.byteLength(turn.user, "utf8");
-			total += Buffer.byteLength(turn.assistant, "utf8");
+		if (totalBytes > MAX_INGEST_BYTES) {
+			throw new Error(
+				`hydradb_ingest payload contains ${totalBytes} UTF-8 bytes; the maximum is ` +
+				`${MAX_INGEST_BYTES}. Split the call.`,
+			);
 		}
+	}
 
-		return total;
+	function toIngestItemOutcome(
+		index: number,
+		id: string,
+		result?: MemoryResultItem,
+	): IngestItemOutcome {
+		const accepted = result == null
+			? null
+			: result.status !== "failed" && !result.error;
+
+		const outcome: IngestItemOutcome = {
+			index,
+			id,
+			status: result?.status ?? "unknown",
+			accepted,
+		};
+
+		if (result?.error) outcome.error = hydra.redact(result.error);
+
+		if (result?.error_code) outcome.error_code = result.error_code;
+
+		if (result?.relations_error) outcome.relations_error = hydra.redact(result.relations_error);
+
+		return outcome;
 	}
 
 	function batchItemOutcome(
@@ -1282,22 +1307,8 @@ export function createHydraDBServer(
 		return items.map((item, index) => {
 			const id = item.sourceId ?? "";
 			const result = byId.get(id);
-			const accepted = result != null && result.status !== "failed" && !result.error;
 
-			const outcome: IngestItemOutcome = {
-				index,
-				id,
-				status: result?.status ?? "missing",
-				accepted,
-			};
-
-			if (result?.error) outcome.error = result.error;
-
-			if (result?.error_code) outcome.error_code = result.error_code;
-
-			if (result?.relations_error) outcome.relations_error = result.relations_error;
-
-			return outcome;
+			return toIngestItemOutcome(index, id, result);
 		});
 	}
 
@@ -1310,14 +1321,6 @@ export function createHydraDBServer(
 		collection?: string;
 	}, signal?: AbortSignal): Promise<ToolResult> {
 		const kind = args.kind ?? "memory";
-		const totalBytes = args.items.reduce((total, item) => total + ingestItemBytes(item), 0);
-
-		if (totalBytes > MAX_INGEST_BYTES) {
-			throw new Error(
-				`hydradb_ingest items contain ${totalBytes} UTF-8 bytes; the maximum is ` +
-				`${MAX_INGEST_BYTES}. Split the call.`,
-			);
-		}
 
 		const items: IngestItem[] = args.items.map((item, index) => {
 			const hasText = item.text != null;
@@ -1341,7 +1344,7 @@ export function createHydraDBServer(
 				throw new Error(`items[${index}] cannot use custom_instructions when infer is false.`);
 			}
 
-			const sourceId = item.source_id ?? generatedSourceId();
+			const sourceId = item.source_id || generatedSourceId();
 
 			const customInstructions = kind === "knowledge"
 				? undefined
@@ -1403,18 +1406,27 @@ export function createHydraDBServer(
 		return allFailed ? { ...result, isError: true } : result;
 	}
 
-	function appKnowledgeNotes(items: AppKnowledgeItem[]): string {
+	function appKnowledgeNotes(items: AppKnowledgeItem[], outcomes: IngestItemOutcome[]): string {
 		const notes: string[] = [];
 
-		for (const item of items) {
-			if (item.id && item.acl == null) {
+		for (const [index, item] of items.entries()) {
+			const accepted = outcomes[index]?.accepted;
+
+			if (item.id && item.acl == null && accepted === true) {
 				notes.push(
 					`Item ${item.id} was stored without an access list. Every caller of this collection ` +
 					"can read it. If this id had an access list before, that list is now removed.",
 				);
 			}
 
-			if (item.acl?.includes("__public__") && item.acl.length > 1) {
+			if (item.id && item.acl == null && accepted == null) {
+				notes.push(
+					`Item ${item.id} was sent without an access list. If Hydra DB accepted it, every caller ` +
+					"of this collection can read it and any previous access list is removed.",
+				);
+			}
+
+			if (accepted !== false && item.acl?.includes("__public__") && item.acl.length > 1) {
 				notes.push(
 					`Item ${item.id || "(server-assigned id)"}: __public__ makes the item readable by ` +
 					"every caller; the other principals are dropped.",
@@ -1431,6 +1443,12 @@ export function createHydraDBServer(
 		database?: string;
 		collection?: string;
 	}, signal?: AbortSignal): Promise<ToolResult> {
+		const explicitIds = args.items.flatMap((item) => item.id ? [item.id] : []);
+
+		if (new Set(explicitIds).size !== explicitIds.length) {
+			throw new Error("hydradb_ingest app_knowledge ids must be unique within one batch.");
+		}
+
 		let raw: Awaited<ReturnType<typeof hydra.context.ingest>>;
 
 		try {
@@ -1462,22 +1480,8 @@ export function createHydraDBServer(
 
 		outcome.items = args.items.map((item, index) => {
 			const result = item.id ? resultsById.get(item.id) : res.results[index];
-			const accepted = result != null && result.status !== "failed" && !result.error;
 
-			const itemOutcome: IngestItemOutcome = {
-				index,
-				id: result?.source_id ?? item.id ?? "",
-				status: result?.status ?? "missing",
-				accepted,
-			};
-
-			if (result?.error) itemOutcome.error = result.error;
-
-			if (result?.error_code) itemOutcome.error_code = result.error_code;
-
-			if (result?.relations_error) itemOutcome.relations_error = result.relations_error;
-
-			return itemOutcome;
+			return toIngestItemOutcome(index, result?.source_id ?? item.id ?? "", result);
 		});
 
 		const allFailed = res.success_count === 0 && res.failed_count > 0;
@@ -1487,7 +1491,7 @@ export function createHydraDBServer(
 			`(${res.success_count} success, ${res.failed_count} failed).` +
 			(outcome.indexing_pending ? indexingNote(res) : "") +
 			ingestIssues(res) +
-			appKnowledgeNotes(args.items),
+			appKnowledgeNotes(args.items, outcome.items),
 			outcome,
 		);
 
@@ -3344,6 +3348,11 @@ export function createHydraDBServer(
 		...scopeSchema,
 	};
 
+	const forcefulRelationsSchema = z.object({
+		ids: z.array(z.string()),
+		properties: z.record(jsonValue).optional(),
+	});
+
 	const ingestMetadataSchema = {
 		metadata: z
 			.record(jsonValue)
@@ -3353,8 +3362,7 @@ export function createHydraDBServer(
 			.record(jsonValue)
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.additional_metadata),
-		relations: z
-			.array(z.record(jsonValue))
+		relations: forcefulRelationsSchema
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.relations),
 		evidence_kind: z
@@ -3451,10 +3459,7 @@ export function createHydraDBServer(
 		additional_metadata: z.record(jsonValue).optional(),
 		attachments: z.array(z.record(jsonValue)).optional(),
 		relations: z.union([
-			z.object({
-				ids: z.array(z.string()),
-				properties: z.record(jsonValue).optional(),
-			}),
+			forcefulRelationsSchema,
 			z.array(z.record(jsonValue)),
 		]).optional(),
 		acl: ingestAclSchema.optional().describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.app_acl),
@@ -3514,6 +3519,30 @@ export function createHydraDBServer(
 	};
 
 	type IngestToolItem = z.infer<typeof ingestItemSchema>;
+
+	type IngestToolArguments = {
+		text?: string;
+		kind?: ContextKind;
+		title?: string;
+		source_id?: string;
+		infer?: boolean;
+		is_markdown?: boolean;
+		overwrite?: boolean;
+		metadata?: IngestParams["metadata"];
+		additional_metadata?: IngestParams["additionalMetadata"];
+		custom_instructions?: string;
+		graph?: IngestGraph;
+		items?: IngestToolItem[];
+		app_knowledge?: AppKnowledgeItem[];
+		relations?: IngestParams["relations"];
+		evidence_kind?: IngestParams["evidenceKind"];
+		evidence_subject?: string;
+		observation_date?: string;
+		turns?: ConversationTurn[];
+		user_name?: string;
+		database?: string;
+		collection?: string;
+	};
 
 	const conversationSchema = {
 		turns: z
@@ -3819,7 +3848,7 @@ export function createHydraDBServer(
 			index: z.number(),
 			id: z.string(),
 			status: z.string(),
-			accepted: z.boolean(),
+			accepted: z.boolean().nullable(),
 			error: z.string().optional(),
 			error_code: z.string().optional(),
 			relations_error: z.string().optional(),
@@ -3971,29 +4000,10 @@ export function createHydraDBServer(
 		TOOL_NAMES.INGEST,
 		ingestSchema,
 		async (args, extra) => {
-		const a = args as {
-			text?: string;
-			kind?: ContextKind;
-			title?: string;
-			source_id?: string;
-			infer?: boolean;
-			is_markdown?: boolean;
-			overwrite?: boolean;
-			metadata?: IngestParams["metadata"];
-			additional_metadata?: IngestParams["additionalMetadata"];
-			custom_instructions?: string;
-			graph?: IngestGraph;
-			items?: IngestToolItem[];
-			app_knowledge?: AppKnowledgeItem[];
-			relations?: IngestParams["relations"];
-			evidence_kind?: IngestParams["evidenceKind"];
-			evidence_subject?: string;
-			observation_date?: string;
-			turns?: ConversationTurn[];
-			user_name?: string;
-			database?: string;
-			collection?: string;
-		};
+			// SAFETY: register validates args against ingestSchema before this handler runs.
+			const a = args as IngestToolArguments;
+
+			assertIngestPayloadSize(a);
 
 		const hasTurns = a.turns != null && a.turns.length > 0;
 		const hasFlatItem = a.text != null || hasTurns;
@@ -4034,6 +4044,21 @@ export function createHydraDBServer(
 					collection: a.collection,
 				},
 				extra?.signal,
+			);
+		}
+
+		const memoryOnlyKnowledgeFields = (
+			[
+				["relations", a.relations],
+				["evidence_kind", a.evidence_kind],
+				["evidence_subject", a.evidence_subject],
+			] as const
+		).flatMap(([name, value]) => value == null ? [] : [name]);
+
+		if ((a.kind ?? "memory") === "memory" && memoryOnlyKnowledgeFields.length > 0) {
+			throw new Error(
+				`${TOOL_NAMES.INGEST} does not support ${memoryOnlyKnowledgeFields.join(", ")} for ` +
+				"memory ingestion — those apply to knowledge ingestion only.",
 			);
 		}
 
