@@ -78,6 +78,13 @@ function banner(message: string): void {
 	console.error(`[hydradb-mcp] ${message}`);
 }
 
+function literalRoutes(paths: string[]): RegExp[] {
+	return paths.map((path) => {
+		const escaped = path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+		return new RegExp(path === "/" ? "^/$" : `^${escaped}/?$`);
+	});
+}
+
 /** The bearer value from an `Authorization` header, scheme-insensitive. */
 function bearerFromHeader(value: string | string[] | undefined): string | undefined {
 	const raw = Array.isArray(value) ? value[0] : value;
@@ -227,7 +234,7 @@ export function createHttpApp(config: HttpServerConfig): Express {
 	// no new routes at all.
 	if (oauth && oauthPaths) {
 		app.get(
-			oauthPaths.metadata,
+			literalRoutes(oauthPaths.metadata),
 			(_req, res) => {
 				res.setHeader("Cache-Control", "public, max-age=300");
 				res.setHeader("Access-Control-Allow-Origin", "*");
@@ -236,7 +243,7 @@ export function createHttpApp(config: HttpServerConfig): Express {
 		);
 	}
 
-	app.all(oauthPaths?.mcp ?? ["/", "/mcp"], async (req, res) => {
+	app.all(literalRoutes(oauthPaths?.mcp ?? ["/", "/mcp"]), async (req, res) => {
 		// An OAuth access token arrives in the same `Authorization: Bearer` slot
 		// an API key does. It is told apart by prefix and exchanged, via the
 		// issuer, for the API key and scope the user approved on the consent

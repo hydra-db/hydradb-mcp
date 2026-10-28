@@ -94,6 +94,8 @@ function parsePublicUrl(value: string): URL {
 	if (value.includes("%")) {
 		throw invalidPublicUrl("must not contain percent-encoded path characters");
 	}
+	if (value.includes("?")) throw invalidPublicUrl("must not include a query string");
+	if (value.includes("#")) throw invalidPublicUrl("must not include a fragment");
 	if (value.split(/[?#]/, 1)[0].split("/").some((segment) => segment === "." || segment === "..")) {
 		throw invalidPublicUrl("must not contain dot path segments");
 	}
@@ -109,8 +111,9 @@ function parsePublicUrl(value: string): URL {
 	}
 	if (!url.hostname) throw invalidPublicUrl("must include a hostname");
 	if (url.username || url.password) throw invalidPublicUrl("must not include credentials");
-	if (url.search) throw invalidPublicUrl("must not include a query string");
-	if (url.hash) throw invalidPublicUrl("must not include a fragment");
+	if (!/^\/[A-Za-z0-9._~!$&'()*+,;=:@/-]*$/.test(url.pathname)) {
+		throw invalidPublicUrl("path contains unsupported characters");
+	}
 	return url;
 }
 
@@ -183,10 +186,10 @@ export function resolveOAuthConfig(
 		warn("WARNING: HYDRADB_OAUTH_ISSUER must be an absolute http(s) URL; OAuth stays OFF.");
 		return null;
 	}
-	const publicUrl = parsePublicUrl(resource!);
+	parsePublicUrl(resource!);
 	return {
 		issuer: stripSlash(issuer!),
-		resource: stripSlash(publicUrl.href),
+		resource: stripSlash(resource!),
 		introspectionSecret: introspectionSecret!,
 	};
 }
