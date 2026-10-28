@@ -161,6 +161,7 @@ const fullLifecycle = process.env.ENG3341_FULL_LIFECYCLE === "1";
 const cleanup = process.env.ENG3341_CLEANUP === "1";
 const runOwned = process.env.ENG3341_RUN_OWNED === "1";
 const fakeVendorPid = process.env.ENG3341_FAKE_VENDOR_PID?.trim();
+let fakeVendorProcessId;
 const passedCases = [];
 const skippedCases = [];
 
@@ -169,6 +170,13 @@ if ((fullLifecycle || cleanup) && !runOwned) {
 }
 if (fullLifecycle && (!connectorId || !resourceId || !fakeVendorPid)) {
 	throw new Error("Full lifecycle requires ENG3341_CONNECTOR_ID, ENG3341_RESOURCE_ID, and ENG3341_FAKE_VENDOR_PID");
+}
+if (fullLifecycle) {
+	fakeVendorProcessId = Number(fakeVendorPid);
+
+	if (!Number.isSafeInteger(fakeVendorProcessId) || fakeVendorProcessId <= 0) {
+		throw new Error("ENG3341_FAKE_VENDOR_PID must be a positive integer process ID");
+	}
 }
 if (cleanup && !connectorId) throw new Error("Cleanup requires ENG3341_CONNECTOR_ID");
 
@@ -337,7 +345,7 @@ if (fullLifecycle) {
 	call("hydradb_connector_resume", { connector_id: connectorId });
 	passedCases.push("resource lifecycle and successful sync");
 
-	process.kill(Number(fakeVendorPid), "SIGTERM");
+	process.kill(fakeVendorProcessId, "SIGTERM");
 	call("hydradb_connector_sync", { connector_id: connectorId });
 	const failed = await pollStatus((status) => status.data.error != null, "a safe provider failure");
 	const secretMarker = process.env.ENG3341_SECRET_MARKER?.trim();

@@ -76,3 +76,26 @@ test("local OAuth failures never print an echoed bearer token", () => {
 	assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, new RegExp(token));
 	assert.match(result.stdout, /request failed safely/);
 });
+
+test("full lifecycle rejects process-group and malformed fake-vendor PIDs before setup", () => {
+	for (const pid of ["0", "-1", "1.5", "not-a-pid"]) {
+		const result = spawnSync(process.execPath, ["scripts/e2e-connectors.local.mjs"], {
+			cwd: process.cwd(),
+			env: {
+				...process.env,
+				HYDRADB_BASE_URL: "http://127.0.0.1:9999",
+				HYDRADB_DASHBOARD_URL: "http://127.0.0.1:3000",
+				ENG3341_FULL_LIFECYCLE: "1",
+				ENG3341_RUN_OWNED: "1",
+				ENG3341_CONNECTOR_ID: "run-owned-connector",
+				ENG3341_RESOURCE_ID: "run-owned-resource",
+				ENG3341_FAKE_VENDOR_PID: pid,
+			},
+			encoding: "utf8",
+			timeout: 10_000,
+		});
+
+		assert.notEqual(result.status, 0);
+		assert.match(result.stderr, /positive integer/);
+	}
+});
