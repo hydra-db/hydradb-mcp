@@ -640,10 +640,22 @@ export function createHydraDBServer(
 				? `\n\n---\nWas this useful? Report it with ${TOOL_NAMES.FEEDBACK} using request_id: ${requestId}`
 				: "";
 
-			const budget = QUERY_CHAR_BUDGET - feedback.length - 200;
+			// Everything around the Markdown counts against the cap: the scope line
+			// and its warning grow with the collections searched, so they are
+			// measured rather than guessed. The truncation note is sized for the
+			// largest number it could print.
+			const warning = scopeWarning ? `\n\nScope warning: ${scopeWarning}` : "";
+
+			const note = (showing: number) =>
+				`\n\n(truncated: ${markdown.length} characters, showing ${showing})`;
+
+			const framing =
+				`${scopeText(resolvedScope)}\n\n`.length + feedback.length + warning.length;
+
+			const budget = Math.max(QUERY_CHAR_BUDGET - framing - note(QUERY_CHAR_BUDGET).length, 0);
 
 			const shown = markdown.length > budget
-				? `${markdown.slice(0, budget)}\n\n(truncated: ${markdown.length} characters, showing ${budget})`
+				? `${markdown.slice(0, budget)}${note(budget)}`
 				: markdown;
 
 			return queryResult(`${scopeText(resolvedScope)}\n\n${shown}${feedback}`);

@@ -2605,6 +2605,26 @@ test("hydradb_query response_format markdown returns Hydra DB's Markdown with sc
 	await client.close();
 });
 
+test("hydradb_query markdown stays within the text cap when many collections are searched", async () => {
+	const { hydra } = mockHydra({ query: "x".repeat(60_000) });
+	const client = await connect(hydra);
+	const collections = Array.from({ length: 10 }, (_, i) => `collection-with-a-long-name-${String(i).padStart(2, "0")}`);
+
+	const out = await client.callTool({
+		name: "hydradb_query",
+		arguments: { query: "q", response_format: "markdown", collections },
+	});
+
+	// SAFETY: every tool result here is text content.
+	const text = (out.content as { text: string }[])[0]!.text;
+
+	assert.notEqual(out.isError, true, text);
+	assert.match(text, /collection-with-a-long-name-09/);
+	assert.match(text, /truncated: 60000 characters/);
+	assert.ok(text.length <= 40_000, `text is ${text.length} characters`);
+	await client.close();
+});
+
 test("hydradb_query response_format markdown refuses a response that is not Markdown", async () => {
 	const { hydra } = mockHydra({ query: { chunks: [] } });
 	const client = await connect(hydra);
