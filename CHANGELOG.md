@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — `hydradb_query` title filter missed documents saved through `hydradb_ingest`
+
+Knowledge text is uploaded as `<title>.md` and the server takes the title from
+the filename, so "Q3 Roadmap" is stored as "Q3 Roadmap.md" and a title filter
+of "Q3 Roadmap" matched nothing. The filter now also searches each title's
+`.md` form; titles already ending in `.md` are sent as given.
+
 ## [1.5.1] - 2026-09-25
 
 ### Added — `hydradb_query` shows a named ticket's links

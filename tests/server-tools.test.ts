@@ -16,6 +16,7 @@ import {
 	beginShutdown,createHydraDBServer,
 	inFlightCount,
 	legacyToolsEnabled,
+	withStoredTitles,
 } from "../src/server.js";
 import {
 	CANONICAL_TOOL_NAMES,
@@ -2481,7 +2482,7 @@ test("hydradb_query forwards source_ids as a retrieval filter", async () => {
 	await client.close();
 });
 
-test("hydradb_query forwards exact titles as a retrieval filter", async () => {
+test("hydradb_query forwards titles plus the .md form hydradb_ingest stored them under", async () => {
 	const { hydra, calls } = mockHydra();
 	(hydra.context as unknown as { query: (args: Record<string, unknown>) => Promise<unknown> }).query =
 		(args) => {
@@ -2494,11 +2495,27 @@ test("hydradb_query forwards exact titles as a retrieval filter", async () => {
 		arguments: { query: "auth flow", titles: ["Smith, John", "Q3 Roadmap.md"] },
 	});
 
+	// "Q3 Roadmap.md" already names a stored file, so it is not doubled.
 	assert.deepEqual(calls.find((c) => c.method === "query")?.args.titles, [
 		"Smith, John",
 		"Q3 Roadmap.md",
+		"Smith, John.md",
 	]);
 	await client.close();
+});
+
+test("withStoredTitles adds each title's stored .md form once", () => {
+	assert.equal(withStoredTitles(undefined), undefined);
+	assert.deepEqual(withStoredTitles(["Atlas migration plan"]), [
+		"Atlas migration plan",
+		"Atlas migration plan.md",
+	]);
+	// Already a stored filename, in any case: left alone.
+	assert.deepEqual(withStoredTitles(["notes.MD"]), ["notes.MD"]);
+	// A title and its stored form both given: no duplicate.
+	assert.deepEqual(withStoredTitles(["Plan", "Plan.md"]), ["Plan", "Plan.md"]);
+	// Ingest trims nothing, but a stray space in the filter should not hide the match.
+	assert.deepEqual(withStoredTitles([" Plan "]), [" Plan ", "Plan.md"]);
 });
 
 test("hydradb_query forwards metadata filters and related-chunk count", async () => {

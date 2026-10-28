@@ -42,7 +42,9 @@ const PARAM = {
 		"The titles are resolved to source IDs first, then the normal semantic or keyword " +
 		"query runs inside those sources. Repeat values in the array for several titles; " +
 		"punctuation such as commas is part of the title. With source_ids, both filters " +
-		"must match. No title match returns an empty result rather than widening.",
+		"must match. No title match returns an empty result rather than widening. " +
+		"Text saved with hydradb_ingest is stored as \"<title>.md\"; pass the title " +
+		"either way, both forms are searched.",
 	metadata_filters:
 		"Exact-match filters over stored metadata, as {key: value}. Exact match only — " +
 		"no ranges, no partial matches, no dates-since. Only useful for keys you know " +

@@ -356,6 +356,25 @@ export function __setFanoutListTimeoutForTests(ms: number): void {
 	fanoutListTimeoutMs = ms;
 }
 
+/**
+ * The titles to match, including the form hydradb_ingest stored them under.
+ *
+ * Knowledge text is uploaded as the file `<title>.md`, and the server takes a
+ * document's title from its filename, so "Q3 Roadmap" is stored as
+ * "Q3 Roadmap.md". An agent filters by the title it chose, which then matched
+ * nothing. The filter matches ANY listed title, so adding the stored form
+ * finds those documents without losing one whose title has no extension.
+ */
+export function withStoredTitles(titles: string[] | undefined): string[] | undefined {
+	if (titles == null) return titles;
+
+	const stored = titles
+		.filter((title) => !/\.md$/i.test(title.trim()))
+		.map((title) => `${title.trim()}.md`);
+
+	return [...new Set([...titles, ...stored])];
+}
+
 /** Collection names from a listing payload, or null when it is malformed. */
 function collectionNamesOf(res: unknown): string[] | null {
 	const raw = res as { collections?: unknown; subTenantIds?: unknown; sub_tenant_ids?: unknown } | null;
@@ -553,7 +572,7 @@ export function createHydraDBServer(
 			mode: args.mode ?? "thinking",
 			operator: args.operator,
 			ids: args.source_ids,
-			titles: args.titles,
+			titles: withStoredTitles(args.titles),
 			metadataFilters: args.metadata_filters,
 			acl: args.acl,
 			numRelatedChunks: args.num_related_chunks,
