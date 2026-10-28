@@ -39,6 +39,27 @@ test("resolveHttpServerConfig reads PORT, BIND_ADDRESS and the allowlists", () =
 	assert.ok(config.allowedHosts.has("localhost:9000"));
 });
 
+test("complete OAuth config rejects unsupported HYDRADB_MCP_PUBLIC_URL layouts", () => {
+	for (const [url, reason] of [
+		["https://mcp.test/path?tenant=a", /query string/],
+		["https://mcp.test/path#fragment", /fragment/],
+		["https://user@mcp.test/path", /credentials/],
+		["https://mcp.test/path%2Fmcp", /percent-encoded path characters/],
+		["https://mcp.test/a/../mcp", /dot path segments/],
+	] as const) {
+		assert.throws(
+			() =>
+				resolveHttpServerConfig({
+					HYDRADB_OAUTH_ISSUER: "https://app.test",
+					HYDRADB_MCP_PUBLIC_URL: url,
+					HYDRADB_OAUTH_INTROSPECTION_SECRET: "secret",
+				}),
+			new RegExp(`HYDRADB_MCP_PUBLIC_URL.*${reason.source}`),
+			url,
+		);
+	}
+});
+
 test("parsePort falls back on garbage rather than accepting a partial number", () => {
 	assert.equal(parsePort(undefined), DEFAULT_PORT);
 	assert.equal(parsePort("8080abc"), DEFAULT_PORT);

@@ -78,6 +78,78 @@ function stripSlash(url: string): string {
 	return url.replace(/\/+$/, "");
 }
 
+const PROTECTED_RESOURCE_METADATA_PATH = "/.well-known/oauth-protected-resource";
+
+function invalidPublicUrl(reason: string): Error {
+	return new Error(`HYDRADB_MCP_PUBLIC_URL ${reason}`);
+}
+
+function parsePublicUrl(value: string): URL {
+	if (!/^[\x20-\x7E]+$/.test(value)) {
+		throw invalidPublicUrl("must contain ASCII URL characters only");
+	}
+	if (value.includes("\\")) {
+		throw invalidPublicUrl("must not contain backslashes");
+	}
+	if (value.includes("%")) {
+		throw invalidPublicUrl("must not contain percent-encoded path characters");
+	}
+	if (value.split(/[?#]/, 1)[0].split("/").some((segment) => segment === "." || segment === "..")) {
+		throw invalidPublicUrl("must not contain dot path segments");
+	}
+
+	let url: URL;
+	try {
+		url = new URL(value);
+	} catch {
+		throw invalidPublicUrl("must be an absolute http(s) URL");
+	}
+	if (url.protocol !== "http:" && url.protocol !== "https:") {
+		throw invalidPublicUrl("must be an absolute http(s) URL");
+	}
+	if (!url.hostname) throw invalidPublicUrl("must include a hostname");
+	if (url.username || url.password) throw invalidPublicUrl("must not include credentials");
+	if (url.search) throw invalidPublicUrl("must not include a query string");
+	if (url.hash) throw invalidPublicUrl("must not include a fragment");
+	return url;
+}
+
+function resourcePath(config: OAuthConfig): string {
+	const path = stripSlash(parsePublicUrl(config.resource).pathname);
+	return path || "/";
+}
+
+/** Literal endpoint and metadata paths accepted for the configured public URL. */
+export function oauthRoutes(config: OAuthConfig): {
+	mcp: string[];
+	metadata: string[];
+} {
+	const configured = resourcePath(config);
+	const leaf = configured === "/" ? "/" : `/${configured.split("/").at(-1)}`;
+	const samePrefix =
+		configured === "/"
+			? PROTECTED_RESOURCE_METADATA_PATH
+			: `${configured}${PROTECTED_RESOURCE_METADATA_PATH}`;
+	const strippedPrefix =
+		leaf === "/" ? PROTECTED_RESOURCE_METADATA_PATH : `${leaf}${PROTECTED_RESOURCE_METADATA_PATH}`;
+	const pathInserted =
+		configured === "/"
+			? PROTECTED_RESOURCE_METADATA_PATH
+			: `${PROTECTED_RESOURCE_METADATA_PATH}${configured}`;
+	return {
+		mcp: [...new Set(["/", "/mcp", configured, leaf])],
+		metadata: [
+			...new Set([
+				PROTECTED_RESOURCE_METADATA_PATH,
+				`${PROTECTED_RESOURCE_METADATA_PATH}/mcp`,
+				samePrefix,
+				strippedPrefix,
+				pathInserted,
+			]),
+		],
+	};
+}
+
 /**
  * Read the OAuth configuration, or `null` when the feature is off.
  *
@@ -107,27 +179,21 @@ export function resolveOAuthConfig(
 		);
 		return null;
 	}
-	for (const [name, value] of [
-		["HYDRADB_OAUTH_ISSUER", issuer],
-		["HYDRADB_MCP_PUBLIC_URL", resource],
-	] as const) {
-		if (!/^https?:\/\//i.test(value!)) {
-			warn(`WARNING: ${name} must be an absolute http(s) URL; OAuth stays OFF.`);
-			return null;
-		}
+	if (!/^https?:\/\//i.test(issuer!)) {
+		warn("WARNING: HYDRADB_OAUTH_ISSUER must be an absolute http(s) URL; OAuth stays OFF.");
+		return null;
 	}
+	const publicUrl = parsePublicUrl(resource!);
 	return {
 		issuer: stripSlash(issuer!),
-		resource: stripSlash(resource!),
+		resource: stripSlash(publicUrl.href),
 		introspectionSecret: introspectionSecret!,
 	};
 }
 
 /** Where the Protected Resource Metadata document lives for this server. */
-export function metadataUrl(config: OAuthConfig, mcpPath = ""): string {
-	// RFC 9728 puts the well-known segment BEFORE the resource's path, so a
-	// server at /mcp advertises at /.well-known/oauth-protected-resource/mcp.
-	return `${config.resource}/.well-known/oauth-protected-resource${mcpPath}`;
+export function metadataUrl(config: OAuthConfig): string {
+	return `${config.resource}${PROTECTED_RESOURCE_METADATA_PATH}`;
 }
 
 /** The RFC 9728 document itself. */
