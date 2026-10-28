@@ -324,7 +324,7 @@ test("a path-prefixed resource serves literal preserved, stripped, and RFC metad
 		trustProxy: false,
 		oauth: {
 			...CONFIG,
-			resource: "https://company.internal/hydra/mcp:v1+edge",
+			resource: "https://company.internal/hydra/api/mcp:v1+edge",
 		},
 	});
 	const prefixedServer = await new Promise<http.Server>((resolve) => {
@@ -335,9 +335,10 @@ test("a path-prefixed resource serves literal preserved, stripped, and RFC metad
 
 	try {
 		for (const path of [
-			"/hydra/mcp:v1+edge/.well-known/oauth-protected-resource",
+			"/hydra/api/mcp:v1+edge/.well-known/oauth-protected-resource",
+			"/api/mcp:v1+edge/.well-known/oauth-protected-resource",
 			"/mcp:v1+edge/.well-known/oauth-protected-resource",
-			"/.well-known/oauth-protected-resource/hydra/mcp:v1+edge",
+			"/.well-known/oauth-protected-resource/hydra/api/mcp:v1+edge",
 		]) {
 			const res = await request(
 				"GET",
@@ -347,12 +348,12 @@ test("a path-prefixed resource serves literal preserved, stripped, and RFC metad
 				prefixedPort,
 			);
 			assert.equal(res.status, 200, path);
-			assert.equal(JSON.parse(res.body).resource, "https://company.internal/hydra/mcp:v1+edge");
+			assert.equal(JSON.parse(res.body).resource, "https://company.internal/hydra/api/mcp:v1+edge");
 		}
 
 		const endpoint = await request(
 			"POST",
-			"/hydra/mcp:v1+edge",
+			"/api/mcp:v1+edge",
 			{ host: `127.0.0.1:${prefixedPort}`, ...JSON_HEADERS },
 			TOOLS_LIST,
 			prefixedPort,
@@ -360,7 +361,7 @@ test("a path-prefixed resource serves literal preserved, stripped, and RFC metad
 		assert.equal(endpoint.status, 401);
 		assert.match(
 			String(endpoint.headers["www-authenticate"]),
-			/resource_metadata="https:\/\/company\.internal\/hydra\/mcp:v1\+edge\/\.well-known\/oauth-protected-resource"/,
+			/resource_metadata="https:\/\/company\.internal\/hydra\/api\/mcp:v1\+edge\/\.well-known\/oauth-protected-resource"/,
 		);
 		const unrelated = await request(
 			"POST",
@@ -384,6 +385,13 @@ test("an anonymous request is a 401 that points at the metadata document", async
 	assert.match(String(res.headers["www-authenticate"]), /scope="hydradb"/);
 	// No token was presented, so no `error=` claim about one.
 	assert.doesNotMatch(String(res.headers["www-authenticate"]), /error=/);
+	const capitalized = await request(
+		"POST",
+		"/MCP",
+		{ host: `127.0.0.1:${port}`, ...JSON_HEADERS },
+		TOOLS_LIST,
+	);
+	assert.equal(capitalized.status, 401);
 });
 
 test("a valid access token is served exactly like the API key it stands for", async () => {

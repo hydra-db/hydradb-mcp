@@ -48,6 +48,7 @@ test("complete OAuth config rejects unsupported HYDRADB_MCP_PUBLIC_URL layouts",
 		["https://user@mcp.test/path", /credentials/],
 		["https://mcp.test/path%2Fmcp", /percent-encoded path characters/],
 		["https://mcp.test/a/../mcp", /dot path segments/],
+		["https://mcp.test/hydra/health", /reserved \/health/],
 	] as const) {
 		assert.throws(
 			() =>

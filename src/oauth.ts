@@ -114,6 +114,9 @@ function parsePublicUrl(value: string): URL {
 	if (!/^\/[A-Za-z0-9._~!$&'()*+,;=:@/-]*$/.test(url.pathname)) {
 		throw invalidPublicUrl("path contains unsupported characters");
 	}
+	if (url.pathname.split("/").filter(Boolean).at(-1)?.toLowerCase() === "health") {
+		throw invalidPublicUrl("path must not end with reserved /health");
+	}
 	return url;
 }
 
@@ -128,25 +131,26 @@ export function oauthRoutes(config: OAuthConfig): {
 	metadata: string[];
 } {
 	const configured = resourcePath(config);
-	const leaf = configured === "/" ? "/" : `/${configured.split("/").at(-1)}`;
-	const samePrefix =
-		configured === "/"
-			? PROTECTED_RESOURCE_METADATA_PATH
-			: `${configured}${PROTECTED_RESOURCE_METADATA_PATH}`;
-	const strippedPrefix =
-		leaf === "/" ? PROTECTED_RESOURCE_METADATA_PATH : `${leaf}${PROTECTED_RESOURCE_METADATA_PATH}`;
+	const segments = configured.split("/").filter(Boolean);
+	const suffixes =
+		segments.length === 0
+			? ["/"]
+			: segments.map((_, index) => `/${segments.slice(index).join("/")}`);
 	const pathInserted =
 		configured === "/"
 			? PROTECTED_RESOURCE_METADATA_PATH
 			: `${PROTECTED_RESOURCE_METADATA_PATH}${configured}`;
 	return {
-		mcp: [...new Set(["/", "/mcp", configured, leaf])],
+		mcp: [...new Set(["/", "/mcp", ...suffixes])],
 		metadata: [
 			...new Set([
 				PROTECTED_RESOURCE_METADATA_PATH,
 				`${PROTECTED_RESOURCE_METADATA_PATH}/mcp`,
-				samePrefix,
-				strippedPrefix,
+				...suffixes.map((suffix) =>
+					suffix === "/"
+						? PROTECTED_RESOURCE_METADATA_PATH
+						: `${suffix}${PROTECTED_RESOURCE_METADATA_PATH}`,
+				),
 				pathInserted,
 			]),
 		],

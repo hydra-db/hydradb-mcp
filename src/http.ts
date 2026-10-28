@@ -81,7 +81,7 @@ function banner(message: string): void {
 function literalRoutes(paths: string[]): RegExp[] {
 	return paths.map((path) => {
 		const escaped = path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-		return new RegExp(path === "/" ? "^/$" : `^${escaped}/?$`);
+		return new RegExp(path === "/" ? "^/$" : `^${escaped}/?$`, "i");
 	});
 }
 
