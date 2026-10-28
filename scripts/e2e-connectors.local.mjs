@@ -100,7 +100,30 @@ async function guardSelfTest() {
 	if (response.status !== 502 || secondHopRequests !== 0) {
 		throw new Error("The local-only guard followed a redirect");
 	}
-	console.log(JSON.stringify({ ok: true, case: "redirect chain refused at first hop" }));
+
+	let receivedQuery = "";
+	const queryServer = createServer((request, queryResponse) => {
+		receivedQuery = new URL(request.url ?? "/", "http://query-fixture.invalid").search;
+		queryResponse.writeHead(204);
+		queryResponse.end();
+	});
+	await new Promise((resolveListen) => queryServer.listen(0, "127.0.0.1", resolveListen));
+	const queryAddress = queryServer.address();
+
+	if (queryAddress == null || typeof queryAddress === "string") throw new Error("Query fixture did not receive a port");
+
+	const queryProxy = await startGuardedProxy(
+		new URL(`http://127.0.0.1:${queryAddress.port}/__eng3341/mode?fixture=run-owned`),
+	);
+	await fetch(queryProxy, { method: "POST", body: "{}", redirect: "manual" });
+	queryServer.close();
+
+	if (receivedQuery !== "?fixture=run-owned") throw new Error("The local-only guard discarded a configured query");
+
+	console.log(JSON.stringify({
+		ok: true,
+		cases: ["redirect chain refused at first hop", "configured query preserved"],
+	}));
 }
 
 if (process.argv.includes("--guard-self-test")) {

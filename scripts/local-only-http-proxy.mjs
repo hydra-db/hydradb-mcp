@@ -36,7 +36,7 @@ const server = createServer(async (request, response) => {
 		const destination = new URL(target);
 		const targetPath = target.pathname.replace(/\/$/, "");
 		destination.pathname = incoming.pathname === "/" ? target.pathname : `${targetPath}${incoming.pathname}`;
-		destination.search = incoming.search;
+		if (incoming.search) destination.search = incoming.search;
 
 		if (!LOOPBACK_HOSTS.has(destination.hostname)) {
 			response.writeHead(502, { "content-type": "application/json" });

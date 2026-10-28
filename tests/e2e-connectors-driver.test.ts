@@ -60,6 +60,7 @@ test("local-only guard refuses redirect chains at the first hop", () => {
 
 	assert.equal(result.status, 0, result.stderr);
 	assert.match(result.stdout, /redirect chain refused at first hop/);
+	assert.match(result.stdout, /configured query preserved/);
 });
 
 test("local OAuth failures never print an echoed bearer token", () => {
