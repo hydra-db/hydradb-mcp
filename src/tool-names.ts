@@ -25,6 +25,12 @@ export const TOOL_NAMES = {
 	// agent working across several databases can find their names without
 	// asking the user, and so a confined connection can see its own limits.
 	DATABASES: "hydradb_databases",
+	CREATE_DATABASE: "hydradb_create_database",
+	DELETE_DATABASE: "hydradb_delete_database",
+	DATABASE_READINESS: "hydradb_database_readiness",
+	GET_METADATA_SCHEMA: "hydradb_get_metadata_schema",
+	ADD_METADATA_FIELDS: "hydradb_add_metadata_fields",
+	DATABASE_STATS: "hydradb_database_stats",
 	LIST_COLLECTIONS: "hydradb_list_collections",
 	// Feedback about a query that already ran (PRO-1805 / POST /feedback). New
 	// capability, so no alias: there is no prior spelling to keep working, the
@@ -63,18 +69,17 @@ export const CANONICAL_TOOL_NAMES = [
 	TOOL_NAMES.STATUS,
 	TOOL_NAMES.SUBGRAPH,
 	TOOL_NAMES.RELATIONS,
+	TOOL_NAMES.DATABASES,
+	TOOL_NAMES.CREATE_DATABASE,
+	TOOL_NAMES.DELETE_DATABASE,
+	TOOL_NAMES.DATABASE_READINESS,
+	TOOL_NAMES.GET_METADATA_SCHEMA,
+	TOOL_NAMES.ADD_METADATA_FIELDS,
+	TOOL_NAMES.DATABASE_STATS,
 	TOOL_NAMES.LIST_COLLECTIONS,
 	TOOL_NAMES.DELETE_COLLECTION,
 	TOOL_NAMES.FEEDBACK,
 ] as const;
-
-/**
- * Registered only for connections established through OAuth, where the user
- * may have confined the app to specific databases and the agent needs to see
- * that. Kept off the canonical list on purpose: an API-key connection's tool
- * surface must not change at all when OAuth ships.
- */
-export const OAUTH_TOOL_NAMES = [TOOL_NAMES.DATABASES] as const;
 
 /** The BYOG graph family, registered together and gated together. */
 export const GRAPH_TOOL_NAMES = [

@@ -142,11 +142,11 @@ function invoke(hydra: HydraDB, op: string, args: Record<string, unknown>): Prom
 		case "database.create":
 			return hydra.databases.create({ database: a.database });
 		case "database.delete":
-			return hydra.databases.delete(a.database);
+			return hydra.databases.delete({ database: a.database });
 		case "database.collections":
 			return hydra.databases.collections(a.database);
 		case "database.readiness":
-			return hydra.databases.readiness(a.database);
+			return hydra.databases.readiness({ database: a.database });
 		default:
 			throw new Error(`conformance: unhandled op "${op}"`);
 	}
@@ -173,7 +173,9 @@ for (const vector of suite.vectors) {
 		const hydra = new HydraDB(
 			{
 				token: "conformance-token",
-				database: suite.scope_defaults.database,
+				database: vector.call.op === "database.delete"
+					? "conformance_connection_default"
+					: suite.scope_defaults.database,
 				collection: suite.scope_defaults.collection,
 			},
 			sdk,

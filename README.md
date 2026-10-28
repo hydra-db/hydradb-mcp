@@ -20,6 +20,15 @@ Run it two ways, same tools either way:
 | `hydradb_subgraph` | Everything connected to one item — its thread, replies, parents, children, links |
 | `hydradb_relations` | The knowledge-graph relations of one item or a whole collection, page by page |
 | `hydradb_feedback` | Report whether a query's results were useful, by its `request_id` |
+| `hydradb_databases` | List databases this connection can address |
+| `hydradb_create_database` | Create a database with an optional metadata schema and embedding dimension |
+| `hydradb_delete_database` | Delete a database irreversibly |
+| `hydradb_database_readiness` | Check whether database provisioning finished |
+| `hydradb_get_metadata_schema` | Read the metadata fields declared for a database |
+| `hydradb_add_metadata_fields` | Add fields to a database metadata schema |
+| `hydradb_database_stats` | Read database-wide knowledge and memory row counts |
+| `hydradb_list_collections` | List collections inside a database |
+| `hydradb_delete_collection` | Delete one collection irreversibly |
 
 Ids flow between these: `hydradb_query`, `hydradb_list` and `hydradb_subgraph` emit them;
 `hydradb_inspect`, `hydradb_delete`, `hydradb_status`, `hydradb_subgraph` and `hydradb_relations` accept them.
@@ -78,6 +87,35 @@ HYDRADB_MCP_LEGACY_TOOLS=1
 | `hydra_db_list_memories`, `hydra_db_list_sources` | `hydradb_list` |
 | `hydra_db_fetch_content` | `hydradb_inspect` |
 | `hydra_db_delete_memory` | `hydradb_delete` |
+
+### Database tools
+
+Database tools are available over stdio, API-key HTTP, and OAuth HTTP connections.
+`hydradb_databases` marks the connection default. On a confined OAuth connection,
+it returns only approved databases, and every database tool refuses other names
+before sending an API request. A connection limited to specific collections cannot
+create or delete a whole database or change its database-wide metadata schema.
+
+| Tool | Required input | Notes |
+|---|---|---|
+| `hydradb_databases` | None | Lists accessible databases and marks the default |
+| `hydradb_create_database` | `database` | Optional `embeddings_dimension` and `database_metadata_schema`; creation is asynchronous |
+| `hydradb_delete_database` | `database` | Destructive. Refuses the connection default |
+| `hydradb_database_readiness` | None | Optional `database`; poll until `ready_for_ingestion` is true |
+| `hydradb_get_metadata_schema` | None | Optional `database`; returns declared field names and types |
+| `hydradb_add_metadata_fields` | `add_fields` | Optional `database`; additive only, with no delete, rename, or retype |
+| `hydradb_database_stats` | None | Optional `database`; returns knowledge and memory row counts |
+
+Metadata fields use `name` and `data_type`. Supported types are `BOOL`, `INT8`,
+`INT16`, `INT32`, `INT64`, `FLOAT`, `DOUBLE`, `VARCHAR`, and `JSON`. Optional
+settings are `max_length`, `enable_match`, `enable_dense_embedding`, and
+`enable_sparse_embedding`.
+
+After `hydradb_create_database` accepts a request, call
+`hydradb_database_readiness` until the database is ready. A 403 from a write
+tool can indicate missing write permission. Read-only credentials cannot perform
+database writes; verify the credential's permissions or reconnect with write
+permission.
 
 ### **hydradb_query**
 

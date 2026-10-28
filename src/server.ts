@@ -11,8 +11,8 @@ import type { GraphConfig } from "./config.js";
 import { renderRecalledContext } from "./context.js";
 import { COLLECTION_PATTERN, MAX_BODY_BYTES, renderRows } from "./cypher.js";
 import { SERVER_INSTRUCTIONS, TOOL_DESCRIPTIONS } from "./descriptions.js";
-import { HydraDB, assertCollectionAllowed, assertDatabaseAllowed, hasEntries } from "./hydra/index.js";
-import type { ContextKind, MetadataFilter, QueryKind, QueryParams } from "./hydra/index.js";
+import { HydraDB, HydraWrapperError, assertCollectionAllowed, assertDatabaseAllowed, hasEntries } from "./hydra/index.js";
+import type { ContextKind, CreateDatabaseParams, MetadataFilter, QueryKind, QueryParams } from "./hydra/index.js";
 import { logger } from "./logger.js";
 import { ALIAS_REPLACEMENTS, DEPRECATED_TOOL_NAMES, TOOL_NAMES } from "./tool-names.js";
 import type { MemoryResultItem } from "./types.js";
@@ -314,16 +314,6 @@ export function __resetAliasWarnings() {
 	warnedAliases.clear();
 }
 
-export interface ServerOptions {
-	/**
-	 * Register the OAuth-connection tools (currently `hydradb_databases`).
-	 * Set by the HTTP transport when the request authenticated with an OAuth
-	 * token; never for API keys, so their tool list is unchanged.
-	 */
-	oauthTools?: boolean;
-}
-
-
 /**
  * How long hydradb_list_collections waits for the optional database-wide row
  * counts before returning the listing without them. Stats has been observed to
@@ -552,7 +542,6 @@ export function createHydraDBServer(
 	 * config is read from the environment exactly as the rest of the config is.
 	 */
 	graphOverride?: Partial<GraphConfig>,
-	options: ServerOptions = {},
 ) {
 	const server = new McpServer(
 		{
@@ -2226,6 +2215,173 @@ export function createHydraDBServer(
 		);
 	}
 
+	type MetadataFieldInput = z.infer<typeof metadataFieldSchema>;
+
+	type SDKMetadataField = NonNullable<CreateDatabaseParams["databaseMetadataSchema"]>[number];
+
+	function metadataField(field: MetadataFieldInput): SDKMetadataField {
+		const mapped: SDKMetadataField = {
+			name: field.name,
+			dataType: field.data_type,
+		};
+
+		if (field.max_length != null) mapped.maxLength = field.max_length;
+
+		if (field.enable_match != null) mapped.enableMatch = field.enable_match;
+
+		if (field.enable_dense_embedding != null) {
+			mapped.enableDenseEmbedding = field.enable_dense_embedding;
+		}
+
+		if (field.enable_sparse_embedding != null) {
+			mapped.enableSparseEmbedding = field.enable_sparse_embedding;
+		}
+
+		return mapped;
+	}
+
+	function renderMetadataField(field: SDKMetadataField) {
+		return {
+			name: field.name,
+			data_type: field.dataType,
+			max_length: field.maxLength,
+			enable_match: field.enableMatch,
+			enable_dense_embedding: field.enableDenseEmbedding,
+			enable_sparse_embedding: field.enableSparseEmbedding,
+		};
+	}
+
+	async function databaseWrite<T>(run: () => Promise<T>): Promise<T> {
+		try {
+			return await run();
+		} catch (error) {
+			if (error instanceof HydraWrapperError && error.status === 403) {
+				throw new Error(
+					`${error.message}. This operation requires database write permission. ` +
+					"Read-only credentials cannot perform it; verify this credential's permissions " +
+					"or reconnect with write permission.",
+				);
+			}
+
+			throw error;
+		}
+	}
+
+	async function runCreateDatabase(args: {
+		database: string;
+		embeddings_dimension?: number;
+		database_metadata_schema?: MetadataFieldInput[];
+	}, signal?: AbortSignal): Promise<ToolResult> {
+		const result = await databaseWrite(() => hydra.databases.create({
+			database: args.database,
+			embeddingsDimension: args.embeddings_dimension,
+			databaseMetadataSchema: args.database_metadata_schema?.map(metadataField),
+		}, { signal }));
+
+		const database = result.database ?? result.tenantId ?? args.database;
+		const status = result.status ?? "accepted";
+
+		return structuredResult(
+			`Database "${database}" creation was ${status}. Provisioning is asynchronous; ` +
+				`poll ${TOOL_NAMES.DATABASE_READINESS} until it is ready for ingestion.`,
+			{ database, status, message: result.message ?? null },
+		);
+	}
+
+	async function runDeleteDatabase(
+		args: { database: string },
+		signal?: AbortSignal,
+	): Promise<ToolResult> {
+		const result = await databaseWrite(() => hydra.databases.delete(args, { signal }));
+		const database = result.database ?? result.tenantId ?? args.database;
+		const status = result.status ?? "deletion_scheduled";
+
+		return structuredResult(
+			`Database "${database}" deletion was ${status}.`,
+			{ database, status, message: result.message ?? null },
+		);
+	}
+
+	async function runDatabaseReadiness(
+		args: { database?: string },
+		signal?: AbortSignal,
+	): Promise<ToolResult> {
+		const database = args.database?.trim() || hydra.database;
+		const result = await hydra.databases.readiness({ database }, { signal });
+		const ready = result.infra?.readyForIngestion === true;
+
+		const structured = {
+			database: result.database ?? result.tenantId ?? database,
+			ready_for_ingestion: ready,
+			scheduler_ready: result.infra?.schedulerStatus ?? null,
+			graph_ready: result.infra?.graphStatus ?? null,
+			vectorstore: result.infra?.vectorstoreStatus ?? null,
+			message: result.message ?? null,
+		};
+
+		return structuredResult(
+			ready
+				? `Database "${structured.database}" is ready for ingestion.`
+				: `Database "${structured.database}" is not ready for ingestion yet. Poll this tool again.`,
+			structured,
+		);
+	}
+
+	async function runGetMetadataSchema(
+		args: { database?: string },
+		signal?: AbortSignal,
+	): Promise<ToolResult> {
+		const database = args.database?.trim() || hydra.database;
+		const result = await hydra.databases.getMetadataSchema({ database }, { signal });
+		const fields = (result.fields ?? []).map(renderMetadataField);
+		const name = result.database ?? result.tenantId ?? database;
+
+		return structuredResult(
+			fields.length === 0
+				? `Database "${name}" has no custom metadata fields.`
+				: `Database "${name}" metadata fields:\n${fields.map((field) => `- ${field.name}: ${field.data_type}`).join("\n")}`,
+			{ database: name, fields },
+		);
+	}
+
+	async function runAddMetadataFields(args: {
+		database?: string;
+		add_fields: MetadataFieldInput[];
+	}, signal?: AbortSignal): Promise<ToolResult> {
+		const database = args.database?.trim() || hydra.database;
+
+		const result = await databaseWrite(() => hydra.databases.updateMetadataSchema({
+			database,
+			addFields: args.add_fields.map(metadataField),
+		}, { signal }));
+
+		const addedFields = result.addedFields ?? args.add_fields.map((field) => field.name);
+		const name = result.database ?? result.tenantId ?? database;
+
+		return structuredResult(
+			`Added metadata field(s) to database "${name}": ${addedFields.join(", ")}.`,
+			{ database: name, added_fields: addedFields },
+		);
+	}
+
+	async function runDatabaseStats(
+		args: { database?: string },
+		signal?: AbortSignal,
+	): Promise<ToolResult> {
+		const database = args.database?.trim() || hydra.database;
+		const result = await hydra.databases.stats({ database }, { signal });
+		const name = result.database ?? result.tenantId ?? database;
+		const knowledgeRows = result.knowledgeCollection?.rowCount ?? null;
+		const memoryRows = result.memoryCollection?.rowCount ?? null;
+		const knowledgeText = knowledgeRows == null ? "knowledge row count is unknown" : `${knowledgeRows} knowledge row(s)`;
+		const memoryText = memoryRows == null ? "memory row count is unknown" : `${memoryRows} memory row(s)`;
+
+		return structuredResult(
+			`Database "${name}" reports ${knowledgeText}; ${memoryText}.`,
+			{ database: name, knowledge_rows: knowledgeRows, memory_rows: memoryRows },
+		);
+	}
+
 	async function runListCollections(
 		args: { database?: string },
 		signal?: AbortSignal,
@@ -2278,7 +2434,7 @@ export function createHydraDBServer(
 
 		try {
 			const stats = await Promise.race([
-				hydra.databases.stats(database, { signal: statsAbort.signal }),
+				hydra.databases.stats({ database }, { signal: statsAbort.signal }),
 				aborted,
 			]);
 
@@ -2892,6 +3048,51 @@ export function createHydraDBServer(
 			.min(1)
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.collection),
+	};
+
+	const databaseNameSchema = z
+		.string()
+		.trim()
+		.min(1)
+		.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CREATE_DATABASE].params.database);
+
+	const metadataFieldSchema = z.object({
+		name: z.string().trim().min(1).describe(TOOL_DESCRIPTIONS[TOOL_NAMES.ADD_METADATA_FIELDS].params.name),
+		data_type: z
+			.enum(["BOOL", "INT8", "INT16", "INT32", "INT64", "FLOAT", "DOUBLE", "VARCHAR", "JSON"])
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.ADD_METADATA_FIELDS].params.data_type),
+		max_length: z.number().int().min(1).optional().describe(TOOL_DESCRIPTIONS[TOOL_NAMES.ADD_METADATA_FIELDS].params.max_length),
+		enable_match: z.boolean().optional().describe(TOOL_DESCRIPTIONS[TOOL_NAMES.ADD_METADATA_FIELDS].params.enable_match),
+		enable_dense_embedding: z.boolean().optional().describe(TOOL_DESCRIPTIONS[TOOL_NAMES.ADD_METADATA_FIELDS].params.enable_dense_embedding),
+		enable_sparse_embedding: z.boolean().optional().describe(TOOL_DESCRIPTIONS[TOOL_NAMES.ADD_METADATA_FIELDS].params.enable_sparse_embedding),
+	});
+
+	const optionalDatabaseSchema = {
+		database: databaseNameSchema
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.DATABASE_READINESS].params.database),
+	};
+
+	const createDatabaseSchema = {
+		database: databaseNameSchema,
+		embeddings_dimension: z
+			.number()
+			.int()
+			.min(1)
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CREATE_DATABASE].params.embeddings_dimension),
+		database_metadata_schema: z
+			.array(metadataFieldSchema)
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CREATE_DATABASE].params.database_metadata_schema),
+	};
+
+	const addMetadataFieldsSchema = {
+		...optionalDatabaseSchema,
+		add_fields: z
+			.array(metadataFieldSchema)
+			.min(1)
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.ADD_METADATA_FIELDS].params.add_fields),
 	};
 
 	const querySchema = {
@@ -3873,12 +4074,67 @@ export function createHydraDBServer(
 		readOnly,
 	);
 
-	// Only an OAuth connection carries a user's database decision, and only
-	// there does an agent need a way to see it. Registering this for API-key
-	// connections too would change their tool list, which must stay identical.
-	if (options.oauthTools) {
-		register(TOOL_NAMES.DATABASES, {}, () => runDatabases(), readOnly);
-	}
+	register(TOOL_NAMES.DATABASES, {}, () => runDatabases(), readOnly);
+
+	register(
+		TOOL_NAMES.CREATE_DATABASE,
+		createDatabaseSchema,
+		(args, extra) => runCreateDatabase(
+			z.object(createDatabaseSchema).parse(args),
+			extra?.signal,
+		),
+		additiveWrite,
+	);
+
+	register(
+		TOOL_NAMES.DELETE_DATABASE,
+		{ database: databaseNameSchema },
+		(args, extra) => runDeleteDatabase(
+			z.object({ database: databaseNameSchema }).parse(args),
+			extra?.signal,
+		),
+		destructive,
+	);
+
+	register(
+		TOOL_NAMES.DATABASE_READINESS,
+		optionalDatabaseSchema,
+		(args, extra) => runDatabaseReadiness(
+			z.object(optionalDatabaseSchema).parse(args),
+			extra?.signal,
+		),
+		readOnly,
+	);
+
+	register(
+		TOOL_NAMES.GET_METADATA_SCHEMA,
+		optionalDatabaseSchema,
+		(args, extra) => runGetMetadataSchema(
+			z.object(optionalDatabaseSchema).parse(args),
+			extra?.signal,
+		),
+		readOnly,
+	);
+
+	register(
+		TOOL_NAMES.ADD_METADATA_FIELDS,
+		addMetadataFieldsSchema,
+		(args, extra) => runAddMetadataFields(
+			z.object(addMetadataFieldsSchema).parse(args),
+			extra?.signal,
+		),
+		additiveWrite,
+	);
+
+	register(
+		TOOL_NAMES.DATABASE_STATS,
+		optionalDatabaseSchema,
+		(args, extra) => runDatabaseStats(
+			z.object(optionalDatabaseSchema).parse(args),
+			extra?.signal,
+		),
+		readOnly,
+	);
 
 	register(
 		TOOL_NAMES.LIST_COLLECTIONS,

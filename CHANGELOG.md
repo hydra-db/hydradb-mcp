@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — MCP database management tools
+
+Added separate tools to create and delete databases, check provisioning
+readiness, read and extend metadata schemas, and get database statistics.
+`hydradb_databases` and the new tools are available to API-key, stdio, and OAuth
+connections. OAuth database confinement now applies before create, delete,
+readiness, stats, and metadata-schema requests. Deleting the connection's own
+default database is refused, and write-permission failures explain how to use a
+writable credential.
+
 ## [1.6.0] - 2026-10-28
 
 ### Fixed — `hydradb_query` title filter missed documents saved through `hydradb_ingest`
