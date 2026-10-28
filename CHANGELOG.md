@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-10-28
+
 ### Fixed — `hydradb_query` title filter missed documents saved through `hydradb_ingest`
 
 Knowledge text is uploaded as `<title>.md` and the server takes the title from
