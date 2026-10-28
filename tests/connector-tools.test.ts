@@ -298,6 +298,7 @@ test("create and reconnect return dashboard completion links without credentials
 		dashboard_url: "http://127.0.0.1:3000/connectors?connect=gitlab+cloud",
 	});
 	assert.match(text(create), /no connector was created/i);
+	assert.match(text(create), /http:\/\/127\.0\.0\.1:3000\/connectors\?connect=gitlab\+cloud/);
 	assert.doesNotMatch(text(create), /credential.*:/i);
 
 	const reconnect = await client.callTool({
@@ -312,6 +313,7 @@ test("create and reconnect return dashboard completion links without credentials
 		dashboard_url: "http://127.0.0.1:3000/connectors?open=allowed",
 	});
 	assert.match(text(reconnect), /select Reconnect/i);
+	assert.match(text(reconnect), /http:\/\/127\.0\.0\.1:3000\/connectors\?open=allowed/);
 	assert.equal(fixture.calls.some((call) => call.method === "update"), false);
 
 	await client.close();

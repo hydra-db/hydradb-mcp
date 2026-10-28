@@ -72,10 +72,27 @@ Both flows set `completed: false` because the dashboard, not MCP, performs the
 credential-bearing request. `HYDRADB_DASHBOARD_URL` changes the dashboard origin.
 
 Run the local-only Inspector acceptance driver after building the package. The
-driver refuses non-loopback API and dashboard URLs. It checks completion links by
-default, checks one existing connector when `ENG3341_CONNECTOR_ID` is set, and only
-mutates run-owned fixtures when both `ENG3341_MUTATE=1` and
-`ENG3341_RUN_OWNED=1` are set:
+driver refuses non-loopback API and dashboard URLs. A local guard proxy rejects
+external redirects before any redirected request. The driver passes server secrets
+through a mode-600 environment file, never through process arguments, and removes
+Inspector stderr from failures.
+
+The default link-only mode checks create and optional reconnect links. Its report
+lists completed and skipped cases and never claims a complete lifecycle. Set
+`ENG3341_FULL_LIFECYCLE=1` and `ENG3341_RUN_OWNED=1` for the complete lifecycle.
+Complete mode requires a disposable connector, resource, and fake-vendor process:
+`ENG3341_CONNECTOR_ID`, `ENG3341_RESOURCE_ID`, and `ENG3341_FAKE_VENDOR_PID`.
+It discovers and configures the resource, waits for a successful sync, pauses and
+resumes, stops the run-owned fake vendor, and waits for safe failure guidance.
+
+Complete mode also requires two local hosted HTTP MCP contexts. Configure the
+allowed context with `ENG3341_OAUTH_ALLOWED_MCP_URL` and
+`ENG3341_OAUTH_ALLOWED_TOKEN`. Configure a different-database context with
+`ENG3341_OAUTH_DENIED_MCP_URL` and `ENG3341_OAUTH_DENIED_TOKEN`. The driver verifies
+allowed reconnect access and denied read and mutation access. Set
+`ENG3341_CLEANUP=1` to delete the run-owned resource and connector. Cleanup never
+runs without `ENG3341_RUN_OWNED=1`. Keep all services and OAuth endpoints on
+loopback addresses:
 
 ```bash
 npm run build
@@ -84,6 +101,9 @@ HYDRADB_DASHBOARD_URL=http://127.0.0.1:3000 \
 HYDRADB_API_KEY=local-key HYDRADB_DATABASE=local-db \
 npm run e2e:connectors:local
 ```
+
+Run `node scripts/e2e-connectors.local.mjs --guard-self-test` to verify that the
+request guard rejects an external redirect without contacting its destination.
 
 ### Graph tools (Cypher)
 

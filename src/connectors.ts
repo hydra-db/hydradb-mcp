@@ -599,14 +599,16 @@ export class ConnectorTools {
 	}
 
 	async create(provider: string): Promise<ConnectorToolResponse> {
+		const dashboardUrl = this.dashboardLink("connect", provider);
+
 		return {
 			text:
-				"No connector was created by this call. Open the dashboard link to connect the provider securely. " +
+				`No connector was created by this call. Open ${dashboardUrl} to connect the provider securely. ` +
 				"Do not paste provider credentials into chat or any MCP tool.",
 			data: {
 				provider,
 				completed: false,
-				dashboard_url: this.dashboardLink("connect", provider),
+				dashboard_url: dashboardUrl,
 			},
 		};
 	}
@@ -614,15 +616,16 @@ export class ConnectorTools {
 	async update(input: ConnectorUpdateInput, opts?: RequestOptions): Promise<ConnectorToolResponse> {
 		if (input.reconnect === true) {
 			await this.authorizedConnector(input.connectorId, opts);
+			const dashboardUrl = this.dashboardLink("open", input.connectorId);
 
 			return {
 				text:
-					"No credentials were changed by this call. Open the connector drawer with the dashboard link, " +
+					`No credentials were changed by this call. Open ${dashboardUrl} to open the connector drawer, ` +
 					"then select Reconnect. Do not paste provider credentials into chat or any MCP tool.",
 				data: {
 					connector_id: input.connectorId,
 					completed: false,
-					dashboard_url: this.dashboardLink("open", input.connectorId),
+					dashboard_url: dashboardUrl,
 				},
 			};
 		}
