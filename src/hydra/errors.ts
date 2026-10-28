@@ -58,15 +58,47 @@ const MAX_BODY_CHARS = 512;
  */
 const SECRET_PATTERNS: [RegExp, string][] = [
 	[/\bBearer\s+\S+/gi, "Bearer [redacted]"],
-	[/\b(sk|hdb|key|tok)[-_][A-Za-z0-9_-]{16,}/g, "[redacted]"],
+	// HydraDB keys are `sk_<env>_<id>.<secret>`. The secret is the half after
+	// the dot, so the match has to run through it, however short the id is.
+	[/\bsk_[A-Za-z0-9]+_[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, "[redacted]"],
+	// OAuth access (`hmat_`) and refresh (`hmrt_`) tokens the dashboard issues.
+	[/\bhm[ar]t_[A-Za-z0-9_.~+=-]+/g, "[redacted]"],
+	[/\b(sk|hdb|key|tok)[-_][A-Za-z0-9_-]{16,}(?:\.[A-Za-z0-9_-]+)?/g, "[redacted]"],
 	[
-		/("(?:api[-_]?key|token|authorization|password|secret)"\s*:\s*)"[^"]*"/gi,
+		/([?&](?:api[-_]?key|access[-_]?token|refresh[-_]?token|token|client[-_]?secret|secret)=)[^&\s"']+/gi,
+		"$1[redacted]",
+	],
+	[
+		/("(?:api[-_]?key|token|access[-_]?token|refresh[-_]?token|authorization|password|secret)"\s*:\s*)"[^"]*"/gi,
 		'$1"[redacted]"',
 	],
 ];
 
-function scrub(text: string): string {
+/**
+ * Shorter than this, an exact-match credential would blank ordinary words in
+ * the message, and no real key or token is this short.
+ */
+const MIN_KNOWN_SECRET_CHARS = 8;
+
+/**
+ * Remove credentials from text a model may see.
+ *
+ * `known` are the exact credentials of the current request. They are removed
+ * whatever their format, which the patterns alone cannot promise: a legacy or
+ * foreign key matches none of them. A key's secret half is removed on its own
+ * too, since a body can echo it apart from the id.
+ */
+export function scrub(text: string, known: readonly string[] = []): string {
 	let out = text;
+
+	for (const secret of known) {
+		const parts = [secret, secret.slice(secret.indexOf(".") + 1)];
+
+		for (const part of parts) {
+			if (part.length >= MIN_KNOWN_SECRET_CHARS) out = out.split(part).join("[redacted]");
+		}
+	}
+
 	for (const [pattern, replacement] of SECRET_PATTERNS) {
 		out = out.replace(pattern, replacement);
 	}
@@ -184,7 +216,8 @@ export function translateError(path: string, err: unknown): HydraWrapperError {
 	}
 
 	// Non-SDK failure (network error, aborted request, unexpected throw).
-	const message = err instanceof Error ? err.message : String(err);
+	// A network or proxy failure can quote the request it failed on.
+	const message = scrub(err instanceof Error ? err.message : String(err));
 	return new HydraWrapperError(`Hydra DB ${path} → ERR: ${message}`, path, {
 		cause: err,
 	});

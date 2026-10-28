@@ -19,7 +19,7 @@
  * insulated from yet.
  */
 
-import { HydraWrapperError } from "./errors.js";
+import { HydraWrapperError, scrub } from "./errors.js";
 import { newRawTransport, type RawTransport, sendRaw } from "./transport.js";
 
 export interface GraphConfig {
@@ -74,6 +74,9 @@ function unexpectedShape(path: string, expected: string, got: unknown): HydraWra
 	} catch {
 		preview = String(got);
 	}
+
+	preview = scrub(preview);
+
 	if (preview.length > 200) preview = `${preview.slice(0, 200)}…`;
 	return new HydraWrapperError(
 		`Hydra DB ${path} → ERR: expected ${expected}, got ${preview}. ` +

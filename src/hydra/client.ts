@@ -20,7 +20,7 @@ import type { HydraDB as SDK } from "@hydradb/sdk";
 import { z } from "zod";
 
 import { unwrap } from "./envelope.js";
-import { HydraWrapperError, translateError } from "./errors.js";
+import { HydraWrapperError, scrub, translateError } from "./errors.js";
 import { type GraphConfig, GraphResource } from "./graph.js";
 import { type RawTransport, mcpHeaders, newRawTransport, sendRaw } from "./transport.js";
 
@@ -1402,6 +1402,8 @@ export class HydraDB {
 	 * but exposed here so callers reach every HydraDB surface through one object.
 	 */
 	readonly graph: GraphResource;
+	/** This connection's credential, kept only so `redact` can remove it. */
+	private readonly token: string;
 
 	constructor(config: HydraConfig, sdk?: HydraDBClient, rawOverride?: RawTransport) {
 		const client =
@@ -1424,6 +1426,7 @@ export class HydraDB {
 				headers: mcpHeaders(config),
 			});
 
+		this.token = config.token;
 		this.database = config.database;
 		this.collection = config.collection;
 		this.allowedDatabases = config.allowedDatabases;
@@ -1471,5 +1474,13 @@ export class HydraDB {
 		if (config.oauthUserId) graphConfig.oauthUserId = config.oauthUserId;
 
 		this.graph = new GraphResource(graphConfig);
+	}
+
+	/**
+	 * Remove credentials, including this connection's own key or token in any
+	 * format, from text bound for the model.
+	 */
+	redact(text: string): string {
+		return scrub(text, [this.token]);
 	}
 }
