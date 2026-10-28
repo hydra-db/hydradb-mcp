@@ -2495,27 +2495,48 @@ test("hydradb_query forwards titles plus the .md form hydradb_ingest stored them
 		arguments: { query: "auth flow", titles: ["Smith, John", "Q3 Roadmap.md"] },
 	});
 
-	// "Q3 Roadmap.md" already names a stored file, so it is not doubled.
+	// Each title as given and with ".md" added: one of the two is the stored title.
 	assert.deepEqual(calls.find((c) => c.method === "query")?.args.titles, [
 		"Smith, John",
 		"Q3 Roadmap.md",
 		"Smith, John.md",
+		"Q3 Roadmap.md.md",
 	]);
 	await client.close();
 });
 
-test("withStoredTitles adds each title's stored .md form once", () => {
+test("withStoredTitles sends each title as given and with .md added", () => {
 	assert.equal(withStoredTitles(undefined), undefined);
 	assert.deepEqual(withStoredTitles(["Atlas migration plan"]), [
 		"Atlas migration plan",
 		"Atlas migration plan.md",
 	]);
-	// Already a stored filename, in any case: left alone.
-	assert.deepEqual(withStoredTitles(["notes.MD"]), ["notes.MD"]);
 	// A title and its stored form both given: no duplicate.
-	assert.deepEqual(withStoredTitles(["Plan", "Plan.md"]), ["Plan", "Plan.md"]);
-	// Ingest trims nothing, but a stray space in the filter should not hide the match.
+	assert.deepEqual(withStoredTitles(["Plan", "Plan.md"]), ["Plan", "Plan.md", "Plan.md.md"]);
+	// A stray space in the filter should not hide the match.
 	assert.deepEqual(withStoredTitles([" Plan "]), [" Plan ", "Plan.md"]);
+});
+
+test("a title saved with .md is found by that same title", async () => {
+	// hydradb_ingest appends ".md" to every title, so "Plan.md" is stored as
+	// "Plan.md.md"; the query must reach that stored title from "Plan.md".
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	await client.callTool({ name: "hydradb_ingest", arguments: { kind: "knowledge", title: "Plan.md", text: "body" } });
+	await client.callTool({ name: "hydradb_query", arguments: { query: "q", titles: ["Plan.md"] } });
+
+	// The server takes the title from the uploaded file's name.
+	// SAFETY: a knowledge ingest always carries its text as `documents`.
+	const upload = calls.find((c) => c.method === "ingest")?.args.documents as { filename: string };
+	const storedTitle = upload.filename;
+
+	// SAFETY: the query tool always sends titles as a string array.
+	const searched = calls.find((c) => c.method === "query-fetch")?.args.titles as string[];
+
+	assert.equal(storedTitle, "Plan.md.md");
+	assert.ok(searched.includes(storedTitle), `searched ${JSON.stringify(searched)}`);
+	await client.close();
 });
 
 test("hydradb_query forwards metadata filters and related-chunk count", async () => {

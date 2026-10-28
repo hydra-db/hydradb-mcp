@@ -43,8 +43,9 @@ const PARAM = {
 		"query runs inside those sources. Repeat values in the array for several titles; " +
 		"punctuation such as commas is part of the title. With source_ids, both filters " +
 		"must match. No title match returns an empty result rather than widening. " +
-		"Text saved with hydradb_ingest is stored as \"<title>.md\"; pass the title " +
-		"either way, both forms are searched.",
+		"hydradb_ingest stores text under its title plus \".md\" (\"Plan\" becomes " +
+		"\"Plan.md\"), so each title is searched as given and with \".md\" added. " +
+		"Pass the title used when saving, or the exact title a listing shows.",
 	metadata_filters:
 		"Exact-match filters over stored metadata, as {key: value}. Exact match only — " +
 		"no ranges, no partial matches, no dates-since. Only useful for keys you know " +

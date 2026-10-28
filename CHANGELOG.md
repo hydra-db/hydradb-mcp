@@ -11,8 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Knowledge text is uploaded as `<title>.md` and the server takes the title from
 the filename, so "Q3 Roadmap" is stored as "Q3 Roadmap.md" and a title filter
-of "Q3 Roadmap" matched nothing. The filter now also searches each title's
-`.md` form; titles already ending in `.md` are sent as given.
+of "Q3 Roadmap" matched nothing (and "Plan.md" was stored as "Plan.md.md").
+Each title is now searched as given and with `.md` added.
 
 ## [1.5.1] - 2026-09-25
 
