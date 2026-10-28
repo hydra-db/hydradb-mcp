@@ -248,7 +248,8 @@ export interface IngestParams {
 }
 
 export interface ListParams {
-	kind?: ContextKind;
+	/** `all` lists memories and knowledge together, in one page (POST /context/list `type=all`). */
+	kind?: QueryKind;
 	ids?: string[];
 	page?: number;
 	pageSize?: number;
@@ -279,6 +280,47 @@ export interface ListParams {
 	sourceFields?: Record<string, string>;
 	/** Exact originating connector instance, stored in additional_metadata. */
 	connectorId?: string;
+	/** Exact-match filter on each item's `metadata` (`filters.metadata`). */
+	metadata?: MetadataFilter;
+	/**
+	 * Exact-match filter on each item's `additional_metadata`
+	 * (`filters.additional_metadata`). `connectorId` is merged into it.
+	 */
+	additionalMetadata?: MetadataFilter;
+	/** Return only these fields (plus id, database, collection). Knowledge rows only. */
+	includeFields?: string[];
+	/** Fold comment and reply rows under their parent row as `comments`. */
+	groupThreads?: boolean;
+}
+
+/** A value an exact-match metadata filter compares a stored value against. */
+export type MetadataFilterValue = string | number | boolean | null;
+
+/** `{key: value}` pairs an item's stored metadata must all match exactly. */
+export type MetadataFilter = Record<string, MetadataFilterValue>;
+
+/** `filters` on POST /context/list, in wire spelling. */
+interface ListFilters {
+	source_fields?: Record<string, string>;
+	metadata?: MetadataFilter;
+	additional_metadata?: MetadataFilter;
+}
+
+/** The POST /context/list body the passthrough sends, in wire spelling. */
+interface ListRequestBody extends ScopeFields {
+	type?: QueryKind;
+	ids?: string[];
+	page?: number;
+	page_size?: number;
+	acl?: string[];
+	filters?: ListFilters;
+	include_fields?: string[];
+	group_threads: boolean;
+}
+
+/** Whether a filter names at least one key; an empty one is no filter at all. */
+export function hasEntries(filter: MetadataFilter | undefined): boolean {
+	return filter != null && Object.keys(filter).length > 0;
 }
 
 export interface InspectParams {
@@ -859,17 +901,50 @@ export class ContextResource extends Resource {
 		params: ListParams = {},
 		opts?: RequestOptions,
 	): Promise<SDK.ListV2ListResponse> {
-		const hasSourceFields =
-			params.sourceFields != null &&
-			Object.keys(params.sourceFields).length > 0;
+		const filters: ListFilters = {};
+
+		if (params.sourceFields != null && hasEntries(params.sourceFields)) {
+			filters.source_fields = params.sourceFields;
+		}
+
+		if (hasEntries(params.metadata)) filters.metadata = params.metadata;
+
+		const additionalMetadata = { ...params.additionalMetadata } satisfies MetadataFilter;
+
+		if (params.connectorId != null) additionalMetadata.connector_id = params.connectorId;
+
+		if (hasEntries(additionalMetadata)) filters.additional_metadata = additionalMetadata;
+
+		const filtered = Object.keys(filters).length > 0;
 
 		// @hydradb/sdk 2.1.4 predates the list `filters` request field and its
 		// generated serializer drops unknown properties (same limitation the
-		// titles filter hit on /query). Its authenticated passthrough still
-		// supplies auth, retry, timeout and fetch config. Once the generated
-		// request exposes `filters` this can collapse back into sdk.context.list.
-		if (hasSourceFields || params.connectorId != null) {
-			const scope = this.scope(params.collection, params.database);
+		// titles filter hit on /query); its type enum also has no `all`. Its
+		// authenticated passthrough still supplies auth, retry, timeout and
+		// fetch config. Once the generated request exposes these fields this
+		// can collapse back into sdk.context.list.
+		if (
+			filtered ||
+			params.kind === "all" ||
+			(params.includeFields?.length ?? 0) > 0 ||
+			params.groupThreads === true
+		) {
+			const request: ListRequestBody = {
+				...this.scope(params.collection, params.database),
+				type: params.kind,
+				ids: params.ids,
+				page: params.page,
+				page_size: params.pageSize,
+				acl: params.acl,
+				group_threads: params.groupThreads ?? false,
+			};
+
+			if (filtered) request.filters = filters;
+
+			if (params.includeFields != null && params.includeFields.length > 0) {
+				request.include_fields = params.includeFields;
+			}
+
 			return this.call<SDK.ListV2ListResponse, unknown>(
 				"/context/list",
 				async () => {
@@ -881,19 +956,7 @@ export class ContextResource extends Resource {
 								"API-Version": "2",
 								"Content-Type": "application/json",
 							},
-							body: JSON.stringify({
-								...scope,
-								type: params.kind,
-								ids: params.ids,
-								page: params.page,
-								page_size: params.pageSize,
-								acl: params.acl,
-								filters: {
-									source_fields: params.sourceFields,
-									additional_metadata: params.connectorId != null ? { connector_id: params.connectorId } : undefined,
-								},
-								group_threads: false,
-							}),
+							body: JSON.stringify(request),
 						},
 						req(opts),
 					);
@@ -946,7 +1009,8 @@ export class ContextResource extends Resource {
 		return this.call("/context/list", () =>
 			this.sdk.context.list({
 				...this.scope(params.collection, params.database),
-				type: params.kind,
+				// `all` took the passthrough above; this narrows the type for the SDK.
+				type: params.kind === "all" ? undefined : params.kind,
 				ids: params.ids,
 				page: params.page,
 				pageSize: params.pageSize,
@@ -1037,6 +1101,7 @@ export class ContextResource extends Resource {
 	/** Knowledge-graph relations (SDK `context.relations`). */
 	relations(
 		params: RelationsParams = {},
+		opts?: RequestOptions,
 	): Promise<SDK.GraphGraphRelationsResponse> {
 		return this.call("/context/relations", () =>
 			this.sdk.context.relations({
@@ -1046,7 +1111,7 @@ export class ContextResource extends Resource {
 				limit: params.limit,
 				cursor: params.cursor,
 				acl: params.acl,
-			}),
+			}, req(opts)),
 		);
 	}
 

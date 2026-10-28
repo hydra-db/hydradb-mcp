@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — `hydradb_list` filters, field selection, threads and `kind: "all"`
+
+`hydradb_list` now takes the `/context/list` options it was missing:
+
+- `metadata` and `additional_metadata`: exact-match filters on stored metadata,
+  for memories and knowledge. `connector_id` is merged into
+  `additional_metadata`; two different connector ids are refused.
+- `include_fields`: return only the named fields per row, shown under each row
+  and in `structuredContent` as `fields`. Names the API does not project
+  (such as `content`) are refused before the call.
+- `group_threads`: comments and replies come back nested under their parent
+  row, in the text and in `structuredContent` as `comments`.
+- `kind: "all"`: memories and knowledge in one page, instead of two calls.
+
+`include_fields` and `group_threads` apply to source rows, so they are refused
+with `kind: "memory"` rather than ignored.
+
+### Added — `hydradb_relations`
+
+A new read-only tool over `GET /context/relations`: the knowledge-graph
+relations of one item, or of the whole collection when `id` is omitted, with
+the evidence passage for each. Pages with `cursor` (`next_cursor` from the
+previous call), takes `acl`, and asks for 50 relations by default (max 200)
+rather than the API's 5000.
+
 ## [1.5.1] - 2026-09-25
 
 ### Added — `hydradb_query` shows a named ticket's links

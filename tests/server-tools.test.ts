@@ -7,6 +7,8 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { z } from "zod";
 
+import { jsonValue } from "../src/adapters.js";
+import type { ListedFields } from "../src/adapters.js";
 import { HydraDB } from "../src/hydra/index.js";
 import {
 	__resetAliasWarnings,
@@ -28,7 +30,7 @@ type RecordedCall = { method: string; args: Record<string, unknown> };
 /** Per-method response overrides, for tests that care what the API returned. */
 type Responses = Partial<
 	Record<
-		"query" | "ingest" | "list" | "inspect" | "delete" | "collections" | "stats" | "feedback",
+		"query" | "ingest" | "list" | "inspect" | "delete" | "relations" | "collections" | "stats" | "feedback",
 		unknown
 	>
 >;
@@ -3395,6 +3397,7 @@ test("every tool that advertises acl actually forwards it", async () => {
 		hydradb_list: { kind: "knowledge" },
 		hydradb_inspect: { id: "s1" },
 		hydradb_subgraph: { id: "s1" },
+		hydradb_relations: { id: "s1" },
 	};
 
 	const method: Record<string, string> = {
@@ -3402,6 +3405,7 @@ test("every tool that advertises acl actually forwards it", async () => {
 		hydradb_list: "list",
 		hydradb_inspect: "inspect",
 		hydradb_subgraph: "subgraph",
+		hydradb_relations: "relations",
 	};
 
 	for (const name of advertising) {
@@ -3903,4 +3907,350 @@ test("hydradb_delete stays quiet about kind when the refusal is not a not-found"
 		/kind: "knowledge"/,
 		"a processing refusal is not a wrong-family miss",
 	);
+});
+
+// ── hydradb_list filters, projection, threads and type=all (ENG-3338) ───────
+
+const toolCallResult = z.object({
+	content: z.array(z.object({ text: z.string().optional() })),
+	isError: z.boolean().optional(),
+	structuredContent: z.record(jsonValue).optional(),
+});
+
+interface ParsedCall {
+	isError: boolean;
+	text: string;
+	structured: ListedFields;
+	calls: RecordedCall[];
+}
+
+async function callTool(name: string, args: ListedFields, responses: Responses): Promise<ParsedCall> {
+	const { hydra, calls } = mockHydra(responses);
+	const client = await connect(hydra);
+
+	try {
+		// Through JSON, as on a real transport: the in-memory one hands objects
+		// over as built, so a property set to undefined would arrive as undefined.
+		const wire: string = JSON.stringify(await client.callTool({ name, arguments: args }));
+		const result = toolCallResult.parse(JSON.parse(wire));
+
+		return {
+			isError: result.isError === true,
+			text: result.content[0]?.text ?? "",
+			structured: result.structuredContent ?? {},
+			calls,
+		};
+	} finally {
+		await client.close();
+	}
+}
+
+const listCall = (args: ListedFields, list: ListedFields = { sources: [], total: 0 }) =>
+	callTool("hydradb_list", args, { list });
+
+const listedItems = z.array(
+	z.object({ fields: z.record(jsonValue).optional(), comments: z.array(jsonValue).optional() }).passthrough(),
+);
+
+test("hydradb_list sends metadata and additional_metadata filters to /context/list", async () => {
+	const { isError, calls } = await listCall({
+		kind: "knowledge",
+		metadata: { project: "hydradb" },
+		additional_metadata: { author: "ada", year: 2026 },
+	});
+
+	assert.equal(isError, false);
+
+	const call = calls.find((c) => c.method === "list-fetch");
+
+	assert.ok(call, "filters must reach /context/list");
+	assert.deepEqual(call.args.filters, {
+		metadata: { project: "hydradb" },
+		additional_metadata: { author: "ada", year: 2026 },
+	});
+});
+
+test("hydradb_list filters memories by metadata too", async () => {
+	const { isError, text, calls } = await listCall(
+		{ kind: "memory", metadata: { topic: "editor" } },
+		{ user_memories: [{ memory_id: "m1", memory_content: "prefers tabs" }], total: 1 },
+	);
+
+	assert.equal(isError, false);
+
+	const call = calls.find((c) => c.method === "list-fetch");
+
+	assert.ok(call);
+	assert.equal(call.args.type, "memory");
+	assert.deepEqual(call.args.filters, { metadata: { topic: "editor" } });
+	assert.match(text, /\[m1\] prefers tabs/);
+});
+
+test("hydradb_list says an empty filtered memory listing is about the filter", async () => {
+	const { text } = await listCall(
+		{ kind: "memory", additional_metadata: { topic: "none" } },
+		{ user_memories: [], total: 0 },
+	);
+
+	assert.match(text, /No memories match the supplied metadata filters/);
+});
+
+test("hydradb_list refuses a nested metadata filter value before a request", async () => {
+	const { isError, calls } = await listCall({ kind: "knowledge", metadata: { team: { name: "infra" } } });
+
+	assert.equal(isError, true);
+	assert.equal(calls.length, 0);
+});
+
+test("hydradb_list merges connector_id into an additional_metadata filter", async () => {
+	const { calls } = await listCall({
+		kind: "knowledge",
+		connector_id: "conn-1",
+		additional_metadata: { author: "ada" },
+	});
+
+	assert.deepEqual(calls.find((c) => c.method === "list-fetch")?.args.filters, {
+		additional_metadata: { author: "ada", connector_id: "conn-1" },
+	});
+});
+
+test("hydradb_list refuses two different connector ids before a request", async () => {
+	const { isError, text, calls } = await listCall({
+		kind: "knowledge",
+		connector_id: "conn-1",
+		additional_metadata: { connector_id: "conn-2" },
+	});
+
+	assert.equal(isError, true);
+	assert.match(text, /Pass one of them/);
+	assert.equal(calls.length, 0);
+});
+
+test("hydradb_list sends include_fields and shows the requested fields", async () => {
+	const { isError, text, structured, calls } = await listCall(
+		{ kind: "knowledge", include_fields: ["title", "metadata", "timestamp"] },
+		{
+			sources: [
+				{ id: "s1", title: "Runbook", metadata: { team: "infra" }, timestamp: "2026-10-01T00:00:00Z" },
+			],
+			total: 1,
+		},
+	);
+
+	assert.equal(isError, false);
+	assert.deepEqual(calls.find((c) => c.method === "list-fetch")?.args.include_fields, ["title", "metadata", "timestamp"]);
+	assert.match(text, /\[s1\] — Runbook/);
+	assert.match(text, /metadata: \{"team":"infra"\}/);
+	assert.match(text, /timestamp: "2026-10-01T00:00:00Z"/);
+	assert.deepEqual(listedItems.parse(structured.items)[0]?.fields, {
+		title: "Runbook",
+		metadata: { team: "infra" },
+		timestamp: "2026-10-01T00:00:00Z",
+	});
+});
+
+test("hydradb_list rejects an include_fields name the API does not project", async () => {
+	const { isError, calls } = await listCall({ kind: "knowledge", include_fields: ["content"] });
+
+	assert.equal(isError, true);
+	assert.equal(calls.length, 0);
+});
+
+test("hydradb_list group_threads nests comments under their parent", async () => {
+	const { isError, text, structured, calls } = await listCall(
+		{ kind: "knowledge", group_threads: true },
+		{
+			sources: [
+				{
+					id: "ticket-1",
+					title: "ENG-1 Login broken",
+					comments: [
+						{ id: "c2", title: "Comment by Bo", comments: [{ id: "c3", title: "Reply by Ada" }] },
+						{ id: "c1", title: "Comment by Ada", comments: [] },
+					],
+					comments_truncated: true,
+				},
+			],
+			total: 1,
+		},
+	);
+
+	assert.equal(isError, false);
+	assert.equal(calls.find((c) => c.method === "list-fetch")?.args.group_threads, true);
+	assert.match(text, /1\. \[ticket-1\] — ENG-1 Login broken\n {3}↳ \[c2\] — Comment by Bo\n {6}↳ \[c3\] — Reply by Ada\n {3}↳ \[c1\] — Comment by Ada/);
+	assert.match(text, /more replies than shown/);
+
+	const item = listedItems.parse(structured.items)[0];
+
+	assert.equal(item?.comments_truncated, true);
+	assert.deepEqual(item?.comments, [
+		{ id: "c2", title: "Comment by Bo", comments: [{ id: "c3", title: "Reply by Ada" }] },
+		{ id: "c1", title: "Comment by Ada", comments: [] },
+	]);
+});
+
+test("hydradb_list refuses include_fields and group_threads on memories before a request", async () => {
+	for (const extra of [{ include_fields: ["title"] }, { group_threads: true }]) {
+		const { isError, text, calls } = await listCall({ kind: "memory", ...extra });
+
+		assert.equal(isError, true);
+		assert.match(text, /not to memories/);
+		assert.equal(calls.length, 0);
+	}
+});
+
+test("hydradb_list kind all lists memories and knowledge in one call", async () => {
+	const { isError, text, structured, calls } = await listCall(
+		{ kind: "all", page_size: 2 },
+		{
+			sources: [
+				{ id: "doc-1", title: "Runbook", type: "markdown" },
+				{ id: "mem-1", title: "Prefers tabs" },
+			],
+			total: 5,
+			pagination: { page: 1, page_size: 2, total_pages: 3, has_next: true },
+		},
+	);
+
+	assert.equal(isError, false);
+	assert.deepEqual(calls.map((c) => c.method), ["list-fetch"], "one call, not one per corpus");
+	assert.equal(calls[0]?.args.type, "all");
+	assert.match(text, /2 of 5 \(page 1\).*items \(memories and knowledge together\)/);
+	assert.match(text, /\[doc-1\] — Runbook \(markdown\)/);
+	assert.match(text, /\[mem-1\] — Prefers tabs/);
+	assert.equal(structured.kind, "all");
+
+	const nextArgs = z.object({ kind: z.string(), page: z.number() }).passthrough().parse(structured.next_args);
+
+	assert.equal(nextArgs.kind, "all", "the next page must list the same corpus");
+	assert.equal(nextArgs.page, 2);
+});
+
+test("hydradb_list without the new options keeps the SDK path", async () => {
+	const { calls } = await listCall({ kind: "knowledge" });
+
+	assert.deepEqual(calls.map((c) => c.method), ["list"]);
+});
+
+// ── hydradb_relations (ENG-3338) ─────────────────────────────────────────
+
+const relationsCall = (args: ListedFields, relations: ListedFields = {}) =>
+	callTool("hydradb_relations", args, { relations });
+
+// camelCase: what the SDK hands back.
+const triplet = (from: string, predicate: string, to: string, context?: string) => ({
+	source: { name: from, type: "person", entityId: `e-${from}` },
+	target: { name: to, type: "organization", entityId: `e-${to}` },
+	chunkId: `chunk-${from}`,
+	relations: [{ canonicalPredicate: predicate, timestamp: "2026-10-01T00:00:00Z", context: context ?? "" }],
+});
+
+test("hydradb_relations forwards id, kind, limit, cursor, acl and scope", async () => {
+	const { calls } = await relationsCall({
+		id: "doc-1",
+		kind: "memory",
+		limit: 20,
+		cursor: 1767225600.5,
+		acl: ["ada@corp.com"],
+		database: "db_other",
+		collection: "research",
+	});
+
+	assert.deepEqual(calls.find((c) => c.method === "relations")?.args, {
+		database: "db_other",
+		collection: "research",
+		id: "doc-1",
+		type: "memory",
+		limit: 20,
+		cursor: 1767225600.5,
+		acl: ["ada@corp.com"],
+	});
+});
+
+test("hydradb_relations reads a page of triplets with their evidence", async () => {
+	const { isError, text, structured } = await relationsCall(
+		{ id: "doc-1" },
+		{
+			relations: [
+				triplet("Ada", "works_at", "Acme", "Ada joined Acme in March."),
+				triplet("Bo", "founded", "Initech"),
+			],
+			auxiliaryRelations: [{}, {}],
+			isTruncated: false,
+		},
+	);
+
+	assert.equal(isError, false);
+	assert.match(text, /2 relations for doc-1/);
+	assert.match(text, /1\. \(Ada: person\) —works_at→ \(Acme: organization\)\n {3}“Ada joined Acme in March\.”/);
+	assert.match(text, /2\. \(Bo: person\) —founded→ \(Initech: organization\)/);
+	assert.match(text, /That is all of them/);
+	assert.match(text, /2 structural link\(s\)/);
+	assert.equal(structured.has_more, false);
+	assert.equal(structured.next_cursor, null);
+	assert.deepEqual(z.array(jsonValue).parse(structured.relations)[0], {
+		from: "Ada",
+		from_type: "person",
+		predicate: "works_at",
+		to: "Acme",
+		to_type: "organization",
+		evidence: "Ada joined Acme in March.",
+		chunk_id: "chunk-Ada",
+	});
+});
+
+test("hydradb_relations pages with the server's cursor", async () => {
+	const { text, structured, calls } = await relationsCall(
+		{},
+		{ relations: [triplet("Ada", "works_at", "Acme")], isTruncated: true, nextCursor: 1767225600.25 },
+	);
+
+	const call = calls.find((c) => c.method === "relations");
+
+	assert.equal(call?.args.id, undefined, "no id reads the whole collection");
+	assert.equal(call?.args.limit, 50, "a bounded default, not the API's 5000");
+	assert.match(text, /relation for this collection/);
+	assert.match(text, /pass cursor=1767225600.25/);
+	assert.equal(structured.has_more, true);
+	assert.equal(structured.next_cursor, 1767225600.25);
+	assert.deepEqual(structured.next_args, { limit: 50, cursor: 1767225600.25 });
+});
+
+test("hydradb_relations does not offer a next page it cannot reach", async () => {
+	const { text, structured } = await relationsCall(
+		{ id: "doc-1" },
+		{ relations: [triplet("Ada", "works_at", "Acme")], isTruncated: true },
+	);
+
+	assert.match(text, /server returned no cursor/);
+	assert.equal(structured.has_more, false);
+});
+
+test("hydradb_relations says when an item has no relations", async () => {
+	const { isError, text, structured } = await relationsCall({ id: "doc-1" }, { relations: [] });
+
+	assert.equal(isError, false);
+	assert.match(text, /No graph relations for doc-1/);
+	assert.equal(structured.shown, 0);
+});
+
+test("hydradb_relations reports a body that is not a relations response", async () => {
+	const { isError, text } = await relationsCall({ id: "doc-1" }, { relations: "<html>login</html>" });
+
+	assert.equal(isError, true);
+	assert.match(text, /Invalid relations response/);
+});
+
+test("hydradb_relations refuses a blank id instead of reading the whole collection", async () => {
+	const { isError, calls } = await relationsCall({ id: "   " });
+
+	assert.equal(isError, true);
+	assert.equal(calls.length, 0);
+});
+
+test("hydradb_relations caps limit", async () => {
+	const { isError, calls } = await relationsCall({ limit: 5000 });
+
+	assert.equal(isError, true);
+	assert.equal(calls.length, 0);
 });

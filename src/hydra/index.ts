@@ -13,6 +13,7 @@ export {
 	FeedbackResource,
 	DEFAULT_TIMEOUT_SECONDS,
 	DEFAULT_MAX_RETRIES,
+	hasEntries,
 } from "./client.js";
 
 export type {
@@ -24,6 +25,8 @@ export type {
 	QueryParams,
 	IngestParams,
 	ListParams,
+	MetadataFilter,
+	MetadataFilterValue,
 	InspectParams,
 	IngestionStatusParams,
 	RelationsParams,
