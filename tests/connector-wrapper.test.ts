@@ -89,10 +89,17 @@ test("connector wrapper requests one provider by the SDK id field", async () => 
 test("connector wrapper forwards cancellation to every SDK call", async () => {
 	const { resource, calls } = fixture();
 	const controller = new AbortController();
+	const options = { signal: controller.signal };
 
-	await resource.get("c1", { signal: controller.signal });
+	await resource.listProviders(undefined, options);
+	await resource.list({}, options);
+	await resource.get("c1", options);
+	await resource.status("c1", options);
+	await resource.discover({ connectorId: "c1" }, options);
+	await resource.listResources("c1", options);
 
-	assert.equal(calls[0]?.signal, controller.signal);
+	assert.equal(calls.length, 6);
+	assert.ok(calls.every((call) => call.signal === controller.signal));
 });
 
 test("connector wrapper rejects malformed successful responses", async () => {
