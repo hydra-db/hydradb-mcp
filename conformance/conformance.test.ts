@@ -115,7 +115,12 @@ const CONNECTOR_RESPONSES = {
 };
 
 // What a recorded SDK call answers with: a connector body above, the query body, or empty.
-type RecordedBody = (typeof CONNECTOR_RESPONSES)[keyof typeof CONNECTOR_RESPONSES] | { chunks: [] } | Record<string, never>;
+type RecordedBody =
+	| (typeof CONNECTOR_RESPONSES)[keyof typeof CONNECTOR_RESPONSES]
+	| { chunks: [] }
+	| { userMemories: [] }
+	| { statuses: [] }
+	| Record<string, never>;
 
 // The connector-resource-add vector's resources, in wire form.
 const vectorResources = z.array(z.object({ resource_id: z.string(), display_name: z.string().optional() }));

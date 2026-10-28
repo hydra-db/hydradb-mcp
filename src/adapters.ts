@@ -125,20 +125,25 @@ function toPageInfo(
 
 /** SDK list result → memory rows. Field names vary across v2 records, so read defensively. */
 export function toMemoryList(data: SDK.ListV2ListResponse): MemoryList {
-	// Memory listings surface at top-level `user_memories` — not under an
-	// `.inner` wrapper, and not under `sources` (that is the knowledge shape).
+	// Wire responses use `user_memories`; SDK 2.1.8 decodes that field and each
+	// row to camelCase. Historical responses can also carry an `.inner` wrapper.
 	const d = data as unknown as Record<string, unknown>;
+	const parsedInner = z.record(z.unknown()).safeParse(d.inner);
+	const inner = parsedInner.success ? parsedInner.data : undefined;
 	const container =
-		(asRecords(d.user_memories) ? d : (d.inner as Record<string, unknown>)) ?? d;
+		(asRecords(d.user_memories) || asRecords(d.userMemories) ? d : inner) ?? d;
 	const records =
 		asRecords(d.user_memories) ??
-		asRecords((d.inner as Record<string, unknown> | undefined)?.user_memories) ??
+		asRecords(d.userMemories) ??
+		asRecords(inner?.user_memories) ??
+		asRecords(inner?.userMemories) ??
 		[];
 	const memories = records.map((record) => ({
-		memory_id: str(record, "memory_id", "id", "source_id") ?? "",
+		memory_id: str(record, "memoryId", "memory_id", "id", "source_id") ?? "",
 		memory_content:
-			str(record, "memory_content", "content", "text", "memory", "title") ?? "",
+			str(record, "memoryContent", "memory_content", "content", "text", "memory", "title") ?? "",
 	}));
+
 	return { memories, page: toPageInfo(container, memories.length) };
 }
 

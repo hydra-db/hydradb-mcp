@@ -96,6 +96,22 @@ test("toMemoryList reads memory rows defensively", () => {
 	]);
 });
 
+test("toMemoryList reads the camelCase rows returned by SDK 2.1.8", () => {
+	// SAFETY: this fixture intentionally uses the SDK's runtime camelCase shape,
+	// which the generated ListV2ListResponse type does not declare accurately.
+	const { memories } = toMemoryList({
+		userMemories: [
+			{ memoryId: "m1", memoryContent: "prefers dark mode" },
+			{ id: "m2", content: "likes tea" },
+		],
+	} as never);
+
+	assert.deepEqual(memories, [
+		{ memory_id: "m1", memory_content: "prefers dark mode" },
+		{ memory_id: "m2", memory_content: "likes tea" },
+	]);
+});
+
 // The server reports how much of the corpus a listing covered; discarding it is
 // what let 50 rows out of 4,000 be presented as the whole store.
 test("toMemoryList carries pagination metadata", () => {

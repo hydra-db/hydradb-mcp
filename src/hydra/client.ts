@@ -114,7 +114,54 @@ function validateQueryResponse(response: unknown): void {
 /** What `sdk.context.list` resolves to: the response envelope. */
 type ListResponse = Awaited<ReturnType<HydraDBClient["context"]["list"]>>;
 
-const successfulList = z.object({ success: z.literal(true).optional() });
+type StatusResponse = Awaited<ReturnType<HydraDBClient["context"]["status"]>>;
+
+type DatabasesResponse = Awaited<ReturnType<HydraDBClient["databases"]["list"]>>;
+
+type ValidatableResponse = ListResponse | StatusResponse | DatabasesResponse;
+
+interface InvalidResponseBody {
+	error: { code: string; message: string };
+	meta?: { request_id: string };
+}
+
+const successfulResponse = z.object({
+	success: z.literal(true).optional(),
+	error: z.null().optional(),
+});
+
+function invalidSuccessfulResponse(
+	code: string,
+	message: string,
+	response: ValidatableResponse,
+): HydraDBError {
+	const requestId = readRequestId(response);
+
+	const body: InvalidResponseBody = { error: { code, message } };
+
+	if (requestId) body.meta = { request_id: requestId };
+
+	return new HydraDBError({
+		statusCode: 200,
+		body,
+	});
+}
+
+/** A documented degraded memory response is a failure, not an empty store. */
+function assertListAvailable(response: ListResponse, kind: ListParams["kind"]): void {
+	if (kind !== "memory") return;
+
+	const payload = unwrap(response);
+	const parsed = z.object({ message: z.string().optional() }).safeParse(payload);
+
+	if (parsed.success && parsed.data.message === "Memories temporarily unavailable") {
+		throw invalidSuccessfulResponse(
+			"MEMORY_LIST_UNAVAILABLE",
+			"Hydra DB could not read the memory store. This is not an empty database. Retry the list.",
+			response,
+		);
+	}
+}
 
 /**
  * A list row with a usable ID, by the list adapters' first-string precedence,
@@ -134,12 +181,12 @@ function listPayload(kind: ListParams["kind"]) {
 		const rows = z.array(listRow(["memoryId", "memory_id", "id", "source_id"]));
 
 		return z.union([
-			successfulList.extend({ userMemories: rows }),
-			successfulList.extend({ user_memories: rows }),
+			successfulResponse.extend({ userMemories: rows }),
+			successfulResponse.extend({ user_memories: rows }),
 		]);
 	}
 
-	return successfulList.extend({ sources: z.array(listRow(["id", "source_id"])) });
+	return successfulResponse.extend({ sources: z.array(listRow(["id", "source_id"])) });
 }
 
 /**
@@ -147,13 +194,46 @@ function listPayload(kind: ListParams["kind"]) {
  * accepting the historical `inner` nesting the list adapters understand.
  */
 function validateListResponse(response: ListResponse, kind: ListParams["kind"]): void {
+	assertListAvailable(response, kind);
 	const payload = listPayload(kind);
-	const accepted = payload.or(successfulList.extend({ inner: payload }));
+	const accepted = payload.or(successfulResponse.extend({ inner: payload }));
 
-	if (!successfulList.safeParse(response).success || !accepted.safeParse(unwrap(response)).success) {
-		throw new Error(
+	if (!successfulResponse.safeParse(response).success || !accepted.safeParse(unwrap(response)).success) {
+		throw invalidSuccessfulResponse(
+			"INVALID_LIST_RESPONSE",
 			`Invalid successful list response: expected a ${kind === "memory" ? "user_memories" : "sources"} ` +
-			"array with nonempty row IDs and no failure flag.",
+				"array with nonempty row IDs and no failure flag.",
+			response,
+		);
+	}
+}
+
+function validateStatusResponse(response: StatusResponse): void {
+	const accepted = successfulResponse.extend({ statuses: z.array(z.unknown()) });
+
+	if (!successfulResponse.safeParse(response).success || !accepted.safeParse(unwrap(response)).success) {
+		throw invalidSuccessfulResponse(
+			"INVALID_STATUS_RESPONSE",
+			"Invalid successful status response: expected a statuses array and no failure flag.",
+			response,
+		);
+	}
+}
+
+function validateDatabasesResponse(response: DatabasesResponse): void {
+	const names = z.array(z.string().trim().min(1));
+
+	const accepted = z.union([
+		successfulResponse.extend({ databases: names }),
+		successfulResponse.extend({ tenantIds: names }),
+		successfulResponse.extend({ tenant_ids: names }),
+	]);
+
+	if (!successfulResponse.safeParse(response).success || !accepted.safeParse(unwrap(response)).success) {
+		throw invalidSuccessfulResponse(
+			"INVALID_DATABASES_RESPONSE",
+			"Invalid successful databases response: expected a string array and no failure flag.",
+			response,
 		);
 	}
 }
@@ -1079,36 +1159,13 @@ export class ContextResource extends Resource {
 					if (!response.ok) {
 						throw new HydraDBError({ statusCode: response.status, body });
 					}
-					// Unlike the generated method, passthrough does not validate JSON.
-					// A proxy's HTML login page must be an error, not "no sources".
-					// Accept both the wire payload and the historical `inner` shape
-					// understood by the list adapters, including a valid empty array.
-					const rowsKey = params.kind === "memory" ? "user_memories" : "sources";
-					const identityKeys = params.kind === "memory"
-						? ["memory_id", "id", "source_id"]
-						: ["id", "source_id"];
-					const listRow = z.record(z.unknown()).refine((row) => {
-						// Use the adapters' first-string precedence: a blank `id`
-						// must not hide behind a valid legacy `source_id`.
-						const id = identityKeys.map((key) => row[key]).find((value) => typeof value === "string");
-						return typeof id === "string" && id.trim() !== "";
-					});
-					const successfulObject = z.object({ success: z.literal(true).optional() });
-					const listPayload = successfulObject.extend({
-						[rowsKey]: z.array(listRow),
-					});
-					const payload = unwrap<unknown>(body);
-					if (
-						!successfulObject.safeParse(body).success ||
-						!z.union([
-							listPayload,
-							successfulObject.extend({ inner: listPayload }),
-						]).safeParse(payload).success
-					) {
-						throw new Error(
-							`Invalid successful list response: expected a ${rowsKey} array with nonempty row IDs and no failure flag.`,
-						);
-					}
+						// Unlike the generated method, passthrough does not validate JSON.
+						// Validate every list through the same contract so a proxy page or
+						// documented degraded-memory response cannot become an empty list.
+						// SAFETY: validateListResponse parses this raw HTTP body before use.
+
+						validateListResponse(body as ListResponse, params.kind);
+
 					return body;
 				},
 			);
@@ -1146,10 +1203,8 @@ export class ContextResource extends Resource {
 
 			const response = await this.sdk.context.list(request, o);
 
-			// A filtered list is a lookup: an empty answer reads as "that source
-			// does not exist", so a body that is not a real list (a proxy's login
-			// page, a failure flag) must be an error rather than no rows.
-			if (filtered) validateListResponse(response, params.kind);
+			// A false empty is wrong on every list path, not only lookups.
+			validateListResponse(response, params.kind);
 
 			return response;
 		});
@@ -1176,12 +1231,15 @@ export class ContextResource extends Resource {
 		params: IngestionStatusParams,
 		opts?: RequestOptions,
 	): Promise<SDK.IngestionV2BatchProcessingStatus> {
-		return this.call("/context/status", "idempotent", opts, (o) =>
-			this.sdk.context.status({
+		return this.call("/context/status", "idempotent", opts, async (o) => {
+			const response = await this.sdk.context.status({
 				...this.scope(params.collection, params.database),
 				ids: params.ids,
-			}, o),
-		);
+			}, o);
+
+			validateStatusResponse(response);
+			return response;
+		});
 	}
 
 	/**
@@ -1300,7 +1358,12 @@ export class DatabasesResource extends Resource {
 	}
 
 	list(opts?: RequestOptions): Promise<SDK.TenantsTenantIdsResponse> {
-		return this.call("/databases", "idempotent", opts, (o) => this.sdk.databases.list(o));
+		return this.call("/databases", "idempotent", opts, async (o) => {
+			const response = await this.sdk.databases.list(o);
+
+			validateDatabasesResponse(response);
+			return response;
+		});
 	}
 
 	collections(
