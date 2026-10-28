@@ -648,6 +648,11 @@ abstract class Resource {
 			: { database };
 	}
 
+	/** Collection allowlist carried by an OAuth grant, when the grant is collection-confined. */
+	protected collectionConfinement(): readonly string[] | undefined {
+		return this.allowedCollections;
+	}
+
 	/**
 	 * Scope for a query that names SEVERAL collections.
 	 *
@@ -1264,6 +1269,18 @@ export class DatabasesResource extends Resource {
 			throw new Error(
 				`Refusing to delete database "${database}" because it is this connection's ` +
 				"default database. Connect through a different default database, then retry the deletion.",
+			);
+		}
+
+		const allowedCollections = this.collectionConfinement();
+
+		if (allowedCollections) {
+			throw new Error(
+				`This connection is confined to collection ${allowedCollections
+					.map((collection) => `"${collection}"`)
+					.join(", ")}, and deleting database "${database}" removes every collection in it, ` +
+					"including ones this connection was not granted. Nothing was deleted. " +
+					"Reconnect without collection confinement before deleting a whole database.",
 			);
 		}
 

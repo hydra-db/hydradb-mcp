@@ -828,6 +828,37 @@ test("database deletion refuses the connection default before the SDK call", asy
 	assert.equal(called, false);
 });
 
+test("database deletion refuses collection confinement before the SDK call", async () => {
+	let called = false;
+
+	const sdk = {
+		databases: {
+			delete: () => {
+				called = true;
+
+				return Promise.resolve({ data: {}, success: true });
+			},
+		},
+	};
+	// SAFETY: The delete method is the only SDK member this test can reach.
+
+	const hydra = new HydraDB(
+		{
+			token: "t",
+			database: "primary",
+			allowedDatabases: ["primary", "archive"],
+			allowedCollections: ["own"],
+		},
+		sdk as HydraDBClient,
+	);
+
+	await assert.rejects(
+		() => hydra.databases.delete({ database: "archive" }),
+		/confined to collection "own".*removes every collection.*nothing was deleted/i,
+	);
+	assert.equal(called, false);
+});
+
 test("collections and collection cannot be sent together", async () => {
 	const calls: string[] = [];
 	const sdk = {

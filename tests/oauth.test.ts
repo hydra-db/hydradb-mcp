@@ -429,15 +429,47 @@ test("a confined OAuth connection refuses every database tool outside its approv
 			"POST",
 			"/",
 			{ host: `127.0.0.1:${port}`, ...JSON_HEADERS, authorization: "Bearer hmat_database_tools" },
-				JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }),
-			);
+			JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }),
+		);
 
-			const result = JSON.parse(res.body).result;
+		const result = JSON.parse(res.body).result;
 
 		assert.equal(result.isError, true, name);
 		assert.match(result.content[0].text, /cannot use database "work"/, name);
 		assert.match(result.content[0].text, /confined to database "personal"/, name);
 	}
+});
+
+test("a collection-confined OAuth connection cannot delete an approved database", async () => {
+	__resetIntrospectionCache();
+	introspectAnswer = () => ({
+		status: 200,
+		body: active({
+			database: "personal",
+			databases: ["personal", "archive"],
+			collection: "own",
+			collections: ["own"],
+		}),
+	});
+
+	const res = await request(
+		"POST",
+		"/",
+		{ host: `127.0.0.1:${port}`, ...JSON_HEADERS, authorization: "Bearer hmat_database_delete" },
+		JSON.stringify({
+			jsonrpc: "2.0",
+			id: 1,
+			method: "tools/call",
+			params: { name: "hydradb_delete_database", arguments: { database: "archive" } },
+		}),
+	);
+
+	const result = JSON.parse(res.body).result;
+
+	assert.equal(result.isError, true);
+	assert.match(result.content[0].text, /confined to collection "own"/);
+	assert.match(result.content[0].text, /removes every collection/);
+	assert.match(result.content[0].text, /nothing was deleted/i);
 });
 
 test("the 401 challenge is readable cross-origin, so browser clients can discover the issuer", async () => {

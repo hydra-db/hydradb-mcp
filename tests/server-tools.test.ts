@@ -9,13 +9,15 @@ import { z } from "zod";
 
 import { jsonValue } from "../src/adapters.js";
 import type { JsonValue, ListedFields } from "../src/adapters.js";
-import { HydraDB } from "../src/hydra/index.js";
+import { HydraDB, HydraWrapperError } from "../src/hydra/index.js";
 import {
 	__resetAliasWarnings,
 	__resetShutdown,
-	__setFanoutListTimeoutForTests, __setListCollectionsStatsTimeoutForTests, 
+	__setFanoutListTimeoutForTests,
+	__setListCollectionsStatsTimeoutForTests,
 	awaitInFlight,
-	beginShutdown,createHydraDBServer,
+	beginShutdown,
+	createHydraDBServer,
 	inFlightCount,
 	legacyToolsEnabled,
 	withStoredTitles,
@@ -264,21 +266,28 @@ test("database read tools reject a blank database before an API call", async () 
 	await client.close();
 });
 
-test("database tools surface API failures, including a plain read-only 403", async () => {
+test("database tools preserve 403s and qualify write-permission guidance", async () => {
 	const { hydra } = mockHydra();
 
-	const denied = () => Promise.reject(new HydraDBError({
+	const deniedRead = () => Promise.reject(new HydraDBError({
 		statusCode: 403,
-		body: { error: { code: "FORBIDDEN", message: "write access is required" } },
+		body: { error: { code: "FORBIDDEN", message: "policy denied this request" } },
 	}));
 
-	hydra.databases.create = denied;
-	hydra.databases.delete = denied;
-	hydra.databases.readiness = denied;
-	hydra.databases.getMetadataSchema = denied;
-	hydra.databases.updateMetadataSchema = denied;
-	hydra.databases.stats = denied;
+	const deniedWrite = () => Promise.reject(new HydraWrapperError(
+		"Hydra DB /databases → 403: policy denied this request",
+		"/databases",
+		{ status: 403 },
+	));
+
+	hydra.databases.create = deniedWrite;
+	hydra.databases.delete = deniedWrite;
+	hydra.databases.readiness = deniedRead;
+	hydra.databases.getMetadataSchema = deniedRead;
+	hydra.databases.updateMetadataSchema = deniedWrite;
+	hydra.databases.stats = deniedRead;
 	const client = await connect(hydra);
+	const writeTools = new Set(["hydradb_create_database", "hydradb_delete_database", "hydradb_add_metadata_fields"]);
 
 	for (const [name, args] of [
 		["hydradb_create_database", { database: "new" }],
@@ -294,7 +303,14 @@ test("database tools surface API failures, including a plain read-only 403", asy
 		const text = toolText(result);
 
 		assert.match(text, /403/, name);
-		assert.match(text, /read-only|write access/i, name);
+
+		if (writeTools.has(name)) {
+			assert.match(text, /requires database write permission/i, name);
+			assert.match(text, /read-only credentials cannot/i, name);
+			assert.doesNotMatch(text, /this credential does not have write access/i, name);
+		} else {
+			assert.doesNotMatch(text, /read-only credentials cannot/i, name);
+		}
 	}
 
 	await client.close();
