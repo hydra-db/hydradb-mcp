@@ -79,6 +79,24 @@ export const SUPPORTED_EXTENSIONS = [...CONTENT_TYPES.keys()];
 /** How much of a local file is read between cancel checks. */
 const READ_CHUNK_BYTES = 1024 * 1024;
 
+/**
+ * `work`, or a rejection as soon as `signal` aborts, whichever comes first. A
+ * file operation stalled on a slow network mount cannot be interrupted, but
+ * the call waiting on it can stop: the call's cancel and deadline still end it.
+ */
+function untilAborted<T>(work: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+	if (signal == null) return work;
+
+	if (signal.aborted) return Promise.reject(signal.reason);
+
+	return new Promise<T>((resolve, reject) => {
+		const onAbort = () => reject(signal.reason);
+
+		signal.addEventListener("abort", onAbort, { once: true });
+		work.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+	});
+}
+
 /** A file ready to upload. */
 export interface IngestFile {
 	data: Buffer;
@@ -165,12 +183,21 @@ export async function readLocal(path: string, filename: string | undefined, sign
 
 	// One handle for the size check and the read, so a file replaced in
 	// between cannot slip past the check.
-	const handle = await open(resolved, "r").catch(() => {
+	const opening = open(resolved, "r");
+
+	const handle = await untilAborted(opening, signal).catch((err: Error) => {
+		if (signal?.aborted) {
+			// Close the file if the abandoned open completes later.
+			opening.then((late) => late.close()).catch(() => {});
+
+			throw err;
+		}
+
 		throw new Error(`No readable file at "${path}".`);
 	});
 
 	try {
-		const info = await handle.stat();
+		const info = await untilAborted(handle.stat(), signal);
 
 		if (!info.isFile()) throw new Error(`"${path}" is not a file.`);
 
@@ -185,10 +212,10 @@ export async function readLocal(path: string, filename: string | undefined, sign
 		let filled = 0;
 
 		while (filled < buffer.length) {
-			// The call's cancel and deadline end the read too, e.g. on a stalled mount.
-			signal?.throwIfAborted();
-
-			const { bytesRead } = await handle.read(buffer, filled, Math.min(READ_CHUNK_BYTES, buffer.length - filled), null);
+			const { bytesRead } = await untilAborted(
+				handle.read(buffer, filled, Math.min(READ_CHUNK_BYTES, buffer.length - filled), null),
+				signal,
+			);
 
 			if (bytesRead === 0) break;
 			filled += bytesRead;
@@ -200,6 +227,10 @@ export async function readLocal(path: string, filename: string | undefined, sign
 
 		return { data: buffer.subarray(0, filled), filename: name, contentType };
 	} finally {
-		await handle.close();
+		// Not awaited after a cancel: a read stuck on a stalled mount would
+		// hold the close, and with it the tool call, open.
+		const closing = handle.close().catch(() => {});
+
+		if (!signal?.aborted) await closing;
 	}
 }

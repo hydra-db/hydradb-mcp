@@ -4,6 +4,7 @@
  * body; only `fetch` is faked.
  */
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdtemp, readFile, rm, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -238,6 +239,29 @@ test("a local read stops when the call is cancelled", async () => {
 	controller.abort();
 
 	await assert.rejects(readLocal(DOCX, undefined, controller.signal), { name: "AbortError" });
+});
+
+// A read stuck on a stalled mount cannot be interrupted, but the call waiting
+// on it must still end. A FIFO with no writer blocks the open the same way.
+test("a cancel ends the wait on a local read that never completes", { skip: process.platform === "win32" }, async (t) => {
+	const dir = await mkdtemp(join(tmpdir(), "hydradb-mcp-"));
+	const fifo = join(dir, "stalled.pdf");
+
+	t.after(() => rm(dir, { recursive: true, force: true }));
+	execFileSync("mkfifo", [fifo]);
+
+	const controller = new AbortController();
+	const read = readLocal(fifo, undefined, controller.signal);
+
+	setTimeout(() => controller.abort(), 100);
+
+	const started = Date.now();
+
+	await assert.rejects(read, { name: "AbortError" });
+	assert.ok(Date.now() - started < 1000, "the cancel ended the wait");
+
+	// Unblock the pending open so the process can exit.
+	await writeFile(fifo, "x");
 });
 
 // The API takes no title for a document; it uses the filename. So a `title`,
