@@ -702,6 +702,7 @@ test("status rejects rows that are not objects with an id", async (t) => {
 			/INVALID_STATUS_RESPONSE/,
 		);
 	}
+
 	assert.equal(fetchMock.mock.callCount(), 4);
 });
 
