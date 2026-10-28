@@ -40,7 +40,7 @@ function captureUploads(t: { mock: { method: typeof import("node:test").mock.met
 		const files: File[] = [];
 
 		for (const [name, value] of form) {
-			if (value instanceof File) {
+			if (value instanceof Blob) {
 				if (name === "documents") files.push(value);
 			} else {
 				fields.set(name, value);
