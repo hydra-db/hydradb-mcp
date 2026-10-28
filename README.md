@@ -80,10 +80,13 @@ Inspector stderr from failures.
 The default link-only mode checks create and optional reconnect links. Its report
 lists completed and skipped cases and never claims a complete lifecycle. Set
 `ENG3341_FULL_LIFECYCLE=1` and `ENG3341_RUN_OWNED=1` for the complete lifecycle.
-Complete mode requires a disposable connector, resource, and fake-vendor process:
-`ENG3341_CONNECTOR_ID`, `ENG3341_RESOURCE_ID`, and `ENG3341_FAKE_VENDOR_PID`.
+Complete mode requires a disposable connector, resource, and fake-vendor failure control:
+`ENG3341_CONNECTOR_ID`, `ENG3341_RESOURCE_ID`, and `ENG3341_FAKE_VENDOR_CONTROL_URL`.
+The control URL must use loopback and accept `{"mode":"terminal_failure"}` and
+`{"mode":"healthy"}` POST bodies without credentials.
 It discovers and configures the resource, waits for a successful sync, pauses and
-resumes, stops the run-owned fake vendor, and waits for safe failure guidance.
+resumes, switches the run-owned fake vendor to a terminal failure, waits for safe
+failure guidance, and restores the fake vendor to healthy mode.
 
 Complete mode also requires two local hosted HTTP MCP contexts. Configure the
 allowed context with `ENG3341_OAUTH_ALLOWED_MCP_URL` and
