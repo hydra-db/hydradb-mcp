@@ -60,6 +60,18 @@ export class DeadlineExceeded extends Error {
 	}
 }
 
+/**
+ * When a caller's own deadline ends, by its signal. The tool layer registers
+ * its whole-call deadline here, so a request made late in a tool call knows
+ * how much of that time is left, not just its own budget.
+ */
+const deadlines = new WeakMap<AbortSignal, number>();
+
+/** Record that `signal` belongs to a call that must end by `endsAt` (epoch ms). */
+export function markDeadline(signal: AbortSignal, endsAt: number): void {
+	deadlines.set(signal, endsAt);
+}
+
 /** First backoff wait; doubles per attempt up to `MAX_BACKOFF_MS`. */
 const BASE_BACKOFF_MS = 250;
 
@@ -316,10 +328,14 @@ export async function withRetries<T>(call: RetryCall<T>): Promise<T> {
 
 			const wait = failure?.retryAfterMs ?? Math.min(BASE_BACKOFF_MS * 2 ** attempt, MAX_BACKOFF_MS);
 
-			if (wait >= budget.deadlineMs - (now - started)) {
+			// The tighter of this request's budget and the caller's whole-call
+			// deadline, so a wait that cannot finish is never started.
+			const endsAt = Math.min(started + budget.deadlineMs, (call.signal && deadlines.get(call.signal)) ?? Number.POSITIVE_INFINITY);
+
+			if (wait >= endsAt - now) {
 				const why =
 					failure?.retryAfterMs != null
-						? `Hydra DB asked to retry after ${formatSeconds(wait)}, past the ${formatSeconds(budget.deadlineMs)} deadline for this call; try again later.`
+						? `Hydra DB asked to retry after ${formatSeconds(wait)}, but this call's deadline is ${formatSeconds(Math.max(0, endsAt - now))} away; try again later.`
 						: undefined;
 
 				throw withHistory(translated, history, now - started, why);

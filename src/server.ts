@@ -14,6 +14,7 @@ import { SERVER_INSTRUCTIONS, TOOL_DESCRIPTIONS } from "./descriptions.js";
 import {
 	DeadlineExceeded,
 	HydraDB,
+	markDeadline,
 	assertCollectionAllowed,
 	assertDatabaseAllowed,
 	hasEntries,
@@ -2239,7 +2240,7 @@ export function createHydraDBServer(
 	 * call: the list IS the answer, and asking the API would only show
 	 * databases the connection is not permitted to use.
 	 */
-	async function runDatabases(): Promise<ToolResult> {
+	async function runDatabases(signal?: AbortSignal): Promise<ToolResult> {
 		const defaultDatabase = hydra.database;
 		let databases: string[];
 		let confined = false;
@@ -2248,7 +2249,7 @@ export function createHydraDBServer(
 			databases = [...hydra.allowedDatabases];
 			confined = true;
 		} else {
-			const listed = await hydra.databases.list();
+			const listed = await hydra.databases.list({ signal });
 			databases = (listed.databases ?? listed.tenantIds ?? []).filter(Boolean);
 		}
 
@@ -2894,6 +2895,8 @@ export function createHydraDBServer(
 		run: (signal: AbortSignal) => Promise<ToolResult>,
 	): Promise<ToolResult> {
 		const controller = new AbortController();
+
+		markDeadline(controller.signal, Date.now() + hydra.deadlineMs);
 
 		const timer = setTimeout(
 			() => controller.abort(new DeadlineExceeded(hydra.deadlineMs)),
@@ -3985,7 +3988,7 @@ export function createHydraDBServer(
 	// there does an agent need a way to see it. Registering this for API-key
 	// connections too would change their tool list, which must stay identical.
 	if (options.oauthTools) {
-		register(TOOL_NAMES.DATABASES, {}, () => runDatabases(), readOnly);
+		register(TOOL_NAMES.DATABASES, {}, (_args, extra) => runDatabases(extra?.signal), readOnly);
 	}
 
 	register(

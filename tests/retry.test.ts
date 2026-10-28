@@ -5,7 +5,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { GraphResource, HydraDB, parseRetryAfter } from "../src/hydra/index.js";
+import { GraphResource, HydraDB, markDeadline, parseRetryAfter } from "../src/hydra/index.js";
 
 type Reply = { status: number; headers?: Record<string, string>; body?: unknown } | "hang" | Error;
 
@@ -58,6 +58,9 @@ test("Retry-After is read in both of its forms", () => {
 	assert.equal(parseRetryAfter(undefined, now), undefined);
 });
 
+// Where fetch itself rejects, the SDK leaves its own request timer running
+// until it fires, so those tests use a short deadline to keep the file quick.
+
 // A write whose response was lost may have committed. Sending it again can
 // apply it twice, so it is not retried, and the error says so.
 test("an ingest is not retried after an unclear failure, and the error says the outcome is unknown", async (t) => {
@@ -65,7 +68,7 @@ test("an ingest is not retried after an unclear failure, and the error says the 
 
 	for (const failure of failures) {
 		const calls = scriptFetch(t, [failure, OK_INGEST]);
-		const hydra = new HydraDB({ token: "t", database: "db" });
+		const hydra = new HydraDB({ token: "t", database: "db", timeoutSeconds: 3 });
 
 		await assert.rejects(
 			hydra.context.ingest({ kind: "memory", text: "note" }),
@@ -96,7 +99,7 @@ test("a write is retried when the failure proves it was not applied", async (t) 
 
 	for (const failure of failures) {
 		const calls = scriptFetch(t, [failure, OK_INGEST]);
-		const hydra = new HydraDB({ token: "t", database: "db" });
+		const hydra = new HydraDB({ token: "t", database: "db", timeoutSeconds: 3 });
 		await hydra.context.ingest({ kind: "memory", text: "note" });
 		assert.equal(calls.length, 2);
 		t.mock.restoreAll();
@@ -145,7 +148,7 @@ test("a Retry-After past the deadline fails at once with the server's answer", a
 	const started = Date.now();
 	await assert.rejects(
 		hydra.context.query({ query: "q" }),
-		/→ 429: .*Hydra DB asked to retry after 30s, past the 5s deadline for this call/,
+		/→ 429: .*Hydra DB asked to retry after 30s, but this call's deadline is \d+(\.\d)?s away/,
 	);
 	assert.ok(Date.now() - started < 500, "no wait that could not finish");
 	assert.equal(calls.length, 1);
@@ -210,4 +213,34 @@ test("a final 4xx is not retried and reads as before", async (t) => {
 		return true;
 	});
 	assert.equal(calls.length, 1);
+});
+
+// A request made late in a tool call must not start a wait that only the
+// tool's deadline, not its own, would cut short.
+test("a Retry-After past the caller's whole-call deadline fails at once", async (t) => {
+	const calls = scriptFetch(t, [{ status: 429, headers: { "retry-after": "3" } }, OK_QUERY]);
+	const hydra = new HydraDB({ token: "t", database: "db", timeoutSeconds: 45 });
+	const tool = new AbortController();
+
+	markDeadline(tool.signal, Date.now() + 1000);
+
+	const started = Date.now();
+
+	await assert.rejects(
+		hydra.context.query({ query: "q" }, { signal: tool.signal }),
+		/→ 429: .*Hydra DB asked to retry after 3s, but this call's deadline is \d(\.\d)?s away/,
+	);
+	assert.ok(Date.now() - started < 500, "no wait that could not finish");
+	assert.equal(calls.length, 1);
+});
+
+test("listing databases follows the caller's cancel", async (t) => {
+	const calls = scriptFetch(t, ["hang"]);
+	const hydra = new HydraDB({ token: "t", database: "db", timeoutSeconds: 2 });
+	const controller = new AbortController();
+	const call = hydra.databases.list({ signal: controller.signal });
+
+	while (calls.length === 0) await new Promise((r) => setTimeout(r, 5));
+	controller.abort();
+	await assert.rejects(call, /request cancelled by the caller/);
 });

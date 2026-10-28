@@ -65,7 +65,7 @@ export { unwrap } from "./envelope.js";
 
 export { DEFAULT_BASE_URL, apiKeyId, newRawTransport, sendRaw } from "./transport.js";
 
-export { DeadlineExceeded, parseRetryAfter, withRetries } from "./retry.js";
+export { DeadlineExceeded, markDeadline, parseRetryAfter, withRetries } from "./retry.js";
 
 export type { CallBudget, RetrySafety } from "./retry.js";
 
