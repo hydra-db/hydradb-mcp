@@ -590,7 +590,9 @@ abstract class Resource {
 			// A refused database is a decision the user made, not a transport
 			// failure from `path`; it keeps its own type and message.
 			if (err instanceof ScopeNotAllowedError) throw err;
-			throw translateError(path, err);
+			// The SDK and the raw transport share one token; tests without a raw
+			// transport pass none, and an empty credential is never matched.
+			throw translateError(path, err, [this.raw?.token ?? ""]);
 		}
 	}
 }
@@ -1153,6 +1155,7 @@ export class DatabasesResource extends Resource {
 			throw translateError(
 				"/databases/collections",
 				opts.signal.reason ?? new Error("aborted"),
+				[this.raw.token],
 			);
 		}
 

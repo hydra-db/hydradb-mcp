@@ -772,9 +772,18 @@ export function createHydraDBServer(
 		);
 	}
 
-	/** Keep one server-supplied message from crowding out the rest of the result. */
+	/**
+	 * Keep one server-supplied message from crowding out the rest of the result.
+	 *
+	 * Redacted first, and here rather than at registration: these messages land
+	 * in results that are not errors (a partly failed ingest, a failed
+	 * document's status), and a credential cut in half by the shortening could
+	 * no longer be matched.
+	 */
 	function briefly(message: string): string {
-		return message.length > 200 ? `${message.slice(0, 200)}…` : message;
+		const safe = hydra.redact(message);
+
+		return safe.length > 200 ? `${safe.slice(0, 200)}…` : safe;
 	}
 
 	/**

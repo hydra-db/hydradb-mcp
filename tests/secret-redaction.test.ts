@@ -9,9 +9,13 @@ import { createHydraDBServer } from "../src/server.js";
 
 // Shaped like the keys the dashboard issues: sk_<env>_<12-char id>.<32-char secret>.
 const KEY_ID = "sk_live_x4K9aB2cD3eF";
+
 const KEY_SECRET = "Zq8RtY2uI9oP3aS6dF1gH4jK7lM0nB5v";
+
 const API_KEY = `${KEY_ID}.${KEY_SECRET}`;
+
 const ACCESS_TOKEN = "hmat_9fJ2kL5mN8pQ1rS4tU7vW0xY3zA6bC";
+
 const REFRESH_TOKEN = "hmrt_Gh7Jk2Lm5Np8Qr1St4Uv7Wx0Yz3Ab6C";
 
 function assertGone(text: string, secret: string) {
@@ -43,6 +47,7 @@ test("OAuth access and refresh tokens are removed", () => {
 			"/query",
 			new HydraDBError({ statusCode: 502, body: `proxy saw token ${token} and gave up` }),
 		).message;
+
 		assertGone(message, token);
 		assert.match(message, /proxy saw token \[redacted\] and gave up/);
 	}
@@ -52,6 +57,7 @@ test("credentials in a quoted query string are removed", () => {
 	const out = scrub(
 		"GET /v1/query?api_key=opaque123456&access_token=abc.def.ghi&client_secret=s3cr3t-value&page=2",
 	);
+
 	for (const secret of ["opaque123456", "abc.def.ghi", "s3cr3t-value"]) assertGone(out, secret);
 	assert.match(out, /page=2/);
 });
@@ -61,6 +67,7 @@ test("a network failure that quotes the request is scrubbed too", () => {
 		"/query",
 		new Error(`connect ECONNREFUSED while sending Bearer ${ACCESS_TOKEN}`),
 	).message;
+
 	assertGone(message, ACCESS_TOKEN);
 });
 
@@ -86,16 +93,19 @@ async function connect(t: TestContext, token: string, respond: () => Response | 
 		await client.close();
 		await server.close();
 	});
+
 	return client;
 }
 
 function resultText(result: { content?: unknown }): string {
+	// SAFETY: every content part this server returns is `{ type: "text", text }`.
 	return (result.content as { text?: string }[]).map((part) => part.text ?? "").join("\n");
 }
 
 test("a tool error never shows the model the caller's unrecognised credential", async (t) => {
 	// No pattern knows this format; only knowing it is the caller's own removes it.
 	const token = "acme-proxy-issued-0f3b9d27";
+
 	const client = await connect(t, token, () =>
 		new Response(`<html><title>401</title><body>gateway refused credential ${token}</body></html>`, {
 			status: 401,
@@ -118,4 +128,56 @@ test("a tool error on an OAuth connection never shows the access token", async (
 
 	assert.equal(result.isError, true);
 	assertGone(resultText(result), ACCESS_TOKEN);
+});
+
+test("a credential cut by the length cap leaves no fragment behind", () => {
+	const token = "acme-proxy-issued-0f3b9d27";
+	// 490 characters of padding put the credential across the 512-character cut.
+	const body = `${"x".repeat(490)} ${token} ${"y".repeat(100)}`;
+	const message = translateError("/query", new HydraDBError({ statusCode: 502, body }), [token]).message;
+
+	assertGone(message, token.slice(0, 10));
+});
+
+test("a tool error cut by the length cap leaves no fragment of the caller's credential", async (t) => {
+	const token = "acme-proxy-issued-0f3b9d27";
+
+	const client = await connect(t, token, () =>
+		new Response(`${"x".repeat(490)} ${token} ${"y".repeat(100)}`, { status: 502 }),
+	);
+
+	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "anything" } });
+
+	assert.equal(result.isError, true);
+	assertGone(resultText(result), token.slice(0, 10));
+});
+
+test("a partly failed ingest does not show the model the caller's credential", async (t) => {
+	// Not an error result: the item failures are reported inside a success.
+	const token = "acme-proxy-issued-0f3b9d27";
+
+	const client = await connect(t, token, () =>
+		new Response(
+			JSON.stringify({
+				success: true,
+				data: {
+					success: true,
+					message: `queued for ${token}`,
+					success_count: 1,
+					failed_count: 1,
+					results: [
+						{ id: "a", status: "failed", error: `upstream refused ${token}` },
+						{ id: "b", status: "completed", relations_error: `extractor 401 for ${"z".repeat(185)}${token}` },
+					],
+				},
+			}),
+			{ headers: { "content-type": "application/json" } },
+		),
+	);
+
+	const result = await client.callTool({ name: "hydradb_ingest", arguments: { text: "a note" } });
+	const text = resultText(result);
+
+	assert.match(text, /upstream refused \[redacted\]/);
+	assertGone(text, token.slice(0, 10));
 });

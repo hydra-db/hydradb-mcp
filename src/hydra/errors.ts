@@ -151,13 +151,15 @@ function fromEnvelope(body: unknown): string | undefined {
 	return `${parts.join(": ")}${trailer}`;
 }
 
-function bodyToString(body: unknown): string {
+function bodyToString(body: unknown, known: readonly string[]): string {
 	if (body == null) return "";
 
 	const structured = fromEnvelope(body);
-	if (structured != null) return truncate(scrub(structured));
+
+	if (structured != null) return truncate(scrub(structured, known));
 
 	let raw: string;
+
 	if (typeof body === "string") {
 		raw = body;
 	} else {
@@ -167,7 +169,8 @@ function bodyToString(body: unknown): string {
 			raw = String(body);
 		}
 	}
-	return truncate(scrub(stripMarkup(raw)));
+
+	return truncate(scrub(stripMarkup(raw), known));
 }
 
 function truncate(text: string): string {
@@ -187,14 +190,19 @@ function truncate(text: string): string {
  *
  * Routing them here instead keeps ONE formatting path, so a BYOG failure and an
  * SDK failure are indistinguishable to everything above the wrapper.
+ *
+ * `known` is the connection's own credential. It is scrubbed here, before the
+ * body is cut to length: after the cut, a credential crossing the boundary
+ * would survive as a prefix no exact match can find.
  */
 export function responseError(
 	path: string,
 	status: number,
 	body: unknown,
+	known: readonly string[] = [],
 ): HydraWrapperError {
 	return new HydraWrapperError(
-		`Hydra DB ${path} → ${status}: ${bodyToString(body)}`,
+		`Hydra DB ${path} → ${status}: ${bodyToString(body, known)}`,
 		path,
 		{ status, body },
 	);
@@ -203,13 +211,18 @@ export function responseError(
 /**
  * Translate any error thrown by an SDK call into a `HydraWrapperError` carrying
  * the byte-identical `Hydra DB ${path} → ${status}: ${body}` message.
+ * `known` is scrubbed before any cut, as in `responseError`.
  */
-export function translateError(path: string, err: unknown): HydraWrapperError {
+export function translateError(
+	path: string,
+	err: unknown,
+	known: readonly string[] = [],
+): HydraWrapperError {
 	if (err instanceof HydraDBError) {
 		const status = err.statusCode;
 		const statusText = status != null ? String(status) : "ERR";
 		return new HydraWrapperError(
-			`Hydra DB ${path} → ${statusText}: ${bodyToString(err.body)}`,
+			`Hydra DB ${path} → ${statusText}: ${bodyToString(err.body, known)}`,
 			path,
 			{ status, body: err.body, cause: err },
 		);
@@ -217,7 +230,7 @@ export function translateError(path: string, err: unknown): HydraWrapperError {
 
 	// Non-SDK failure (network error, aborted request, unexpected throw).
 	// A network or proxy failure can quote the request it failed on.
-	const message = scrub(err instanceof Error ? err.message : String(err));
+	const message = scrub(err instanceof Error ? err.message : String(err), known);
 	return new HydraWrapperError(`Hydra DB ${path} → ERR: ${message}`, path, {
 		cause: err,
 	});

@@ -18,6 +18,10 @@ half survived, and it did not know OAuth tokens (`hmat_` / `hmrt_`) at all. Now:
 - The current connection's own key or token is removed from every tool error,
   whatever its format, including the reason in a refused delete.
 - Network failures that quote the request are scrubbed too.
+- Server messages inside results that are not errors (a partly failed ingest,
+  a failed document's status) are scrubbed the same way.
+- The connection's credential is removed before an error body is cut to length,
+  so a credential crossing the cut leaves no fragment behind.
 
 ## [1.5.1] - 2026-09-25
 
