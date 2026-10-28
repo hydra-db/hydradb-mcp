@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — `@hydradb/sdk` 2.1.8; no more hand-written API calls
+
+MCP now depends on `@hydradb/sdk` 2.1.8, which matches the public API spec.
+Title-filtered queries, filtered lists (`external_id`, `parent_external_id`,
+`url`, `provider`, `connector_id`) and deleting a collection used to bypass the
+SDK with their own HTTP calls, because 2.1.4 could not send those fields. They
+now go through the SDK like every other call. A title-filtered query still
+returns its request id.
+
+Along the way:
+
+- Graph relations render the same from 2.1.8's camelCase relation fields
+  (predicate, date and chunk matching), which 2.1.4 left as snake_case.
+- Dated facts render unless the response says the temporal filter was not
+  applied. 2.1.8 no longer carries that diagnostic, so requiring it would have
+  hidden every dated fact.
+- An error with no response (a cancelled or timed-out call) shows the SDK's
+  message instead of an empty one.
+
 ## [1.5.1] - 2026-09-25
 
 ### Added — `hydradb_query` shows a named ticket's links

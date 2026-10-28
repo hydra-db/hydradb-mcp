@@ -109,6 +109,53 @@ function validateQueryResponse(response: unknown): void {
 	}
 }
 
+/** What `sdk.context.list` resolves to: the response envelope. */
+type ListResponse = Awaited<ReturnType<HydraDBClient["context"]["list"]>>;
+
+const successfulList = z.object({ success: z.literal(true).optional() });
+
+/**
+ * A list row with a usable ID, by the list adapters' first-string precedence,
+ * so a blank `id` cannot hide behind a valid legacy `source_id`.
+ */
+function listRow(identityKeys: readonly string[]) {
+	return z.object({}).passthrough().refine((row) => {
+		const id = identityKeys.map((key) => row[key]).find((value) => z.string().safeParse(value).success);
+
+		return z.string().trim().min(1).safeParse(id).success;
+	});
+}
+
+/** The rows of one list kind, under the SDK's name or the wire's. */
+function listPayload(kind: ListParams["kind"]) {
+	if (kind === "memory") {
+		const rows = z.array(listRow(["memoryId", "memory_id", "id", "source_id"]));
+
+		return z.union([
+			successfulList.extend({ userMemories: rows }),
+			successfulList.extend({ user_memories: rows }),
+		]);
+	}
+
+	return successfulList.extend({ sources: z.array(listRow(["id", "source_id"])) });
+}
+
+/**
+ * Reject a successful list that is not a real list, bare or enveloped, also
+ * accepting the historical `inner` nesting the list adapters understand.
+ */
+function validateListResponse(response: ListResponse, kind: ListParams["kind"]): void {
+	const payload = listPayload(kind);
+	const accepted = payload.or(successfulList.extend({ inner: payload }));
+
+	if (!successfulList.safeParse(response).success || !accepted.safeParse(unwrap(response)).success) {
+		throw new Error(
+			`Invalid successful list response: expected a ${kind === "memory" ? "user_memories" : "sources"} ` +
+			"array with nonempty row IDs and no failure flag.",
+		);
+	}
+}
+
 export interface HydraConfig {
 	/** Bearer token (the HydraDB API key). */
 	token: string;
@@ -673,77 +720,12 @@ export class ContextResource extends Resource {
 			recencyBias: params.recencyBias,
 			queryApps: params.queryApps,
 			ids: params.ids,
+			// An empty list is no filter, not a filter that matches nothing.
+			titles: params.titles != null && params.titles.length > 0 ? params.titles : undefined,
 			metadataFilters: params.metadataFilters,
 			numRelatedChunks: params.numRelatedChunks,
 			acl: params.acl,
 		};
-
-		// @hydradb/sdk 2.1.4 predates the titles request field and its generated
-		// serializer drops unknown properties. Its authenticated passthrough still
-		// supplies the SDK's auth, retry, timeout and fetch configuration, including
-		// for a ContextResource constructed directly without our RawTransport. Once
-		// the generated request exposes titles this can collapse back into sdk.query.
-		if (params.titles != null && params.titles.length > 0) {
-			return this.call(
-				"/query",
-				async () => {
-				const response = await this.sdk.fetch(
-					"/query",
-					{
-						method: "POST",
-						headers: { "API-Version": "2", "Content-Type": "application/json" },
-						body: JSON.stringify({
-							...scope,
-							query: params.query,
-							type: params.kind,
-							operator: params.operator,
-							query_by: queryBy,
-							max_results: params.maxResults,
-							mode: params.mode,
-							graph_context: params.graphContext,
-							alpha: params.alpha,
-							recency_bias: params.recencyBias,
-							query_apps: params.queryApps,
-							ids: params.ids,
-							titles: params.titles,
-							metadata_filters: params.metadataFilters,
-							num_related_chunks: params.numRelatedChunks,
-							acl: params.acl,
-						}),
-					},
-					req(opts),
-				);
-				const text = await response.text();
-				let body: unknown = text;
-				try {
-					body = text === "" ? null : JSON.parse(text);
-				} catch {
-					// Preserve a non-JSON proxy response for the shared error formatter.
-				}
-				if (!response.ok) {
-					throw new HydraDBError({ statusCode: response.status, body });
-				}
-					validateQueryResponse(body);
-					// Use the SAME wire-to-SDK conversion as sdk.query, including nested
-					// graph context and metadata. Casting raw JSON loses their contents.
-					const envelope = unwrap<unknown>(body) === body ? { success: true, data: body } : body;
-					return serialization.HandlerEnvelopeSearchV2RetrievalResult.parseOrThrow(envelope, {
-						unrecognizedObjectKeys: "passthrough",
-						allowUnrecognizedUnionMembers: true,
-						allowUnrecognizedEnumValues: true,
-						skipValidation: true,
-						breadcrumbsPrefix: ["response"],
-					});
-				},
-				// The request id has to survive this path too. A query that used
-				// `titles` would otherwise print no id, and hydradb_feedback would
-				// have nothing to attach to for exactly the queries a title filter
-				// was used on. readRequestId reads both spellings, so the raw
-				// envelope's snake_case `meta.request_id` resolves here the same way
-				// the SDK's camelCase does.
-				opts?.onMeta,
-			);
-		}
 
 		return this.call("/query", async () => {
 			const response = await this.sdk.query(request, req(opts));
@@ -839,13 +821,13 @@ export class ContextResource extends Resource {
 			// Knowledge is multipart with the document as a file part — never the
 			// `app_knowledge` JSON field (guards the DX-G-002 class of bug).
 			if (params.text != null) {
-				request.documents = {
+				request.documents = [{
 					data: Buffer.from(params.text, "utf-8"),
 					// The title rides on the filename; the server's
 					// document_metadata does not accept a `title` key.
 					filename: params.filename ?? `${params.title ?? "document"}.md`,
 					contentType: "text/markdown",
-				};
+				}];
 			}
 		}
 
@@ -863,96 +845,44 @@ export class ContextResource extends Resource {
 			params.sourceFields != null &&
 			Object.keys(params.sourceFields).length > 0;
 
-		// @hydradb/sdk 2.1.4 predates the list `filters` request field and its
-		// generated serializer drops unknown properties (same limitation the
-		// titles filter hit on /query). Its authenticated passthrough still
-		// supplies auth, retry, timeout and fetch config. Once the generated
-		// request exposes `filters` this can collapse back into sdk.context.list.
-		if (hasSourceFields || params.connectorId != null) {
-			const scope = this.scope(params.collection, params.database);
-			return this.call<SDK.ListV2ListResponse, unknown>(
-				"/context/list",
-				async () => {
-					const response = await this.sdk.fetch(
-						"/context/list",
-						{
-							method: "POST",
-							headers: {
-								"API-Version": "2",
-								"Content-Type": "application/json",
-							},
-							body: JSON.stringify({
-								...scope,
-								type: params.kind,
-								ids: params.ids,
-								page: params.page,
-								page_size: params.pageSize,
-								acl: params.acl,
-								filters: {
-									source_fields: params.sourceFields,
-									additional_metadata: params.connectorId != null ? { connector_id: params.connectorId } : undefined,
-								},
-								group_threads: false,
-							}),
-						},
-						req(opts),
-					);
-					const text = await response.text();
-					let body: unknown = text;
-					try {
-						body = text === "" ? null : JSON.parse(text);
-					} catch {
-						// Preserve a non-JSON proxy response for the shared formatter.
-					}
-					if (!response.ok) {
-						throw new HydraDBError({ statusCode: response.status, body });
-					}
-					// Unlike the generated method, passthrough does not validate JSON.
-					// A proxy's HTML login page must be an error, not "no sources".
-					// Accept both the wire payload and the historical `inner` shape
-					// understood by the list adapters, including a valid empty array.
-					const rowsKey = params.kind === "memory" ? "user_memories" : "sources";
-					const identityKeys = params.kind === "memory"
-						? ["memory_id", "id", "source_id"]
-						: ["id", "source_id"];
-					const listRow = z.record(z.unknown()).refine((row) => {
-						// Use the adapters' first-string precedence: a blank `id`
-						// must not hide behind a valid legacy `source_id`.
-						const id = identityKeys.map((key) => row[key]).find((value) => typeof value === "string");
-						return typeof id === "string" && id.trim() !== "";
-					});
-					const successfulObject = z.object({ success: z.literal(true).optional() });
-					const listPayload = successfulObject.extend({
-						[rowsKey]: z.array(listRow),
-					});
-					const payload = unwrap<unknown>(body);
-					if (
-						!successfulObject.safeParse(body).success ||
-						!z.union([
-							listPayload,
-							successfulObject.extend({ inner: listPayload }),
-						]).safeParse(payload).success
-					) {
-						throw new Error(
-							`Invalid successful list response: expected a ${rowsKey} array with nonempty row IDs and no failure flag.`,
-						);
-					}
-					return body;
-				},
-				opts?.onMeta,
-			);
-		}
+		const filtered = hasSourceFields || params.connectorId != null;
 
-		return this.call("/context/list", () =>
-			this.sdk.context.list({
+		return this.call<SDK.ListV2ListResponse, ListResponse>("/context/list", async () => {
+			const request: SDK.ListV2ListContentRequest = {
 				...this.scope(params.collection, params.database),
 				type: params.kind,
 				ids: params.ids,
 				page: params.page,
 				pageSize: params.pageSize,
 				acl: params.acl,
-			}, req(opts)),
-		);
+			};
+
+			if (filtered) {
+				const filters: SDK.ListContentFilter = {};
+
+				// The tools build these with their wire names; the serializer maps
+				// them to the SDK's, and rejects a key the API does not define.
+				if (hasSourceFields) {
+					filters.sourceFields = serialization.ListSourceFieldFilters.parseOrThrow(params.sourceFields);
+				}
+
+				if (params.connectorId != null) {
+					filters.additionalMetadata = { connector_id: params.connectorId };
+				}
+
+				request.filters = filters;
+				request.groupThreads = false;
+			}
+
+			const response = await this.sdk.context.list(request, req(opts));
+
+			// A filtered list is a lookup: an empty answer reads as "that source
+			// does not exist", so a body that is not a real list (a proxy's login
+			// page, a failure flag) must be an error rather than no rows.
+			if (filtered) validateListResponse(response, params.kind);
+
+			return response;
+		}, opts?.onMeta);
 	}
 
 	/** Fetch a source's content (SDK `context.inspect`; was "fetch content"). */
@@ -1124,29 +1054,12 @@ export class DatabasesResource extends Resource {
 
 	/**
 	 * Permanently delete one collection and all of its data
-	 * (`DELETE /databases/collections`). Not yet on the pinned SDK, so this
-	 * is a hand-rolled path matching GraphResource.
+	 * (SDK `databases.deleteCollection`).
 	 */
 	async deleteCollection(
 		params: DeleteCollectionParams,
 		opts?: RequestOptions,
-	): Promise<{
-		database?: string;
-		collection?: string;
-		status?: string;
-		message?: string;
-	}> {
-		// Hand-rolled for the same reason `context.subgraph` is (CONTRACT §2
-		// rule 7): the pinned SDK has no `databases.delete_collection`. It goes
-		// through the same raw transport, so it shares the retry, envelope
-		// unwrap and error type of every other call here.
-		if (!this.raw) {
-			throw new HydraWrapperError(
-				"Hydra DB /databases/collections → ERR: no HTTP transport configured",
-				"/databases/collections",
-			);
-		}
-
+	): Promise<SDK.TenantsSubTenantDeleteResponse> {
 		// A caller who already cancelled is not waiting for the request to go
 		// out: reject a pre-aborted signal rather than send and then unwind.
 		if (opts?.signal?.aborted) {
@@ -1165,15 +1078,14 @@ export class DatabasesResource extends Resource {
 
 		// scope() resolves the default database, enforces any confinement, and
 		// returns the canonical `database`/`collection` names the API expects.
-		const query = new URLSearchParams(this.scope(params.collection, params.database));
-		const path = `/databases/collections?${query.toString()}`;
+		const { database, collection } = this.scope(params.collection, params.database);
 
-		return sendRaw<{
-			database?: string;
-			collection?: string;
-			status?: string;
-			message?: string;
-		}>(this.raw, path, "DELETE", undefined, opts);
+		return this.call("/databases/collections", () =>
+			this.sdk.databases.deleteCollection(
+				{ database, collection: collection ?? params.collection.trim() },
+				req(opts),
+			),
+		);
 	}
 }
 
@@ -1408,9 +1320,6 @@ export class HydraDB {
 			sdk ??
 			new HydraDBClient({
 				token: config.token,
-				// SDK 2.1.4's generated methods apply this default, but its fetch
-				// passthrough does not. Set it for both title and source lookups so
-				// their relative paths work without HYDRADB_BASE_URL as well.
 				baseUrl: config.baseUrl ?? HydraDBEnvironment.Default,
 				// Both are stated rather than inherited. The SDK's defaults (60s,
 				// 2 retries) were never chosen by this server, and their product is

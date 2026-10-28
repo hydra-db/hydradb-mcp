@@ -80,20 +80,6 @@ function mockHydra(
 				memoryCollection: { rowCount: 1 },
 			}),
 		},
-		// The SDK 2.1.4 serializer drops request fields it predates (titles on
-		// /query, filters on /context/list), so those paths use the SDK's
-		// authenticated raw fetch. Record the parsed body under the endpoint's
-		// last path segment so a boundary test can assert what was actually sent.
-		fetch: async (input: string | URL | Request, init?: RequestInit) => {
-			const path = String(typeof input === "object" && "url" in input ? input.url : input);
-			const method = path.split("/").filter(Boolean).pop() ?? "fetch";
-			calls.push({ method: `${method}-fetch`, args: JSON.parse(String(init?.body ?? "{}")) });
-			const data = method === "query" ? { chunks: [] } : "list" in responses ? responses.list : { sources: [], total: 0 };
-			return new Response(JSON.stringify({ success: true, data }), {
-				status: 200,
-				headers: { "content-type": "application/json" },
-			});
-		},
 	} as unknown as HydraDBClient;
 
 	const feedbackResponseSchema = z.object({
@@ -712,12 +698,10 @@ test("hydradb_list resolves a knowledge source by provider id through source_fie
 
 	assert.notEqual(result.isError, true);
 	assert.match((result.content as { text: string }[])[0]!.text, /src-confluence-1/);
-	// filters ride the raw-fetch bypass (SDK serializer drops them), so assert on
-	// the body actually sent to /context/list.
-	const call = calls.find((c) => c.method === "list-fetch");
+	const call = calls.find((c) => c.method === "list");
 	assert.ok(call, "a source-field list must reach /context/list");
 	assert.deepEqual(call.args.filters, {
-		source_fields: { app_external_id: "123456", app_provider: "confluence" },
+		sourceFields: { appExternalId: "123456", appProvider: "confluence" },
 	});
 	assert.equal(call.args.type, "knowledge");
 	assert.equal(call.args.database, "db_test");
@@ -738,14 +722,14 @@ test("hydradb_list combines source selectors without losing scope, ACL, ids or p
 			},
 		});
 		assert.notEqual(result.isError, true);
-		assert.deepEqual(calls.map((call) => call.method), ["list-fetch"], "no unfiltered retry");
+		assert.deepEqual(calls.map((call) => call.method), ["list"], "no unfiltered retry");
 		assert.deepEqual(calls[0]!.args, {
 			database: "customer_db", collection: "research", type: "knowledge",
-			ids: ["source-1"], page: 2, page_size: 10, acl: ["user-1"],
-			filters: { source_fields: {
-				app_external_id: "page-1", url: "https://example.test/wiki/pages/page-1", app_provider: "confluence",
+			ids: ["source-1"], page: 2, pageSize: 10, acl: ["user-1"],
+			filters: { sourceFields: {
+				appExternalId: "page-1", url: "https://example.test/wiki/pages/page-1", appProvider: "confluence",
 			} },
-			group_threads: false,
+			groupThreads: false,
 		});
 		const text = (result.content as { text: string }[])[0]!.text;
 		assert.match(text, /No visible sources.*page 2.*customer_db.*research/);
@@ -766,7 +750,7 @@ test("hydradb_list URL-only lookup identifies the default workspace on an empty 
 		});
 		assert.notEqual(result.isError, true);
 		assert.deepEqual(calls[0]!.args.filters, {
-			source_fields: { url: "https://example.test/wiki/pages/page-1" },
+			sourceFields: { url: "https://example.test/wiki/pages/page-1" },
 		});
 		assert.equal(calls[0]!.args.collection, undefined);
 		assert.match((result.content as { text: string }[])[0]!.text, /No visible sources.*db_test.*workspace default/);

@@ -176,8 +176,11 @@ export function translateError(path: string, err: unknown): HydraWrapperError {
 	if (err instanceof HydraDBError) {
 		const status = err.statusCode;
 		const statusText = status != null ? String(status) : "ERR";
+		// A failure with no response (an abort, a timeout, a dropped connection)
+		// has no body to show; the SDK's own message is then the diagnosis.
+		const detail = bodyToString(err.body) || scrub(err.message);
 		return new HydraWrapperError(
-			`Hydra DB ${path} → ${statusText}: ${bodyToString(err.body)}`,
+			`Hydra DB ${path} → ${statusText}: ${detail}`,
 			path,
 			{ status, body: err.body, cause: err },
 		);

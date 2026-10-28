@@ -1224,11 +1224,11 @@ export function createHydraDBServer(
 	 */
 	function inspectBody(
 		res: {
-			content?: string;
-			contentBase64?: string;
-			contentType?: string;
-			sizeBytes?: number;
-			inferredContent?: string;
+			content?: string | null;
+			contentBase64?: string | null;
+			contentType?: string | null;
+			sizeBytes?: number | null;
+			inferredContent?: string | null;
 		},
 		offset?: number,
 		limit?: number,
