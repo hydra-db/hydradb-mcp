@@ -24,6 +24,29 @@ Run it two ways, same tools either way:
 Ids flow between these: `hydradb_query`, `hydradb_list` and `hydradb_subgraph` emit them;
 `hydradb_inspect`, `hydradb_delete`, `hydradb_status`, `hydradb_subgraph` and `hydradb_relations` accept them.
 
+### Connector reads
+
+| Tool | What it does |
+|---|---|
+| `hydradb_connector_providers` | List supported providers, or inspect one provider's credential field schema |
+| `hydradb_connector_list` | List connected sources, optionally with health |
+| `hydradb_connector_get` | Read one connector's configuration and lifecycle |
+| `hydradb_connector_status` | Explain connector and resource sync health in plain words |
+| `hydradb_connector_discover` | Discover resources visible through a connected provider account |
+| `hydradb_connector_resources` | List resources configured on a connector |
+
+Connector tools are on by default. Set `HYDRADB_MCP_CONNECTOR_TOOLS=0` to
+withhold the whole family. A database-confined OAuth connection sees only
+connectors assigned to an allowed database. Connectors with no database stay
+hidden, and every by-ID read checks the connector before reading status,
+discovery, or resources. Resource listings also check each resource's
+`database_override` and otherwise inherit the connector database.
+
+The provider-detail tool returns credential **schema metadata**, not credential
+values. Do not paste provider credentials into chat or any MCP tool argument.
+Defaults, examples, constants, and unknown schema extensions are removed before
+the schema reaches model context.
+
 ### Graph tools (Cypher)
 
 Hydra DB also runs **property graphs you model and own end to end**, queried in [Cypher](https://docs.hydradb.com/essentials/v2/graph-collections-byog). This is a different product surface from the memory and knowledge above, and nothing crosses between them: `hydradb_query` cannot see graph data, and `hydradb_graph_query` cannot see memories.
@@ -341,6 +364,7 @@ Checks whether ingested sources have finished indexing.
 | `HYDRADB_GRAPH_DATABASE` | Default graph database for the Cypher tools | `HYDRADB_DATABASE` |
 | `HYDRADB_GRAPH_COLLECTION` | Default graph collection | `default` |
 | `HYDRADB_MCP_GRAPH_TOOLS` | Register the graph tools (`0` withholds them) | *on* |
+| `HYDRADB_MCP_CONNECTOR_TOOLS` | Register the connector tools (`0` withholds them) | *on* |
 
 A graph database is a **different namespace** from the memory database: the same
 name can exist as both, and Cypher aimed at the wrong one reads an empty graph

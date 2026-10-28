@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — connector read tools
+
+Six read-only tools now cover connector provider metadata, connector lists,
+connector details, plain-language sync status, resource discovery, and
+configured resources. `HYDRADB_MCP_CONNECTOR_TOOLS=0` withholds the family; it
+is enabled by default.
+
+Database-confined OAuth connections filter connector lists, hide org-wide
+connectors with no database, authorize every by-ID read, and filter resources
+by their effective destination database. Provider credential schemas are
+metadata only. Defaults, examples, constants, and unknown schema extensions
+are removed before the schema enters model context.
+
 ## [1.6.0] - 2026-10-28
 
 ### Fixed — `hydradb_query` title filter missed documents saved through `hydradb_ingest`

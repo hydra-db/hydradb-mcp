@@ -42,6 +42,14 @@ export const TOOL_NAMES = {
 	GRAPH_COLLECTIONS: "hydradb_graph_collections",
 	GRAPH_ADMIN: "hydradb_graph_admin",
 
+	// Connector lifecycle and resource management (ENG-3341).
+	CONNECTOR_PROVIDERS: "hydradb_connector_providers",
+	CONNECTOR_LIST: "hydradb_connector_list",
+	CONNECTOR_GET: "hydradb_connector_get",
+	CONNECTOR_STATUS: "hydradb_connector_status",
+	CONNECTOR_DISCOVER: "hydradb_connector_discover",
+	CONNECTOR_RESOURCES: "hydradb_connector_resources",
+
 	// Deprecated aliases — kept working for backward compatibility.
 	SEARCH: "hydra_db_search",
 	STORE: "hydra_db_store",
@@ -81,6 +89,16 @@ export const GRAPH_TOOL_NAMES = [
 	TOOL_NAMES.GRAPH_QUERY,
 	TOOL_NAMES.GRAPH_COLLECTIONS,
 	TOOL_NAMES.GRAPH_ADMIN,
+] as const;
+
+/** Connector tools are a separately gated product family. */
+export const CONNECTOR_TOOL_NAMES = [
+	TOOL_NAMES.CONNECTOR_PROVIDERS,
+	TOOL_NAMES.CONNECTOR_LIST,
+	TOOL_NAMES.CONNECTOR_GET,
+	TOOL_NAMES.CONNECTOR_STATUS,
+	TOOL_NAMES.CONNECTOR_DISCOVER,
+	TOOL_NAMES.CONNECTOR_RESOURCES,
 ] as const;
 
 export const DEPRECATED_TOOL_NAMES = [
