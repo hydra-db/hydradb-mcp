@@ -39,6 +39,14 @@ test("OAuth is off with no configuration and on only when all three values are s
 		resource: "https://mcp.test",
 		introspectionSecret: "s3cret",
 	});
+	assert.equal(
+		resolveOAuthConfig({
+			HYDRADB_OAUTH_ISSUER: "https://app.test",
+			HYDRADB_MCP_PUBLIC_URL: "HTTPS://MCP.TEST:443/hydra/mcp/",
+			HYDRADB_OAUTH_INTROSPECTION_SECRET: "s3cret",
+		})?.resource,
+		"HTTPS://MCP.TEST:443/hydra/mcp",
+	);
 });
 
 test("a non-URL issuer disables OAuth rather than advertising garbage", () => {
@@ -63,7 +71,7 @@ const CONFIG: OAuthConfig = {
 	introspectionSecret: "s3cret",
 };
 
-test("metadata document and WWW-Authenticate follow RFC 9728", () => {
+test("root metadata document and WWW-Authenticate remain unchanged", () => {
 	assert.equal(metadataUrl(CONFIG), "https://mcp.test/.well-known/oauth-protected-resource");
 	assert.deepEqual(protectedResourceMetadata(CONFIG), {
 		resource: "https://mcp.test",
@@ -81,6 +89,21 @@ test("metadata document and WWW-Authenticate follow RFC 9728", () => {
 		wwwAuthenticate(CONFIG, "invalid_token", 'it "expired"'),
 		"Bearer realm=\"Hydra DB MCP\", error=\"invalid_token\", error_description=\"it 'expired'\", " +
 			'resource_metadata="https://mcp.test/.well-known/oauth-protected-resource", scope="hydradb"',
+	);
+});
+
+test("path-prefixed resources advertise metadata under the public prefix", () => {
+	const config: OAuthConfig = {
+		...CONFIG,
+		resource: "https://company.internal/hydra/mcp",
+	};
+	assert.equal(
+		metadataUrl(config),
+		"https://company.internal/hydra/mcp/.well-known/oauth-protected-resource",
+	);
+	assert.match(
+		wwwAuthenticate(config),
+		/resource_metadata="https:\/\/company\.internal\/hydra\/mcp\/\.well-known\/oauth-protected-resource"/,
 	);
 });
 
@@ -169,6 +192,27 @@ test("a token for another resource is refused even though the issuer says it is 
 	assert.ok(r2.ok);
 });
 
+test("a path-prefixed resource keeps exact audience binding and trailing-slash tolerance", async () => {
+	const config = { ...CONFIG, resource: "https://company.internal/hydra/mcp", now: () => NOW };
+	for (const aud of [
+		"https://company.internal/hydra/mcp",
+		"https://company.internal/hydra/mcp/",
+	]) {
+		__resetIntrospectionCache();
+		const { fetchFn } = fakeFetch(() => ({ status: 200, body: active({ aud }) }));
+		const result = await introspect({ ...config, fetchFn }, `hmat_${aud.length}`);
+		assert.ok(result.ok);
+	}
+	__resetIntrospectionCache();
+	const { fetchFn } = fakeFetch(() => ({
+		status: 200,
+		body: active({ aud: "https://company.internal/hydra/other" }),
+	}));
+	const result = await introspect({ ...config, fetchFn }, "hmat_wrong_path");
+	assert.ok(!result.ok);
+	assert.equal(result.reason, "wrong_audience");
+});
+
 test("inactive, expired and key-less answers are invalid_token; transport failures are unavailable", async () => {
 	__resetIntrospectionCache();
 	const cfg = (h: Parameters<typeof fakeFetch>[0]) => ({ ...CONFIG, fetchFn: fakeFetch(h).fetchFn, now: () => NOW });
@@ -233,9 +277,15 @@ before(async () => {
 });
 after(() => server?.close());
 
-function request(method: string, path: string, headers: Record<string, string> = {}, body?: string) {
+function request(
+	method: string,
+	path: string,
+	headers: Record<string, string> = {},
+	body?: string,
+	targetPort = port,
+) {
 	return new Promise<{ status: number; headers: http.IncomingHttpHeaders; body: string }>((resolve, reject) => {
-		const req = http.request({ host: "127.0.0.1", port, method, path, headers }, (res) => {
+		const req = http.request({ host: "127.0.0.1", port: targetPort, method, path, headers }, (res) => {
 			let data = "";
 			res.on("data", (c) => {
 				data += c;
@@ -264,6 +314,115 @@ test("the protected resource metadata document is served at both well-known path
 	}
 });
 
+test("a path-prefixed resource serves literal preserved, stripped, and RFC metadata routes", async () => {
+	const prefixedHosts = buildAllowedHosts(0, []);
+	const app = createHttpApp({
+		port: 0,
+		bindAddress: "127.0.0.1",
+		allowedOrigins: [],
+		allowedHosts: prefixedHosts,
+		trustProxy: false,
+		oauth: {
+			...CONFIG,
+			resource: "https://company.internal/hydra/api/mcp:v1+edge",
+		},
+	});
+	const prefixedServer = await new Promise<http.Server>((resolve) => {
+		const listener = app.listen(0, "127.0.0.1", () => resolve(listener));
+	});
+	const prefixedPort = (prefixedServer.address() as AddressInfo).port;
+	prefixedHosts.add(`127.0.0.1:${prefixedPort}`);
+
+	try {
+		for (const path of [
+			"/hydra/api/mcp:v1+edge/.well-known/oauth-protected-resource",
+			"/api/mcp:v1+edge/.well-known/oauth-protected-resource",
+			"/mcp:v1+edge/.well-known/oauth-protected-resource",
+			"/.well-known/oauth-protected-resource/hydra/api/mcp:v1+edge",
+		]) {
+			const res = await request(
+				"GET",
+				path,
+				{ host: `127.0.0.1:${prefixedPort}` },
+				undefined,
+				prefixedPort,
+			);
+			assert.equal(res.status, 200, path);
+			assert.equal(JSON.parse(res.body).resource, "https://company.internal/hydra/api/mcp:v1+edge");
+		}
+
+		const endpoint = await request(
+			"POST",
+			"/api/mcp:v1+edge",
+			{ host: `127.0.0.1:${prefixedPort}`, ...JSON_HEADERS },
+			TOOLS_LIST,
+			prefixedPort,
+		);
+		assert.equal(endpoint.status, 401);
+		assert.match(
+			String(endpoint.headers["www-authenticate"]),
+			/resource_metadata="https:\/\/company\.internal\/hydra\/api\/mcp:v1\+edge\/\.well-known\/oauth-protected-resource"/,
+		);
+		const unrelated = await request(
+			"POST",
+			"/hydra/mcpXv1edge",
+			{ host: `127.0.0.1:${prefixedPort}`, ...JSON_HEADERS },
+			TOOLS_LIST,
+			prefixedPort,
+		);
+		assert.equal(unrelated.status, 404);
+	} finally {
+		await new Promise<void>((resolve, reject) =>
+			prefixedServer.close((error) => (error ? reject(error) : resolve())),
+		);
+	}
+});
+
+test("a public path with an interior double slash keeps its exact preserved routes", async () => {
+	const doubleSlashHosts = buildAllowedHosts(0, []);
+	const app = createHttpApp({
+		port: 0,
+		bindAddress: "127.0.0.1",
+		allowedOrigins: [],
+		allowedHosts: doubleSlashHosts,
+		trustProxy: false,
+		oauth: {
+			...CONFIG,
+			resource: "https://company.internal/hydra//mcp",
+		},
+	});
+	const server = await new Promise<http.Server>((resolve) => {
+		const listener = app.listen(0, "127.0.0.1", () => resolve(listener));
+	});
+	const targetPort = (server.address() as AddressInfo).port;
+	doubleSlashHosts.add(`127.0.0.1:${targetPort}`);
+
+	try {
+		const metadata = await request(
+			"GET",
+			"/hydra//mcp/.well-known/oauth-protected-resource",
+			{ host: `127.0.0.1:${targetPort}` },
+			undefined,
+			targetPort,
+		);
+		assert.equal(metadata.status, 200);
+		assert.equal(JSON.parse(metadata.body).resource, "https://company.internal/hydra//mcp");
+
+		const endpoint = await request(
+			"POST",
+			"/hydra//mcp",
+			{ host: `127.0.0.1:${targetPort}`, ...JSON_HEADERS },
+			TOOLS_LIST,
+			targetPort,
+		);
+		assert.equal(endpoint.status, 401);
+	} finally {
+		await new Promise<void>((resolve, reject) =>
+			server.close((error) => (error ? reject(error) : resolve())),
+		);
+	}
+});
+
 test("an anonymous request is a 401 that points at the metadata document", async () => {
 	const res = await request("POST", "/", { host: `127.0.0.1:${port}`, ...JSON_HEADERS }, TOOLS_LIST);
 	assert.equal(res.status, 401);
@@ -271,6 +430,13 @@ test("an anonymous request is a 401 that points at the metadata document", async
 	assert.match(String(res.headers["www-authenticate"]), /scope="hydradb"/);
 	// No token was presented, so no `error=` claim about one.
 	assert.doesNotMatch(String(res.headers["www-authenticate"]), /error=/);
+	const capitalized = await request(
+		"POST",
+		"/MCP",
+		{ host: `127.0.0.1:${port}`, ...JSON_HEADERS },
+		TOOLS_LIST,
+	);
+	assert.equal(capitalized.status, 401);
 });
 
 test("a valid access token is served exactly like the API key it stands for", async () => {

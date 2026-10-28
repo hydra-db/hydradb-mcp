@@ -515,7 +515,47 @@ The image binds `0.0.0.0` inside the container (the host controls exposure with
 
 ### Sign in with HydraDB (OAuth)
 
-With three extra variables the hosted server also speaks the MCP authorization flow: a client that arrives with no credentials gets a `401` pointing at `/.well-known/oauth-protected-resource`, discovers the HydraDB dashboard as its authorization server, opens the browser, and the user signs in and picks a database. No key is ever pasted into a client.
+With three extra variables the hosted server also speaks the MCP authorization flow: a client that arrives with no credentials gets a `401` pointing at protected-resource metadata, discovers the HydraDB dashboard as its authorization server, opens the browser, and the user signs in and picks a database. No key is ever pasted into a client.
+
+Set all three OAuth variables to enable the flow:
+
+```bash
+HYDRADB_OAUTH_ISSUER=https://app.hydradb.example \
+HYDRADB_MCP_PUBLIC_URL=https://company.internal/hydra/mcp \
+HYDRADB_OAUTH_INTROSPECTION_SECRET=replace-me \
+ALLOWED_HOSTS=company.internal \
+npm run start:http
+```
+
+`HYDRADB_MCP_PUBLIC_URL` is the exact public MCP endpoint and OAuth resource.
+The server keeps `/` and `/mcp`, and also serves the configured pathname. It
+supports a reverse proxy that preserves `/hydra/mcp`, strips `/hydra` and sends
+`/mcp`, or strips the complete prefix and sends `/`.
+
+The 401 challenge advertises metadata under the same public proxy prefix:
+
+```text
+https://company.internal/hydra/mcp/.well-known/oauth-protected-resource
+```
+
+The server also serves the RFC 9728 section 3.1 path-inserted form for clients
+that construct it themselves:
+
+```text
+https://company.internal/.well-known/oauth-protected-resource/hydra/mcp
+```
+
+Route both public metadata URLs to this server. A proxy that forwards only
+`/hydra` cannot deliver the origin-root RFC URL without an explicit route. All
+metadata aliases return `resource: "https://company.internal/hydra/mcp"`.
+Token audience checks remain unchanged, including tolerance for a trailing
+slash on an otherwise equal audience.
+
+The process fails before listening when a complete `HYDRADB_MCP_PUBLIC_URL`
+contains an unsupported layout, such as credentials, a query string, a
+fragment, a backslash, dot path segments, or percent-encoded path characters. The error names
+`HYDRADB_MCP_PUBLIC_URL` and the reason. Partial OAuth configuration keeps the
+existing behavior: the server warns and leaves OAuth disabled.
 
 | Variable | Description |
 | --- | --- |
