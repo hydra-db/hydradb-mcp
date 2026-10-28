@@ -98,3 +98,22 @@ test("full lifecycle refuses a non-loopback fake-vendor control endpoint before 
 	assert.notEqual(result.status, 0);
 	assert.match(result.stderr, /must use a loopback host/);
 });
+
+test("full lifecycle rejects poll timeouts outside its bounded range", () => {
+	for (const seconds of ["29", "901", "not-seconds"]) {
+		const result = spawnSync(process.execPath, ["scripts/e2e-connectors.local.mjs"], {
+			cwd: process.cwd(),
+			env: {
+				...process.env,
+				HYDRADB_BASE_URL: "http://127.0.0.1:9999",
+				HYDRADB_DASHBOARD_URL: "http://127.0.0.1:3000",
+				ENG3341_POLL_TIMEOUT_SECONDS: seconds,
+			},
+			encoding: "utf8",
+			timeout: 10_000,
+		});
+
+		assert.notEqual(result.status, 0);
+		assert.match(result.stderr, /between 30 and 900/);
+	}
+});

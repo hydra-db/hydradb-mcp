@@ -184,8 +184,15 @@ const fullLifecycle = process.env.ENG3341_FULL_LIFECYCLE === "1";
 const cleanup = process.env.ENG3341_CLEANUP === "1";
 const runOwned = process.env.ENG3341_RUN_OWNED === "1";
 const fakeVendorControl = fullLifecycle ? localUrl("ENG3341_FAKE_VENDOR_CONTROL_URL") : undefined;
+const pollTimeoutSeconds = Number(process.env.ENG3341_POLL_TIMEOUT_SECONDS ?? "360");
 const passedCases = [];
 const skippedCases = [];
+
+if (!Number.isSafeInteger(pollTimeoutSeconds) || pollTimeoutSeconds < 30 || pollTimeoutSeconds > 900) {
+	throw new Error("ENG3341_POLL_TIMEOUT_SECONDS must be an integer between 30 and 900");
+}
+
+const pollTimeoutMs = pollTimeoutSeconds * 1_000;
 
 if ((fullLifecycle || cleanup) && !runOwned) {
 	throw new Error("Set ENG3341_RUN_OWNED=1 before lifecycle mutations or cleanup");
@@ -278,7 +285,7 @@ async function callHttp(urlName, tokenName, name, args) {
 	return await guardedHttpCall(url, token, name, args);
 }
 
-async function pollStatus(predicate, label, timeoutMs = 120_000) {
+async function pollStatus(predicate, label, timeoutMs = pollTimeoutMs) {
 	const deadline = Date.now() + timeoutMs;
 
 	while (Date.now() < deadline) {

@@ -87,6 +87,9 @@ The control URL must use loopback and accept `{"mode":"terminal_failure"}` and
 It discovers and configures the resource, waits for a successful sync, pauses and
 resumes, switches the run-owned fake vendor to a terminal failure, waits for safe
 failure guidance, and restores the fake vendor to healthy mode.
+Status polling defaults to 360 seconds because the local connector worker can run
+four one-minute empty-drain retries. Set `ENG3341_POLL_TIMEOUT_SECONDS` to an
+integer from 30 through 900 when a local stack uses a different bounded window.
 
 Complete mode also requires two local hosted HTTP MCP contexts. Configure the
 allowed context with `ENG3341_OAUTH_ALLOWED_MCP_URL` and
