@@ -378,6 +378,51 @@ test("a path-prefixed resource serves literal preserved, stripped, and RFC metad
 	}
 });
 
+test("a public path with an interior double slash keeps its exact preserved routes", async () => {
+	const doubleSlashHosts = buildAllowedHosts(0, []);
+	const app = createHttpApp({
+		port: 0,
+		bindAddress: "127.0.0.1",
+		allowedOrigins: [],
+		allowedHosts: doubleSlashHosts,
+		trustProxy: false,
+		oauth: {
+			...CONFIG,
+			resource: "https://company.internal/hydra//mcp",
+		},
+	});
+	const server = await new Promise<http.Server>((resolve) => {
+		const listener = app.listen(0, "127.0.0.1", () => resolve(listener));
+	});
+	const targetPort = (server.address() as AddressInfo).port;
+	doubleSlashHosts.add(`127.0.0.1:${targetPort}`);
+
+	try {
+		const metadata = await request(
+			"GET",
+			"/hydra//mcp/.well-known/oauth-protected-resource",
+			{ host: `127.0.0.1:${targetPort}` },
+			undefined,
+			targetPort,
+		);
+		assert.equal(metadata.status, 200);
+		assert.equal(JSON.parse(metadata.body).resource, "https://company.internal/hydra//mcp");
+
+		const endpoint = await request(
+			"POST",
+			"/hydra//mcp",
+			{ host: `127.0.0.1:${targetPort}`, ...JSON_HEADERS },
+			TOOLS_LIST,
+			targetPort,
+		);
+		assert.equal(endpoint.status, 401);
+	} finally {
+		await new Promise<void>((resolve, reject) =>
+			server.close((error) => (error ? reject(error) : resolve())),
+		);
+	}
+});
+
 test("an anonymous request is a 401 that points at the metadata document", async () => {
 	const res = await request("POST", "/", { host: `127.0.0.1:${port}`, ...JSON_HEADERS }, TOOLS_LIST);
 	assert.equal(res.status, 401);

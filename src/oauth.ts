@@ -131,11 +131,13 @@ export function oauthRoutes(config: OAuthConfig): {
 	metadata: string[];
 } {
 	const configured = resourcePath(config);
-	const segments = configured.split("/").filter(Boolean);
 	const suffixes =
-		segments.length === 0
+		configured === "/"
 			? ["/"]
-			: segments.map((_, index) => `/${segments.slice(index).join("/")}`);
+			: configured
+					.slice(1)
+					.split("/")
+					.map((_, index, segments) => `/${segments.slice(index).join("/")}`);
 	const pathInserted =
 		configured === "/"
 			? PROTECTED_RESOURCE_METADATA_PATH
