@@ -5,7 +5,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
 import { jsonValue, toAddMemoryResponse, toMemoryList, toRelationList, toSourceList } from "./adapters.js";
-import type { ListedFields, PageInfo, SourceListItem } from "./adapters.js";
+import type { JsonValue, ListedFields, PageInfo, SourceListItem } from "./adapters.js";
 import { resolveConfig, resolveGraphConfig } from "./config.js";
 import type { GraphConfig } from "./config.js";
 import { renderRecalledContext } from "./context.js";
@@ -372,20 +372,119 @@ interface ListedRow {
 	title?: string;
 	type?: string;
 	fields?: ListedFields;
+	/** Some projected data was cut to fit the output budget; see fieldBudget. */
+	fields_truncated?: boolean;
 	comments?: ListedRow[];
 	comments_truncated?: boolean;
 }
 
-function toListedRow(src: SourceListItem): ListedRow {
+/**
+ * Characters of projected field data one row, and one listing page, may put
+ * into structuredContent. The text view clamps each field to a preview; the
+ * structured view keeps the JSON as returned, so it needs its own ceiling or
+ * one `relations` or metadata blob could carry megabytes.
+ */
+const LIST_FIELDS_ROW_CHARS = 2_000;
+
+const LIST_FIELDS_PAGE_CHARS = 20_000;
+
+/** What is left of the page's projected-field budget, and whether any was cut. */
+interface FieldBudget {
+	left: number;
+	truncated: boolean;
+}
+
+/**
+ * Copy `value` within `budget`, keeping its JSON structure: a long string is
+ * cut and ends in "…", and arrays and objects keep the leading entries that
+ * fit. Every cut sets `budget.truncated`.
+ */
+function boundJson(value: JsonValue, budget: FieldBudget): JsonValue {
+	const text = z.string().safeParse(value);
+
+	if (text.success) {
+		if (text.data.length <= budget.left) {
+			budget.left -= text.data.length;
+
+			return text.data;
+		}
+
+		budget.truncated = true;
+
+		const kept = text.data.slice(0, Math.max(budget.left, 0));
+
+		budget.left = 0;
+
+		return `${kept}…`;
+	}
+
+	if (Array.isArray(value)) {
+		const out: JsonValue[] = [];
+
+		for (const item of value) {
+			if (budget.left <= 0) {
+				budget.truncated = true;
+				break;
+			}
+
+			out.push(boundJson(item, budget));
+		}
+
+		return out;
+	}
+
+	const entries = z.record(jsonValue).safeParse(value);
+
+	if (!entries.success) {
+		// A number, boolean or null: small, and kept whole.
+		budget.left -= String(value).length;
+
+		return value;
+	}
+
+	const out: ListedFields = {};
+
+	for (const [key, item] of Object.entries(entries.data)) {
+		if (budget.left <= 0) {
+			budget.truncated = true;
+			break;
+		}
+
+		budget.left -= key.length;
+		out[key] = boundJson(item, budget);
+	}
+
+	return out;
+}
+
+function toListedRow(src: SourceListItem, page: FieldBudget): ListedRow {
 	const row: ListedRow = { id: src.id };
 
 	if (src.title != null) row.title = src.title;
 
 	if (src.type != null) row.type = src.type;
 
-	if (src.fields != null) row.fields = src.fields;
+	if (src.fields != null) {
+		const allowance = Math.min(LIST_FIELDS_ROW_CHARS, page.left);
+		const budget: FieldBudget = { left: allowance, truncated: false };
+		const fields: ListedFields = {};
 
-	if (src.comments != null) row.comments = src.comments.map(toListedRow);
+		for (const [name, value] of Object.entries(src.fields)) {
+			if (budget.left <= 0) {
+				budget.truncated = true;
+				break;
+			}
+
+			fields[name] = boundJson(value, budget);
+		}
+
+		row.fields = fields;
+		page.left -= allowance - Math.max(budget.left, 0);
+
+		if (budget.truncated) row.fields_truncated = true;
+	}
+
+	if (src.comments != null) row.comments = src.comments.map((comment) => toListedRow(comment, page));
 
 	if (src.comments_truncated === true) row.comments_truncated = true;
 
@@ -1238,6 +1337,7 @@ export function createHydraDBServer(
 			...commentLines(s, "   "),
 		]);
 
+		const fieldBudget: FieldBudget = { left: LIST_FIELDS_PAGE_CHARS, truncated: false };
 
 		// Was `${total} sources:` — the corpus-wide total printed above a single
 		// page of rows, so "412 sources:" sat over 50 lines with no marker and no
@@ -1249,7 +1349,7 @@ export function createHydraDBServer(
 				kind: args.kind,
 				resolved_scope: resolvedScope,
 				items: sources.map((src) => ({
-					...toListedRow(src),
+					...toListedRow(src, fieldBudget),
 					...(src.external_id != null ? { external_id: src.external_id } : {}),
 					...(src.provider != null ? { provider: src.provider } : {}),
 					...(src.parent_external_id != null ? { parent_external_id: src.parent_external_id } : {}),
@@ -3089,6 +3189,7 @@ export function createHydraDBServer(
 			title: z.string().optional(),
 			type: z.string().optional(),
 			fields: z.record(jsonValue).optional(),
+			fields_truncated: z.boolean().optional(),
 			comments: z.array(listedRow).optional(),
 			comments_truncated: z.boolean().optional(),
 		}),
@@ -3108,6 +3209,7 @@ export function createHydraDBServer(
 				parent_external_id: z.string().optional(),
 				connector_id: z.string().optional(),
 				fields: z.record(jsonValue).optional(),
+				fields_truncated: z.boolean().optional(),
 				comments: z.array(listedRow).optional(),
 				comments_truncated: z.boolean().optional(),
 				children_args: z.record(z.unknown()).optional(),

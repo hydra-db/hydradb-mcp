@@ -172,6 +172,10 @@ export const jsonValue: z.ZodType<JsonValue> = z.lazy(() =>
 // matching `str`'s first-string-wins reading of the same records.
 const optionalText = z.string().optional().catch(undefined);
 
+// Read on its own: the row keeps `additional_metadata` whole, because
+// `include_fields: ["additional_metadata"]` projects every key of it.
+const connectorMetadata = z.object({ connector_id: optionalText });
+
 /**
  * One listed source row. Passthrough keeps the projected fields, which are
  * read by name and parsed as JSON; `comments` are rows of this same kind,
@@ -190,8 +194,6 @@ const listedSourceRecord = z
 		appProvider: optionalText,
 		app_parent_id: optionalText,
 		appParentId: optionalText,
-		additional_metadata: z.object({ connector_id: optionalText }).optional().catch(undefined),
-		additionalMetadata: z.object({ connector_id: optionalText }).optional().catch(undefined),
 		comments: z.array(z.unknown()).optional().catch(undefined),
 		comments_truncated: z.boolean().optional().catch(undefined),
 	})
@@ -218,7 +220,7 @@ function toSourceRow(record: ListedSourceRecord, fields: readonly string[]): Sou
 
 	if (parentExternalId != null) row.parent_external_id = parentExternalId;
 
-	const connectorId = (record.additional_metadata ?? record.additionalMetadata)?.connector_id;
+	const connectorId = connectorMetadata.safeParse(record.additional_metadata ?? record.additionalMetadata).data?.connector_id;
 
 	if (connectorId != null) row.connector_id = connectorId;
 
@@ -327,8 +329,11 @@ const relationTripletRecord = z.object({
 	relations: z.array(relationEvidenceRecord).optional(),
 });
 
+// Every field is optional on its own, but the API always sends `relations`
+// and `is_truncated`: a body with neither (`{}`, an upstream error message)
+// is not a relations response and must not read as an empty graph.
 const relationsResponseRecord = z.object({
-	relations: z.array(relationTripletRecord).optional(),
+	relations: z.array(relationTripletRecord).nullable().optional(),
 	auxiliary_relations: z.array(z.unknown()).optional(),
 	auxiliaryRelations: z.array(z.unknown()).optional(),
 	auxiliary_truncated: z.boolean().optional(),
@@ -337,7 +342,10 @@ const relationsResponseRecord = z.object({
 	isTruncated: z.boolean().optional(),
 	next_cursor: z.number().nullable().optional(),
 	nextCursor: z.number().nullable().optional(),
-});
+}).refine(
+	(body) => body.relations != null || body.is_truncated != null || body.isTruncated != null,
+	{ message: "expected a relations array or a truncation flag" },
+);
 
 function relationEnd(record: z.infer<typeof relationEndRecord> | undefined): RelationEnd {
 	return {

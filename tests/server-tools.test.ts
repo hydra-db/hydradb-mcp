@@ -72,7 +72,7 @@ function mockHydra(
 			list: record("list", { inner: { sources: [], total: 0 } }),
 			inspect: record("inspect", { success: true, content: "hi" }),
 			delete: record("delete", { success: true, userMemoryDeleted: 1 }),
-			relations: record("relations", {}),
+			relations: record("relations", { relations: [], isTruncated: false }),
 			status: record("status", {}),
 		},
 		databases: {
@@ -3949,7 +3949,11 @@ const listCall = (args: ListedFields, list: ListedFields = { sources: [], total:
 	callTool("hydradb_list", args, { list });
 
 const listedItems = z.array(
-	z.object({ fields: z.record(jsonValue).optional(), comments: z.array(jsonValue).optional() }).passthrough(),
+	z.object({
+		fields: z.record(jsonValue).optional(),
+		fields_truncated: z.boolean().optional(),
+		comments: z.array(jsonValue).optional(),
+	}).passthrough(),
 );
 
 test("hydradb_list sends metadata and additional_metadata filters to /context/list", async () => {
@@ -4047,6 +4051,64 @@ test("hydradb_list sends include_fields and shows the requested fields", async (
 		metadata: { team: "infra" },
 		timestamp: "2026-10-01T00:00:00Z",
 	});
+});
+
+test("hydradb_list projects every additional_metadata key, not only connector_id", async () => {
+	const { text, structured } = await listCall(
+		{ kind: "knowledge", include_fields: ["additional_metadata"] },
+		{
+			sources: [{ id: "s1", additional_metadata: { author: "ada", year: 2026, connector_id: "conn-1" } }],
+			total: 1,
+		},
+	);
+
+	assert.deepEqual(listedItems.parse(structured.items)[0]?.fields, {
+		additional_metadata: { author: "ada", year: 2026, connector_id: "conn-1" },
+	});
+	assert.match(text, /additional_metadata: \{"author":"ada","year":2026,"connector_id":"conn-1"\}/);
+	assert.match(text, /connector_id="conn-1"/, "connector_id is still read for the row's identity");
+});
+
+test("hydradb_list bounds projected fields in structured output and says so", async () => {
+	const big = {
+		note: "x".repeat(5_000),
+		tags: Array.from({ length: 500 }, (_, i) => `tag-${i}`),
+	};
+
+	const rows = Array.from({ length: 30 }, (_, i) => ({ id: `s${i}`, additional_metadata: big }));
+
+	const { structured } = await listCall(
+		{ kind: "knowledge", include_fields: ["additional_metadata"] },
+		{ sources: rows, total: rows.length },
+	);
+
+	const items = listedItems.parse(structured.items);
+	const first = items[0];
+
+	assert.equal(first?.fields_truncated, true, "a cut row must be marked");
+
+	const projected = z.object({ note: z.string() }).passthrough().parse(first?.fields?.additional_metadata);
+
+	assert.ok(projected.note.endsWith("…"), "a cut string ends in an ellipsis");
+	assert.ok(projected.note.length <= 2_001, "one row stays within its allowance");
+
+	const projectedBytes = JSON.stringify(items.map((item) => item.fields ?? {})).length;
+
+	assert.ok(projectedBytes < 25_000, `the page's projected data stays bounded, got ${projectedBytes}`);
+	assert.equal(items.length, 30, "rows past the budget are still listed, by id");
+	assert.equal(items[29]?.fields_truncated, true);
+});
+
+test("hydradb_list leaves small projected fields whole and unmarked", async () => {
+	const { structured } = await listCall(
+		{ kind: "knowledge", include_fields: ["metadata"] },
+		{ sources: [{ id: "s1", metadata: { team: "infra", tags: ["a", "b"] } }], total: 1 },
+	);
+
+	const item = listedItems.parse(structured.items)[0];
+
+	assert.deepEqual(item?.fields, { metadata: { team: "infra", tags: ["a", "b"] } });
+	assert.equal(item?.fields_truncated, undefined);
 });
 
 test("hydradb_list rejects an include_fields name the API does not project", async () => {
@@ -4235,10 +4297,21 @@ test("hydradb_relations says when an item has no relations", async () => {
 });
 
 test("hydradb_relations reports a body that is not a relations response", async () => {
-	const { isError, text } = await relationsCall({ id: "doc-1" }, { relations: "<html>login</html>" });
+	// None of these is an empty graph: a wrong type, no fields at all, and an
+	// upstream error message with neither `relations` nor `is_truncated`.
+	for (const body of [{ relations: "<html>login</html>" }, {}, { message: "upstream unavailable" }]) {
+		const { isError, text } = await relationsCall({ id: "doc-1" }, body);
 
-	assert.equal(isError, true);
-	assert.match(text, /Invalid relations response/);
+		assert.equal(isError, true, `${JSON.stringify(body)} must not read as no relations`);
+		assert.match(text, /Invalid relations response/);
+	}
+});
+
+test("hydradb_relations accepts a real empty page that sends only the truncation flag", async () => {
+	const { isError, text } = await relationsCall({ id: "doc-1" }, { relations: null, isTruncated: false });
+
+	assert.equal(isError, false);
+	assert.match(text, /No graph relations for doc-1/);
 });
 
 test("hydradb_relations refuses a blank id instead of reading the whole collection", async () => {

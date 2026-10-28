@@ -15,8 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for memories and knowledge. `connector_id` is merged into
   `additional_metadata`; two different connector ids are refused.
 - `include_fields`: return only the named fields per row, shown under each row
-  and in `structuredContent` as `fields`. Names the API does not project
-  (such as `content`) are refused before the call.
+  and in `structuredContent` as `fields`, bounded to 2,000 characters per
+  row and 20,000 per page with the JSON structure kept; a cut row carries
+  `fields_truncated: true`. Names the API does not project (such as
+  `content`) are refused before the call.
 - `group_threads`: comments and replies come back nested under their parent
   row, in the text and in `structuredContent` as `comments`.
 - `kind: "all"`: memories and knowledge in one page, instead of two calls.
