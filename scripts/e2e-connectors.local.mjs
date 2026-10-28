@@ -70,8 +70,21 @@ async function startGuardedProxy(target) {
 }
 
 async function guardSelfTest() {
-	const redirectServer = createServer((_request, response) => {
+	let secondHopRequests = 0;
+	const secondHop = createServer((_request, response) => {
+		secondHopRequests += 1;
 		response.writeHead(307, { location: "https://example.com/forbidden" });
+		response.end();
+	});
+	await new Promise((resolveListen) => secondHop.listen(0, "127.0.0.1", resolveListen));
+	const secondHopAddress = secondHop.address();
+
+	if (secondHopAddress == null || typeof secondHopAddress === "string") {
+		throw new Error("Second redirect fixture did not receive a port");
+	}
+
+	const redirectServer = createServer((_request, response) => {
+		response.writeHead(307, { location: `http://127.0.0.1:${secondHopAddress.port}/second-hop` });
 		response.end();
 	});
 	await new Promise((resolveListen) => redirectServer.listen(0, "127.0.0.1", resolveListen));
@@ -82,13 +95,60 @@ async function guardSelfTest() {
 	const proxy = await startGuardedProxy(new URL(`http://127.0.0.1:${address.port}`));
 	const response = await fetch(proxy, { method: "POST", body: "must-not-leave-loopback", redirect: "manual" });
 	redirectServer.close();
+	secondHop.close();
 
-	if (response.status !== 502) throw new Error("The local-only guard followed a non-loopback redirect");
-	console.log(JSON.stringify({ ok: true, case: "non-loopback redirect refused" }));
+	if (response.status !== 502 || secondHopRequests !== 0) {
+		throw new Error("The local-only guard followed a redirect");
+	}
+	console.log(JSON.stringify({ ok: true, case: "redirect chain refused at first hop" }));
 }
 
 if (process.argv.includes("--guard-self-test")) {
 	await guardSelfTest();
+	process.exit(0);
+}
+
+async function guardedHttpCall(url, token, name, args) {
+	const guardedUrl = await startGuardedProxy(url);
+	const transport = new StreamableHTTPClientTransport(guardedUrl, {
+		requestInit: { headers: { authorization: `Bearer ${token}` } },
+	});
+	const client = new Client({ name: "eng3341-local-e2e", version: "1" });
+
+	try {
+		await client.connect(transport);
+		return await client.callTool({ name, arguments: args });
+	} catch {
+		throw new Error(`Local OAuth ${name} request failed safely`);
+	} finally {
+		await client.close().catch(() => undefined);
+	}
+}
+
+async function oauthErrorSelfTest() {
+	const token = required("ENG3341_SELF_TEST_TOKEN");
+	const errorServer = createServer((request, response) => {
+		response.writeHead(500, { "content-type": "text/plain" });
+		response.end(`refused ${request.headers.authorization ?? "missing authorization"}`);
+	});
+	await new Promise((resolveListen) => errorServer.listen(0, "127.0.0.1", resolveListen));
+	const address = errorServer.address();
+
+	if (address == null || typeof address === "string") throw new Error("OAuth error fixture did not receive a port");
+
+	try {
+		await guardedHttpCall(new URL(`http://127.0.0.1:${address.port}/mcp`), token, "self_test", {});
+		throw new Error("OAuth error fixture unexpectedly succeeded");
+	} catch (error) {
+		if (!(error instanceof Error) || error.message !== "Local OAuth self_test request failed safely") throw error;
+		console.log(JSON.stringify({ ok: true, case: error.message }));
+	} finally {
+		errorServer.close();
+	}
+}
+
+if (process.argv.includes("--oauth-error-self-test")) {
+	await oauthErrorSelfTest();
 	process.exit(0);
 }
 
@@ -191,17 +251,8 @@ function call(name, args, allowError = false) {
 async function callHttp(urlName, tokenName, name, args) {
 	const url = localUrl(urlName);
 	const token = required(tokenName);
-	const transport = new StreamableHTTPClientTransport(url, {
-		requestInit: { headers: { authorization: `Bearer ${token}` } },
-	});
-	const client = new Client({ name: "eng3341-local-e2e", version: "1" });
 
-	try {
-		await client.connect(transport);
-		return await client.callTool({ name, arguments: args });
-	} finally {
-		await client.close();
-	}
+	return await guardedHttpCall(url, token, name, args);
 }
 
 async function pollStatus(predicate, label, timeoutMs = 120_000) {
@@ -260,12 +311,22 @@ if (connectorId) {
 if (fullLifecycle) {
 	call("hydradb_connector_discover", { connector_id: connectorId, limit: 25 });
 	call("hydradb_connector_add_resource", { connector_id: connectorId, resource_id: resourceId });
+	call("hydradb_connector_configure", {
+		connector_id: connectorId,
+		resources: [{ resource_id: resourceId, sync_mode: "rescan" }],
+	});
 	call("hydradb_connector_update_resource", {
 		connector_id: connectorId,
 		resource_id: resourceId,
 		acl: [],
 		custom_instructions: "ENG-3341 local-only verification",
 	});
+	const configured = call("hydradb_connector_resources", { connector_id: connectorId });
+
+	if (!JSON.stringify(configured.data).includes(resourceId)) {
+		throw new Error("Configured resource listing did not include the run-owned resource");
+	}
+	passedCases.push("configure and configured resource listing");
 	const before = call("hydradb_connector_status", { connector_id: connectorId }).data.last_successful_sync_at;
 	call("hydradb_connector_sync", { connector_id: connectorId });
 	await pollStatus(
@@ -292,11 +353,22 @@ if (fullLifecycle) {
 		"hydradb_connector_update",
 		{ connector_id: connectorId, reconnect: true },
 	);
-	const deniedRead = await callHttp(
+	const deniedReads = await Promise.all([
+		["hydradb_connector_get", { connector_id: connectorId }],
+		["hydradb_connector_status", { connector_id: connectorId }],
+		["hydradb_connector_resources", { connector_id: connectorId }],
+		["hydradb_connector_discover", { connector_id: connectorId, limit: 1 }],
+	].map(([name, args]) => callHttp(
 		"ENG3341_OAUTH_DENIED_MCP_URL",
 		"ENG3341_OAUTH_DENIED_TOKEN",
-		"hydradb_connector_get",
-		{ connector_id: connectorId },
+		name,
+		args,
+	)));
+	const deniedList = await callHttp(
+		"ENG3341_OAUTH_DENIED_MCP_URL",
+		"ENG3341_OAUTH_DENIED_TOKEN",
+		"hydradb_connector_list",
+		{},
 	);
 	const deniedWrite = await callHttp(
 		"ENG3341_OAUTH_DENIED_MCP_URL",
@@ -305,10 +377,15 @@ if (fullLifecycle) {
 		{ connector_id: connectorId, custom_instructions: "must not apply" },
 	);
 
-	if (allowedResult.isError || !deniedRead.isError || !deniedWrite.isError) {
+	if (
+		allowedResult.isError
+		|| deniedReads.some((result) => !result.isError)
+		|| !deniedWrite.isError
+		|| JSON.stringify(deniedList.structuredContent ?? deniedList).includes(connectorId)
+	) {
 		throw new Error("OAuth allowed and denied connector results did not match the expected confinement");
 	}
-	passedCases.push("OAuth allowed and denied confinement");
+	passedCases.push("OAuth list filtering and by-ID read/write confinement");
 } else {
 	skippedCases.push("full resource, sync, failure, and OAuth lifecycle: ENG3341_FULL_LIFECYCLE not set");
 }

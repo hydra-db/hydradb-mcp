@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+/* oxlint-disable anti-slop/no-runtime-typeof, anti-slop/require-readable-spacing -- This process validates dynamic Node HTTP and TCP boundary values. */
 import { createServer } from "node:http";
 import process from "node:process";
 
@@ -31,32 +32,35 @@ function copyRequestHeaders(headers) {
 
 const server = createServer(async (request, response) => {
 	try {
-		const destination = new URL(request.url ?? "/", target);
+		const incoming = new URL(request.url ?? "/", "http://loopback-guard.invalid");
+		const destination = new URL(target);
+		const targetPath = target.pathname.replace(/\/$/, "");
+		destination.pathname = incoming.pathname === "/" ? target.pathname : `${targetPath}${incoming.pathname}`;
+		destination.search = incoming.search;
 
 		if (!LOOPBACK_HOSTS.has(destination.hostname)) {
 			response.writeHead(502, { "content-type": "application/json" });
 			response.end(JSON.stringify({ error: "non_loopback_destination_refused" }));
 			return;
-		}
+			}
 
-		const method = request.method ?? "GET";
-		const upstream = await fetch(destination, {
-			method,
-			headers: copyRequestHeaders(request.headers),
-			body: method === "GET" || method === "HEAD" ? undefined : request,
-			redirect: "manual",
-			...(method === "GET" || method === "HEAD" ? {} : { duplex: "half" }),
-		});
+			const method = request.method ?? "GET";
+			const options = {
+				method,
+				headers: copyRequestHeaders(request.headers),
+				body: method === "GET" || method === "HEAD" ? undefined : request,
+				redirect: "manual",
+			};
+
+			if (method !== "GET" && method !== "HEAD") options.duplex = "half";
+
+			const upstream = await fetch(destination, options);
 		const location = upstream.headers.get("location");
 
 		if (isRedirect(upstream.status) && location) {
-			const redirectDestination = new URL(location, destination);
-
-			if (!LOOPBACK_HOSTS.has(redirectDestination.hostname)) {
-				response.writeHead(502, { "content-type": "application/json" });
-				response.end(JSON.stringify({ error: "non_loopback_redirect_refused" }));
-				return;
-			}
+			response.writeHead(502, { "content-type": "application/json" });
+			response.end(JSON.stringify({ error: "redirect_refused" }));
+			return;
 		}
 
 		const headers = {};

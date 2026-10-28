@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+/* oxlint-disable anti-slop/no-runtime-typeof, anti-slop/require-readable-spacing -- This launcher validates one protected JSON I/O boundary before setting process environment values. */
 import { readFileSync } from "node:fs";
 import process from "node:process";
 import { pathToFileURL } from "node:url";

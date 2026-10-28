@@ -51,7 +51,7 @@ process.stdout.write(JSON.stringify(output));
 	}
 });
 
-test("local-only guard refuses external redirects", () => {
+test("local-only guard refuses redirect chains at the first hop", () => {
 	const result = spawnSync(process.execPath, ["scripts/e2e-connectors.local.mjs", "--guard-self-test"], {
 		cwd: process.cwd(),
 		encoding: "utf8",
@@ -59,5 +59,20 @@ test("local-only guard refuses external redirects", () => {
 	});
 
 	assert.equal(result.status, 0, result.stderr);
-	assert.match(result.stdout, /non-loopback redirect refused/);
+	assert.match(result.stdout, /redirect chain refused at first hop/);
+});
+
+test("local OAuth failures never print an echoed bearer token", () => {
+	const token = "eng3341-oauth-error-secret";
+
+	const result = spawnSync(process.execPath, ["scripts/e2e-connectors.local.mjs", "--oauth-error-self-test"], {
+		cwd: process.cwd(),
+		env: { ...process.env, ENG3341_SELF_TEST_TOKEN: token },
+		encoding: "utf8",
+		timeout: 10_000,
+	});
+
+	assert.equal(result.status, 0, result.stderr);
+	assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, new RegExp(token));
+	assert.match(result.stdout, /request failed safely/);
 });
