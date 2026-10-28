@@ -72,6 +72,26 @@ const PARAM = {
 		"answer could live in more than one and you do not know which — otherwise " +
 		"prefer a single `collection`, which is both faster and more precise. " +
 		"Pass either this or `collection`, never both.",
+	additional_context:
+		"Background text prepended to the query to steer retrieval, such as the " +
+		"project or person the question is about. It is not searched for itself.",
+	alpha:
+		"Hybrid balance between keyword and vector search: 0 is keyword only, 1 is " +
+		"vector only, 'auto' lets Hydra DB choose (default: 0.8). Hybrid retrieval " +
+		"only; an error with operator or query_by 'text'.",
+	query_by:
+		"Retrieval method: 'hybrid' (default) searches keyword and vector together; " +
+		"'text' is keyword matching only. Setting operator implies 'text'.",
+	query_forceful_relations:
+		"In thinking mode, also follow the relations declared at ingest and return the " +
+		"chunks they point to alongside each match.",
+	temporal_reasoning:
+		"Resolve time-based questions ('when', 'how long', 'as of') using dated facts " +
+		"(default: true). Set false to skip it.",
+	response_format:
+		"'structured' (default rendering) shows each chunk with its source id for " +
+		"follow-up calls; 'markdown' returns Hydra DB's own Markdown rendering of the " +
+		"results as-is, without per-chunk ids.",
 	operator:
 		"Switches this query to KEYWORD retrieval (query_by=text) and says how to " +
 		"combine the terms: 'or' matches any, 'and' requires all, 'phrase' matches the " +
@@ -420,6 +440,12 @@ export const TOOL_DESCRIPTIONS = {
 			num_related_chunks: PARAM.num_related_chunks,
 			recency_bias: PARAM.recency_bias,
 			query_apps: PARAM.query_apps,
+			additional_context: PARAM.additional_context,
+			alpha: PARAM.alpha,
+			query_by: PARAM.query_by,
+			query_forceful_relations: PARAM.query_forceful_relations,
+			temporal_reasoning: PARAM.temporal_reasoning,
+			response_format: PARAM.response_format,
 			database: PARAM.database,
 			collection: PARAM.collection,
 			collections: PARAM.collections,

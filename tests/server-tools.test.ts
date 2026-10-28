@@ -2503,6 +2503,137 @@ test("hydradb_query forwards metadata filters and related-chunk count", async ()
 	await client.close();
 });
 
+test("hydradb_query sends every documented query field it is given", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	await client.callTool({
+		name: "hydradb_query",
+		arguments: {
+			query: "q",
+			additional_context: "project Atlas",
+			alpha: 0.3,
+			query_by: "hybrid",
+			query_forceful_relations: true,
+			temporal_reasoning: false,
+			response_format: "structured",
+		},
+	});
+
+	const call = calls.find((c) => c.method === "query");
+
+	assert.equal(call?.args.additionalContext, "project Atlas");
+	assert.equal(call?.args.alpha, 0.3);
+	assert.equal(call?.args.queryBy, "hybrid");
+	assert.equal(call?.args.queryForcefulRelations, true);
+	assert.equal(call?.args.temporalReasoning, false);
+	assert.equal(call?.args.responseFormat, "structured");
+	await client.close();
+});
+
+test("hydradb_query sends none of the new fields when they are unset", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
+
+	const call = calls.find((c) => c.method === "query");
+
+	for (const field of ["additionalContext", "queryBy", "queryForcefulRelations", "temporalReasoning", "responseFormat"]) {
+		assert.equal(call?.args[field], undefined, field);
+	}
+
+	assert.equal(call?.args.alpha, 0.8, "the host default alpha is unchanged");
+	await client.close();
+});
+
+test("hydradb_query accepts alpha auto and refuses alpha outside 0 to 1", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	await client.callTool({ name: "hydradb_query", arguments: { query: "q", alpha: "auto" } });
+
+	assert.equal(calls.find((c) => c.method === "query")?.args.alpha, "auto");
+
+	const out = await client.callTool({ name: "hydradb_query", arguments: { query: "q", alpha: 1.5 } });
+
+	assert.equal(out.isError, true);
+	await client.close();
+});
+
+test("hydradb_query keyword retrieval gets no default alpha and refuses an explicit one", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	await client.callTool({ name: "hydradb_query", arguments: { query: "q", query_by: "text" } });
+
+	const call = calls.find((c) => c.method === "query");
+
+	assert.equal(call?.args.queryBy, "text");
+	assert.equal(call?.args.alpha, undefined, "alpha is a hybrid-only knob");
+
+	for (const extra of [{ query_by: "text" }, { operator: "and" }]) {
+		calls.length = 0;
+		const out = await client.callTool({ name: "hydradb_query", arguments: { query: "q", alpha: 0.5, ...extra } });
+
+		assert.equal(out.isError, true);
+		// SAFETY: every tool result here is text content.
+		assert.match((out.content as { text: string }[])[0]!.text, /alpha balances hybrid retrieval/);
+		assert.equal(calls.filter((c) => c.method === "query").length, 0, "refused before the wire");
+	}
+
+	await client.close();
+});
+
+test("hydradb_query response_format markdown returns Hydra DB's Markdown with scope and request id", async () => {
+	const { hydra, calls } = mockHydra({ query: "## Results\n\n- Alice joined Acme in January" });
+	const client = await connect(hydra);
+
+	const out = await client.callTool({
+		name: "hydradb_query",
+		arguments: { query: "who joined", response_format: "markdown" },
+	});
+
+	// SAFETY: every tool result here is text content.
+	const text = (out.content as { text: string }[])[0]!.text;
+
+	assert.notEqual(out.isError, true);
+	assert.equal(calls.find((c) => c.method === "query")?.args.responseFormat, "markdown");
+	assert.match(text, /## Results\n\n- Alice joined Acme in January/);
+	assert.match(text, /db_test/);
+	assert.match(text, /request_id: req-from-meta/);
+	await client.close();
+});
+
+test("hydradb_query response_format markdown refuses a response that is not Markdown", async () => {
+	const { hydra } = mockHydra({ query: { chunks: [] } });
+	const client = await connect(hydra);
+
+	const out = await client.callTool({
+		name: "hydradb_query",
+		arguments: { query: "q", response_format: "markdown" },
+	});
+
+	assert.equal(out.isError, true);
+	// SAFETY: every tool result here is text content.
+	assert.match((out.content as { text: string }[])[0]!.text, /expected a Markdown string/);
+	await client.close();
+});
+
+test("hydradb_query describes each new field in its schema", async () => {
+	const client = await connect(mockHydra().hydra);
+	const { tools } = await client.listTools();
+	const query = tools.find((tool) => tool.name === "hydradb_query");
+	// SAFETY: MCP tool input schemas are JSON Schema objects with `properties`.
+	const properties = query?.inputSchema.properties as Record<string, { description?: string }>;
+
+	for (const field of ["additional_context", "alpha", "query_by", "query_forceful_relations", "temporal_reasoning", "response_format"]) {
+		assert.ok(properties[field]?.description, field);
+	}
+
+	await client.close();
+});
+
 // Each related chunk multiplies response size, so the ceiling is deliberate.
 test("num_related_chunks is capped", async () => {
 	const { hydra } = mockHydra();

@@ -156,6 +156,8 @@ function validateListResponse(response: ListResponse, kind: ListParams["kind"]):
 	}
 }
 
+const markdownQueryResponse = z.object({ success: z.literal(true).optional(), data: z.string() });
+
 export interface HydraConfig {
 	/** Bearer token (the HydraDB API key). */
 	token: string;
@@ -205,8 +207,23 @@ export interface QueryParams {
 	maxResults?: number;
 	mode?: "fast" | "thinking" | "auto";
 	graphContext?: boolean;
-	alpha?: number;
+	/**
+	 * Hybrid balance between keyword and vector retrieval: 0 to 1, or "auto".
+	 * Hybrid only, so it is refused alongside keyword retrieval; see `query`.
+	 */
+	alpha?: SDK.SearchQueryRequestAlpha;
 	recencyBias?: number;
+	/** Text prepended to the query to improve retrieval. */
+	additionalContext?: string;
+	/** In thinking mode, follow relations declared at ingest. */
+	queryForcefulRelations?: boolean;
+	/** Resolve time-based questions using dated facts. The API defaults it on. */
+	temporalReasoning?: boolean;
+	/**
+	 * `structured` asks the API to leave out its `llm_prompt` rendering. The
+	 * Markdown form is a different response shape; see `queryMarkdown`.
+	 */
+	responseFormat?: "structured";
 	/**
 	 * Restrict retrieval to these source ids. A hard pre-filter: the server
 	 * returns nothing rather than widening when none match.
@@ -658,15 +675,12 @@ export class ContextResource extends Resource {
 	}
 
 	/**
-	 * The single retrieval entry point (SDK `client.query`).
+	 * The `/query` request for `params`, refusing combinations the API rejects.
 	 *
-	 * `async` so the operator/retrieval validation below surfaces as a rejection,
-	 * for the same reason `ingest` is async.
+	 * Throws synchronously; both callers are `async`, so it surfaces as a
+	 * rejection, for the same reason `ingest` is async.
 	 */
-	async query(
-		params: QueryParams,
-		opts?: RequestOptions,
-	): Promise<SDK.SearchV2RetrievalResult> {
+	private queryRequest(params: QueryParams): SDK.SearchQueryRequest {
 		// `operator` is keyword syntax, and the API accepts it only when the
 		// request also asks for keyword retrieval. On hybrid it does not ignore
 		// the field, it refuses the whole call:
@@ -690,6 +704,17 @@ export class ContextResource extends Resource {
 		const queryBy =
 			params.queryBy ?? (params.operator != null ? "text" : undefined);
 
+		// alpha weighs the vector lane against the keyword lane, and keyword
+		// retrieval has only one. Sent there it is a hybrid-only knob on a request
+		// that is not hybrid, so it is refused like operator on hybrid.
+		if (params.alpha != null && queryBy === "text") {
+			throw new Error(
+				`alpha balances hybrid retrieval and does not apply to keyword ` +
+				`retrieval (queryBy "text", or any operator). Drop alpha, or drop ` +
+				`operator and queryBy "text" to search hybrid.`,
+			);
+		}
+
 		// One scope selector per request. The server rejects a multi-scope
 		// selector sent alongside the singular one it folds `collection` into, so
 		// a caller that sets both has stated two different scopes and only they
@@ -707,7 +732,7 @@ export class ContextResource extends Resource {
 				? this.multiScope(params.collections, params.database)
 				: this.scope(params.collection, params.database);
 
-		const request = {
+		return {
 			...scope,
 			query: params.query,
 			type: params.kind,
@@ -725,11 +750,55 @@ export class ContextResource extends Resource {
 			metadataFilters: params.metadataFilters,
 			numRelatedChunks: params.numRelatedChunks,
 			acl: params.acl,
+			additionalContext: params.additionalContext,
+			queryForcefulRelations: params.queryForcefulRelations,
+			temporalReasoning: params.temporalReasoning,
+			responseFormat: params.responseFormat,
 		};
+	}
+
+	/**
+	 * The single retrieval entry point (SDK `client.query`).
+	 *
+	 * `async` so the operator/retrieval validation surfaces as a rejection,
+	 * for the same reason `ingest` is async.
+	 */
+	async query(
+		params: QueryParams,
+		opts?: RequestOptions,
+	): Promise<SDK.SearchV2RetrievalResult> {
+		const request = this.queryRequest(params);
+
 
 		return this.call("/query", async () => {
 			const response = await this.sdk.query(request, req(opts));
 			validateQueryResponse(response);
+			return response;
+		}, opts?.onMeta);
+	}
+
+	/**
+	 * The same retrieval with `response_format=markdown`: the API's own Markdown
+	 * rendering of the results, as one string, instead of the result object.
+	 */
+	async queryMarkdown(
+		params: Omit<QueryParams, "responseFormat">,
+		opts?: RequestOptions,
+	): Promise<string> {
+		const request: SDK.SearchQueryRequest = { ...this.queryRequest(params), responseFormat: "markdown" };
+
+		return this.call("/query", async () => {
+			const response = await this.sdk.query(request, req(opts));
+
+			// The SDK types `data` as the result object and passes the string
+			// through unparsed. Anything else is not a successful Markdown answer.
+			if (!markdownQueryResponse.safeParse(response).success) {
+				throw new HydraDBError({ statusCode: 200, body: { error: {
+					code: "INVALID_QUERY_RESPONSE",
+					message: "Invalid successful query response: expected a Markdown string with response_format=markdown.",
+				} } });
+			}
+
 			return response;
 		}, opts?.onMeta);
 	}

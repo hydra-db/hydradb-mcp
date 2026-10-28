@@ -100,6 +100,12 @@ chunks with their source id, a relevance score, and knowledge-graph context.
 | `recency_bias` | number | No | Favour recently-updated sources when ranking, 0-1 (default: 0). Re-ranks only; it never excludes older sources |
 | `query_apps` | boolean | No | App-aware retrieval over connector sources — exact IDs and actors, thread reconstruction, linked and parent/child items (on by default: Hydra DB applies it when omitted; pass `false` to skip) |
 | `collections` | array | No | Search several collections at once. Pass either this or `collection`, never both |
+| `additional_context` | string | No | Background text prepended to the query to steer retrieval; not searched for itself |
+| `alpha` | number or `auto` | No | Hybrid balance, 0 (keyword) to 1 (vector), or `auto` (default: 0.8). Hybrid only: refused with `operator` or `query_by: text` |
+| `query_by` | string | No | `hybrid` (default) or `text` (keyword only). Setting `operator` implies `text` |
+| `query_forceful_relations` | boolean | No | In thinking mode, also follow relations declared at ingest and return their chunks |
+| `temporal_reasoning` | boolean | No | Resolve time-based questions using dated facts (Hydra DB default: true) |
+| `response_format` | string | No | `structured` (the default rendering, with source ids) or `markdown` (Hydra DB's own Markdown rendering, returned as-is, without per-chunk ids) |
 
 Results are text only by default: each chunk carries its source id and
 collection, and the header names the resolved scope. With `structured: true`,

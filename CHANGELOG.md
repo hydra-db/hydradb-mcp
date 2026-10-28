@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — `hydradb_query` takes every documented query field
+
+`hydradb_query` now accepts the six `POST /query` fields it did not:
+`additional_context`, `alpha` (0 to 1, or `auto`), `query_by` (`hybrid` or
+`text`), `query_forceful_relations`, `temporal_reasoning` and `response_format`.
+
+- `alpha` is hybrid only. It is refused with `operator` or `query_by: "text"`,
+  and the 0.8 default is no longer sent on a `query_by: "text"` query.
+- `response_format: "markdown"` returns Hydra DB's own Markdown rendering as-is,
+  with the searched scope and the request id, under the same size cap. It has
+  no per-chunk source ids; use the default rendering when you need them.
+
 ### Changed — `@hydradb/sdk` 2.1.8; no more hand-written API calls
 
 MCP now depends on `@hydradb/sdk` 2.1.8, which matches the public API spec.

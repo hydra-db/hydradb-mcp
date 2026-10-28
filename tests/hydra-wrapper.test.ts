@@ -1065,3 +1065,61 @@ for (const [label, config, wantUser] of [
 		}
 	});
 }
+
+/** The /query body fields the six-field tests read, as the SDK sends them. */
+type QueryWireBody = {
+	additional_context?: string;
+	alpha?: number | string;
+	query_by?: string;
+	query_forceful_relations?: boolean;
+	temporal_reasoning?: boolean;
+	response_format?: string;
+};
+
+test("real SDK sends the six query fields under their wire names", async (t) => {
+	const bodies: QueryWireBody[] = [];
+
+	t.mock.method(globalThis, "fetch", async (_input: Request | string | URL, init?: RequestInit) => {
+		bodies.push(JSON.parse(String(init?.body)));
+
+		return new Response(JSON.stringify({ success: true, data: { chunks: [] } }), { status: 200 });
+	});
+
+	const hydra = new HydraDB({ token: "t", database: "db_test", maxRetries: 0 });
+
+	await hydra.context.query({
+		query: "q",
+		additionalContext: "project Atlas",
+		alpha: "auto",
+		queryBy: "hybrid",
+		queryForcefulRelations: true,
+		temporalReasoning: false,
+		responseFormat: "structured",
+	});
+
+	assert.equal(bodies[0]?.additional_context, "project Atlas");
+	assert.equal(bodies[0]?.alpha, "auto");
+	assert.equal(bodies[0]?.query_by, "hybrid");
+	assert.equal(bodies[0]?.query_forceful_relations, true);
+	assert.equal(bodies[0]?.temporal_reasoning, false);
+	assert.equal(bodies[0]?.response_format, "structured");
+});
+
+test("real SDK markdown query sends response_format=markdown and returns the string", async (t) => {
+	const bodies: QueryWireBody[] = [];
+
+	t.mock.method(globalThis, "fetch", async (_input: Request | string | URL, init?: RequestInit) => {
+		bodies.push(JSON.parse(String(init?.body)));
+
+		return new Response(JSON.stringify({ success: true, data: "## Results", meta: { request_id: "r-md" } }), { status: 200 });
+	});
+
+	const hydra = new HydraDB({ token: "t", database: "db_test", maxRetries: 0 });
+	let requestId: string | undefined;
+
+	const markdown = await hydra.context.queryMarkdown({ query: "q" }, { onMeta: (meta) => { requestId = meta.requestId; } });
+
+	assert.equal(bodies[0]?.response_format, "markdown");
+	assert.equal(markdown, "## Results");
+	assert.equal(requestId, "r-md");
+});
