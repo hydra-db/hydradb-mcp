@@ -49,7 +49,7 @@ export type {
 	GraphRow,
 } from "./graph.js";
 
-export { HydraWrapperError, responseError, translateError } from "./errors.js";
+export { HydraWrapperError, responseError, scrub, translateError } from "./errors.js";
 
 export {
 	assertCollectionAllowed,

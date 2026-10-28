@@ -825,9 +825,18 @@ export function createHydraDBServer(
 		);
 	}
 
-	/** Keep one server-supplied message from crowding out the rest of the result. */
+	/**
+	 * Keep one server-supplied message from crowding out the rest of the result.
+	 *
+	 * Redacted first, and here rather than at registration: these messages land
+	 * in results that are not errors (a partly failed ingest, a failed
+	 * document's status), and a credential cut in half by the shortening could
+	 * no longer be matched.
+	 */
 	function briefly(message: string): string {
-		return message.length > 200 ? `${message.slice(0, 200)}…` : message;
+		const safe = hydra.redact(message);
+
+		return safe.length > 200 ? `${safe.slice(0, 200)}…` : safe;
 	}
 
 	/**
@@ -1702,7 +1711,10 @@ export function createHydraDBServer(
 		}
 
 		if (res.success === false) {
-			const reason = deleteFailureReason(res);
+			// Server text, and it also lands in structuredContent, which the
+			// error-text redaction at registration does not reach.
+			const refusal = deleteFailureReason(res);
+			const reason = refusal == null ? refusal : hydra.redact(refusal);
 
 			// A refusal that is ITSELF a not-found carries the same ambiguity as the
 			// success-removed-nothing branch below. Any other refusal ("still
@@ -2462,6 +2474,35 @@ export function createHydraDBServer(
 
 	// --- Registration helper ---
 
+	/**
+	 * The last stop before a failure reaches the model: strip this connection's
+	 * credential, and any credential-shaped text, from whatever the tool threw or
+	 * returned as an error. Errors are built in many places; this is the one
+	 * place every one of them passes, and the only one that knows the caller's
+	 * own key or token.
+	 */
+	async function redactFailure(run: () => Promise<ToolResult>): Promise<ToolResult> {
+		let result: ToolResult;
+
+		try {
+			result = await run();
+		} catch (err) {
+			if (err instanceof Error) {
+				err.message = hydra.redact(err.message);
+				throw err;
+			}
+
+			throw new Error(hydra.redact(String(err)));
+		}
+
+		if (!result.isError) return result;
+
+		return {
+			...result,
+			content: result.content.map((part) => ({ ...part, text: hydra.redact(part.text) })),
+		};
+	}
+
 	function register(
 		name: keyof typeof TOOL_DESCRIPTIONS,
 		inputSchema: Record<string, unknown>,
@@ -2483,7 +2524,7 @@ export function createHydraDBServer(
 		const counted = (
 			args: Record<string, unknown>,
 			extra?: { signal?: AbortSignal },
-		) => trackInFlight(() => handler(args, extra));
+		) => trackInFlight(() => redactFailure(() => handler(args, extra)));
 
 		const wrapped = isDeprecated
 			? (args: Record<string, unknown>, extra?: { signal?: AbortSignal }) => {
