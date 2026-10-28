@@ -10,6 +10,9 @@ import { resolveConfig, resolveGraphConfig } from "./config.js";
 import type { GraphConfig } from "./config.js";
 import { renderRecalledContext } from "./context.js";
 import { COLLECTION_PATTERN, MAX_BODY_BYTES, renderRows } from "./cypher.js";
+import { extname } from "node:path";
+
+import { decodeInline, type IngestFile, readLocal } from "./files.js";
 import { SERVER_INSTRUCTIONS, TOOL_DESCRIPTIONS } from "./descriptions.js";
 import {
 	DeadlineExceeded,
@@ -105,6 +108,14 @@ function structuredResult(
 ): ToolResult {
 	return { content: [{ type: "text" as const, text }], structuredContent };
 }
+
+/** The structured result of an ingest: what `ingestOutputSchema` declares. */
+type IngestOutput = {
+	id?: string;
+	success_count: number;
+	failed_count: number;
+	indexing_pending: boolean;
+};
 
 /**
  * A failure the caller should treat as a failure, not a result.
@@ -339,6 +350,12 @@ export interface ServerOptions {
 	 * caller without it could reproduce.
 	 */
 	cancelScope?: string;
+	/**
+	 * Let `hydradb_ingest` read a `file.path` from this machine's disk. Only the
+	 * stdio entry point sets it: there the server runs as the user, on their
+	 * machine. On the hosted server a path would name a file on the SERVER.
+	 */
+	localFiles?: boolean;
 }
 
 /**
@@ -1098,6 +1115,115 @@ export function createHydraDBServer(
 		}
 
 		return lines.length > 0 ? `\n\nIssues:\n${lines.join("\n")}` : "";
+	}
+
+	/** The `file` argument of hydradb_ingest, as the schema accepts it. */
+	type FileArg = { filename?: string; content_base64?: string; path?: string };
+
+	/**
+	 * Ingest one file as a knowledge document (see ./files for the two ways a
+	 * file arrives and their limits). Everything that can be refused is
+	 * refused before the upload.
+	 */
+	async function runIngestFile(
+		args: Omit<Parameters<typeof runStore>[0], "text"> & {
+			text?: string;
+			turns?: ConversationTurn[];
+			user_name?: string;
+		},
+		file: FileArg,
+		signal?: AbortSignal,
+	): Promise<ToolResult> {
+		if (args.text != null || args.turns != null) {
+			throw new Error(
+				`${TOOL_NAMES.INGEST} takes exactly one of \`text\`, \`turns\` or \`file\`, not several.`,
+			);
+		}
+
+		if (args.kind === "memory") {
+			throw new Error(
+				`${TOOL_NAMES.INGEST} ingests a \`file\` as knowledge, not memory. Drop \`kind\`, or extract ` +
+				"the facts worth remembering and send them as `text`.",
+			);
+		}
+
+		const unsupported = (
+			[
+				["infer", args.infer],
+				["is_markdown", args.is_markdown],
+				["user_name", args.user_name],
+				["metadata", args.metadata],
+				["observation_date", args.observation_date],
+			] as const
+		).flatMap(([name, value]) => (value != null ? [name] : []));
+
+		if (unsupported.length > 0) {
+			throw new Error(
+				`${TOOL_NAMES.INGEST} does not support ${unsupported.join(", ")} with \`file\`.`,
+			);
+		}
+
+		if ((file.content_base64 != null) === (file.path != null)) {
+			throw new Error("`file` needs exactly one of `content_base64` (the bytes) or `path` (a local file).");
+		}
+
+		let upload: IngestFile;
+
+		if (file.path != null) {
+			if (!options.localFiles) {
+				throw new Error(
+					"`file.path` works only on the local (stdio) Hydra DB MCP server. This server cannot " +
+					"read your machine's files: send the file's bytes as `file.content_base64` (up to 8 MB) " +
+					"with its `filename`.",
+				);
+			}
+
+			upload = await readLocal(file.path, file.filename, signal);
+		} else {
+			if (file.filename == null) {
+				throw new Error("`file.filename` is required with `content_base64`, including its extension (e.g. \"plan.pdf\").");
+			}
+
+			upload = decodeInline(file.filename, file.content_base64 ?? "");
+		}
+
+		// A document's title is its filename (the API takes no title), so a
+		// `title` renames the upload, keeping the extension the format needs.
+		if (args.title != null && args.title.trim() !== "") {
+			const ext = extname(upload.filename);
+			const title = args.title.trim();
+
+			upload.filename = title.toLowerCase().endsWith(ext.toLowerCase()) ? title : `${title}${ext}`;
+		}
+
+		logger.debug(`${TOOL_NAMES.INGEST}: file ${upload.filename} (${upload.data.length} bytes)`);
+
+		const raw = await hydra.context.ingest({
+			kind: "knowledge",
+			file: { ...upload, id: args.source_id },
+			database: args.database,
+			collection: args.collection,
+			upsert: args.overwrite ?? true,
+		}, { signal });
+
+		const res = toAddMemoryResponse(raw);
+		const id = createdId(res) ?? args.source_id;
+
+		const structured: IngestOutput = {
+			success_count: res.success_count,
+			failed_count: res.failed_count,
+			indexing_pending: true,
+		};
+
+		if (id != null) structured.id = id;
+
+		return structuredResult(
+			`Saved ${upload.filename} to Hydra DB as knowledge${id ? ` (id: ${id})` : ""} ` +
+			`(${res.success_count} success, ${res.failed_count} failed).` +
+			indexingNote(res) +
+			ingestIssues(res),
+			structured,
+		);
 	}
 
 	async function runStore(args: {
@@ -3173,6 +3299,16 @@ export function createHydraDBServer(
 			.string()
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.user_name),
+		// `path` is in the schema on every transport so the tool looks the same
+		// everywhere; the hosted server refuses it with a message saying why.
+		file: z
+			.object({
+				filename: z.string().trim().min(1).optional(),
+				content_base64: z.string().optional(),
+				path: z.string().trim().min(1).optional(),
+			})
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.file),
 	};
 
 	const conversationSchema = {
@@ -3636,9 +3772,12 @@ export function createHydraDBServer(
 			observation_date?: string;
 			turns?: ConversationTurn[];
 			user_name?: string;
+			file?: FileArg;
 			database?: string;
 			collection?: string;
 		};
+
+		if (a.file != null) return runIngestFile(a, a.file, extra?.signal);
 
 		const hasTurns = a.turns != null && a.turns.length > 0;
 
@@ -3728,7 +3867,7 @@ export function createHydraDBServer(
 		}
 
 			throw new Error(
-				`${TOOL_NAMES.INGEST} requires either \`text\` (a note) or \`turns\` (a conversation).`,
+				`${TOOL_NAMES.INGEST} requires one of \`text\` (a note), \`turns\` (a conversation) or \`file\` (a document).`,
 			);
 		},
 		overwritingWrite,

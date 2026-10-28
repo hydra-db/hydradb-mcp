@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — `hydradb_ingest` takes files
+
+`hydradb_ingest` has a new `file` argument for PDF, Word, PowerPoint,
+spreadsheets, OpenDocument, iWork, images and text files. They are uploaded as
+`documents` on POST /context/ingest and indexed as knowledge. The title is
+`title` when given (the upload is renamed to it), otherwise the filename.
+
+- `file.content_base64` carries the bytes in the tool call, up to 8 MB. This is
+  how files reach the hosted server, which cannot read the caller's disk.
+- `file.path` reads a local file, up to the API's 50 MB, on the stdio server
+  only; the hosted server refuses it.
+- Oversized files and unreadable formats are refused before upload, with the
+  limit or the accepted formats in the message. The limits are in the tool
+  description.
+- The hosted server's request body limit is now 16 MB (was 8 MB), so an 8 MB
+  file fits in one call.
+
 ### Changed — retries, timeouts and cancellation
 
 - **One deadline per tool call.** `HYDRADB_TIMEOUT_SECONDS` now bounds the

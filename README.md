@@ -118,13 +118,14 @@ resolve the collection before inspecting. Explicit scope is never widened.
 
 ### **hydradb_ingest**
 
-Saves information so it outlives the session. Provide **exactly one** of `text`
-or `turns`.
+Saves information so it outlives the session. Provide **exactly one** of `text`,
+`turns` or `file`.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `text` | string | No\* | A note, fact, decision, or document body |
 | `turns` | array | No\* | Conversation turns, each with `user` and `assistant` |
+| `file` | object | No\* | A PDF, Word, PowerPoint, spreadsheet, image or text file, ingested as knowledge. See below |
 | `kind` | string | No | `memory` (default) or `knowledge` for a document |
 | `title` | string | No | Label shown in later search results — always set it |
 | `source_id` | string | No | Identifier for this entry. **Reusing one REPLACES what is stored under it** |
@@ -135,7 +136,21 @@ or `turns`.
 | `observation_date` | string | No | When the fact was true, as `YYYY-MM-DD` (e.g. `2026-07-04`), vs when it was stored |
 | `user_name` | string | No | What to call the user, used with `turns` (default: `User`) |
 
-\* Passing both is an error; passing neither is an error.
+\* Passing more than one is an error; passing none is an error.
+
+**Files.** `file` takes `filename` (with its real extension) and one of the two
+below. The document's title is `title` when set, otherwise the filename.
+
+- `content_base64`: the file's bytes as base64, **up to 8 MB**. Works on every
+  transport, and is the only way on the hosted server, which cannot read your disk.
+- `path`: an absolute path to a file on your machine, **up to 50 MB** (the
+  API's own limit). Local (stdio) server only: the bytes go straight to Hydra DB
+  instead of through the conversation. The hosted server refuses it.
+
+A larger file, or a format Hydra DB cannot read (`.heic`, `.html`, `.zip`, ...),
+is refused before anything is uploaded. `source_id` sets the document's id and
+`overwrite` applies as usual; `infer`, `metadata` and the other memory options
+do not apply to files.
 
 Ingestion is **asynchronous** — content is not searchable the instant it is
 saved. Use `hydradb_status` to confirm.
@@ -583,7 +598,7 @@ owns scope injection, envelope unwrapping and error translation; the tools call
 it and render the results.
 
 - **hydradb_query** retrieves relevant memories and returns graph-enriched context (entity paths, chunk relations, extra context). Supports `fast` and `thinking` recall modes.
-- **hydradb_ingest** stores a note (`text`) or a conversation (`turns`) as a memory, with configurable `infer`, `is_markdown`, `title`, and `source_id`. Hydra DB extracts insights and builds a knowledge graph automatically.
+- **hydradb_ingest** stores a note (`text`), a conversation (`turns`) or a file such as a PDF or DOCX (`file`), with configurable `infer`, `is_markdown`, `title`, and `source_id`. Hydra DB extracts insights and builds a knowledge graph automatically.
 - **hydradb_list** browses stored memories (`kind: memory`) or ingested knowledge sources (`kind: knowledge`, with an optional `source_ids` filter).
 - **hydradb_inspect** retrieves the original ingested content of a source, with mode options (`content`, `url`, or `both`).
 - **hydradb_delete** removes a memory or knowledge source by ID.
