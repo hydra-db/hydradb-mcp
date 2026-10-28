@@ -111,12 +111,18 @@ export function decodeInline(filename: string, contentBase64: string): IngestFil
 
 	if (payload === "") throw new Error(`content_base64 for "${filename}" is empty.`);
 
-	if (!/^[A-Za-z0-9+/_-]+={0,2}$/.test(payload)) {
-		throw new Error(`content_base64 for "${filename}" is not valid base64.`);
-	}
-
 	const padding = payload.endsWith("==") ? 2 : payload.endsWith("=") ? 1 : 0;
-	const size = Math.floor((payload.length * 3) / 4) - padding;
+
+	// The alphabet alone is not enough: a padded string is a whole number of
+	// 4-character groups, and an unpadded one can never leave 1 character over
+	// (6 bits are not a byte). Either would decode to less than was sent.
+	const wellFormed =
+		/^[A-Za-z0-9+/_-]+={0,2}$/.test(payload) &&
+		(padding > 0 ? payload.length % 4 === 0 : payload.length % 4 !== 1);
+
+	if (!wellFormed) throw new Error(`content_base64 for "${filename}" is not valid base64.`);
+
+	const size = Math.floor(((payload.length - padding) * 3) / 4);
 
 	if (size > MAX_INLINE_FILE_BYTES) {
 		throw new Error(
@@ -126,7 +132,11 @@ export function decodeInline(filename: string, contentBase64: string): IngestFil
 		);
 	}
 
-	return { data: Buffer.from(payload, "base64"), filename, contentType };
+	const data = Buffer.from(payload, "base64");
+
+	if (data.length === 0) throw new Error(`content_base64 for "${filename}" decodes to no bytes.`);
+
+	return { data, filename, contentType };
 }
 
 /**
@@ -134,7 +144,7 @@ export function decodeInline(filename: string, contentBase64: string): IngestFil
  * with `~/`): the server's working directory is not the agent's, so a relative
  * path could name a different file than the one meant.
  */
-export async function readLocal(path: string, filename?: string): Promise<IngestFile> {
+export async function readLocal(path: string, filename: string | undefined, signal: AbortSignal | undefined): Promise<IngestFile> {
 	const resolved = path.startsWith("~/") ? join(homedir(), path.slice(2)) : path;
 
 	if (!isAbsolute(resolved)) {
@@ -159,5 +169,6 @@ export async function readLocal(path: string, filename?: string): Promise<Ingest
 
 	if (info.size === 0) throw new Error(`"${path}" is empty.`);
 
-	return { data: await readFile(resolved), filename: name, contentType };
+	// The call's cancel and deadline end the read too, e.g. on a stalled mount.
+	return { data: await readFile(resolved, { signal }), filename: name, contentType };
 }

@@ -1177,7 +1177,7 @@ export function createHydraDBServer(
 				);
 			}
 
-			upload = await readLocal(file.path, file.filename);
+			upload = await readLocal(file.path, file.filename, signal);
 		} else {
 			if (file.filename == null) {
 				throw new Error("`file.filename` is required with `content_base64`, including its extension (e.g. \"plan.pdf\").");

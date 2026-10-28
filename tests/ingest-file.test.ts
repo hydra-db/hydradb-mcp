@@ -13,7 +13,7 @@ import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
-import { MAX_FILE_BYTES, MAX_INLINE_FILE_BYTES } from "../src/files.js";
+import { MAX_FILE_BYTES, MAX_INLINE_FILE_BYTES, readLocal } from "../src/files.js";
 import { HydraDB } from "../src/hydra/index.js";
 import { createHydraDBServer } from "../src/server.js";
 
@@ -204,6 +204,11 @@ test("file is exclusive with text and turns, is knowledge only, and takes no tit
 		[{ file: { filename: "a.pdf" } }, /exactly one of `content_base64`/],
 		[{ file: { content_base64: "aGVsbG8=" } }, /filename` is required/],
 		[{ file: { filename: "a.pdf", content_base64: "not base64!" } }, /not valid base64/],
+		// Right alphabet, impossible shape: these used to decode to fewer bytes than sent.
+		[{ file: { filename: "a.pdf", content_base64: "A" } }, /not valid base64/],
+		[{ file: { filename: "a.pdf", content_base64: "AAAAA" } }, /not valid base64/],
+		[{ file: { filename: "a.pdf", content_base64: "AAA==" } }, /not valid base64/],
+		[{ file: { filename: "a.pdf", content_base64: "==" } }, /not valid base64/],
 	];
 
 	for (const [args, message] of cases) {
@@ -226,4 +231,12 @@ test("the tool description states the size limits", async () => {
 	assert.match(tool?.description ?? "", /`file`.*base64 up to 8 MB.*local path up to 50 MB/);
 	assert.match(file?.description ?? "", /AT MOST 8 MB per file/);
 	assert.match(file?.description ?? "", /AT MOST 50 MB/);
+});
+
+test("a local read stops when the call is cancelled", async () => {
+	const controller = new AbortController();
+
+	controller.abort();
+
+	await assert.rejects(readLocal(DOCX, undefined, controller.signal), { name: "AbortError" });
 });
