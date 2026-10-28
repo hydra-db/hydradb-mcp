@@ -711,6 +711,49 @@ test("hydradb_ingest does not append a second markdown extension", async () => {
 	await client.close();
 });
 
+test("hydradb_ingest forwards every knowledge document field", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	await client.callTool({
+		name: "hydradb_ingest",
+		arguments: {
+			kind: "knowledge",
+			text: "quarterly report",
+			title: "Q3.md",
+			source_id: "report-q3",
+			metadata: { department: "finance" },
+			additional_metadata: { author: "Ada" },
+			relations: [{ target: "budget-2026", type: "supports" }],
+			infer: false,
+			evidence_kind: "record",
+			evidence_subject: "team:finance",
+		},
+	});
+
+	const call = calls.find((entry) => entry.method === "ingest");
+
+	const request = z.object({
+		type: z.literal("knowledge"),
+		upsert: z.literal("true"),
+		documentMetadata: z.string(),
+		documents: z.array(z.object({ filename: z.string() })),
+	}).parse(call?.args);
+
+	assert.equal(request.documents[0]?.filename, "Q3.md");
+	assert.deepEqual(JSON.parse(request.documentMetadata), [{
+		id: "report-q3",
+		metadata: { department: "finance" },
+		additional_metadata: { author: "Ada" },
+		relations: [{ target: "budget-2026", type: "supports" }],
+		infer: false,
+		evidence_kind: "record",
+		evidence_subject: "team:finance",
+	}]);
+
+	await client.close();
+});
+
 // Every audit of this server reached the same finding independently: a recall
 // result carried no value that hydradb_inspect or hydradb_delete would accept,
 // so a follow-up meant guessing an id or listing everything and matching prose.
@@ -2993,19 +3036,21 @@ test("observation_date advertises its format in the input schema", async () => {
 	assert.match(String(observationDate.description), /YYYY-MM-DD/);
 });
 
-// They belong to the memory item shape, so the knowledge branch must reject
-// them rather than drop them — same rule as every other memory-only field.
-test("knowledge ingest rejects metadata rather than dropping it", async () => {
+// Observation dates belong to the memory item shape, so the knowledge branch
+// must reject one rather than drop it.
+test("knowledge ingest rejects observation_date rather than dropping it", async () => {
 	const { hydra } = mockHydra();
 	const client = await connect(hydra);
 
 	const result = await client.callTool({
 		name: "hydradb_ingest",
-		arguments: { text: "doc body", kind: "knowledge", metadata: { a: 1 } },
+		arguments: { text: "doc body", kind: "knowledge", observation_date: "2026-10-28" },
 	});
 
 	assert.equal(result.isError, true);
-	assert.match((result.content as { text: string }[])[0]!.text, /metadata/);
+	const content = z.array(z.object({ text: z.string() })).parse(result.content);
+
+	assert.match(content[0]!.text, /observation_date/);
 	await client.close();
 });
 

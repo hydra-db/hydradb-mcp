@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — complete knowledge document metadata
+
+`hydradb_ingest` knowledge writes now preserve caller ids, metadata, additional
+metadata, explicit relations, inference control, evidence kind, and evidence
+subject in the API's per-document metadata.
+
 ### Fixed — ingest outcomes and supported fields are preserved
 
 `hydradb_ingest` now reports accepted ids, rejected items, and stored titles.

@@ -103,8 +103,6 @@ function ingestSdk(): { sdk: HydraDBClient; calls: unknown[] } {
 test("knowledge ingest rejects memory-only params instead of dropping them", async () => {
 	for (const [name, extra] of [
 		["pairs", { pairs: [{ user: "hi", assistant: "hello" }] }],
-		["sourceId", { sourceId: "s1" }],
-		["infer", { infer: true }],
 		["isMarkdown", { isMarkdown: true }],
 		["customInstructions", { customInstructions: "focus on X" }],
 		["userName", { userName: "Ada" }],
@@ -136,6 +134,36 @@ test("knowledge ingest still accepts the params it can carry", async () => {
 	});
 
 	assert.equal(calls.length, 1, "knowledge ingest should still reach the SDK");
+});
+
+test("knowledge ingest serializes every supported per-document field", async () => {
+	const { sdk, calls } = ingestSdk();
+	const hydra = new HydraDB({ token: "t", database: "db_test" }, sdk);
+
+	await hydra.context.ingest({
+		kind: "knowledge",
+		text: "quarterly report body",
+		title: "Q3",
+		sourceId: "report-q3",
+		metadata: { department: "finance" },
+		additionalMetadata: { author: "Ada" },
+		relations: [{ target: "budget-2026", type: "supports" }],
+		infer: false,
+		evidenceKind: "record",
+		evidenceSubject: "team:finance",
+	});
+
+	const request = z.object({ documentMetadata: z.string() }).parse(calls[0]);
+
+	assert.deepEqual(JSON.parse(request.documentMetadata), [{
+		id: "report-q3",
+		metadata: { department: "finance" },
+		additional_metadata: { author: "Ada" },
+		relations: [{ target: "budget-2026", type: "supports" }],
+		infer: false,
+		evidence_kind: "record",
+		evidence_subject: "team:finance",
+	}]);
 });
 
 test("memory ingest is unaffected by the knowledge guard", async () => {

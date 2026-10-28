@@ -140,6 +140,18 @@ const PARAM = {
 		"Key/value metadata to store with this entry, as {key: value}. These are the " +
 		"keys hydradb_query's metadata_filters can match on later, so set them when you " +
 		"expect to narrow by them — e.g. {\"project\": \"hydradb\", \"kind\": \"decision\"}.",
+	additional_metadata:
+		"Document metadata for knowledge ingestion, as {key: value}. Use it for descriptive " +
+		"fields that should travel with the document but are not scalar query filters.",
+	relations:
+		"Explicit graph relationships for a knowledge document. Each object describes one " +
+		"relationship in the format accepted by the Hydra DB ingest API.",
+	evidence_kind:
+		"Provenance class for a knowledge document: assertion, record, said, done, " +
+		"third_party, or inferred.",
+	evidence_subject:
+		"Stable handle for the entity that a knowledge document describes, such as " +
+		"user:kiran@acme.com or team:finance.",
 	// The format is stated as the server's own, YYYY-MM-DD. This said "RFC3339",
 	// which is a date-TIME format: a caller that followed it sent
 	// "2026-08-17T00:00:00Z" and got 400 INVALID_INPUT back from /context/ingest.
@@ -505,6 +517,10 @@ export const TOOL_DESCRIPTIONS = {
 			is_markdown: PARAM.is_markdown,
 			overwrite: PARAM.overwrite,
 			metadata: PARAM.metadata,
+			additional_metadata: PARAM.additional_metadata,
+			relations: PARAM.relations,
+			evidence_kind: PARAM.evidence_kind,
+			evidence_subject: PARAM.evidence_subject,
 			observation_date: PARAM.observation_date,
 			turns:
 				"The conversation to ingest, oldest first, as [{user, assistant}, ...]. Provide " +

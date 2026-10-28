@@ -19,6 +19,7 @@ import { HydraDBClient, HydraDBEnvironment, HydraDBError, serialization } from "
 import type { HydraDB as SDK } from "@hydradb/sdk";
 import { z } from "zod";
 
+import type { JsonValue } from "../adapters.js";
 import { unwrap } from "./envelope.js";
 import { HydraWrapperError, scrub, translateError } from "./errors.js";
 import { type GraphConfig, GraphResource } from "./graph.js";
@@ -299,9 +300,15 @@ export interface IngestParams {
 	 * generated SDK request type, which is why the wrapper carries it explicitly
 	 * inside the memory item rather than as a typed field.
 	 */
-	metadata?: Record<string, unknown>;
+	metadata?: Record<string, JsonValue>;
 	/** Document-level metadata, matchable via `additional_metadata`. */
-	additionalMetadata?: Record<string, unknown>;
+	additionalMetadata?: Record<string, JsonValue>;
+	/** Explicit graph relationships attached to this document. */
+	relations?: Array<Record<string, JsonValue>>;
+	/** Caller-declared provenance class for this document. */
+	evidenceKind?: "assertion" | "record" | "said" | "done" | "third_party" | "inferred";
+	/** Caller-stable handle for the entity this document describes. */
+	evidenceSubject?: string;
 	/** When the fact was true, as opposed to when it was stored (RFC3339 date). */
 	observationDate?: string;
 	/** Filename to attach when ingesting knowledge text as a document. */
@@ -910,13 +917,9 @@ export class ContextResource extends Resource {
 			const unsupported = (
 				[
 					["pairs", params.pairs],
-					["sourceId", params.sourceId],
-					["infer", params.infer],
 					["isMarkdown", params.isMarkdown],
 					["customInstructions", params.customInstructions],
 					["userName", params.userName],
-					["metadata", params.metadata],
-					["additionalMetadata", params.additionalMetadata],
 					["observationDate", params.observationDate],
 				] as const
 			)
@@ -936,6 +939,23 @@ export class ContextResource extends Resource {
 			if (params.text != null) {
 				const title = params.title ?? "document";
 				const filename = params.filename ?? (/\.md$/i.test(title) ? title : `${title}.md`);
+				const documentMetadata: Record<string, JsonValue> = {};
+
+				if (params.sourceId != null) documentMetadata.id = params.sourceId;
+
+				if (params.metadata != null) documentMetadata.metadata = params.metadata;
+
+				if (params.additionalMetadata != null) {
+					documentMetadata.additional_metadata = params.additionalMetadata;
+				}
+
+				if (params.relations != null) documentMetadata.relations = params.relations;
+
+				if (params.infer != null) documentMetadata.infer = params.infer;
+
+				if (params.evidenceKind != null) documentMetadata.evidence_kind = params.evidenceKind;
+
+				if (params.evidenceSubject != null) documentMetadata.evidence_subject = params.evidenceSubject;
 
 				request.documents = [{
 					data: Buffer.from(params.text, "utf-8"),
@@ -944,6 +964,7 @@ export class ContextResource extends Resource {
 					filename,
 					contentType: "text/markdown",
 				}];
+				request.documentMetadata = JSON.stringify([documentMetadata]);
 			}
 		}
 

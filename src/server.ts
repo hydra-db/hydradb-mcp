@@ -1095,7 +1095,11 @@ export function createHydraDBServer(
 		infer?: boolean;
 		is_markdown?: boolean;
 		overwrite?: boolean;
-		metadata?: Record<string, unknown>;
+		metadata?: IngestParams["metadata"];
+		additional_metadata?: IngestParams["additionalMetadata"];
+		relations?: IngestParams["relations"];
+		evidence_kind?: IngestParams["evidenceKind"];
+		evidence_subject?: string;
 		observation_date?: string;
 		database?: string;
 		collection?: string;
@@ -1108,7 +1112,7 @@ export function createHydraDBServer(
 		// where they mean something. The wrapper rejects them on the knowledge
 		// branch rather than dropping them, and passing them here unconditionally
 		// would make every knowledge write fail.
-		const memoryOnly =
+		const kindSpecific =
 			kind === "memory"
 				? {
 						sourceId: args.source_id,
@@ -1118,13 +1122,21 @@ export function createHydraDBServer(
 						metadata: args.metadata,
 						observationDate: args.observation_date,
 					}
-				: {};
+				: {
+						sourceId: args.source_id,
+						infer: args.infer,
+						metadata: args.metadata,
+						additionalMetadata: args.additional_metadata,
+						relations: args.relations,
+						evidenceKind: args.evidence_kind,
+						evidenceSubject: args.evidence_subject,
+					};
 
 		const raw = await hydra.context.ingest({
 			kind,
 			text: args.text,
 			title: args.title ?? defaultTitle(args.text),
-			...memoryOnly,
+			...kindSpecific,
 			database: args.database,
 			collection: args.collection,
 			// Default stays true. The SDK retries POSTs, so upsert is what keeps a
@@ -3067,6 +3079,22 @@ export function createHydraDBServer(
 			.record(z.unknown())
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.metadata),
+		additional_metadata: z
+			.record(jsonValue)
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.additional_metadata),
+		relations: z
+			.array(z.record(jsonValue))
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.relations),
+		evidence_kind: z
+			.enum(["assertion", "record", "said", "done", "third_party", "inferred"])
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.evidence_kind),
+		evidence_subject: z
+			.string()
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.evidence_subject),
 		observation_date: z
 			.string()
 			.regex(OBSERVATION_DATE_PATTERN, {
@@ -3567,7 +3595,11 @@ export function createHydraDBServer(
 			infer?: boolean;
 			is_markdown?: boolean;
 			overwrite?: boolean;
-			metadata?: Record<string, unknown>;
+			metadata?: IngestParams["metadata"];
+			additional_metadata?: IngestParams["additionalMetadata"];
+			relations?: IngestParams["relations"];
+			evidence_kind?: IngestParams["evidenceKind"];
+			evidence_subject?: string;
 			observation_date?: string;
 			turns?: ConversationTurn[];
 			user_name?: string;
@@ -3594,11 +3626,8 @@ export function createHydraDBServer(
 		if (a.kind === "knowledge") {
 			const memoryOnlyGiven = (
 				[
-					["source_id", a.source_id],
-					["infer", a.infer],
 					["is_markdown", a.is_markdown],
 					["user_name", a.user_name],
-					["metadata", a.metadata],
 					["observation_date", a.observation_date],
 				] as const
 			)
@@ -3656,6 +3685,10 @@ export function createHydraDBServer(
 					is_markdown: a.is_markdown,
 					overwrite: a.overwrite,
 					metadata: a.metadata,
+					additional_metadata: a.additional_metadata,
+					relations: a.relations,
+					evidence_kind: a.evidence_kind,
+					evidence_subject: a.evidence_subject,
 					observation_date: a.observation_date,
 					database: a.database,
 					collection: a.collection,
