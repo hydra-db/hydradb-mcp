@@ -4549,3 +4549,29 @@ test("query warnings remain bounded and account for the text budget", async () =
 	assert.equal(out.structuredContent?.warnings_omitted, 2);
 	await client.close();
 });
+
+test("all ACL-bearing read tools surface enforcement warnings", async () => {
+	const warning = { code: "acl_ignored_by_connector_enforcement", message: "Request ACL ignored." };
+	const envelope = (data: unknown) => ({ success: true, data, meta: { requestId: "r-warning", warnings: [warning] } });
+	const { hydra } = mockHydra({
+		list: async () => envelope({ inner: { sources: [], total: 0 } }),
+		inspect: async () => envelope({ success: true, content: "body" }),
+		relations: async () => envelope({ relations: [], isTruncated: false }),
+	});
+	(hydra.context as unknown as { subgraph: (args: unknown, opts?: { onMeta?: (meta: unknown) => void }) => Promise<unknown> }).subgraph = async (_args, opts) => {
+		opts?.onMeta?.({ requestId: "r-warning", warnings: [warning] });
+		return { success: true, seed_source_id: "s1", sources: [], relations: [], auxiliary_relations: [], is_truncated: false, auxiliary_truncated: false, max_depth_reached: 0 };
+	};
+	const client = await connect(hydra);
+	for (const request of [
+		{ name: "hydradb_list", arguments: { kind: "knowledge", acl: ["user@example.com"] } },
+		{ name: "hydradb_inspect", arguments: { id: "s1", acl: ["user@example.com"] } },
+		{ name: "hydradb_relations", arguments: { id: "s1", acl: ["user@example.com"] } },
+		{ name: "hydradb_subgraph", arguments: { id: "s1", acl: ["user@example.com"] } },
+	]) {
+		const out = await client.callTool(request);
+		assert.match((out.content as { text: string }[])[0]!.text, /acl_ignored_by_connector_enforcement/);
+		assert.deepEqual(out.structuredContent?.warnings, [warning]);
+	}
+	await client.close();
+});

@@ -1136,6 +1136,7 @@ export class ContextResource extends Resource {
 				expirySeconds: params.expirySeconds,
 				acl: params.acl,
 			}, req(opts)),
+			opts?.onMeta,
 		);
 	}
 
@@ -1199,7 +1200,10 @@ export class ContextResource extends Resource {
 		for (const principal of params.acl ?? []) query.append("acl", principal);
 		const path = `/context/${encodeURIComponent(params.id)}/subgraph?${query.toString()}`;
 
-		return sendRaw<SubgraphResult>(this.raw, path, "GET", undefined, opts);
+		return sendRaw<SubgraphResult>(this.raw, path, "GET", undefined, {
+			signal: opts?.signal,
+			onResponse: (value) => opts?.onMeta?.(readResponseMeta(value)),
+		});
 	}
 
 	/** Knowledge-graph relations (SDK `context.relations`). */
@@ -1216,6 +1220,7 @@ export class ContextResource extends Resource {
 				cursor: params.cursor,
 				acl: params.acl,
 			}, req(opts)),
+			opts?.onMeta,
 		);
 	}
 

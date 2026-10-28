@@ -65,6 +65,8 @@ export interface RawTransport {
 
 export interface RawRequestOptions {
 	signal?: AbortSignal;
+	/** Observe the successful wire response before envelope unwrapping. */
+	onResponse?: (value: unknown) => void;
 }
 
 export function newRawTransport(config: {
@@ -166,6 +168,7 @@ async function attemptRaw<T>(
 			throw responseError(path, response.status, parsed, [t.token]);
 		}
 
+		opts?.onResponse?.(parsed);
 		return unwrap<T>(parsed);
 	} catch (err) {
 		if (err instanceof HydraWrapperError) throw err;
