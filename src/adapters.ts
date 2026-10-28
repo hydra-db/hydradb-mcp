@@ -133,10 +133,8 @@ export function toMemoryList(data: SDK.ListV2ListResponse): MemoryList {
 	const container =
 		(asRecords(d.user_memories) || asRecords(d.userMemories) ? d : inner) ?? d;
 	const records =
-		asRecords(d.user_memories) ??
-		asRecords(d.userMemories) ??
-		asRecords(inner?.user_memories) ??
-		asRecords(inner?.userMemories) ??
+		asRecords(container.user_memories) ??
+		asRecords(container.userMemories) ??
 		[];
 	const memories = records.map((record) => ({
 		memory_id: str(record, "memoryId", "memory_id", "id", "source_id") ?? "",

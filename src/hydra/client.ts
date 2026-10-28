@@ -1107,12 +1107,12 @@ export class ContextResource extends Resource {
 					if (!response.ok) {
 						throw new HydraDBError({ statusCode: response.status, body });
 					}
-						// Unlike the generated method, passthrough does not validate JSON.
-						// Validate every list through the same contract so a proxy page or
-						// documented degraded-memory response cannot become an empty list.
-						// SAFETY: validateListResponse parses this raw HTTP body before use.
+					// Unlike the generated method, passthrough does not validate JSON.
+					// Validate every list through the same contract so a proxy page or
+					// documented degraded-memory response cannot become an empty list.
+					// SAFETY: validateListResponse parses this raw HTTP body before use.
 
-						validateListResponse(body as ListResponse, params.kind);
+					validateListResponse(body as ListResponse, params.kind);
 
 					return body;
 				},
@@ -1305,15 +1305,15 @@ export class DatabasesResource extends Resource {
 		return this.call("/databases", () => this.sdk.databases.delete({ database }));
 	}
 
-		list(): Promise<SDK.TenantsTenantIdsResponse> {
-			return this.call("/databases", async () => {
-				const response = await this.sdk.databases.list();
+	list(): Promise<SDK.TenantsTenantIdsResponse> {
+		return this.call("/databases", async () => {
+			const response = await this.sdk.databases.list();
 
-				validateDatabasesResponse(response);
+			validateDatabasesResponse(response);
 
-				return response;
-			});
-		}
+			return response;
+		});
+	}
 
 	collections(
 		database: string,

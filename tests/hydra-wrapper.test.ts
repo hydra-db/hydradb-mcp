@@ -682,6 +682,53 @@ test("status and database listing reject successful non-JSON bodies", async (t) 
 	assert.equal(fetchMock.mock.callCount(), 2);
 });
 
+test("status and database listing accept valid SDK-decoded arrays", async (t) => {
+	const bodies = [
+		{ statuses: [] },
+		{ statuses: [{ id: "source-1", indexing_status: "completed", success: true }] },
+		{ tenant_ids: [] },
+		{ tenant_ids: ["db_one", "db_two"] },
+	];
+
+	const fetchMock = t.mock.method(globalThis, "fetch", async () =>
+		new Response(JSON.stringify({ success: true, data: bodies.shift() }), { status: 200 }),
+	);
+
+	const hydra = new HydraDB({ token: "t", database: "db_test", maxRetries: 0 });
+
+	assert.deepEqual(await hydra.context.ingestionStatus({ ids: ["source-1"] }), { statuses: [] });
+	assert.deepEqual(await hydra.context.ingestionStatus({ ids: ["source-1"] }), {
+		statuses: [{ id: "source-1", indexingStatus: "completed", success: true }],
+	});
+	assert.deepEqual(await hydra.databases.list(), { tenantIds: [] });
+	assert.deepEqual(await hydra.databases.list(), { tenantIds: ["db_one", "db_two"] });
+	assert.equal(fetchMock.mock.callCount(), 4);
+});
+
+test("synthetic validation errors preserve the SDK-decoded request id", async (t) => {
+	const fetchMock = t.mock.method(globalThis, "fetch", async () =>
+		new Response(
+			JSON.stringify({
+				success: true,
+				data: {},
+				meta: { request_id: "req-invalid-shape" },
+			}),
+			{ status: 200 },
+		),
+	);
+
+	const hydra = new HydraDB({ token: "t", database: "db_test", maxRetries: 0 });
+
+	for (const invoke of [
+		() => hydra.context.ingestionStatus({ ids: ["source-1"] }),
+		() => hydra.databases.list(),
+	]) {
+		await assert.rejects(invoke, /request_id: req-invalid-shape/);
+	}
+
+	assert.equal(fetchMock.mock.callCount(), 2);
+});
+
 // --- Database confinement ---
 
 import { assertDatabaseAllowed, ScopeNotAllowedError } from "../src/hydra/index.js";
