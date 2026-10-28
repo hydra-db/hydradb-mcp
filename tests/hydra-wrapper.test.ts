@@ -573,7 +573,11 @@ test("source lookup accepts bare, enveloped and historical inner list payloads",
 		for (const body of [payload, { success: true, data: payload }]) {
 			const fetchMock = t.mock.method(globalThis, "fetch", async () => new Response(JSON.stringify(body), { status: 200 }));
 			const hydra = new HydraDB({ token: "t", database: "db_test", maxRetries: 0 });
-			await hydra.context.list({ kind: "knowledge", sourceFields: { app_external_id: "1" } });
+			// Rows and their ids come back as sent: the SDK's parse must not drop or rename them.
+			assert.deepEqual(
+				await hydra.context.list({ kind: "knowledge", sourceFields: { app_external_id: "1" } }),
+				payload,
+			);
 			fetchMock.mock.restore();
 		}
 	}
