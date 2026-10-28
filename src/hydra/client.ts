@@ -22,18 +22,18 @@ import { z } from "zod";
 import { unwrap } from "./envelope.js";
 import { HydraWrapperError, scrub, translateError } from "./errors.js";
 import { type GraphConfig, GraphResource } from "./graph.js";
+import {
+	type CallBudget,
+	DEFAULT_MAX_RETRIES,
+	DEFAULT_TIMEOUT_SECONDS,
+	type RetrySafety,
+	withRetries,
+} from "./retry.js";
 import { type RawTransport, mcpHeaders, newRawTransport, sendRaw } from "./transport.js";
 
 export type ContextKind = "memory" | "knowledge";
 
-/**
- * Sized to fit inside a typical MCP host's tool timeout rather than outlast it,
- * so a stalled call fails with a HydraDB diagnostic the caller can act on
- * instead of a generic host-side timeout carrying no information.
- */
-export const DEFAULT_TIMEOUT_SECONDS = 30;
-
-export const DEFAULT_MAX_RETRIES = 2;
+export { DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT_SECONDS };
 
 /**
  * Per-call transport controls, separate from the domain params.
@@ -90,9 +90,10 @@ const STDERR_LOGGER = {
 		console.error("[hydradb-sdk]", message, ...args),
 };
 
-/** Wrapper options → the SDK's per-request options, omitted when there is nothing to say. */
-function req(opts?: RequestOptions): { abortSignal?: AbortSignal } | undefined {
-	return opts?.signal ? { abortSignal: opts.signal } : undefined;
+/** What each SDK attempt receives: the call's signal, and no SDK-side retries. */
+interface SdkRequestOptions {
+	abortSignal: AbortSignal;
+	maxRetries: 0;
 }
 
 /** Generated deserialization is deliberately permissive; reject false empties. */
@@ -178,14 +179,14 @@ export interface HydraConfig {
 	/** Optional base URL override; defaults to the SDK's environment. */
 	baseUrl?: string;
 	/**
-	 * Per-attempt deadline. The SDK's own default is 60s, which combined with its
-	 * 2 retries means a persistently failing endpoint can occupy a caller for
-	 * ~3 minutes with no output — far longer than any MCP host waits, so in
-	 * practice the host times out first and the caller gets a generic error with
-	 * no HydraDB diagnostic while this process keeps retrying.
+	 * Deadline for the whole call: every attempt and every wait between them.
+	 * The SDK's own 60s applied to each attempt, so with its 2 retries a failing
+	 * endpoint could occupy a caller for ~3 minutes — far longer than an MCP
+	 * host waits, which then timed out first with no HydraDB diagnostic while
+	 * this process kept retrying.
 	 */
 	timeoutSeconds?: number;
-	/** Retries per call. The SDK defaults to 2; set explicitly so it is a choice. */
+	/** Attempts after the first, inside that deadline. 0 disables retrying. */
 	maxRetries?: number;
 	/** Test seam for the hand-rolled HTTP path; production never sets it. */
 	fetchFn?: typeof fetch;
@@ -681,25 +682,44 @@ abstract class Resource {
 		return { database, collections };
 	}
 
+	/** The whole-call budget, from the connection's transport settings. */
+	private budget(): CallBudget {
+		return {
+			deadlineMs: this.raw?.timeoutMs ?? DEFAULT_TIMEOUT_SECONDS * 1000,
+			maxRetries: this.raw?.maxRetries ?? DEFAULT_MAX_RETRIES,
+		};
+	}
+
+	/**
+	 * One SDK call under the shared retry policy (./retry). `fn` is one attempt
+	 * and must hand the options it is given to the SDK: they carry the call's
+	 * abort signal and turn the SDK's own retries off.
+	 */
 	protected async call<T, Response>(
 		path: string,
-		fn: () => Promise<Response>,
-		onMeta?: (meta: { requestId?: string }) => void,
+		safety: RetrySafety,
+		opts: RequestOptions | undefined,
+		fn: (sdkOptions: SdkRequestOptions) => Promise<Response>,
 	): Promise<T> {
-		try {
-			const raw = await fn();
+		// The SDK and the raw transport share one token; tests without a raw
+		// transport pass none, and an empty credential is never matched.
+		const known = [this.raw?.token ?? ""];
 
-			if (onMeta) onMeta({ requestId: readRequestId(raw) });
-
-			return unwrap<T>(raw);
-		} catch (err) {
+		const raw = await withRetries({
+			path,
+			safety,
+			budget: this.budget(),
+			signal: opts?.signal,
+			known,
 			// A refused database is a decision the user made, not a transport
 			// failure from `path`; it keeps its own type and message.
-			if (err instanceof ScopeNotAllowedError) throw err;
-			// The SDK and the raw transport share one token; tests without a raw
-			// transport pass none, and an empty credential is never matched.
-			throw translateError(path, err, [this.raw?.token ?? ""]);
-		}
+			rethrow: (err) => err instanceof ScopeNotAllowedError,
+			attempt: (signal) => fn({ abortSignal: signal, maxRetries: 0 }),
+		});
+
+		opts?.onMeta?.({ requestId: readRequestId(raw) });
+
+		return unwrap<T>(raw);
 	}
 }
 
@@ -814,11 +834,11 @@ export class ContextResource extends Resource {
 		const request = this.queryRequest(params);
 
 
-		return this.call("/query", async () => {
-			const response = await this.sdk.query(request, req(opts));
+		return this.call("/query", "idempotent", opts, async (o) => {
+			const response = await this.sdk.query(request, o);
 			validateQueryResponse(response);
 			return response;
-		}, opts?.onMeta);
+		});
 	}
 
 	/**
@@ -831,8 +851,8 @@ export class ContextResource extends Resource {
 	): Promise<string> {
 		const request: SDK.SearchQueryRequest = { ...this.queryRequest(params), responseFormat: "markdown" };
 
-		return this.call("/query", async () => {
-			const response = await this.sdk.query(request, req(opts));
+		return this.call("/query", "idempotent", opts, async (o) => {
+			const response = await this.sdk.query(request, o);
 
 			// The SDK types `data` as the result object and passes the string
 			// through unparsed. Anything else is not a successful Markdown answer.
@@ -844,7 +864,7 @@ export class ContextResource extends Resource {
 			}
 
 			return response;
-		}, opts?.onMeta);
+		});
 	}
 
 	/**
@@ -944,8 +964,10 @@ export class ContextResource extends Resource {
 			}
 		}
 
-		return this.call("/context/ingest", () =>
-			this.sdk.context.ingest(request, req(opts)),
+		// Not safe to send twice: without a source id a repeat stores a second
+		// copy, and memory inference can extract a second set of facts.
+		return this.call("/context/ingest", "unsafe", opts, (o) =>
+			this.sdk.context.ingest(request, o),
 		);
 	}
 
@@ -1004,7 +1026,9 @@ export class ContextResource extends Resource {
 
 			return this.call<SDK.ListV2ListResponse, unknown>(
 				"/context/list",
-				async () => {
+				"idempotent",
+				opts,
+				async (o) => {
 					const response = await this.sdk.fetch(
 						"/context/list",
 						{
@@ -1015,7 +1039,7 @@ export class ContextResource extends Resource {
 							},
 							body: JSON.stringify(request),
 						},
-						req(opts),
+						o,
 					);
 					const text = await response.text();
 					let body: unknown = text;
@@ -1059,13 +1083,12 @@ export class ContextResource extends Resource {
 					}
 					return body;
 				},
-				opts?.onMeta,
 			);
 		}
 
 		const filtered = hasSourceFields || params.connectorId != null;
 
-		return this.call<SDK.ListV2ListResponse, ListResponse>("/context/list", async () => {
+		return this.call<SDK.ListV2ListResponse, ListResponse>("/context/list", "idempotent", opts, async (o) => {
 			const request: SDK.ListV2ListContentRequest = {
 				...this.scope(params.collection, params.database),
 				// `all` took the passthrough above; this narrows the type for the SDK.
@@ -1093,7 +1116,7 @@ export class ContextResource extends Resource {
 				request.groupThreads = false;
 			}
 
-			const response = await this.sdk.context.list(request, req(opts));
+			const response = await this.sdk.context.list(request, o);
 
 			// A filtered list is a lookup: an empty answer reads as "that source
 			// does not exist", so a body that is not a real list (a proxy's login
@@ -1101,7 +1124,7 @@ export class ContextResource extends Resource {
 			if (filtered) validateListResponse(response, params.kind);
 
 			return response;
-		}, opts?.onMeta);
+		});
 	}
 
 	/** Fetch a source's content (SDK `context.inspect`; was "fetch content"). */
@@ -1109,14 +1132,14 @@ export class ContextResource extends Resource {
 		params: InspectParams,
 		opts?: RequestOptions,
 	): Promise<SDK.FetchV2SourceFetchResponse> {
-		return this.call("/context/inspect", () =>
+		return this.call("/context/inspect", "idempotent", opts, (o) =>
 			this.sdk.context.inspect({
 				...this.scope(params.collection, params.database),
 				id: params.id,
 				mode: params.mode,
 				expirySeconds: params.expirySeconds,
 				acl: params.acl,
-			}, req(opts)),
+			}, o),
 		);
 	}
 
@@ -1125,11 +1148,11 @@ export class ContextResource extends Resource {
 		params: IngestionStatusParams,
 		opts?: RequestOptions,
 	): Promise<SDK.IngestionV2BatchProcessingStatus> {
-		return this.call("/context/status", () =>
+		return this.call("/context/status", "idempotent", opts, (o) =>
 			this.sdk.context.status({
 				...this.scope(params.collection, params.database),
 				ids: params.ids,
-			}, req(opts)),
+			}, o),
 		);
 	}
 
@@ -1188,7 +1211,7 @@ export class ContextResource extends Resource {
 		params: RelationsParams = {},
 		opts?: RequestOptions,
 	): Promise<SDK.GraphGraphRelationsResponse> {
-		return this.call("/context/relations", () =>
+		return this.call("/context/relations", "idempotent", opts, (o) =>
 			this.sdk.context.relations({
 				...this.scope(params.collection, params.database),
 				id: params.id,
@@ -1196,7 +1219,7 @@ export class ContextResource extends Resource {
 				limit: params.limit,
 				cursor: params.cursor,
 				acl: params.acl,
-			}, req(opts)),
+			}, o),
 		);
 	}
 
@@ -1205,12 +1228,12 @@ export class ContextResource extends Resource {
 		params: DeleteParams,
 		opts?: RequestOptions,
 	): Promise<SDK.SourcesMemoryDeleteResponse> {
-		return this.call("/context", () =>
+		return this.call("/context", "idempotent", opts, (o) =>
 			this.sdk.context.delete({
 				...this.scope(params.collection, params.database),
 				ids: params.ids,
 				type: params.kind,
-			}, req(opts)),
+			}, o),
 		);
 	}
 }
@@ -1233,42 +1256,44 @@ export class DatabasesResource extends Resource {
 	create(
 		params: CreateDatabaseParams,
 	): Promise<SDK.TenantsTenantCreateAcceptedResponse> {
-		return this.call("/databases", () =>
+		return this.call("/databases", "unsafe", undefined, (o) =>
 			this.sdk.databases.create({
 				database: params.database,
 				databaseMetadataSchema: params.databaseMetadataSchema,
 				embeddingsDimension: params.embeddingsDimension,
-			}),
+			}, o),
 		);
 	}
 
 	delete(database: string): Promise<SDK.TenantsTenantDeleteResponse> {
-		return this.call("/databases", () => this.sdk.databases.delete({ database }));
+		return this.call("/databases", "unsafe", undefined, (o) =>
+			this.sdk.databases.delete({ database }, o),
+		);
 	}
 
-	list(): Promise<SDK.TenantsTenantIdsResponse> {
-		return this.call("/databases", () => this.sdk.databases.list());
+	list(opts?: RequestOptions): Promise<SDK.TenantsTenantIdsResponse> {
+		return this.call("/databases", "idempotent", opts, (o) => this.sdk.databases.list(o));
 	}
 
 	collections(
 		database: string,
 		opts?: RequestOptions,
 	): Promise<SDK.TenantsSubTenantIdsResponse> {
-		return this.call("/databases/collections", () =>
-			this.sdk.databases.collections({ database }, req(opts)),
+		return this.call("/databases/collections", "idempotent", opts, (o) =>
+			this.sdk.databases.collections({ database }, o),
 		);
 	}
 
 	stats(database: string, opts?: RequestOptions): Promise<SDK.TenantsTenantStatsResponse> {
-		return this.call("/databases/stats", () =>
-			this.sdk.databases.stats({ database }, req(opts)),
+		return this.call("/databases/stats", "idempotent", opts, (o) =>
+			this.sdk.databases.stats({ database }, o),
 		);
 	}
 
 	/** Infra provisioning readiness — renamed away from `status` (SDK `databases.status`). */
 	readiness(database: string): Promise<SDK.TenantsInfraStatusResponseV2> {
-		return this.call("/databases/status", () =>
-			this.sdk.databases.status({ database }),
+		return this.call("/databases/status", "idempotent", undefined, (o) =>
+			this.sdk.databases.status({ database }, o),
 		);
 	}
 
@@ -1301,10 +1326,12 @@ export class DatabasesResource extends Resource {
 		// returns the canonical `database`/`collection` names the API expects.
 		const { database, collection } = this.scope(params.collection, params.database);
 
-		return this.call("/databases/collections", () =>
+		// A repeat after the first succeeded answers "not found", which would
+		// report a deletion that happened as one that failed.
+		return this.call("/databases/collections", "unsafe", opts, (o) =>
 			this.sdk.databases.deleteCollection(
 				{ database, collection: collection ?? params.collection.trim() },
-				req(opts),
+				o,
 			),
 		);
 	}
@@ -1537,6 +1564,8 @@ export class HydraDB {
 	readonly graph: GraphResource;
 	/** This connection's credential, kept only so `redact` can remove it. */
 	private readonly token: string;
+	/** Deadline for one whole tool call, every request and wait inside it. */
+	readonly deadlineMs: number;
 
 	constructor(config: HydraConfig, sdk?: HydraDBClient, rawOverride?: RawTransport) {
 		const client =
@@ -1544,11 +1573,12 @@ export class HydraDB {
 			new HydraDBClient({
 				token: config.token,
 				baseUrl: config.baseUrl ?? HydraDBEnvironment.Default,
-				// Both are stated rather than inherited. The SDK's defaults (60s,
-				// 2 retries) were never chosen by this server, and their product is
-				// a ~3 minute worst case on the slowest tool it exposes.
-				timeoutInSeconds: config.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS,
-				maxRetries: config.maxRetries ?? DEFAULT_MAX_RETRIES,
+				// The retry loop in ./retry owns retries and the deadline, so the
+				// SDK makes exactly one attempt per call. Its own timer is set past
+				// the deadline so that the loop's abort, which says which deadline
+				// passed, always fires first.
+				timeoutInSeconds: (config.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS) + 5,
+				maxRetries: 0,
 				// Never inherit the SDK's console logger: it writes to stdout, which
 				// on stdio transport is the JSON-RPC channel. Only the sink is
 				// overridden — level and silencing keep the SDK's own defaults.
@@ -1568,6 +1598,8 @@ export class HydraDB {
 				timeoutSeconds: DEFAULT_TIMEOUT_SECONDS,
 				maxRetries: DEFAULT_MAX_RETRIES,
 			});
+
+		this.deadlineMs = raw.timeoutMs;
 
 		this.context = new ContextResource(
 			client,

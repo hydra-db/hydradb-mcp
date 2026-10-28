@@ -18,11 +18,16 @@
  * shared process serving many independent callers builds a fresh server +
  * transport per request and tears it down when the response closes. That is the
  * transport's documented stateless mode (`sessionIdGenerator: undefined`).
+ * Because of that, a `notifications/cancelled` POST reaches a different server
+ * instance than the call it names; `forwardCancels` routes it across.
  */
+
+import { createHash } from "node:crypto";
 
 import cors from "cors";
 import express, { type Express } from "express";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { z } from "zod";
 
 import { HydraDB, type HydraConfig, apiKeyId } from "./hydra/index.js";
 import {
@@ -47,6 +52,7 @@ import {
 import {
 	awaitInFlight,
 	beginShutdown,
+	cancelToolCall,
 	createHydraDBServer,
 	inFlightCount,
 } from "./server.js";
@@ -83,6 +89,50 @@ function bearerFromHeader(value: string | string[] | undefined): string | undefi
 	if (!raw) return undefined;
 	const match = /^\s*Bearer\s+(.+)$/i.exec(raw);
 	return (match ? match[1] : raw).trim() || undefined;
+}
+
+/**
+ * The cancel scope for one caller: a hash of the full credential, never its
+ * public key id, so only someone holding the credential can cancel its calls.
+ * Requests that carry an MCP session id are scoped to it too.
+ */
+function cancelScope(apiKey: string, oauthUserId: string | undefined, sessionId: string | undefined): string {
+	return createHash("sha256")
+		.update([apiKey, oauthUserId ?? "", sessionId ?? ""].join("\u0000"))
+		.digest("hex");
+}
+
+/** A `notifications/cancelled` message, as the MCP spec defines it. */
+const cancelNotification = z.object({
+	method: z.literal("notifications/cancelled"),
+	params: z.object({
+		requestId: z.union([z.string(), z.number()]),
+		reason: z.string().optional(),
+	}),
+});
+
+/** A request body: one JSON-RPC message or a batch of them. */
+const jsonRpcBody = z.union([z.array(z.unknown()), z.unknown().transform((message) => [message])]);
+
+/**
+ * Route `notifications/cancelled` to the call it names.
+ *
+ * Each HTTP request gets a fresh server, so the instance that receives a
+ * cancel is never the one running the call, and the MCP SDK on its own would
+ * drop it. The running call is found by (caller scope, request id) instead.
+ * The notification itself still goes to the fresh server afterwards, which
+ * acknowledges it as usual.
+ */
+function forwardCancels(messages: readonly z.infer<typeof cancelNotification>[], scope: string): void {
+	for (const { params } of messages) {
+		const stopped = cancelToolCall(
+			scope,
+			params.requestId,
+			new Error(params.reason || "cancelled by the caller"),
+		);
+
+		logger.info("cancel received", { requestId: String(params.requestId), stopped });
+	}
 }
 
 /** JSON-RPC error codes used for transport-level failures (spec: -32000 range). */
@@ -330,7 +380,22 @@ export function createHttpApp(config: HttpServerConfig): Express {
 			if (oauthUserId) hydraConfig.oauthUserId = oauthUserId;
 
 			const hydra = new HydraDB(hydraConfig);
-			const server = createHydraDBServer(hydra, creds.graph, { oauthTools: identity != null });
+			const scope = cancelScope(creds.apiKey, oauthUserId, req.header("mcp-session-id"));
+
+			const cancels = jsonRpcBody
+				.parse(req.body)
+				.flatMap((message) => {
+					const parsed = cancelNotification.safeParse(message);
+
+					return parsed.success ? [parsed.data] : [];
+				});
+
+			forwardCancels(cancels, scope);
+
+			const server = createHydraDBServer(hydra, creds.graph, {
+				oauthTools: identity != null,
+				cancelScope: scope,
+			});
 
 			// Stateless: this pair serves exactly this request and is discarded when
 			// the response closes. Tearing them down on `close` — which fires for a

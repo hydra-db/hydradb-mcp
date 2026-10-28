@@ -335,12 +335,29 @@ Checks whether ingested sources have finished indexing.
 | `HYDRADB_COLLECTION` | Collection (sub-tenant) for partitioning | *none* — unset means the workspace's own collection; the model can also name one per call via `collection`/`collections` (see `hydradb_list_collections`) |
 | `HYDRADB_BASE_URL`   | Base URL override                    | `https://api.hydradb.com` |
 | `HYDRADB_LOG_LEVEL`  | Log level: DEBUG, INFO, WARN, ERROR  | `ERROR`                   |
-| `HYDRADB_TIMEOUT_SECONDS` | Per-attempt request timeout     | `30`                      |
-| `HYDRADB_MAX_RETRIES` | Retries per request (0 disables)    | `2`                       |
+| `HYDRADB_TIMEOUT_SECONDS` | Deadline for a whole tool call, every attempt and retry wait included | `45` |
+| `HYDRADB_MAX_RETRIES` | Retries per request, inside that deadline (0 disables) | `2`                       |
 | `HYDRADB_MCP_LEGACY_TOOLS` | Register the deprecated `hydra_db_*` tools | *off* |
 | `HYDRADB_GRAPH_DATABASE` | Default graph database for the Cypher tools | `HYDRADB_DATABASE` |
 | `HYDRADB_GRAPH_COLLECTION` | Default graph collection | `default` |
 | `HYDRADB_MCP_GRAPH_TOOLS` | Register the graph tools (`0` withholds them) | *on* |
+
+#### Timeouts, retries and cancellation
+
+One deadline (`HYDRADB_TIMEOUT_SECONDS`, default 45s) covers a whole tool call,
+so with the defaults a call ends before the 60s most MCP hosts wait. When the
+deadline passes, the error names it and lists every attempt.
+
+- Reads are retried after `429`, `408`, `5xx` and dropped connections.
+- Writes that are not safe to repeat (ingest, Cypher, feedback, creating or
+  deleting a database or collection) are retried only when the failure shows
+  Hydra DB did not act on them (`429`, `408`, connection refused). After a
+  `5xx`, a dropped connection or the deadline, the error says the outcome is
+  unknown: check before sending it again.
+- `Retry-After` (seconds or HTTP date) sets the wait. If the wait would end
+  past the deadline, the call fails at once with Hydra DB's answer.
+- Cancelling a tool call stops the request in flight and starts no new attempt,
+  on stdio and on the hosted HTTP server.
 
 A graph database is a **different namespace** from the memory database: the same
 name can exist as both, and Cypher aimed at the wrong one reads an empty graph
