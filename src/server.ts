@@ -12,7 +12,7 @@ import { renderRecalledContext } from "./context.js";
 import { COLLECTION_PATTERN, MAX_BODY_BYTES, renderRows } from "./cypher.js";
 import { SERVER_INSTRUCTIONS, TOOL_DESCRIPTIONS } from "./descriptions.js";
 import { HydraDB, assertCollectionAllowed, assertDatabaseAllowed, hasEntries } from "./hydra/index.js";
-import type { ContextKind, MetadataFilter, QueryKind, QueryParams } from "./hydra/index.js";
+import type { ContextKind, MetadataFilter, QueryKind, QueryParams, ResponseMeta, ResponseWarning } from "./hydra/index.js";
 import { logger } from "./logger.js";
 import { ALIAS_REPLACEMENTS, DEPRECATED_TOOL_NAMES, TOOL_NAMES } from "./tool-names.js";
 import type { MemoryResultItem } from "./types.js";
@@ -730,6 +730,8 @@ export function createHydraDBServer(
 		// Captured per call, not stored on the resource: two tools can be in
 		// flight at once and a shared slot would hand one the other's id.
 		let requestId: string | undefined;
+		let warnings: ResponseWarning[] = [];
+		let omittedWarnings = 0;
 
 		const textRetrieval = args.operator != null || args.query_by === "text";
 
@@ -771,8 +773,12 @@ export function createHydraDBServer(
 
 		const requestOptions = {
 			signal,
-			onMeta: (meta: { requestId?: string }) => {
+			onMeta: (meta: ResponseMeta) => {
 				requestId = meta.requestId;
+				omittedWarnings = Math.max((meta.warnings?.length ?? 0) - 10, 0);
+				warnings = (meta.warnings ?? []).slice(0, 10).map((warning) => ({
+					code: briefly(warning.code), message: briefly(warning.message),
+				}));
 			},
 		};
 
@@ -800,12 +806,17 @@ export function createHydraDBServer(
 		// Independent of `detail`, which only decides how much of each chunk is
 		// shown. No outputSchema is declared on this tool, so omitting it is
 		// within spec.
+		const warningText = () => warnings.length
+			? `\n\nWarnings:\n${warnings.map((warning) => `- ${warning.code}: ${warning.message}`).join("\n")}${omittedWarnings ? `\n(${omittedWarnings} additional warnings omitted)` : ""}`
+			: "";
 		const queryResult = (text: string, extra: Record<string, unknown> = {}) => {
-			const body = scopeWarning ? `${text}\n\nScope warning: ${scopeWarning}` : text;
+			const body = `${text}${scopeWarning ? `\n\nScope warning: ${scopeWarning}` : ""}${warningText()}`;
 			if (args.structured !== true) return textResult(body);
 			return structuredResult(body, {
 				resolved_scope: resolvedScope, ...(requestId ? { request_id: requestId } : {}), ...extra,
 				...(scopeWarning ? { scope_warning: scopeWarning } : {}),
+				...(warnings.length ? { warnings } : {}),
+				...(omittedWarnings ? { warnings_omitted: omittedWarnings } : {}),
 			});
 		};
 
@@ -829,7 +840,7 @@ export function createHydraDBServer(
 				`\n\n(truncated: ${markdown.length} characters, showing ${showing})`;
 
 			const framing =
-				`${scopeText(resolvedScope)}\n\n`.length + feedback.length + warning.length;
+				`${scopeText(resolvedScope)}\n\n`.length + feedback.length + warning.length + warningText().length;
 
 			const budget = Math.max(QUERY_CHAR_BUDGET - framing - note(QUERY_CHAR_BUDGET).length, 0);
 
@@ -925,7 +936,7 @@ export function createHydraDBServer(
 			feedbackLine;
 
 		const scopeLine = scopeText(resolvedScope);
-		const headerAllowance = 120 + scopeLine.length + (scopeWarning?.length ?? 0) + 20;
+		const headerAllowance = 120 + scopeLine.length + (scopeWarning?.length ?? 0) + 20 + warningText().length;
 		const sourceRefs = new Map<string, Record<string, unknown>>();
 		const singleCollection = "collection" in resolvedScope
 			? resolvedScope.collection

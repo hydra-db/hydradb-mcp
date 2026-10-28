@@ -4514,3 +4514,38 @@ test("hydradb_relations caps limit", async () => {
 	assert.equal(isError, true);
 	assert.equal(calls.length, 0);
 });
+
+test("query surfaces non-fatal API warnings in text and structured results", async () => {
+	const warning = { code: "acl_ignored_by_connector_enforcement", message: "Request ACL ignored." };
+	for (const format of [undefined, "markdown"] as const) {
+		const { hydra } = mockHydra({ query: async () => ({ success: true,
+			data: format === "markdown" ? "## Results" : { chunks: [] },
+			meta: { requestId: "r-warning", warnings: [warning] },
+		}) });
+		const client = await connect(hydra);
+		const out = await client.callTool({ name: "hydradb_query", arguments: {
+			query: "q", structured: true, ...(format ? { response_format: format } : {}),
+		} });
+		assert.notEqual(out.isError, true);
+		assert.match((out.content as { text: string }[])[0]!.text, /acl_ignored_by_connector_enforcement/);
+		assert.deepEqual(out.structuredContent?.warnings, [warning]);
+		assert.equal(out.structuredContent?.request_id, "r-warning");
+		await client.close();
+	}
+});
+
+test("query warnings remain bounded and account for the text budget", async () => {
+	const warnings = Array.from({ length: 12 }, (_, i) => ({ code: `notice_${i}`, message: "x".repeat(1000) }));
+	const { hydra } = mockHydra({ query: async () => ({ success: true, data: "a".repeat(60_000),
+		meta: { requestId: "r", warnings },
+	}) });
+	const client = await connect(hydra);
+	const out = await client.callTool({ name: "hydradb_query", arguments: {
+		query: "q", structured: true, response_format: "markdown",
+	} });
+	const text = (out.content as { text: string }[])[0]!.text;
+	assert.ok(text.length <= 40_000);
+	assert.match(text, /2 additional warnings omitted/);
+	assert.equal(out.structuredContent?.warnings_omitted, 2);
+	await client.close();
+});

@@ -1127,3 +1127,35 @@ test("real SDK markdown query sends response_format=markdown and returns the str
 	assert.equal(markdown, "## Results");
 	assert.equal(requestId, "r-md");
 });
+
+test("query metadata retains warnings for camelCase and snake_case envelopes", async () => {
+	const warning = { code: "acl_ignored_by_connector_enforcement", message: "Request ACL ignored." };
+	for (const meta of [{ requestId: "r1", warnings: [warning] }, { request_id: "r1", warnings: [warning] }]) {
+		const sdk = { query: async () => ({ success: true, data: { chunks: [] }, meta }) } as unknown as HydraDBClient;
+		const hydra = new HydraDB({ token: "t", database: "db_test" }, sdk);
+		let received: unknown;
+		await hydra.context.query({ query: "q" }, { onMeta: (value) => { received = value; } });
+		assert.deepEqual(received, { requestId: "r1", warnings: [warning] });
+	}
+});
+
+test("malformed warning entries do not discard the request id or valid warnings", async () => {
+	const sdk = { query: async () => ({ success: true, data: { chunks: [] }, meta: {
+		request_id: "r1", warnings: [null, { code: 42 }, { code: "notice", message: "ok" }],
+	} }) } as unknown as HydraDBClient;
+	const hydra = new HydraDB({ token: "t", database: "db_test" }, sdk);
+	let received: unknown;
+	await hydra.context.query({ query: "q" }, { onMeta: (value) => { received = value; } });
+	assert.deepEqual(received, { requestId: "r1", warnings: [{ code: "notice", message: "ok" }] });
+});
+
+test("released SDK query retains wire warning metadata", async (t) => {
+	const warning = { code: "acl_ignored_by_connector_enforcement", message: "Request ACL ignored." };
+	t.mock.method(globalThis, "fetch", async () => new Response(JSON.stringify({
+		success: true, data: { chunks: [] }, meta: { request_id: "r-wire", warnings: [warning] },
+	}), { status: 200, headers: { "content-type": "application/json" } }));
+	const hydra = new HydraDB({ token: "t", database: "db_test", maxRetries: 0 });
+	let received: unknown;
+	await hydra.context.query({ query: "q" }, { onMeta: (value) => { received = value; } });
+	assert.deepEqual(received, { requestId: "r-wire", warnings: [warning] });
+});
