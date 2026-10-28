@@ -72,6 +72,8 @@ export interface RawRequestOptions {
 	 * and `unsafe` for everything else; see ./retry for what each allows.
 	 */
 	safety?: RetrySafety;
+	/** Observe the successful wire response before envelope unwrapping. */
+	onResponse?: (value: unknown) => void;
 }
 
 export function newRawTransport(config: {
@@ -108,7 +110,7 @@ export function sendRaw<T>(
 		budget: { deadlineMs: t.timeoutMs, maxRetries: t.maxRetries },
 		signal: opts?.signal,
 		known: [t.token],
-		attempt: (signal) => attemptRaw<T>(t, path, method, body, signal),
+		attempt: (signal) => attemptRaw<T>(t, path, method, body, signal, opts?.onResponse),
 	});
 }
 
@@ -118,6 +120,7 @@ async function attemptRaw<T>(
 	method: "GET" | "POST" | "DELETE",
 	body: unknown,
 	signal: AbortSignal,
+	onResponse?: (value: unknown) => void,
 ): Promise<T> {
 	const doFetch = t.fetchFn ?? fetch;
 
@@ -152,6 +155,7 @@ async function attemptRaw<T>(
 			throw responseError(path, response.status, parsed, [t.token], response.headers);
 		}
 
+		onResponse?.(parsed);
 		return unwrap<T>(parsed);
 	} catch (err) {
 		if (err instanceof HydraWrapperError) throw err;

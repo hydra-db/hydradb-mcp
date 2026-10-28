@@ -1113,6 +1113,36 @@ export function createHydraDBServer(
 		return safe.length > 200 ? `${safe.slice(0, 200)}…` : safe;
 	}
 
+	/** Preserve bounded, non-fatal response warnings on every ACL-bearing read. */
+	async function withResponseWarnings(
+		run: (onMeta: (meta: ResponseMeta) => void) => Promise<ToolResult>,
+	): Promise<ToolResult> {
+		let warnings: ResponseWarning[] = [];
+		let omitted = 0;
+		const result = await run((meta) => {
+			omitted = Math.max((meta.warnings?.length ?? 0) - 10, 0);
+			warnings = (meta.warnings ?? []).slice(0, 10).map((warning) => ({
+				code: briefly(warning.code),
+				message: briefly(warning.message),
+			}));
+		});
+
+		if (warnings.length === 0) return result;
+		const notice = `\n\nWarnings:\n${warnings.map((warning) => `- ${warning.code}: ${warning.message}`).join("\n")}` +
+			(omitted ? `\n(${omitted} additional warnings omitted)` : "");
+		return {
+			...result,
+			content: result.content.map((part, index) => index === 0 ? { ...part, text: part.text + notice } : part),
+			...(result.structuredContent ? {
+				structuredContent: {
+					...result.structuredContent,
+					warnings,
+					...(omitted ? { warnings_omitted: omitted } : {}),
+				},
+			} : {}),
+		};
+	}
+
 	/**
 	 * Per-item detail for an ingest that did not fully succeed.
 	 *
@@ -1424,7 +1454,7 @@ export function createHydraDBServer(
 		acl?: string[];
 		database?: string;
 		collection?: string;
-	} = {}, signal?: AbortSignal): Promise<ToolResult> {
+	} = {}, signal?: AbortSignal, onMeta?: (meta: ResponseMeta) => void): Promise<ToolResult> {
 		logger.debug(TOOL_NAMES.LIST);
 
 		const raw = await hydra.context.list({
@@ -1437,7 +1467,7 @@ export function createHydraDBServer(
 			acl: args.acl,
 			database: args.database,
 			collection: args.collection,
-		}, { signal });
+		}, { signal, onMeta });
 
 		const { memories, page } = toMemoryList(raw);
 		const resolvedScope = singleScope(args);
@@ -1532,7 +1562,7 @@ export function createHydraDBServer(
 		acl?: string[];
 		database?: string;
 		collection?: string;
-	}, signal?: AbortSignal): Promise<ToolResult> {
+	}, signal?: AbortSignal, onMeta?: (meta: ResponseMeta) => void): Promise<ToolResult> {
 		logger.debug(TOOL_NAMES.LIST);
 
 		const sourceFields: Record<string, string> = {};
@@ -1559,7 +1589,7 @@ export function createHydraDBServer(
 			acl: args.acl,
 			database: args.database,
 			collection: args.collection,
-		}, { signal });
+		}, { signal, onMeta });
 
 		const { sources, page } = toSourceList(raw, args.include_fields);
 		const noun = args.kind === "all" ? "items (memories and knowledge together)" : "sources";
@@ -1672,6 +1702,7 @@ export function createHydraDBServer(
 			collection?: string;
 		},
 		signal?: AbortSignal,
+		onMeta?: (meta: ResponseMeta) => void,
 	): Promise<ToolResult> {
 		// Like subgraph: blank is refused, anything else goes out byte for byte.
 		// A blank id would otherwise read as "omitted" and return the whole
@@ -1697,7 +1728,7 @@ export function createHydraDBServer(
 					database: args.database,
 					collection: args.collection,
 				},
-				{ signal },
+				{ signal, onMeta },
 			),
 		);
 
@@ -1936,6 +1967,7 @@ export function createHydraDBServer(
 			collection?: string;
 		},
 		signal?: AbortSignal,
+		onMeta?: (meta: ResponseMeta) => void,
 	): Promise<ToolResult> {
 		// Blank is rejected; anything else is forwarded byte for byte. The
 		// server treats an item id as opaque (ingest stores a caller's
@@ -1962,7 +1994,7 @@ export function createHydraDBServer(
 				database: args.database,
 				collection: args.collection,
 			},
-			{ signal },
+			{ signal, onMeta },
 		);
 
 		// Soft failure, like inspect: the server's own message, flagged.
@@ -2074,7 +2106,7 @@ export function createHydraDBServer(
 		acl?: string[];
 		database?: string;
 		collection?: string;
-	}, signal?: AbortSignal): Promise<ToolResult> {
+	}, signal?: AbortSignal, onMeta?: (meta: ResponseMeta) => void): Promise<ToolResult> {
 		logger.debug(`${TOOL_NAMES.INSPECT}: ${args.source_id}`);
 
 		const res = await hydra.context.inspect({
@@ -2084,7 +2116,7 @@ export function createHydraDBServer(
 			acl: args.acl,
 			database: args.database,
 			collection: args.collection,
-		}, { signal });
+		}, { signal, onMeta });
 
 		// Soft failure: return a normal (non-error) text result, matching v1.
 		if (!res.success || res.error) {
@@ -4098,10 +4130,11 @@ export function createHydraDBServer(
 				);
 			}
 
-			if (a.kind === "knowledge" || a.kind === "all") {
-				return runListSources(
-					{
-						kind: a.kind,
+				if (a.kind === "knowledge" || a.kind === "all") {
+					const sourceKind = a.kind;
+					return withResponseWarnings((onMeta) => runListSources(
+						{
+							kind: sourceKind,
 						source_ids: ids,
 						external_id: a.external_id,
 						parent_external_id: a.parent_external_id,
@@ -4119,10 +4152,11 @@ export function createHydraDBServer(
 						collection: a.collection,
 					},
 					extra?.signal,
-				);
+					onMeta,
+				));
 			}
 
-			return runListMemories(
+			return withResponseWarnings((onMeta) => runListMemories(
 				{
 					source_ids: ids,
 					page: a.page,
@@ -4134,7 +4168,8 @@ export function createHydraDBServer(
 					collection: a.collection,
 				},
 				extra?.signal,
-			);
+				onMeta,
+			));
 		},
 		readOnly,
 		listOutputSchema,
@@ -4143,14 +4178,15 @@ export function createHydraDBServer(
 	register(
 		TOOL_NAMES.INSPECT,
 		inspectSchema,
-		(args, extra) => runInspect(toInspectArgs(args), extra?.signal),
+		(args, extra) => withResponseWarnings((onMeta) => runInspect(toInspectArgs(args), extra?.signal, onMeta)),
 		readOnly,
 	);
 
 	register(
 		TOOL_NAMES.SUBGRAPH,
 		subgraphSchema,
-		(args, extra) => runSubgraph(args as Parameters<typeof runSubgraph>[0], extra?.signal),
+		(args, extra) => withResponseWarnings((onMeta) =>
+			runSubgraph(args as Parameters<typeof runSubgraph>[0], extra?.signal, onMeta)),
 		readOnly,
 	);
 
@@ -4159,7 +4195,8 @@ export function createHydraDBServer(
 		relationsSchema,
 		// SAFETY: the MCP SDK validated args against relationsSchema, whose keys
 		// and types are exactly runRelations' parameter.
-		(args, extra) => runRelations(args as Parameters<typeof runRelations>[0], extra?.signal),
+		(args, extra) => withResponseWarnings((onMeta) =>
+			runRelations(args as Parameters<typeof runRelations>[0], extra?.signal, onMeta)),
 		readOnly,
 		relationsOutputSchema,
 	);
