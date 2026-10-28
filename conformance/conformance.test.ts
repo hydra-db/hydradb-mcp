@@ -80,24 +80,30 @@ type RecordedCall = {
 	contentType: string;
 };
 
+type RecorderData =
+	| { chunks: never[] }
+	| { userMemories: never[] }
+	| { statuses: never[] };
+
 function makeRecorder(): { sdk: HydraDBClient; calls: RecordedCall[] } {
 	const calls: RecordedCall[] = [];
 	const record =
-		(method: string, contentType: string) =>
+		(method: string, contentType: string, data?: RecorderData) =>
 		(args?: Record<string, unknown>) => {
 			calls.push({ method, args: args ?? {}, contentType });
-			return Promise.resolve({ data: method === "query" ? { chunks: [] } : {}, success: true });
+
+			return Promise.resolve({ data: data ?? {}, success: true });
 		};
 
 	const sdk = {
-		query: record("query", "application/json"),
+		query: record("query", "application/json", { chunks: [] }),
 		context: {
 			ingest: record("ingest", "multipart/form-data"),
-			list: record("list", "application/json"),
+			list: record("list", "application/json", { userMemories: [] }),
 			inspect: record("inspect", "application/json"),
 			delete: record("delete", "application/json"),
 			relations: record("relations", "application/json"),
-			status: record("status", "application/json"),
+			status: record("status", "application/json", { statuses: [] }),
 		},
 		databases: {
 			create: record("create", "application/json"),

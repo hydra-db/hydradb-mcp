@@ -842,6 +842,10 @@ export function createHydraDBServer(
 
 		const raw = await send();
 
+		const feedbackLine = requestId
+			? `\nWas this useful? Report it with ${TOOL_NAMES.FEEDBACK} using request_id: ${requestId}`
+			: "";
+
 		// The renderer reads the SDK payload directly; there is no longer a
 		// snake_case mirror to convert into.
 		const res = raw;
@@ -864,7 +868,7 @@ export function createHydraDBServer(
 				return queryResult(
 					`No relevant ${resultNoun(kind)} found in any of the ${widened.length} collections of database ` +
 						`"${database}" (${widened.join(", ")}). Try rephrasing the question, or pass \`collection\` ` +
-						`to search one collection with its full result budget.`,
+						`to search one collection with its full result budget.${feedbackLine}`,
 				);
 			}
 
@@ -884,14 +888,15 @@ export function createHydraDBServer(
 					: "";
 
 			return queryResult(
-				scope != null
+				(scope != null
 					? `No relevant ${resultNoun(kind)} found in collection "${scope}" of database "${database}". ` +
 						`The data may live in another collection — call ${TOOL_NAMES.LIST_COLLECTIONS} to list them, ` +
 						`then pass \`collection\` (or \`collections\` to search several at once).`
 					: `No relevant ${resultNoun(kind)} found in database "${database}" — with no collection ` +
 						`named, the search ran in this connection's workspace default. If the data could live ` +
 						`elsewhere, call ${TOOL_NAMES.LIST_COLLECTIONS} and pass \`collection\` (or \`collections\` ` +
-						`to search several at once).${tooMany}`,
+						`to search several at once).${tooMany}`) +
+					feedbackLine,
 			);
 		}
 
@@ -913,10 +918,6 @@ export function createHydraDBServer(
 		// cannot be reconstructed later — if it is not printed here, the feedback
 		// tool has nothing to attach a submission to. Rendered on its own line so
 		// a model copies it verbatim rather than reformatting it.
-		const feedbackLine = requestId
-			? `\nWas this useful? Report it with ${TOOL_NAMES.FEEDBACK} using request_id: ${requestId}`
-			: "";
-
 		const legend =
 			`\n\n---\nEach [id: …] is a source id: pass one to ${TOOL_NAMES.INSPECT} for that ` +
 			`source's content, or to ${TOOL_NAMES.DELETE} to remove it. Keep the resolved database, the source's collection, and your ACL on follow-up calls. ` +
