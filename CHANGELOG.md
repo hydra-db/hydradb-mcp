@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — retries, timeouts and cancellation
+
+- **One deadline per tool call.** `HYDRADB_TIMEOUT_SECONDS` now bounds the
+  whole call, every attempt and wait included, instead of each attempt. The
+  default is 45s (was 30s per attempt, up to ~90s with retries), so a call ends
+  before a 60s host timeout. The error names the deadline and lists every
+  attempt, not just the last one.
+- **No blind retry of writes.** Ingest, Cypher, feedback and database or
+  collection creation and deletion are retried only after a failure that shows
+  Hydra DB did not act on them (429, 408, connection refused). After a 5xx, a
+  dropped connection or the deadline they are not retried, and the error says
+  the outcome is unknown. Reads retry as before.
+- **`Retry-After` is honoured** in both forms (seconds and HTTP date) on every
+  call, within the deadline. A wait that would end past the deadline fails at
+  once with the server's answer.
+- **Cancellation stops retrying.** A cancel during the wait between attempts
+  ends the call with no new attempt.
+- **Cancel works on the hosted server.** Each HTTP request gets its own MCP
+  server instance, so a `notifications/cancelled` POST never reached the call
+  it named. Running calls are now registered by caller and request id, and a
+  cancel from the same credential stops the call and its upstream request.
+- **Tool annotations.** `hydradb_ingest` (and its legacy aliases) is marked
+  destructive, since it overwrites a document with the same source id, and
+  not idempotent. `hydradb_graph_query` is marked not idempotent.
+- The SDK's own retry loop is turned off (`maxRetries: 0`); one policy in
+  `src/hydra/retry.ts` now covers SDK and hand-rolled calls alike.
+
 ## [1.6.0] - 2026-10-28
 
 ### Fixed — `hydradb_query` title filter missed documents saved through `hydradb_ingest`

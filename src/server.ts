@@ -11,7 +11,13 @@ import type { GraphConfig } from "./config.js";
 import { renderRecalledContext } from "./context.js";
 import { COLLECTION_PATTERN, MAX_BODY_BYTES, renderRows } from "./cypher.js";
 import { SERVER_INSTRUCTIONS, TOOL_DESCRIPTIONS } from "./descriptions.js";
-import { HydraDB, assertCollectionAllowed, assertDatabaseAllowed, hasEntries } from "./hydra/index.js";
+import {
+	DeadlineExceeded,
+	HydraDB,
+	assertCollectionAllowed,
+	assertDatabaseAllowed,
+	hasEntries,
+} from "./hydra/index.js";
 import type { ContextKind, MetadataFilter, QueryKind, QueryParams } from "./hydra/index.js";
 import { logger } from "./logger.js";
 import { ALIAS_REPLACEMENTS, DEPRECATED_TOOL_NAMES, TOOL_NAMES } from "./tool-names.js";
@@ -321,6 +327,43 @@ export interface ServerOptions {
 	 * token; never for API keys, so their tool list is unchanged.
 	 */
 	oauthTools?: boolean;
+	/**
+	 * Who is calling, for cancellation that arrives on another server instance.
+	 *
+	 * The hosted transport builds a fresh server for every HTTP request, so a
+	 * `notifications/cancelled` POST lands on an instance that is not running
+	 * the call it names. With a scope set, every running call is registered
+	 * under (scope, request id) and `cancelToolCall` can stop it from anywhere
+	 * in the process. Must identify the credential itself, not something a
+	 * caller without it could reproduce.
+	 */
+	cancelScope?: string;
+}
+
+/**
+ * Running tool calls by caller scope and JSON-RPC request id. A set, because
+ * two clients on one credential can use the same request id at once; a cancel
+ * for that id stops both, which only ever affects the credential's own calls.
+ */
+const cancellable = new Map<string, Set<AbortController>>();
+
+function cancelKey(scope: string, requestId: string | number): string {
+	// JSON keeps the type in the key: request id 1 and request id "1" differ.
+	return `${scope}\u0000${JSON.stringify(requestId)}`;
+}
+
+/**
+ * Cancel the running tool call `requestId` made under `scope`, on whichever
+ * server instance in this process is running it. Returns how many were stopped.
+ */
+export function cancelToolCall(scope: string, requestId: string | number, reason: Error): number {
+	const running = cancellable.get(cancelKey(scope, requestId));
+
+	if (!running) return 0;
+
+	for (const controller of running) controller.abort(reason);
+
+	return running.size;
 }
 
 
@@ -2806,6 +2849,9 @@ export function createHydraDBServer(
 
 	// --- Registration helper ---
 
+	/** The part of the MCP request context the tool wrapper reads. */
+	type ToolExtra = { signal?: AbortSignal; requestId?: string | number };
+
 	/**
 	 * The last stop before a failure reaches the model: strip this connection's
 	 * credential, and any credential-shaped text, from whatever the tool threw or
@@ -2835,6 +2881,58 @@ export function createHydraDBServer(
 		};
 	}
 
+	/**
+	 * Run one tool call under one deadline, and make it cancellable.
+	 *
+	 * The deadline covers the whole call, however many HydraDB requests it
+	 * makes, so the defaults end before a host's 60s tool timeout. The signal
+	 * the handler gets aborts on the host's cancel, on the deadline, or on a
+	 * cancel routed here by `cancelToolCall`.
+	 */
+	async function withCallBudget(
+		extra: ToolExtra | undefined,
+		run: (signal: AbortSignal) => Promise<ToolResult>,
+	): Promise<ToolResult> {
+		const controller = new AbortController();
+
+		const timer = setTimeout(
+			() => controller.abort(new DeadlineExceeded(hydra.deadlineMs)),
+			hydra.deadlineMs,
+		);
+
+		const onHostAbort = () => controller.abort(extra?.signal?.reason);
+
+		if (extra?.signal?.aborted) onHostAbort();
+		else extra?.signal?.addEventListener("abort", onHostAbort, { once: true });
+
+		const key =
+			options.cancelScope != null && extra?.requestId != null
+				? cancelKey(options.cancelScope, extra.requestId)
+				: undefined;
+
+		if (key != null) {
+			const running = cancellable.get(key) ?? new Set();
+
+			running.add(controller);
+			cancellable.set(key, running);
+		}
+
+		try {
+			return await run(controller.signal);
+		} finally {
+			clearTimeout(timer);
+			extra?.signal?.removeEventListener("abort", onHostAbort);
+
+			if (key != null) {
+				const running = cancellable.get(key);
+
+				running?.delete(controller);
+
+				if (running?.size === 0) cancellable.delete(key);
+			}
+		}
+	}
+
 	function register(
 		name: keyof typeof TOOL_DESCRIPTIONS,
 		inputSchema: Record<string, unknown>,
@@ -2855,8 +2953,8 @@ export function createHydraDBServer(
 
 		const counted = (
 			args: Record<string, unknown>,
-			extra?: { signal?: AbortSignal },
-		) => trackInFlight(() => redactFailure(() => handler(args, extra)));
+			extra?: ToolExtra,
+		) => trackInFlight(() => redactFailure(() => withCallBudget(extra, (signal) => handler(args, { ...extra, signal }))));
 
 		const wrapped = isDeprecated
 			? (args: Record<string, unknown>, extra?: { signal?: AbortSignal }) => {
@@ -3466,13 +3564,10 @@ export function createHydraDBServer(
 		row_count: z.number(),
 	};
 
-	// `destructiveHint` was missing from the annotations type, so no tool could
-	// declare it — and the MCP spec defaults it to TRUE for any non-readonly
-	// tool. A spec-following host therefore read hydradb_ingest as destructive
-	// and could prompt the user before every proactive save, which is exactly the
-	// behaviour the instructions now ask for. Meanwhile hydradb_delete, which IS
-	// destructive, was landing there only by absence — one refactor adding an
-	// explicit `readOnlyHint: false` would have flipped it.
+	// The MCP spec defaults `destructiveHint` to TRUE for any non-readonly tool,
+	// so a tool that leaves it out is read as destructive by accident rather
+	// than by decision. hydradb_ingest IS destructive, deliberately: it
+	// overwrites an existing document that has the same source id.
 	//
 	// All four are stated on every tool so none of them depends on a default.
 	const readOnly = {
@@ -3488,6 +3583,19 @@ export function createHydraDBServer(
 	const additiveWrite = {
 		readOnlyHint: false,
 		destructiveHint: false,
+		idempotentHint: false,
+		openWorldHint: true,
+	};
+
+	/**
+	 * Writes that can replace what is stored, and are not safe to repeat:
+	 * ingest overwrites an existing document with the same source id (and
+	 * without one, a repeat stores a second copy); Cypher can MERGE, SET or
+	 * DELETE, and a repeated CREATE makes duplicates.
+	 */
+	const overwritingWrite = {
+		readOnlyHint: false,
+		destructiveHint: true,
 		idempotentHint: false,
 		openWorldHint: true,
 	};
@@ -3620,7 +3728,7 @@ export function createHydraDBServer(
 				`${TOOL_NAMES.INGEST} requires either \`text\` (a note) or \`turns\` (a conversation).`,
 			);
 		},
-		additiveWrite,
+		overwritingWrite,
 		ingestOutputSchema,
 	);
 
@@ -3952,7 +4060,8 @@ export function createHydraDBServer(
 			// DELETE is as reachable through it as MATCH. Annotating it any other
 			// way would tell a host it is safe to auto-approve, which is exactly
 			// the claim the removed read/write split could not actually back.
-			destructive,
+			// Not idempotent either: a repeated CREATE adds a second node.
+			overwritingWrite,
 			graphRowsOutputSchema,
 		);
 
@@ -4010,7 +4119,7 @@ export function createHydraDBServer(
 		TOOL_NAMES.STORE,
 		storeSchema,
 		(args, extra) => runStore(args as Parameters<typeof runStore>[0], extra?.signal),
-		additiveWrite,
+		overwritingWrite,
 	);
 
 	register(
@@ -4038,7 +4147,7 @@ export function createHydraDBServer(
 				extra?.signal,
 			);
 		},
-		additiveWrite,
+		overwritingWrite,
 	);
 
 	register(
