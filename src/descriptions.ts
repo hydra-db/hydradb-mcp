@@ -720,6 +720,65 @@ Confirm with the user before deleting a collection they did not name. Take the c
 		},
 	},
 
+	// --- Connector lifecycle and resources (ENG-3341) ---
+
+	[TOOL_NAMES.CONNECTOR_PROVIDERS]: {
+		title: "List Connector Providers",
+		description:
+			"List supported connector providers, or inspect one provider's setup and credential field schema. The schema describes fields only. Never put credential values in MCP tool arguments or chat.",
+		params: {
+			provider: "Provider identifier such as slack, github, linear, notion, or gmail. Omit it to list the provider catalog.",
+		},
+	},
+
+	[TOOL_NAMES.CONNECTOR_LIST]: {
+		title: "List Connectors",
+		description:
+			"List connected data sources visible to this connection. Database-confined OAuth connections only see connectors assigned to an allowed database; org-wide connectors with no database stay hidden.",
+		params: {
+			provider: "Optional provider identifier used to narrow the list.",
+			include_health: "Set true to include current connector health and plan-limit information.",
+		},
+	},
+
+	[TOOL_NAMES.CONNECTOR_GET]: {
+		title: "Get Connector",
+		description:
+			"Read one connector's configuration and lifecycle. Take connector_id from hydradb_connector_list; never invent it.",
+		params: {
+			connector_id: "Connector identifier from hydradb_connector_list.",
+		},
+	},
+
+	[TOOL_NAMES.CONNECTOR_STATUS]: {
+		title: "Check Connector Status",
+		description:
+			"Explain connector and resource sync health in plain words. This separates current sync activity, the latest attempt, the last successful sync, retryability, required action, and permission warnings.",
+		params: {
+			connector_id: "Connector identifier from hydradb_connector_list.",
+		},
+	},
+
+	[TOOL_NAMES.CONNECTOR_DISCOVER]: {
+		title: "Discover Connector Resources",
+		description:
+			"List resources currently visible through a connected provider account. Continue with next_cursor while has_more is true.",
+		params: {
+			connector_id: "Connector identifier from hydradb_connector_list.",
+			cursor: "Opaque next_cursor returned by the previous discovery page.",
+			limit: "Maximum resources to request on this page, from 1 through 100.",
+		},
+	},
+
+	[TOOL_NAMES.CONNECTOR_RESOURCES]: {
+		title: "List Configured Connector Resources",
+		description:
+			"List resources configured on one connector. A database-confined OAuth connection only receives resources whose effective destination database is allowed.",
+		params: {
+			connector_id: "Connector identifier from hydradb_connector_list.",
+		},
+	},
+
 	// --- Deprecated aliases ---
 
 	[TOOL_NAMES.SEARCH]: {
@@ -838,6 +897,15 @@ THE TOOLS
 - ${TOOL_NAMES.LIST_COLLECTIONS} — the collections inside a database, with this connection's default marked. Call it before choosing a collection when the connection has no default.
 - ${TOOL_NAMES.FEEDBACK} — report whether a query's results were actually useful, using the request_id that query printed. Say what the right answer was (\`ground_truth_answer\`) or which sources held it (\`ground_truth_source_ids\`) when you know — that is machine-checkable and worth far more than prose. It records a signal; it never changes the query's result or the stored data.
 - ${TOOL_NAMES.DELETE_COLLECTION} — irreversible removal of one collection and everything in it. Confirm first. Take the name from ${TOOL_NAMES.LIST_COLLECTIONS}.
+
+CONNECTORS
+
+- ${TOOL_NAMES.CONNECTOR_PROVIDERS} — supported connector providers and one provider's credential field schema. Never send credential values through MCP.
+- ${TOOL_NAMES.CONNECTOR_LIST} — connected data sources visible to this connection.
+- ${TOOL_NAMES.CONNECTOR_GET} — one connector's configuration and lifecycle.
+- ${TOOL_NAMES.CONNECTOR_STATUS} — plain-language connector and resource sync health.
+- ${TOOL_NAMES.CONNECTOR_DISCOVER} — resources available through a connector's stored provider account.
+- ${TOOL_NAMES.CONNECTOR_RESOURCES} — resources already configured on a connector.
 
 Ids flow between these: ${TOOL_NAMES.QUERY}, ${TOOL_NAMES.LIST} and ${TOOL_NAMES.SUBGRAPH} emit them; ${TOOL_NAMES.INSPECT}, ${TOOL_NAMES.DELETE}, ${TOOL_NAMES.RELATIONS}, ${TOOL_NAMES.STATUS} and ${TOOL_NAMES.SUBGRAPH} accept them. Never invent one.
 

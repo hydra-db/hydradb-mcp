@@ -22,6 +22,12 @@ export interface HydraDBConfig {
 	timeoutSeconds?: number;
 	maxRetries?: number;
 	graph: GraphConfig;
+	connectors: ConnectorConfig;
+}
+
+export interface ConnectorConfig {
+	/** Whether the connector tools are registered at all. */
+	enabled: boolean;
 }
 
 /**
@@ -162,7 +168,15 @@ export function resolveConfig(
 		...(timeoutSeconds != null ? { timeoutSeconds } : {}),
 		...(maxRetries != null ? { maxRetries } : {}),
 		graph: resolveGraphConfig(env, database),
+		connectors: resolveConnectorConfig(env),
 	};
+}
+
+/** Resolve the connector-family gate without requiring an API key. */
+export function resolveConnectorConfig(
+	env: EnvSource = process.env,
+): ConnectorConfig {
+	return { enabled: flag(env.HYDRADB_MCP_CONNECTOR_TOOLS, true) };
 }
 
 /**

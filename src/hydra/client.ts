@@ -19,6 +19,7 @@ import { HydraDBClient, HydraDBEnvironment, HydraDBError, serialization } from "
 import type { HydraDB as SDK } from "@hydradb/sdk";
 import { z } from "zod";
 
+import { ConnectorsResource } from "./connectors.js";
 import { unwrap } from "./envelope.js";
 import { HydraWrapperError, scrub, translateError } from "./errors.js";
 import { type GraphConfig, GraphResource } from "./graph.js";
@@ -1519,6 +1520,8 @@ export class FeedbackResource extends Resource {
 
 export class HydraDB {
 	readonly context: ContextResource;
+	/** Public connector lifecycle and resource operations. */
+	readonly connectors: ConnectorsResource;
 	readonly databases: DatabasesResource;
 	/** Feedback about a query that already ran (POST /feedback). */
 	readonly feedback: FeedbackResource;
@@ -1577,6 +1580,7 @@ export class HydraDB {
 			config.allowedCollections,
 			raw,
 		);
+		this.connectors = new ConnectorsResource(client);
 		this.feedback = new FeedbackResource(
 			client,
 			config.database,

@@ -6,8 +6,9 @@ import { z } from "zod";
 
 import { jsonValue, toAddMemoryResponse, toMemoryList, toRelationList, toSourceList } from "./adapters.js";
 import type { JsonValue, ListedFields, PageInfo, SourceListItem } from "./adapters.js";
-import { resolveConfig, resolveGraphConfig } from "./config.js";
-import type { GraphConfig } from "./config.js";
+import { resolveConfig, resolveConnectorConfig, resolveGraphConfig } from "./config.js";
+import type { ConnectorConfig, GraphConfig } from "./config.js";
+import { ConnectorTools } from "./connectors.js";
 import { renderRecalledContext } from "./context.js";
 import { COLLECTION_PATTERN, MAX_BODY_BYTES, renderRows } from "./cypher.js";
 import { SERVER_INSTRUCTIONS, TOOL_DESCRIPTIONS } from "./descriptions.js";
@@ -32,6 +33,10 @@ type ToolResult = {
 	structuredContent?: Record<string, unknown>;
 	isError?: boolean;
 };
+
+interface ToolInputFields {
+	[name: string]: z.ZodTypeAny;
+}
 
 /**
  * A usable title for an entry the caller did not name.
@@ -566,10 +571,12 @@ export function createHydraDBServer(
 
 	let hydra: HydraDB;
 	let graphConfig: GraphConfig;
+	let connectorConfig: ConnectorConfig;
 
 	if (hydraOverride) {
 		hydra = hydraOverride;
 		graphConfig = { ...resolveGraphConfig(), ...graphOverride };
+		connectorConfig = resolveConnectorConfig();
 	} else {
 		const config = resolveConfig();
 		hydra = new HydraDB({
@@ -583,10 +590,13 @@ export function createHydraDBServer(
 			...(config.maxRetries != null ? { maxRetries: config.maxRetries } : {}),
 		});
 		graphConfig = { ...config.graph, ...graphOverride };
+		connectorConfig = config.connectors;
 		logger.info(
 			`Hydra DB connected (database=${config.database}, collection=${config.collection})`,
 		);
 	}
+
+	const connectorTools = new ConnectorTools(hydra);
 
 	// --- Handlers (shared by canonical tools and their deprecated aliases) ---
 
@@ -711,6 +721,7 @@ export function createHydraDBServer(
 			// Listing is discovery: confined like it, before anything is sent.
 			assertDatabaseAllowed(database, hydra.allowedDatabases);
 			const names = await collectionNamesBounded(database, signal);
+
 			if (names == null) scopeWarning = "Collection discovery failed; only the workspace default was searched. Named collections may contain additional results.";
 			const allowed = hydra.allowedCollections;
 			const usable = (names ?? []).filter((n) => !allowed || allowed.includes(n));
@@ -788,10 +799,13 @@ export function createHydraDBServer(
 		const searchedCollections = scopeCollections != null
 			? Array.isArray(scopeCollections) ? scopeCollections : Object.keys(scopeCollections)
 			: undefined;
+
 		const resolvedScope = searchedCollections
 			? { database, collections: searchedCollections }
 			: singleScope({ database, collection: scopeCollection });
+
 		const compact = (args.detail ?? "compact") === "compact";
+
 		// Text only unless the caller asks for `structured: true`. The default
 		// consumer is a model reading the text, and everything `structuredContent`
 		// carries is already in it — ids and collection per chunk, the resolved
@@ -802,7 +816,9 @@ export function createHydraDBServer(
 		// within spec.
 		const queryResult = (text: string, extra: Record<string, unknown> = {}) => {
 			const body = scopeWarning ? `${text}\n\nScope warning: ${scopeWarning}` : text;
+
 			if (args.structured !== true) return textResult(body);
+
 			return structuredResult(body, {
 				resolved_scope: resolvedScope, ...(requestId ? { request_id: requestId } : {}), ...extra,
 				...(scopeWarning ? { scope_warning: scopeWarning } : {}),
@@ -927,17 +943,22 @@ export function createHydraDBServer(
 		const scopeLine = scopeText(resolvedScope);
 		const headerAllowance = 120 + scopeLine.length + (scopeWarning?.length ?? 0) + 20;
 		const sourceRefs = new Map<string, Record<string, unknown>>();
+
 		const singleCollection = "collection" in resolvedScope
 			? resolvedScope.collection
 			: searchedCollections?.length === 1 ? searchedCollections[0] : undefined;
+
 		const scopedChunks = (res.chunks ?? []).map((chunk) => {
 			const collection = chunk.collection || singleCollection;
+
 			// A multi-collection result needs per-source provenance; an id alone
 			// is not unique across partitions. Never remember a shared last scope.
 			const scopeKnown = searchedCollections
 				? typeof collection === "string" && searchedCollections.includes(collection)
 				: "collection" in resolvedScope && collection === resolvedScope.collection;
+
 			const followScope = { database, ...(collection != null ? { collection } : {}), ...(args.acl != null ? { acl: args.acl } : {}) };
+
 			const ref = {
 				id: chunk.id, collection: collection ?? null,
 				...(chunk.sourceTitle ? { title: chunk.sourceTitle } : {}),
@@ -946,7 +967,9 @@ export function createHydraDBServer(
 					...(kind !== "all" ? { list_args: { kind, ids: [chunk.id], ...followScope } } : {}),
 				} : { scope_unresolved: true }),
 			};
+
 			sourceRefs.set(JSON.stringify([collection, chunk.id]), ref);
+
 			return { ...chunk, ...(collection != null ? { collection } : {}) };
 		});
 
@@ -1243,6 +1266,7 @@ export function createHydraDBServer(
 			// content, including this one — a caller branching on `items` should not
 			// have to special-case the empty result.
 			const filtered = hasEntries(args.metadata) || hasEntries(args.additional_metadata);
+
 			return structuredResult(
 				args.page != null && args.page > 1
 					? `No memories on page ${args.page}.`
@@ -1331,9 +1355,13 @@ export function createHydraDBServer(
 		logger.debug(TOOL_NAMES.LIST);
 
 		const sourceFields: Record<string, string> = {};
+
 		if (args.external_id != null) sourceFields.app_external_id = args.external_id;
+
 		if (args.parent_external_id != null) sourceFields.app_parent_id = args.parent_external_id;
+
 		if (args.url != null) sourceFields.url = args.url;
+
 		if (args.provider != null) sourceFields.app_provider = args.provider;
 
 		const raw = await hydra.context.list({
@@ -1359,6 +1387,7 @@ export function createHydraDBServer(
 
 		if (sources.length === 0) {
 			const collection = args.collection?.trim() || hydra.collection;
+
 			const lookupScope = `database ${JSON.stringify(args.database?.trim() || hydra.database)}, ` +
 				(collection == null ? "workspace default" : `collection ${JSON.stringify(collection)}`);
 
@@ -1651,6 +1680,7 @@ export function createHydraDBServer(
 		const start = Math.max(0, offset ?? 0);
 		const budget = Math.min(limit ?? INSPECT_CHAR_BUDGET, INSPECT_CHAR_BUDGET);
 		const total = res.content.length;
+
 		if (start > total) throw new Error(`Inspect offset ${start} exceeds source length ${total}; restart at offset 0 if the source changed.`);
 
 		if (start === 0 && total <= budget) return res.content;
@@ -1907,9 +1937,11 @@ export function createHydraDBServer(
 		const end = content == null ? offset : Math.min(offset + (args.limit ?? INSPECT_CHAR_BUDGET), content.length);
 		const hasMoreContent = content != null && end < content.length;
 		const contentHash = content != null ? createHash("sha256").update(content).digest("hex") : undefined;
+
 		if (contentHash != null && content != null && (offset > 0 || end < content.length)) {
 			parts.push(`Content SHA-256: ${contentHash}. Each slice re-fetches the source; restart at offset 0 if this changes.`);
 		}
+
 		return structuredResult(parts.join("\n\n"), {
 			id: args.source_id, resolved_scope: resolvedScope,
 			...(mode !== "content" && res.presignedUrl ? { download_url: res.presignedUrl } : {}),
@@ -2001,6 +2033,7 @@ export function createHydraDBServer(
 		// message must name the assumption instead of asserting the id is wrong.
 		const otherKind = kind === "memory" ? "knowledge" : "memory";
 		const otherNoun = otherKind === "knowledge" ? "knowledge source" : "memory";
+
 		const assumedHint = kindAssumed
 			? ` \`kind\` was not given, so this looked in ${kind} only. If ` +
 				`${ids.length > 1 ? "these ids are" : "this id is"} a ${otherNoun}, ` +
@@ -2837,7 +2870,7 @@ export function createHydraDBServer(
 
 	function register(
 		name: keyof typeof TOOL_DESCRIPTIONS,
-		inputSchema: Record<string, unknown>,
+		inputSchema: ToolInputFields | z.ZodType,
 		handler: (
 			args: Record<string, unknown>,
 			extra?: { signal?: AbortSignal },
@@ -3691,12 +3724,15 @@ export function createHydraDBServer(
 				a.url != null ? "url" : null,
 				a.provider != null ? "provider" : null,
 			].filter((s): s is string => s != null);
+
 			if (a.parent_external_id != null && a.provider == null) {
 				throw new Error(`${TOOL_NAMES.LIST}: parent_external_id requires provider; parent IDs are not unique across providers.`);
 			}
+
 			if (a.parent_external_id != null && a.connector_id == null) {
 				throw new Error(`${TOOL_NAMES.LIST}: parent_external_id requires connector_id; provider alone does not identify a site/account. Resolve the parent with external_id first and copy its stored connector_id; never guess it.`);
 			}
+
 			if (a.kind !== "knowledge" && sourceSelectors.length > 0) {
 				throw new Error(
 					`${TOOL_NAMES.LIST}: ${sourceSelectors.join(", ")} ` +
@@ -3927,6 +3963,135 @@ export function createHydraDBServer(
 			deleted: z.boolean(),
 		},
 	);
+
+	// --- Connector read tools (ENG-3341) ---
+	if (connectorConfig.enabled) {
+		const providerSchema = z
+			.object({
+				provider: z
+					.string()
+					.trim()
+					.min(1)
+					.optional()
+					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_PROVIDERS].params.provider),
+			})
+			.strict();
+
+		const connectorListSchema = z
+			.object({
+				provider: z
+					.string()
+					.trim()
+					.min(1)
+					.optional()
+					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_LIST].params.provider),
+				include_health: z
+					.boolean()
+					.optional()
+					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_LIST].params.include_health),
+			})
+			.strict();
+
+		const connectorIdSchema = (name: typeof TOOL_NAMES.CONNECTOR_GET | typeof TOOL_NAMES.CONNECTOR_STATUS | typeof TOOL_NAMES.CONNECTOR_RESOURCES) =>
+			z
+				.object({
+					connector_id: z
+						.string()
+						.trim()
+						.min(1)
+						.describe(TOOL_DESCRIPTIONS[name].params.connector_id),
+				})
+				.strict();
+
+		const discoverSchema = z
+			.object({
+				connector_id: z
+					.string()
+					.trim()
+					.min(1)
+					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_DISCOVER].params.connector_id),
+				cursor: z
+					.string()
+					.min(1)
+					.optional()
+					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_DISCOVER].params.cursor),
+				limit: z
+					.number()
+					.int()
+					.min(1)
+					.max(100)
+					.optional()
+					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_DISCOVER].params.limit),
+			})
+			.strict();
+
+		register(
+			TOOL_NAMES.CONNECTOR_PROVIDERS,
+			providerSchema,
+			async (args, extra) => {
+				const input = providerSchema.parse(args);
+				const result = await connectorTools.providers(input.provider, { signal: extra?.signal });
+
+				return structuredResult(result.text, result.data);
+			},
+			readOnly,
+		);
+
+		register(
+			TOOL_NAMES.CONNECTOR_LIST,
+			connectorListSchema,
+			async (args, extra) => {
+				const input = connectorListSchema.parse(args);
+
+				const result = await connectorTools.list(
+					{ provider: input.provider, includeHealth: input.include_health },
+					{ signal: extra?.signal },
+				);
+
+				return structuredResult(result.text, result.data);
+			},
+			readOnly,
+		);
+
+		for (const [name, run] of [
+			[TOOL_NAMES.CONNECTOR_GET, (id: string, signal?: AbortSignal) => connectorTools.get(id, { signal })],
+			[TOOL_NAMES.CONNECTOR_STATUS, (id: string, signal?: AbortSignal) => connectorTools.status(id, { signal })],
+			[TOOL_NAMES.CONNECTOR_RESOURCES, (id: string, signal?: AbortSignal) => connectorTools.resources(id, { signal })],
+		] as const) {
+			const schema = connectorIdSchema(name);
+			register(
+				name,
+				schema,
+				async (args, extra) => {
+					const input = schema.parse(args);
+					const result = await run(input.connector_id, extra?.signal);
+
+					return structuredResult(result.text, result.data);
+				},
+				readOnly,
+			);
+		}
+
+		register(
+			TOOL_NAMES.CONNECTOR_DISCOVER,
+			discoverSchema,
+			async (args, extra) => {
+				const input = discoverSchema.parse(args);
+
+				const result = await connectorTools.discover(
+					{
+						connectorId: input.connector_id,
+						cursor: input.cursor,
+						limit: input.limit,
+					},
+					{ signal: extra?.signal },
+				);
+
+				return structuredResult(result.text, result.data);
+			},
+			readOnly,
+		);
+	}
 
 	// --- BYOG graph tools (PRO-1681) ---
 	//

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { resolveConfig } from "../src/config.js";
+import { resolveConfig, resolveConnectorConfig } from "../src/config.js";
 import { LogLevel, resolveLogLevel } from "../src/logger.js";
 
 // A fresh warning sink per call keeps assertions isolated from the module-level
@@ -34,6 +34,7 @@ test("canonical HYDRADB_* names are read as primary with no warning", () => {
 			database: "db",
 			collection: "default",
 		},
+		connectors: { enabled: true },
 	});
 	assert.deepEqual(messages, []);
 });
@@ -180,6 +181,18 @@ test("malformed timeout and retry values fall back rather than throwing", () => 
 			config.timeoutSeconds,
 			undefined,
 			`"${bad}" should be ignored, not adopted`,
+		);
+	}
+});
+
+test("connector tools are enabled by default and accept normal false spellings", () => {
+	assert.equal(resolveConnectorConfig({}).enabled, true);
+
+	for (const value of ["0", "false", "FALSE", "no", "off", " off "]) {
+		assert.equal(
+			resolveConnectorConfig({ HYDRADB_MCP_CONNECTOR_TOOLS: value }).enabled,
+			false,
+			`"${value}" should disable connector tools`,
 		);
 	}
 });

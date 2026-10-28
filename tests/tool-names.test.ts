@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { SERVER_INSTRUCTIONS, TOOL_DESCRIPTIONS } from "../src/descriptions.js";
 import {
 	CANONICAL_TOOL_NAMES,
+	CONNECTOR_TOOL_NAMES,
 	DEPRECATED_TOOL_NAMES,
 	TOOL_NAMES,
 } from "../src/tool-names.js";
@@ -28,7 +29,7 @@ test("all tool names have corresponding descriptions", () => {
 // `hydra_db_ingest_conversation` exists before it had even seen the tool list —
 // and those names beat the canonical ones on literal match.
 test("server instructions reference every canonical tool", () => {
-	for (const toolName of CANONICAL_TOOL_NAMES) {
+	for (const toolName of [...CANONICAL_TOOL_NAMES, ...CONNECTOR_TOOL_NAMES]) {
 		assert.match(
 			SERVER_INSTRUCTIONS,
 			new RegExp(toolName),
