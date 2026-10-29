@@ -1517,11 +1517,225 @@ export class FeedbackResource extends Resource {
 	}
 }
 
+export interface WebhookRegisterParams {
+	/** Public https URL the indexing callbacks are POSTed to. */
+	url: string;
+	/** Event types to subscribe to; defaults server-side to indexing.status_changed. */
+	eventTypes?: string[];
+	/** Bring-your-own signing secret (>= 16 chars). Mutually exclusive with generateSigningSecret. */
+	signingSecret?: string;
+	/** Ask the server to mint a secret as part of the same call; the plaintext comes back once. */
+	generateSigningSecret?: boolean;
+}
+
+export interface WebhookSigningSecretParams {
+	/** A supplied secret (>= 16 chars); omit to have one generated. */
+	signingSecret?: string;
+}
+
+export interface WebhookListDeliveriesParams {
+	/** 1-100, server default 20. */
+	limit?: number;
+	/** Opaque pagination cursor from a previous page's nextCursor. */
+	cursor?: string;
+	/** One of pending, sweeping, delivered, failed, permanently_failed. */
+	status?: string;
+}
+
+// Wire shapes are snake_case: sendRaw unwraps the envelope without renaming, so
+// these mirror the API's JSON exactly, like SubgraphResult and FeedbackResult.
+export interface WebhookRegisterResult {
+	registered: boolean;
+	url?: string;
+	event_types?: string[];
+	signing_secret_configured: boolean;
+	/** Plaintext, returned EXACTLY ONCE when a secret was generated; never readable later. */
+	signing_secret?: string;
+	message?: string;
+}
+
+export interface WebhookGetResult {
+	registered: boolean;
+	url?: string | null;
+	event_types: string[];
+	signing_secret_configured: boolean;
+}
+
+export interface WebhookDeleteResult {
+	deleted: boolean;
+	message?: string;
+}
+
+export interface WebhookSigningSecretResult {
+	/** Plaintext, returned EXACTLY ONCE; never readable later. */
+	signing_secret: string;
+	generated: boolean;
+	message?: string;
+}
+
+export interface WebhookDeliveryItem {
+	delivery_id: string;
+	doc_id: string;
+	status: string;
+	indexing_status: string;
+	event_type: string;
+	webhook_url?: string;
+	attempts: number;
+	error_code?: string | null;
+	error_message?: string | null;
+	created_at: string;
+	updated_at: string;
+}
+
+export interface WebhookDeliveryListResult {
+	deliveries: WebhookDeliveryItem[];
+	count: number;
+	next_cursor?: string | null;
+}
+
+export interface WebhookRetryResult {
+	delivery_id: string;
+	queued: boolean;
+	message?: string;
+}
+
+export interface WebhookTestResult {
+	delivered: boolean;
+	status_code?: number | null;
+	message?: string;
+}
+
+/**
+ * Indexing webhooks (PRO-3342): the /webhooks/indexing management surface —
+ * register a callback for indexing events, rotate or disable its signing secret,
+ * and inspect/retry past deliveries.
+ *
+ * None of these is on the pinned SDK, so every method takes the hand-rolled HTTP
+ * path (CONTRACT §2 rule 7): same header, same envelope unwrap, same error type
+ * as the SDK calls. The endpoints are scoped to the API key's ORG server-side —
+ * not to a database or collection — so none passes a scope.
+ */
+export class WebhooksResource extends Resource {
+	// The base constructor is `protected`, so this one is what makes the class
+	// instantiable from outside the file. Removing it fails with TS2674.
+	// biome-ignore lint/complexity/noUselessConstructor: widens visibility
+	constructor(
+		sdk: HydraDBClient,
+		database: string,
+		collection?: string,
+		allowedDatabases?: readonly string[],
+		allowedCollections?: readonly string[],
+		raw?: RawTransport,
+	) {
+		super(sdk, database, collection, allowedDatabases, allowedCollections, raw);
+	}
+
+	/** The hand-rolled transport, or a legible error when none was configured. */
+	private transport(path: string): RawTransport {
+		if (!this.raw) {
+			throw new HydraWrapperError(
+				`Hydra DB ${path} → ERR: no HTTP transport configured`,
+				path,
+			);
+		}
+
+		return this.raw;
+	}
+
+	register(
+		params: WebhookRegisterParams,
+		opts?: RequestOptions,
+	): Promise<WebhookRegisterResult> {
+		const path = "/webhooks/indexing";
+
+		// Undefined fields are dropped by JSON.stringify, so an omitted event_types
+		// takes the server's default and an omitted signing_secret preserves any
+		// stored secret — exactly the register contract.
+		const body = {
+			url: params.url,
+			event_types: params.eventTypes,
+			signing_secret: params.signingSecret,
+			generate_signing_secret: params.generateSigningSecret,
+		};
+
+		return sendRaw<WebhookRegisterResult>(this.transport(path), path, "POST", body, opts);
+	}
+
+	get(opts?: RequestOptions): Promise<WebhookGetResult> {
+		const path = "/webhooks/indexing";
+
+		return sendRaw<WebhookGetResult>(this.transport(path), path, "GET", undefined, opts);
+	}
+
+	delete(opts?: RequestOptions): Promise<WebhookDeleteResult> {
+		const path = "/webhooks/indexing";
+
+		return sendRaw<WebhookDeleteResult>(this.transport(path), path, "DELETE", undefined, opts);
+	}
+
+	setSigningSecret(
+		params: WebhookSigningSecretParams = {},
+		opts?: RequestOptions,
+	): Promise<WebhookSigningSecretResult> {
+		const path = "/webhooks/indexing/signing-secret";
+
+		// Omit the body to mean "generate one for me": the backend treats an empty
+		// body and an absent signing_secret identically.
+		const body =
+			params.signingSecret != null ? { signing_secret: params.signingSecret } : undefined;
+
+		return sendRaw<WebhookSigningSecretResult>(this.transport(path), path, "POST", body, opts);
+	}
+
+	clearSigningSecret(opts?: RequestOptions): Promise<WebhookRegisterResult> {
+		const path = "/webhooks/indexing/signing-secret";
+
+		return sendRaw<WebhookRegisterResult>(this.transport(path), path, "DELETE", undefined, opts);
+	}
+
+	listDeliveries(
+		params: WebhookListDeliveriesParams = {},
+		opts?: RequestOptions,
+	): Promise<WebhookDeliveryListResult> {
+		const query = new URLSearchParams();
+
+		if (params.limit != null) query.set("limit", String(params.limit));
+
+		if (params.cursor != null) query.set("cursor", params.cursor);
+
+		if (params.status != null) query.set("status", params.status);
+		const suffix = query.toString();
+		const path = `/webhooks/indexing/deliveries${suffix ? `?${suffix}` : ""}`;
+
+		return sendRaw<WebhookDeliveryListResult>(this.transport(path), path, "GET", undefined, opts);
+	}
+
+	getDelivery(deliveryId: string, opts?: RequestOptions): Promise<WebhookDeliveryItem> {
+		const path = `/webhooks/indexing/deliveries/${encodeURIComponent(deliveryId)}`;
+
+		return sendRaw<WebhookDeliveryItem>(this.transport(path), path, "GET", undefined, opts);
+	}
+
+	retryDelivery(deliveryId: string, opts?: RequestOptions): Promise<WebhookRetryResult> {
+		const path = `/webhooks/indexing/deliveries/${encodeURIComponent(deliveryId)}/retry`;
+
+		return sendRaw<WebhookRetryResult>(this.transport(path), path, "POST", undefined, opts);
+	}
+
+	test(opts?: RequestOptions): Promise<WebhookTestResult> {
+		const path = "/webhooks/indexing/test";
+
+		return sendRaw<WebhookTestResult>(this.transport(path), path, "POST", undefined, opts);
+	}
+}
+
 export class HydraDB {
 	readonly context: ContextResource;
 	readonly databases: DatabasesResource;
 	/** Feedback about a query that already ran (POST /feedback). */
 	readonly feedback: FeedbackResource;
+	/** Indexing webhook management (PRO-3342); hand-rolled HTTP, org-scoped. */
+	readonly webhooks: WebhooksResource;
 	/** The default database every unscoped call uses. */
 	readonly database: string;
 	/** Databases a per-call override may name; undefined means any. */
@@ -1586,6 +1800,14 @@ export class HydraDB {
 			raw,
 		);
 		this.databases = new DatabasesResource(
+			client,
+			config.database,
+			config.collection,
+			config.allowedDatabases,
+			config.allowedCollections,
+			raw,
+		);
+		this.webhooks = new WebhooksResource(
 			client,
 			config.database,
 			config.collection,

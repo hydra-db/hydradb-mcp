@@ -42,6 +42,21 @@ export const TOOL_NAMES = {
 	GRAPH_COLLECTIONS: "hydradb_graph_collections",
 	GRAPH_ADMIN: "hydradb_graph_admin",
 
+	// Indexing webhook tools (PRO-3342). One per public /webhooks/indexing
+	// endpoint, so an agent can register a callback for indexing events and debug
+	// a failed delivery without leaving the session. A separate family with its
+	// own gate, like the graph tools above: new capability, no prior spelling, so
+	// no alias.
+	WEBHOOK_REGISTER: "hydradb_webhook_register",
+	WEBHOOK_GET: "hydradb_webhook_get",
+	WEBHOOK_DELETE: "hydradb_webhook_delete",
+	WEBHOOK_SET_SIGNING_SECRET: "hydradb_webhook_set_signing_secret",
+	WEBHOOK_CLEAR_SIGNING_SECRET: "hydradb_webhook_clear_signing_secret",
+	WEBHOOK_LIST_DELIVERIES: "hydradb_webhook_list_deliveries",
+	WEBHOOK_GET_DELIVERY: "hydradb_webhook_get_delivery",
+	WEBHOOK_RETRY_DELIVERY: "hydradb_webhook_retry_delivery",
+	WEBHOOK_TEST: "hydradb_webhook_test",
+
 	// Deprecated aliases — kept working for backward compatibility.
 	SEARCH: "hydra_db_search",
 	STORE: "hydra_db_store",
@@ -81,6 +96,24 @@ export const GRAPH_TOOL_NAMES = [
 	TOOL_NAMES.GRAPH_QUERY,
 	TOOL_NAMES.GRAPH_COLLECTIONS,
 	TOOL_NAMES.GRAPH_ADMIN,
+] as const;
+
+/**
+ * The indexing-webhook family (PRO-3342), registered together and gated
+ * together. On by default like the graph family — a real product surface no
+ * other client exposes — and withheld as a group by HYDRADB_MCP_WEBHOOK_TOOLS=0
+ * for callers who do not want the extra manifest.
+ */
+export const WEBHOOK_TOOL_NAMES = [
+	TOOL_NAMES.WEBHOOK_REGISTER,
+	TOOL_NAMES.WEBHOOK_GET,
+	TOOL_NAMES.WEBHOOK_DELETE,
+	TOOL_NAMES.WEBHOOK_SET_SIGNING_SECRET,
+	TOOL_NAMES.WEBHOOK_CLEAR_SIGNING_SECRET,
+	TOOL_NAMES.WEBHOOK_LIST_DELIVERIES,
+	TOOL_NAMES.WEBHOOK_GET_DELIVERY,
+	TOOL_NAMES.WEBHOOK_RETRY_DELIVERY,
+	TOOL_NAMES.WEBHOOK_TEST,
 ] as const;
 
 export const DEPRECATED_TOOL_NAMES = [

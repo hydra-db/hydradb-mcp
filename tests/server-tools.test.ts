@@ -24,6 +24,7 @@ import {
 	CANONICAL_TOOL_NAMES,
 	DEPRECATED_TOOL_NAMES,
 	GRAPH_TOOL_NAMES,
+	WEBHOOK_TOOL_NAMES,
 } from "../src/tool-names.js";
 
 type RecordedCall = { method: string; args: Record<string, unknown> };
@@ -1670,11 +1671,11 @@ test("deprecated aliases are not registered by default", async () => {
 		assert.ok(!names.includes(alias), `${alias} must be off by default`);
 	}
 
-	// The graph family IS on by default — it is a product surface with no other
-	// client exposing it, not a legacy alias.
+	// The graph and webhook families are BOTH on by default — each is a product
+	// surface with no other client exposing it, not a legacy alias.
 	assert.equal(
 		names.length,
-		CANONICAL_TOOL_NAMES.length + GRAPH_TOOL_NAMES.length,
+		CANONICAL_TOOL_NAMES.length + GRAPH_TOOL_NAMES.length + WEBHOOK_TOOL_NAMES.length,
 	);
 });
 
@@ -1689,6 +1690,7 @@ test("HYDRADB_MCP_LEGACY_TOOLS restores every alias", async () => {
 		names.length,
 		CANONICAL_TOOL_NAMES.length +
 			GRAPH_TOOL_NAMES.length +
+			WEBHOOK_TOOL_NAMES.length +
 			DEPRECATED_TOOL_NAMES.length,
 	);
 });

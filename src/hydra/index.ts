@@ -11,6 +11,7 @@ export {
 	ContextResource,
 	DatabasesResource,
 	FeedbackResource,
+	WebhooksResource,
 	DEFAULT_TIMEOUT_SECONDS,
 	DEFAULT_MAX_RETRIES,
 	hasEntries,
@@ -41,6 +42,17 @@ export type {
 	FeedbackRating,
 	FeedbackSource,
 	FeedbackGroundTruth,
+	WebhookRegisterParams,
+	WebhookSigningSecretParams,
+	WebhookListDeliveriesParams,
+	WebhookRegisterResult,
+	WebhookGetResult,
+	WebhookDeleteResult,
+	WebhookSigningSecretResult,
+	WebhookDeliveryItem,
+	WebhookDeliveryListResult,
+	WebhookRetryResult,
+	WebhookTestResult,
 } from "./client.js";
 
 export { GraphResource } from "./graph.js";

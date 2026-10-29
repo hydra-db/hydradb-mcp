@@ -12,6 +12,13 @@ import { renderRecalledContext } from "./context.js";
 import { COLLECTION_PATTERN, MAX_BODY_BYTES, renderRows } from "./cypher.js";
 import { SERVER_INSTRUCTIONS, TOOL_DESCRIPTIONS } from "./descriptions.js";
 import { HydraDB, assertCollectionAllowed, assertDatabaseAllowed, hasEntries } from "./hydra/index.js";
+import type {
+	WebhookDeliveryItem,
+	WebhookDeliveryListResult,
+	WebhookGetResult,
+	WebhookRegisterResult,
+	WebhookSigningSecretResult,
+} from "./hydra/index.js";
 import type { ContextKind, MetadataFilter, QueryKind, QueryParams } from "./hydra/index.js";
 import { logger } from "./logger.js";
 import { ALIAS_REPLACEMENTS, DEPRECATED_TOOL_NAMES, TOOL_NAMES } from "./tool-names.js";
@@ -114,6 +121,121 @@ function structuredResult(
  */
 function errorResult(text: string): ToolResult {
 	return { content: [{ type: "text" as const, text }], isError: true };
+}
+
+/**
+ * The one place a plaintext signing secret is rendered (PRO-3342).
+ *
+ * The secret is returned by the API exactly once — on generate/set — and is
+ * never readable again (`get` only reports whether one is configured). So it is
+ * shown here with a clear "copy it now" label and NEVER logged, so it does not
+ * leak into later tool output or the process logs.
+ */
+function signingSecretBlock(secret: string): string {
+	return (
+		"\nSigning secret (shown once — copy it now, it cannot be retrieved later):\n" +
+		secret
+	);
+}
+
+/** One-line summary of a registration, for the register/get/clear tools. */
+function formatRegistration(res: WebhookRegisterResult): string {
+	const lines = [
+		res.message ?? (res.registered ? "Webhook registered." : "No webhook registered."),
+	];
+
+	if (res.url) lines.push(`URL: ${res.url}`);
+
+	if (res.event_types != null && res.event_types.length > 0) {
+		lines.push(`Events: ${res.event_types.join(", ")}`);
+	}
+
+	lines.push(`Signing: ${res.signing_secret_configured ? "enabled" : "disabled"}`);
+
+	if (res.signing_secret != null && res.signing_secret !== "") {
+		lines.push(signingSecretBlock(res.signing_secret));
+	}
+
+	return lines.join("\n");
+}
+
+/** The get-webhook view: never carries a secret. */
+function formatRegistrationGet(res: WebhookGetResult): string {
+	if (!res.registered) {
+		return "No webhook is registered for this API key's org.";
+	}
+
+	const lines = ["A webhook is registered."];
+
+	if (res.url != null && res.url !== "") lines.push(`URL: ${res.url}`);
+
+	if (res.event_types.length > 0) lines.push(`Events: ${res.event_types.join(", ")}`);
+
+	lines.push(`Signing: ${res.signing_secret_configured ? "enabled" : "disabled"}`);
+
+	return lines.join("\n");
+}
+
+/** The generate/set signing-secret view: always carries the secret, once. */
+function formatSigningSecret(res: WebhookSigningSecretResult): string {
+	const head = res.message ?? (res.generated ? "Signing secret generated." : "Signing secret set.");
+
+	return head + signingSecretBlock(res.signing_secret);
+}
+
+/** One delivery as a single line, for the list view. */
+function formatDeliveryLine(d: WebhookDeliveryItem): string {
+	const parts = [`${d.delivery_id} — ${d.status} (${d.event_type})`];
+
+	if (d.doc_id !== "") parts.push(`doc ${d.doc_id}`);
+
+	parts.push(`${d.attempts} attempt${d.attempts === 1 ? "" : "s"}`);
+
+	if (d.error_message != null && d.error_message !== "") {
+		parts.push(`error: ${d.error_message}`);
+	}
+
+	return parts.join(" · ");
+}
+
+/** A delivery list as readable text, with the paging hint when there is more. */
+function formatDeliveryList(res: WebhookDeliveryListResult): string {
+	if (res.count === 0) {
+		return "No webhook deliveries found.";
+	}
+
+	const lines = res.deliveries.map(formatDeliveryLine);
+	let text = `${res.count} delivery attempt${res.count === 1 ? "" : "s"}:\n${lines.join("\n")}`;
+
+	if (res.next_cursor != null && res.next_cursor !== "") {
+		text += `\n\nMore available — pass cursor: ${res.next_cursor}`;
+	}
+
+	return text;
+}
+
+/** A single delivery in full, for the get-delivery tool. */
+function formatDeliveryDetail(d: WebhookDeliveryItem): string {
+	const lines = [
+		`Delivery ${d.delivery_id}`,
+		`Status: ${d.status}`,
+		`Event: ${d.event_type}`,
+		`Document: ${d.doc_id}`,
+		`Indexing status: ${d.indexing_status}`,
+		`Attempts: ${d.attempts}`,
+	];
+
+	if (d.webhook_url != null && d.webhook_url !== "") lines.push(`URL: ${d.webhook_url}`);
+
+	if (d.error_code != null && d.error_code !== "") lines.push(`Error code: ${d.error_code}`);
+
+	if (d.error_message != null && d.error_message !== "") {
+		lines.push(`Error: ${d.error_message}`);
+	}
+
+	lines.push(`Created: ${d.created_at}`, `Updated: ${d.updated_at}`);
+
+	return lines.join("\n");
 }
 
 /**
@@ -307,6 +429,23 @@ export function legacyToolsEnabled(env: NodeJS.ProcessEnv = process.env): boolea
 	if (raw == null) return false;
 
 	return ["1", "true", "yes", "on"].includes(raw.trim().toLowerCase());
+}
+
+/**
+ * Whether the indexing-webhook tools are registered.
+ *
+ * On by default (PRO-3342), like the graph family — a real product surface no
+ * other client exposes. HYDRADB_MCP_WEBHOOK_TOOLS=0 withholds the whole group
+ * for callers who do not want the extra manifest. An unrecognised value keeps
+ * the default, so a typo cannot silently strip a capability an operator relies
+ * on.
+ */
+export function webhookToolsEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+	const raw = env.HYDRADB_MCP_WEBHOOK_TOOLS;
+
+	if (raw == null || raw.trim() === "") return true;
+
+	return !["0", "false", "no", "off"].includes(raw.trim().toLowerCase());
 }
 
 /** Test-only: reset the once-per-process alias warning dedupe. */
@@ -3973,6 +4112,221 @@ export function createHydraDBServer(
 			(args, extra) =>
 				runGraphAdmin(args as Parameters<typeof runGraphAdmin>[0], extra?.signal),
 			destructive,
+		);
+	}
+
+	// --- Indexing webhook tools (PRO-3342) ---
+	//
+	// One tool per public /webhooks/indexing endpoint, so an agent can register a
+	// callback for indexing events and debug a failed delivery without leaving the
+	// session. On by default, withheld as a group by HYDRADB_MCP_WEBHOOK_TOOLS=0.
+	//
+	// The signing secret is returned by the API exactly once, on register (with
+	// generate) and on set-signing-secret; `get` never returns it. These tools
+	// render it only on that one response, clearly labelled, and never log it, so
+	// it cannot leak into later output.
+	if (webhookToolsEnabled()) {
+		const WEBHOOK_STATUSES = [
+			"pending",
+			"sweeping",
+			"delivered",
+			"failed",
+			"permanently_failed",
+		] as const;
+
+		const webhookRegisterSchema = {
+			url: z
+				.string()
+				.min(1)
+				.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.WEBHOOK_REGISTER].params.url),
+			event_types: z
+				.array(z.string())
+				.optional()
+				.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.WEBHOOK_REGISTER].params.event_types),
+			signing_secret: z
+				.string()
+				.optional()
+				.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.WEBHOOK_REGISTER].params.signing_secret),
+			generate_signing_secret: z
+				.boolean()
+				.optional()
+				.describe(
+					TOOL_DESCRIPTIONS[TOOL_NAMES.WEBHOOK_REGISTER].params.generate_signing_secret,
+				),
+		};
+
+		register(
+			TOOL_NAMES.WEBHOOK_REGISTER,
+			webhookRegisterSchema,
+			async (args, extra) => {
+				const a = z.object(webhookRegisterSchema).parse(args);
+
+				const res = await hydra.webhooks.register(
+					{
+						url: a.url,
+						eventTypes: a.event_types,
+						signingSecret: a.signing_secret,
+						generateSigningSecret: a.generate_signing_secret,
+					},
+					{ signal: extra?.signal },
+				);
+
+				return textResult(formatRegistration(res));
+			},
+			additiveWrite,
+		);
+
+		register(
+			TOOL_NAMES.WEBHOOK_GET,
+			{},
+			async (_args, extra) =>
+				textResult(formatRegistrationGet(await hydra.webhooks.get({ signal: extra?.signal }))),
+			readOnly,
+		);
+
+		register(
+			TOOL_NAMES.WEBHOOK_DELETE,
+			{},
+			async (_args, extra) => {
+				const res = await hydra.webhooks.delete({ signal: extra?.signal });
+
+				return textResult(res.message ?? "Webhook unregistered.");
+			},
+			destructive,
+		);
+
+		const webhookSigningSecretSchema = {
+			signing_secret: z
+				.string()
+				.optional()
+				.describe(
+					TOOL_DESCRIPTIONS[TOOL_NAMES.WEBHOOK_SET_SIGNING_SECRET].params.signing_secret,
+				),
+		};
+
+		register(
+			TOOL_NAMES.WEBHOOK_SET_SIGNING_SECRET,
+			webhookSigningSecretSchema,
+			async (args, extra) => {
+				const a = z.object(webhookSigningSecretSchema).parse(args);
+
+				const res = await hydra.webhooks.setSigningSecret(
+					{ signingSecret: a.signing_secret },
+					{ signal: extra?.signal },
+				);
+
+				return textResult(formatSigningSecret(res));
+			},
+			additiveWrite,
+		);
+
+		register(
+			TOOL_NAMES.WEBHOOK_CLEAR_SIGNING_SECRET,
+			{},
+			async (_args, extra) => {
+				const res = await hydra.webhooks.clearSigningSecret({ signal: extra?.signal });
+
+				return textResult(res.message ?? "Signing disabled. Deliveries are no longer signed.");
+			},
+			destructive,
+		);
+
+		const webhookListDeliveriesSchema = {
+			limit: z
+				.number()
+				.int()
+				.min(1)
+				.max(100)
+				.optional()
+				.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.WEBHOOK_LIST_DELIVERIES].params.limit),
+			cursor: z
+				.string()
+				.optional()
+				.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.WEBHOOK_LIST_DELIVERIES].params.cursor),
+			status: z
+				.enum(WEBHOOK_STATUSES)
+				.optional()
+				.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.WEBHOOK_LIST_DELIVERIES].params.status),
+		};
+
+		register(
+			TOOL_NAMES.WEBHOOK_LIST_DELIVERIES,
+			webhookListDeliveriesSchema,
+			async (args, extra) => {
+				const a = z.object(webhookListDeliveriesSchema).parse(args);
+
+				const res = await hydra.webhooks.listDeliveries(
+					{ limit: a.limit, cursor: a.cursor, status: a.status },
+					{ signal: extra?.signal },
+				);
+
+				return textResult(formatDeliveryList(res));
+			},
+			readOnly,
+		);
+
+		const webhookDeliveryIdSchema = {
+			delivery_id: z
+				.string()
+				.min(1)
+				.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.WEBHOOK_GET_DELIVERY].params.delivery_id),
+		};
+
+		register(
+			TOOL_NAMES.WEBHOOK_GET_DELIVERY,
+			webhookDeliveryIdSchema,
+			async (args, extra) => {
+				const a = z.object(webhookDeliveryIdSchema).parse(args);
+
+				const res = await hydra.webhooks.getDelivery(a.delivery_id, { signal: extra?.signal });
+
+				return textResult(formatDeliveryDetail(res));
+			},
+			readOnly,
+		);
+
+		const webhookRetrySchema = {
+			delivery_id: z
+				.string()
+				.min(1)
+				.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.WEBHOOK_RETRY_DELIVERY].params.delivery_id),
+		};
+
+		register(
+			TOOL_NAMES.WEBHOOK_RETRY_DELIVERY,
+			webhookRetrySchema,
+			async (args, extra) => {
+				const a = z.object(webhookRetrySchema).parse(args);
+
+				const res = await hydra.webhooks.retryDelivery(a.delivery_id, {
+					signal: extra?.signal,
+				});
+
+				return textResult(res.message ?? (res.queued ? "Delivery queued for retry." : "Delivery not queued."));
+			},
+			additiveWrite,
+		);
+
+		register(
+			TOOL_NAMES.WEBHOOK_TEST,
+			{},
+			async (_args, extra) => {
+				const res = await hydra.webhooks.test({ signal: extra?.signal });
+
+				const lines = [
+					res.message ?? (res.delivered ? "Test delivery sent." : "Test delivery failed."),
+				];
+
+				// The receiver's status on its own line, so it is always present (the
+				// success message omits it) and never doubled with the failure message
+				// that already names it.
+				if (res.status_code != null) {
+					lines.push(`Receiver responded with HTTP ${res.status_code}.`);
+				}
+
+				return textResult(lines.join("\n"));
+			},
+			additiveWrite,
 		);
 	}
 
