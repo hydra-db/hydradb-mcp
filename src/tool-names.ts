@@ -9,6 +9,7 @@ export const TOOL_NAMES = {
 	// Canonical (CONTRACT §3).
 	QUERY: "hydradb_query",
 	INGEST: "hydradb_ingest",
+	UPDATE: "hydradb_update",
 	LIST: "hydradb_list",
 	INSPECT: "hydradb_inspect",
 	DELETE: "hydradb_delete",
@@ -57,6 +58,7 @@ export type ToolName = (typeof TOOL_NAMES)[keyof typeof TOOL_NAMES];
 export const CANONICAL_TOOL_NAMES = [
 	TOOL_NAMES.QUERY,
 	TOOL_NAMES.INGEST,
+	TOOL_NAMES.UPDATE,
 	TOOL_NAMES.LIST,
 	TOOL_NAMES.INSPECT,
 	TOOL_NAMES.DELETE,
