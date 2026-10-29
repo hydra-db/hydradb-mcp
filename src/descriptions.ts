@@ -720,6 +720,125 @@ Confirm with the user before deleting a collection they did not name. Take the c
 		},
 	},
 
+	// --- Indexing webhook tools (PRO-3342) ---
+
+	[TOOL_NAMES.WEBHOOK_REGISTER]: {
+		title: "Register an indexing webhook",
+		description:
+			"Register the indexing webhook for this API key's org — the single HTTPS endpoint " +
+			"Hydra DB POSTs to whenever a source finishes (or fails) indexing. Registering again " +
+			"replaces the current URL and event types. Set `generate_signing_secret` to register " +
+			"and enable signing in one call; the secret is shown once. Omitting `signing_secret` " +
+			`leaves any existing secret in place — to turn signing off use ${TOOL_NAMES.WEBHOOK_CLEAR_SIGNING_SECRET}.`,
+		params: {
+			url:
+				"The public HTTPS URL indexing events are POSTed to. Must be publicly routable — " +
+				"loopback, private, and link-local addresses are rejected.",
+			event_types:
+				'Event types to subscribe to. The only supported value today is ' +
+				'"indexing.status_changed"; omit to use it as the default.',
+			signing_secret:
+				"Bring your own signing secret (at least 16 characters) so your receiver can verify " +
+				"the X-HydraDB-Signature header. Omit to leave signing unchanged, or set " +
+				"generate_signing_secret to have one minted. Cannot be combined with " +
+				"generate_signing_secret.",
+			generate_signing_secret:
+				"Set true to have the server mint a signing secret as part of registration. The " +
+				"plaintext is returned once in this call's output and can never be retrieved again — " +
+				"copy it immediately.",
+		},
+	},
+
+	[TOOL_NAMES.WEBHOOK_GET]: {
+		title: "Get the registered indexing webhook",
+		description:
+			"Show the indexing webhook registered for this API key's org: its URL, subscribed event " +
+			"types, and whether signing is enabled. Never returns the signing secret itself — that is " +
+			"shown only once, when it is generated or set.",
+		params: {},
+	},
+
+	[TOOL_NAMES.WEBHOOK_DELETE]: {
+		title: "Delete the indexing webhook",
+		description:
+			"Unregister this org's indexing webhook. Hydra DB stops sending indexing callbacks. This " +
+			"removes the registration, including its signing secret; re-register to resume.",
+		params: {},
+	},
+
+	[TOOL_NAMES.WEBHOOK_SET_SIGNING_SECRET]: {
+		title: "Set or generate the webhook signing secret",
+		description:
+			"Generate a signing secret, or store one you supply, for this org's webhook. Hydra DB " +
+			"signs each delivery with it (the X-HydraDB-Signature header) so your receiver can verify " +
+			"the call is genuine. The plaintext is returned exactly once and cannot be retrieved " +
+			"afterwards. It takes effect immediately, so rotate only once your receiver accepts the " +
+			"new secret.",
+		params: {
+			signing_secret:
+				"A signing secret to store (at least 16 characters). Omit to have one generated for " +
+				"you. Either way the plaintext is returned once in this call's output and can never be " +
+				"retrieved again — copy it immediately.",
+		},
+	},
+
+	[TOOL_NAMES.WEBHOOK_CLEAR_SIGNING_SECRET]: {
+		title: "Disable webhook signing",
+		description:
+			"Disable signing for this org's webhook by removing the stored secret. Deliveries stop " +
+			"carrying the X-HydraDB-Signature header. This is the only way to turn signing off — " +
+			"registering again never clears the secret.",
+		params: {},
+	},
+
+	[TOOL_NAMES.WEBHOOK_LIST_DELIVERIES]: {
+		title: "List webhook deliveries",
+		description:
+			"List recent webhook delivery attempts for this org: each one's status, event, document, " +
+			"attempt count, and any error. Use it to see whether callbacks are arriving and to find " +
+			`the delivery_id of a failed one to retry with ${TOOL_NAMES.WEBHOOK_RETRY_DELIVERY}. Pages with a cursor.`,
+		params: {
+			limit: "Maximum deliveries to return (1-100, default 20).",
+			cursor:
+				"Pagination cursor from a previous page's output; omit for the first page.",
+			status:
+				"Filter to one delivery status: pending, sweeping, delivered, failed, or " +
+				"permanently_failed.",
+		},
+	},
+
+	[TOOL_NAMES.WEBHOOK_GET_DELIVERY]: {
+		title: "Get a webhook delivery",
+		description:
+			"Show one webhook delivery attempt in full by its id — status, event, document, attempts, " +
+			`and the error code and message if it failed. Take the id from ${TOOL_NAMES.WEBHOOK_LIST_DELIVERIES}.`,
+		params: {
+			delivery_id: `The delivery id, as shown by ${TOOL_NAMES.WEBHOOK_LIST_DELIVERIES}.`,
+		},
+	},
+
+	[TOOL_NAMES.WEBHOOK_RETRY_DELIVERY]: {
+		title: "Retry a webhook delivery",
+		description:
+			"Re-queue a failed webhook delivery for another attempt. Only deliveries in the failed or " +
+			"permanently_failed state can be retried; anything else is reported back unchanged. Take " +
+			`the id from ${TOOL_NAMES.WEBHOOK_LIST_DELIVERIES}.`,
+		params: {
+			delivery_id:
+				`The delivery id to retry, as shown by ${TOOL_NAMES.WEBHOOK_LIST_DELIVERIES}. Only ` +
+				"failed or permanently_failed deliveries can be retried.",
+		},
+	},
+
+	[TOOL_NAMES.WEBHOOK_TEST]: {
+		title: "Send a test webhook delivery",
+		description:
+			"Send a test delivery to this org's registered webhook URL to confirm the receiver is " +
+			"reachable and accepts the payload. Requires a webhook to be registered first. Reports " +
+			"whether it was delivered and the HTTP status the receiver returned.",
+		params: {},
+	},
+
 	// --- Deprecated aliases ---
 
 	[TOOL_NAMES.SEARCH]: {
@@ -862,4 +981,12 @@ Choose by the question, not the vocabulary: "what has the user told me about X" 
 
 Working against an unfamiliar collection, discover its structure by querying it — \`MATCH (n) UNWIND labels(n) AS l RETURN l, count(*) AS c ORDER BY l\` — rather than guessing labels, which yields empty results that look like missing data.
 
-All tools require HYDRADB_API_KEY and HYDRADB_DATABASE in the environment. The graph tools additionally read HYDRADB_GRAPH_DATABASE and HYDRADB_GRAPH_COLLECTION for their default scope, and can be disabled with HYDRADB_MCP_GRAPH_TOOLS=0.`;
+INDEXING WEBHOOKS (a separate product surface)
+
+Hydra DB can call a URL of yours whenever a source finishes (or fails) indexing, so a system can react without polling. One webhook is registered per org.
+
+- ${TOOL_NAMES.WEBHOOK_REGISTER} — register the callback URL (and, optionally, mint a signing secret in the same call). ${TOOL_NAMES.WEBHOOK_GET} shows it; ${TOOL_NAMES.WEBHOOK_DELETE} removes it.
+- ${TOOL_NAMES.WEBHOOK_SET_SIGNING_SECRET} / ${TOOL_NAMES.WEBHOOK_CLEAR_SIGNING_SECRET} — turn request signing on (rotate) or off. A generated secret is shown ONCE and can never be read back, so surface it to the user immediately and never repeat it.
+- ${TOOL_NAMES.WEBHOOK_LIST_DELIVERIES}, ${TOOL_NAMES.WEBHOOK_GET_DELIVERY}, ${TOOL_NAMES.WEBHOOK_RETRY_DELIVERY} — inspect delivery history and re-queue a failed one. ${TOOL_NAMES.WEBHOOK_TEST} fires a test delivery to confirm the receiver works.
+
+All tools require HYDRADB_API_KEY and HYDRADB_DATABASE in the environment. The graph tools additionally read HYDRADB_GRAPH_DATABASE and HYDRADB_GRAPH_COLLECTION for their default scope, and can be disabled with HYDRADB_MCP_GRAPH_TOOLS=0. The webhook tools can be disabled with HYDRADB_MCP_WEBHOOK_TOOLS=0.`;

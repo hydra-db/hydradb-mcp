@@ -1127,3 +1127,168 @@ test("real SDK markdown query sends response_format=markdown and returns the str
 	assert.equal(markdown, "## Results");
 	assert.equal(requestId, "r-md");
 });
+
+// ── webhooks (PRO-3342): the raw path, behind the same surface ─────────────
+// Exercise the real WebhooksResource (not a stand-in): method, path, snake_case
+// body, delivery-id encoding, and envelope unwrapping, all over the shared raw
+// transport — the layer the server-level tests mock past.
+
+function webhookHydra(fetchFn: typeof fetch): HydraDB {
+	return new HydraDB(
+		{ token: "tok", database: "db_test", baseUrl: "https://h.test", fetchFn },
+		{} as unknown as HydraDBClient,
+	);
+}
+
+test("webhooks.register POSTs a snake_case body to /webhooks/indexing", async () => {
+	const { fetchFn, calls } = fakeRawFetch(() => ({
+		status: 201,
+		body: {
+			data: {
+				registered: true,
+				url: "https://r.test/h",
+				event_types: ["indexing.status_changed"],
+				signing_secret_configured: true,
+				signing_secret: "whsec_generated",
+				message: "ok",
+			},
+			success: true,
+		},
+	}));
+
+	const res = await webhookHydra(fetchFn).webhooks.register({
+		url: "https://r.test/h",
+		eventTypes: ["indexing.status_changed"],
+		generateSigningSecret: true,
+	});
+
+	assert.equal(res.signing_secret, "whsec_generated", "envelope unwrapped to .data");
+	assert.equal(calls.length, 1);
+	assert.equal(new URL(calls[0]!.url).pathname, "/webhooks/indexing");
+	assert.equal(calls[0]!.init?.method, "POST");
+	const headers = calls[0]!.init?.headers as Record<string, string>;
+	assert.equal(headers["API-Version"], "2", "CONTRACT §2 rule 6");
+	assert.equal(headers.Authorization, "Bearer tok");
+	// Undefined fields are dropped, so an omitted signing_secret is absent — not null.
+	assert.deepEqual(JSON.parse(String(calls[0]!.init?.body)), {
+		url: "https://r.test/h",
+		event_types: ["indexing.status_changed"],
+		generate_signing_secret: true,
+	});
+});
+
+test("webhooks.get and webhooks.delete use the right method on /webhooks/indexing", async () => {
+	for (const method of ["GET", "DELETE"] as const) {
+		const { fetchFn, calls } = fakeRawFetch(() => ({
+			status: 200,
+			body: { data: { registered: true }, success: true },
+		}));
+		const hydra = webhookHydra(fetchFn);
+
+		await (method === "GET" ? hydra.webhooks.get() : hydra.webhooks.delete());
+
+		assert.equal(new URL(calls[0]!.url).pathname, "/webhooks/indexing");
+		assert.equal(calls[0]!.init?.method, method);
+		assert.equal(calls[0]!.init?.body, undefined, "a bodyless call sends no body");
+	}
+});
+
+test("webhooks.setSigningSecret sends a body only when bringing your own", async () => {
+	const gen = fakeRawFetch(() => ({
+		status: 200,
+		body: { data: { signing_secret: "whsec_g", generated: true, message: "ok" }, success: true },
+	}));
+	await webhookHydra(gen.fetchFn).webhooks.setSigningSecret();
+	assert.equal(new URL(gen.calls[0]!.url).pathname, "/webhooks/indexing/signing-secret");
+	assert.equal(gen.calls[0]!.init?.method, "POST");
+	assert.equal(gen.calls[0]!.init?.body, undefined, "no body means 'generate one for me'");
+
+	const byo = fakeRawFetch(() => ({
+		status: 200,
+		body: { data: { signing_secret: "mine", generated: false, message: "ok" }, success: true },
+	}));
+	await webhookHydra(byo.fetchFn).webhooks.setSigningSecret({ signingSecret: "my-own-secret-16c" });
+	assert.deepEqual(JSON.parse(String(byo.calls[0]!.init?.body)), {
+		signing_secret: "my-own-secret-16c",
+	});
+});
+
+test("webhooks.clearSigningSecret DELETEs the signing-secret sub-resource", async () => {
+	const { fetchFn, calls } = fakeRawFetch(() => ({
+		status: 200,
+		body: { data: { registered: true, signing_secret_configured: false, message: "ok" }, success: true },
+	}));
+	await webhookHydra(fetchFn).webhooks.clearSigningSecret();
+	assert.equal(new URL(calls[0]!.url).pathname, "/webhooks/indexing/signing-secret");
+	assert.equal(calls[0]!.init?.method, "DELETE");
+});
+
+test("webhooks.listDeliveries puts its filters on the query string", async () => {
+	const { fetchFn, calls } = fakeRawFetch(() => ({
+		status: 200,
+		body: { data: { deliveries: [], count: 0, next_cursor: null }, success: true },
+	}));
+	await webhookHydra(fetchFn).webhooks.listDeliveries({ limit: 50, status: "failed", cursor: "C1" });
+	const url = new URL(calls[0]!.url);
+	assert.equal(url.pathname, "/webhooks/indexing/deliveries");
+	assert.equal(url.searchParams.get("limit"), "50");
+	assert.equal(url.searchParams.get("status"), "failed");
+	assert.equal(url.searchParams.get("cursor"), "C1");
+	assert.equal(calls[0]!.init?.method, "GET");
+});
+
+test("webhooks delivery-id paths are URL-encoded", async () => {
+	const { fetchFn, calls } = fakeRawFetch(() => ({
+		status: 200,
+		body: {
+			data: {
+				delivery_id: "a/b 1",
+				doc_id: "d",
+				status: "failed",
+				indexing_status: "failed",
+				event_type: "indexing.status_changed",
+				attempts: 1,
+				created_at: "t",
+				updated_at: "t",
+			},
+			success: true,
+		},
+	}));
+	const hydra = webhookHydra(fetchFn);
+
+	await hydra.webhooks.getDelivery("a/b 1");
+	assert.equal(new URL(calls[0]!.url).pathname, "/webhooks/indexing/deliveries/a%2Fb%201");
+	assert.equal(calls[0]!.init?.method, "GET");
+
+	await hydra.webhooks.retryDelivery("a/b 1");
+	assert.equal(new URL(calls[1]!.url).pathname, "/webhooks/indexing/deliveries/a%2Fb%201/retry");
+	assert.equal(calls[1]!.init?.method, "POST");
+});
+
+test("webhooks.test POSTs to /webhooks/indexing/test and unwraps the result", async () => {
+	const { fetchFn, calls } = fakeRawFetch(() => ({
+		status: 200,
+		body: { data: { delivered: true, status_code: 200, message: "sent" }, success: true },
+	}));
+	const res = await webhookHydra(fetchFn).webhooks.test();
+	assert.equal(res.delivered, true);
+	assert.equal(res.status_code, 200);
+	assert.equal(new URL(calls[0]!.url).pathname, "/webhooks/indexing/test");
+	assert.equal(calls[0]!.init?.method, "POST");
+});
+
+test("a webhook failure becomes the wrapper's own error", async () => {
+	const { fetchFn } = fakeRawFetch(() => ({
+		status: 404,
+		body: { success: false, error: { code: "NOT_FOUND", message: "Delivery not found." } },
+	}));
+	await assert.rejects(
+		() => webhookHydra(fetchFn).webhooks.getDelivery("x"),
+		(e: unknown) => {
+			assert.ok(e instanceof HydraWrapperError, "same error type as an SDK failure");
+			assert.equal(e.status, 404);
+			assert.match(e.message, /Delivery not found/);
+			return true;
+		},
+	);
+});
