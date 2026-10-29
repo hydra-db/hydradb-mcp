@@ -25,6 +25,7 @@ export type {
 	QueryParams,
 	IngestParams,
 	IngestDocument,
+	UpdateContextParams,
 	ListParams,
 	MetadataFilter,
 	MetadataFilterValue,
