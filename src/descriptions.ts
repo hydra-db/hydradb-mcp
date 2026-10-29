@@ -354,6 +354,14 @@ Examples:
   {"turns": [{"user": "let's go with Postgres", "assistant": "Agreed, I'll set up the schema."}], "title": "Datastore decision"}
   {"text": "# Runbook\\n\\nRestart order: api, worker, scheduler.", "kind": "knowledge", "title": "Restart runbook"}`;
 
+const UPDATE_BODY = `Edit one existing context item without re-ingesting it. Take the item id from hydradb_query, hydradb_list, or hydradb_inspect; never guess an id.
+
+\`database_metadata\` and \`additional_metadata\` MERGE the supplied keys into their existing maps. Database metadata keys must satisfy the collection's schema when it has one. Additional metadata is free-form.
+
+\`acl\` REPLACES the complete access list rather than merging it. Send every principal that should retain access. Pass \`[]\` or \`null\` to make the item private. Pass [\"__public__\"] to make it available to every identified caller. Omit \`acl\` to leave access unchanged.
+
+This write is idempotent. If the response reports a partial commit or search-index synchronization failure, retry the identical request to converge it.`;
+
 const CONVERSATION_BODY =
 	"Ingest one or more user-assistant conversation turns into Hydra DB memory. " +
 	"Hydra DB will extract insights, preferences, and knowledge graph entities from the " +
@@ -512,6 +520,23 @@ export const TOOL_DESCRIPTIONS = {
 				"neither. Use this when the exchange itself is worth preserving; when only the " +
 				"conclusion matters, prefer `text` with the distilled fact.",
 			user_name: PARAM.user_name,
+			database: PARAM.database,
+			collection: PARAM.collection,
+		},
+	},
+
+	[TOOL_NAMES.UPDATE]: {
+		title: "Update Hydra DB Context",
+		description: UPDATE_BODY,
+		params: {
+			id:
+				"The existing context id to edit. Copy it from hydradb_query, hydradb_list, or hydradb_inspect; never construct one.",
+			database_metadata:
+				"Keys to merge into database_metadata. Existing keys not named here stay unchanged. Keys must satisfy the collection schema when one exists.",
+			additional_metadata:
+				"Free-form keys to merge into additional_metadata. Existing keys not named here stay unchanged.",
+			acl:
+				"The complete replacement ACL. Pass all principals that should retain access. [] or null makes the item private; [\"__public__\"] makes it public to identified callers; omit acl to leave access unchanged.",
 			database: PARAM.database,
 			collection: PARAM.collection,
 		},
@@ -828,6 +853,7 @@ THE TOOLS
 
 - ${TOOL_NAMES.QUERY} — semantic search across memory and knowledge, with knowledge-graph context. Your default read. Every result carries an id.
 - ${TOOL_NAMES.INGEST} — write. A note or document via 'text', or a conversation via 'turns' (exactly one of the two).
+- ${TOOL_NAMES.UPDATE} — idempotent write. Merge metadata or replace the complete ACL of one existing item by id.
 - ${TOOL_NAMES.LIST} — the full inventory of ONE family. Use it for "what do you have?"; for "what do you know about X" use ${TOOL_NAMES.QUERY} instead.
 - ${TOOL_NAMES.INSPECT} — the complete original content of one source you already have an id for.
 - ${TOOL_NAMES.DELETE} — irreversible removal of one item by id.
@@ -839,7 +865,7 @@ THE TOOLS
 - ${TOOL_NAMES.FEEDBACK} — report whether a query's results were actually useful, using the request_id that query printed. Say what the right answer was (\`ground_truth_answer\`) or which sources held it (\`ground_truth_source_ids\`) when you know — that is machine-checkable and worth far more than prose. It records a signal; it never changes the query's result or the stored data.
 - ${TOOL_NAMES.DELETE_COLLECTION} — irreversible removal of one collection and everything in it. Confirm first. Take the name from ${TOOL_NAMES.LIST_COLLECTIONS}.
 
-Ids flow between these: ${TOOL_NAMES.QUERY}, ${TOOL_NAMES.LIST} and ${TOOL_NAMES.SUBGRAPH} emit them; ${TOOL_NAMES.INSPECT}, ${TOOL_NAMES.DELETE}, ${TOOL_NAMES.RELATIONS}, ${TOOL_NAMES.STATUS} and ${TOOL_NAMES.SUBGRAPH} accept them. Never invent one.
+Ids flow between these: ${TOOL_NAMES.QUERY}, ${TOOL_NAMES.LIST} and ${TOOL_NAMES.SUBGRAPH} emit them; ${TOOL_NAMES.INSPECT}, ${TOOL_NAMES.UPDATE}, ${TOOL_NAMES.DELETE}, ${TOOL_NAMES.RELATIONS}, ${TOOL_NAMES.STATUS} and ${TOOL_NAMES.SUBGRAPH} accept them. Never invent one.
 
 COLLECTIONS — WHO DECIDES THE SCOPE
 

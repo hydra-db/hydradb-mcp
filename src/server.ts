@@ -12,7 +12,13 @@ import { renderRecalledContext } from "./context.js";
 import { COLLECTION_PATTERN, MAX_BODY_BYTES, renderRows } from "./cypher.js";
 import { SERVER_INSTRUCTIONS, TOOL_DESCRIPTIONS } from "./descriptions.js";
 import { HydraDB, assertCollectionAllowed, assertDatabaseAllowed, hasEntries } from "./hydra/index.js";
-import type { ContextKind, MetadataFilter, QueryKind, QueryParams } from "./hydra/index.js";
+import type {
+	ContextKind,
+	MetadataFilter,
+	QueryKind,
+	QueryParams,
+	UpdateContextParams,
+} from "./hydra/index.js";
 import { logger } from "./logger.js";
 import { ALIAS_REPLACEMENTS, DEPRECATED_TOOL_NAMES, TOOL_NAMES } from "./tool-names.js";
 import type { MemoryResultItem } from "./types.js";
@@ -1121,6 +1127,116 @@ export function createHydraDBServer(
 				failed_count: res.failed_count,
 				indexing_pending: true,
 			},
+		);
+	}
+
+	async function runUpdate(args: {
+		id: string;
+		database_metadata?: UpdateContextParams["databaseMetadata"];
+		additional_metadata?: UpdateContextParams["additionalMetadata"];
+		acl?: string[] | null;
+		database?: string;
+		collection?: string;
+	}, signal?: AbortSignal): Promise<ToolResult> {
+		const databaseMetadataPresent =
+			args.database_metadata != null && Object.keys(args.database_metadata).length > 0;
+
+		const additionalMetadataPresent =
+			args.additional_metadata != null && Object.keys(args.additional_metadata).length > 0;
+
+		if (!databaseMetadataPresent && !additionalMetadataPresent && args.acl === undefined) {
+			return errorResult(
+				`${TOOL_NAMES.UPDATE} requires database_metadata, additional_metadata, or acl. ` +
+				"No request was sent.",
+			);
+		}
+
+		const update: UpdateContextParams = {
+			id: args.id,
+			database: args.database,
+			collection: args.collection,
+		};
+
+		if (databaseMetadataPresent) update.databaseMetadata = args.database_metadata;
+
+		if (additionalMetadataPresent) update.additionalMetadata = args.additional_metadata;
+
+		// The API treats null and [] identically. The generated SDK serializer
+		// accepts arrays only, so normalize null without collapsing omission.
+		if (args.acl !== undefined) update.acl = args.acl ?? [];
+
+		const res = await hydra.context.update(update, { signal });
+
+		const id = res.id ?? args.id;
+		const database = res.database ?? args.database;
+		const collection = res.collection ?? args.collection;
+
+		const structured: NonNullable<ToolResult["structuredContent"]> = {
+			id,
+			updated: res.updated ?? false,
+			database_metadata_keys: res.databaseMetadataKeys ?? [],
+			additional_metadata_keys: res.additionalMetadataKeys ?? [],
+			acl_updated: res.aclUpdated ?? false,
+		};
+
+		if (database != null) structured.database = database;
+
+		if (collection != null) structured.collection = collection;
+
+		if (res.vectorSyncRequired != null) {
+			structured.vector_sync_required = res.vectorSyncRequired;
+		}
+
+		if (res.vectorAclSynced != null) structured.vector_acl_synced = res.vectorAclSynced;
+
+		if (res.vectorRowsSynced != null) structured.vector_rows_synced = res.vectorRowsSynced;
+
+		if (res.partialCommit != null) structured.partial_commit = res.partialCommit;
+
+		if (res.vectorSyncError != null) structured.vector_sync_error = res.vectorSyncError;
+
+		const convergenceIssue =
+			res.partialCommit ??
+			res.vectorSyncError ??
+			(res.aclUpdated === true &&
+			res.vectorSyncRequired !== false &&
+			res.vectorAclSynced !== true
+				? "The ACL update was saved, but search-index ACL synchronization was not confirmed."
+				: undefined);
+
+		if (res.updated !== true) {
+			return {
+				...structuredResult(`Hydra DB did not confirm an update for ${id}.`, structured),
+				isError: true,
+			};
+		}
+
+		if (convergenceIssue != null) {
+			return {
+				...structuredResult(
+					`Updated ${id}, but the edit is not fully converged: ${convergenceIssue} ` +
+					"Retry the identical hydradb_update request; it is idempotent.",
+					structured,
+				),
+				isError: true,
+			};
+		}
+
+		const changes: string[] = [];
+
+		if ((res.databaseMetadataKeys?.length ?? 0) > 0) {
+			changes.push(`database metadata: ${res.databaseMetadataKeys!.join(", ")}`);
+		}
+
+		if ((res.additionalMetadataKeys?.length ?? 0) > 0) {
+			changes.push(`additional metadata: ${res.additionalMetadataKeys!.join(", ")}`);
+		}
+
+		if (res.aclUpdated === true) changes.push("ACL replaced and synchronized");
+
+		return structuredResult(
+			`Updated ${id}${changes.length > 0 ? ` (${changes.join("; ")})` : ""}.`,
+			structured,
 		);
 	}
 
@@ -2994,6 +3110,52 @@ export function createHydraDBServer(
 		...scopeSchema,
 	};
 
+	const updateSchema = {
+		id: z
+			.string()
+			.trim()
+			.min(1)
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.UPDATE].params.id),
+		database_metadata: z
+			.record(z.unknown())
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.UPDATE].params.database_metadata),
+		additional_metadata: z
+			.record(z.unknown())
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.UPDATE].params.additional_metadata),
+		acl: z
+			.array(z.string().min(1))
+			.nullable()
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.UPDATE].params.acl),
+		database: z
+			.string()
+			.min(1)
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.UPDATE].params.database),
+		collection: z
+			.string()
+			.min(1)
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.UPDATE].params.collection),
+	};
+
+	const updateOutputSchema = {
+		id: z.string(),
+		database: z.string().optional(),
+		collection: z.string().optional(),
+		updated: z.boolean(),
+		database_metadata_keys: z.array(z.string()),
+		additional_metadata_keys: z.array(z.string()),
+		acl_updated: z.boolean(),
+		vector_sync_required: z.boolean().optional(),
+		vector_acl_synced: z.boolean().optional(),
+		vector_rows_synced: z.number().optional(),
+		partial_commit: z.string().optional(),
+		vector_sync_error: z.string().optional(),
+	};
+
 	const storeSchema = {
 		text: z
 			.string()
@@ -3492,6 +3654,14 @@ export function createHydraDBServer(
 		openWorldHint: true,
 	};
 
+	/** Changes one existing item; retrying an identical request has no extra effect. */
+	const idempotentWrite = {
+		readOnlyHint: false,
+		destructiveHint: false,
+		idempotentHint: true,
+		openWorldHint: true,
+	};
+
 	/** Removes context irreversibly. Repeating it is harmless once it is gone. */
 	const destructive = {
 		readOnlyHint: false,
@@ -3622,6 +3792,18 @@ export function createHydraDBServer(
 		},
 		additiveWrite,
 		ingestOutputSchema,
+	);
+
+	register(
+		TOOL_NAMES.UPDATE,
+		updateSchema,
+		(args, extra) => {
+			// SAFETY: the MCP SDK validated args against updateSchema, which
+			// declares exactly the fields and types accepted by runUpdate.
+			return runUpdate(args as Parameters<typeof runUpdate>[0], extra?.signal);
+		},
+		idempotentWrite,
+		updateOutputSchema,
 	);
 
 	register(

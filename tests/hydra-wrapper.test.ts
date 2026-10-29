@@ -908,6 +908,7 @@ function captureSdk(seen: Record<string, unknown>) {
 			list: grab("list"),
 			inspect: grab("inspect"),
 			relations: grab("relations"),
+			updateSourceMetadata: grab("update"),
 		},
 	} as unknown as HydraDBClient;
 }
@@ -949,6 +950,56 @@ test("an omitted acl stays undefined rather than becoming an empty list", async 
 	await hydra.context.list({});
 	assert.equal(seen.query.acl, undefined);
 	assert.equal(seen.list.acl, undefined);
+});
+
+test("context.update sends metadata and the full replacement ACL through the SDK", async () => {
+	const seen: Parameters<typeof captureSdk>[0] = {};
+	const hydra = wrapperFor(seen);
+
+	await hydra.context.update({
+		id: "doc-1",
+		databaseMetadata: { department: "finance" },
+		additionalMetadata: { author: "ada", reviewed: true },
+		acl: ["user_email:ada@example.test"],
+	});
+
+	assert.deepEqual(seen.update, {
+		id: "doc-1",
+		database: "db_test",
+		collection: "col_test",
+		databaseMetadata: { department: "finance" },
+		additionalMetadata: { author: "ada", reviewed: true },
+		acl: ["user_email:ada@example.test"],
+	});
+});
+
+test("context.update omits acl when the caller leaves it unchanged", async () => {
+	const seen: Parameters<typeof captureSdk>[0] = {};
+	const hydra = wrapperFor(seen);
+
+	await hydra.context.update({ id: "doc-1", additionalMetadata: { reviewed: true } });
+
+	assert.equal("acl" in seen.update, false);
+});
+
+test("context.update requires a collection and rejects empty edits before the network", async () => {
+	const seen: Parameters<typeof captureSdk>[0] = {};
+
+	const unscoped = new HydraDB(
+		{ token: "t", database: "db_test" },
+		captureSdk(seen),
+	);
+
+	await assert.rejects(
+		() => unscoped.context.update({ id: "doc-1", additionalMetadata: { reviewed: true } }),
+		/collection.*required/i,
+	);
+	await assert.rejects(
+		() => wrapperFor(seen).context.update({ id: "doc-1" }),
+		/metadata.*acl|nothing to update/i,
+	);
+
+	assert.equal(seen.update, undefined);
 });
 
 test("every call path sends X-HydraDB-Source: mcp", async (t) => {

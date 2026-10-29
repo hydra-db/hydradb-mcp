@@ -13,6 +13,7 @@ Run it two ways, same tools either way:
 |---|---|
 | `hydradb_query` | Search memories and knowledge together, with knowledge-graph context |
 | `hydradb_ingest` | Save a note, a document, or a conversation |
+| `hydradb_update` | Merge metadata or replace the access list of one existing item |
 | `hydradb_list` | Enumerate what is stored — memories, knowledge sources, or both in one page |
 | `hydradb_inspect` | Fetch one source's full content by id |
 | `hydradb_delete` | Remove one or more items by id, irreversibly |
@@ -22,7 +23,7 @@ Run it two ways, same tools either way:
 | `hydradb_feedback` | Report whether a query's results were useful, by its `request_id` |
 
 Ids flow between these: `hydradb_query`, `hydradb_list` and `hydradb_subgraph` emit them;
-`hydradb_inspect`, `hydradb_delete`, `hydradb_status`, `hydradb_subgraph` and `hydradb_relations` accept them.
+`hydradb_inspect`, `hydradb_update`, `hydradb_delete`, `hydradb_status`, `hydradb_subgraph` and `hydradb_relations` accept them.
 
 ### Graph tools (Cypher)
 
@@ -139,6 +140,24 @@ or `turns`.
 
 Ingestion is **asynchronous** — content is not searchable the instant it is
 saved. Use `hydradb_status` to confirm.
+
+### **hydradb_update**
+
+Edits one existing item without re-ingesting it. Copy `id` from
+`hydradb_query`, `hydradb_list`, or `hydradb_inspect`; never guess an id.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `id` | string | Yes | Existing context id to edit |
+| `database_metadata` | object | No\* | Keys to merge into schema-controlled database metadata |
+| `additional_metadata` | object | No\* | Free-form keys to merge into additional metadata |
+| `acl` | array or null | No\* | Complete replacement ACL. `[]` or `null` makes the item private; `["__public__"]` makes it public to identified callers; omission leaves access unchanged |
+
+\* Provide at least one of `database_metadata`, `additional_metadata`, or `acl`.
+Metadata maps merge only the supplied keys. ACL updates replace the complete
+list, so include every principal that must retain access. The edit is
+idempotent. Retry the identical request if Hydra DB reports a partial commit or
+search-index synchronization failure.
 
 ### **hydradb_list**
 

@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — `hydradb_update`
+
+`hydradb_update` edits one existing context item without re-ingesting it. It
+merges `database_metadata` and `additional_metadata`, or replaces the complete
+ACL. An omitted ACL stays unchanged; `[]` or `null` makes the item private;
+`["__public__"]` makes it public to identified callers. The tool reports
+partial commits and search-index ACL synchronization failures as retryable,
+idempotent errors instead of claiming complete success.
+
 ## [1.6.0] - 2026-10-28
 
 ### Fixed — `hydradb_query` title filter missed documents saved through `hydradb_ingest`

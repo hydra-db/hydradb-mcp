@@ -31,7 +31,7 @@ type RecordedCall = { method: string; args: Record<string, unknown> };
 /** Per-method response overrides, for tests that care what the API returned. */
 type Responses = Partial<
 	Record<
-		"query" | "ingest" | "list" | "inspect" | "delete" | "relations" | "collections" | "stats" | "feedback",
+		"query" | "ingest" | "list" | "inspect" | "update" | "delete" | "relations" | "collections" | "stats" | "feedback",
 		unknown
 	>
 >;
@@ -72,6 +72,12 @@ function mockHydra(
 			ingest: record("ingest", { success: true, successCount: 1, failedCount: 0 }),
 			list: record("list", { inner: { sources: [], total: 0 } }),
 			inspect: record("inspect", { success: true, content: "hi" }),
+			updateSourceMetadata: record("update", {
+				updated: true,
+				id: "doc-1",
+				database: "db_test",
+				collection: "col_test",
+			}),
 			delete: record("delete", { success: true, userMemoryDeleted: 1 }),
 			relations: record("relations", { relations: [], isTruncated: false }),
 			status: record("status", {}),
@@ -1879,7 +1885,12 @@ test("reads are read-only, writes are not, and only deletes are destructive", as
 
 	// Ingest writes but never removes; a host must not gate it behind a
 	// destructive-action prompt.
-	for (const name of ["hydradb_ingest", "hydra_db_store", "hydra_db_ingest_conversation"]) {
+	for (const name of [
+		"hydradb_ingest",
+		"hydradb_update",
+		"hydra_db_store",
+		"hydra_db_ingest_conversation",
+	]) {
 		assert.equal(hint(name).readOnlyHint, false, `${name} writes`);
 		assert.equal(
 			hint(name).destructiveHint,
@@ -1893,6 +1904,123 @@ test("reads are read-only, writes are not, and only deletes are destructive", as
 	}
 
 	await client.close();
+});
+
+test("hydradb_update merges both metadata maps and replaces a named ACL", async () => {
+	const { hydra, calls } = mockHydra({
+		update: {
+			updated: true,
+			id: "doc-1",
+			database: "db_test",
+			collection: "col_test",
+			databaseMetadataKeys: ["department"],
+			additionalMetadataKeys: ["author", "reviewed"],
+			aclUpdated: true,
+			vectorAclSynced: true,
+		},
+	});
+
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_update",
+		arguments: {
+			id: "doc-1",
+			database_metadata: { department: "finance" },
+			additional_metadata: { author: "ada", reviewed: true },
+			acl: ["user_email:ada@example.test"],
+		},
+	});
+
+	const call = calls.find((entry) => entry.method === "update");
+
+	assert.deepEqual(call?.args, {
+		id: "doc-1",
+		database: "db_test",
+		collection: "col_test",
+		databaseMetadata: { department: "finance" },
+		additionalMetadata: { author: "ada", reviewed: true },
+		acl: ["user_email:ada@example.test"],
+	});
+	assert.notEqual(result.isError, true);
+
+	const first = result.content[0];
+
+	assert.equal(first?.type, "text");
+
+	if (first?.type !== "text") assert.fail("Expected text tool content");
+	assert.match(first.text, /Updated doc-1/);
+	assert.equal(result.structuredContent?.acl_updated, true);
+	await client.close();
+});
+
+for (const [label, acl, expected] of [
+	["empty", [], []],
+	["null", null, []],
+	["public", ["__public__"], ["__public__"]],
+] as const) {
+	test(`hydradb_update maps ${label} ACL to the documented replacement`, async () => {
+		const { hydra, calls } = mockHydra();
+		const client = await connect(hydra);
+
+		await client.callTool({
+			name: "hydradb_update",
+			arguments: { id: "doc-1", acl },
+		});
+
+		assert.deepEqual(calls.find((entry) => entry.method === "update")?.args.acl, expected);
+		await client.close();
+	});
+}
+
+test("hydradb_update omits ACL when it was not supplied", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	await client.callTool({
+		name: "hydradb_update",
+		arguments: { id: "doc-1", additional_metadata: { reviewed: true } },
+	});
+
+	const args = calls.find((entry) => entry.method === "update")?.args ?? {};
+	assert.equal("acl" in args, false);
+	await client.close();
+});
+
+test("hydradb_update rejects an empty edit without calling HydraDB", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	const result = await client.callTool({ name: "hydradb_update", arguments: { id: "doc-1" } });
+
+	assert.equal(result.isError, true);
+	assert.equal(calls.some((entry) => entry.method === "update"), false);
+	await client.close();
+});
+
+test("hydradb_update reports partial persistence and vector sync failures as errors", async () => {
+	for (const update of [
+		{ updated: true, partialCommit: "Mongo updated; chunk rows failed" },
+		{ updated: true, aclUpdated: true, vectorSyncError: "Milvus unavailable" },
+	]) {
+		const { hydra } = mockHydra({ update });
+		const client = await connect(hydra);
+
+		const result = await client.callTool({
+			name: "hydradb_update",
+			arguments: { id: "doc-1", acl: ["__public__"] },
+		});
+
+		assert.equal(result.isError, true);
+
+		const first = result.content[0];
+
+			assert.equal(first?.type, "text");
+
+			if (first?.type !== "text") assert.fail("Expected text tool content");
+		assert.match(first.text, /retry/i);
+		await client.close();
+	}
 });
 
 // CONTRACT §1 says a source's identifier field is `id`, but one concept was

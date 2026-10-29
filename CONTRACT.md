@@ -181,6 +181,7 @@ skill files and persisted to `state.json`; the CLI's `--output json` is a docume
 |---|---|
 | `hydradb_query` | `hydra_db_search` |
 | `hydradb_ingest` | `hydra_db_store`, `hydra_db_ingest_conversation` |
+| `hydradb_update` | — (new in ENG-3339; no prior spelling) |
 | `hydradb_list` | `hydra_db_list_memories`, `hydra_db_list_sources` |
 | `hydradb_inspect` | `hydra_db_fetch_content` |
 | `hydradb_delete` | `hydra_db_delete_memory` |

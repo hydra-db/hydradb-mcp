@@ -311,6 +311,20 @@ export interface IngestParams {
 	database?: string;
 }
 
+/** Fields accepted by PATCH /context/{id}/metadata. */
+export interface UpdateContextParams {
+	id: string;
+	/** Values merged into the source's schema-controlled database metadata. */
+	databaseMetadata?: SDK.HandlerContextMetadataUpdateRequest["databaseMetadata"];
+	/** Free-form values merged into the source's additional metadata. */
+	additionalMetadata?: SDK.HandlerContextMetadataUpdateRequest["additionalMetadata"];
+	/** Full replacement ACL. Omit this property to leave the ACL unchanged. */
+	acl?: string[];
+	collection?: string;
+	/** Per-call database override. */
+	database?: string;
+}
+
 export interface ListParams {
 	/** `all` lists memories and knowledge together, in one page (POST /context/list `type=all`). */
 	kind?: QueryKind;
@@ -946,6 +960,49 @@ export class ContextResource extends Resource {
 
 		return this.call("/context/ingest", () =>
 			this.sdk.context.ingest(request, req(opts)),
+		);
+	}
+
+	/** Merge metadata or replace the ACL of one existing context item. */
+	async update(
+		params: UpdateContextParams,
+		opts?: RequestOptions,
+	): Promise<SDK.GithubComHydradbHydradbApplicationInternalServiceMetadataEditResult> {
+		const databaseMetadataPresent =
+			params.databaseMetadata != null && Object.keys(params.databaseMetadata).length > 0;
+
+		const additionalMetadataPresent =
+			params.additionalMetadata != null && Object.keys(params.additionalMetadata).length > 0;
+
+		if (!databaseMetadataPresent && !additionalMetadataPresent && params.acl === undefined) {
+			throw new Error(
+				"Nothing to update: pass database metadata, additional metadata, or a replacement ACL.",
+			);
+		}
+
+		const scope = this.scope(params.collection, params.database);
+
+		if (scope.collection == null) {
+			throw new Error(
+				"A collection is required to update context metadata. List collections, then pass one explicitly.",
+			);
+		}
+
+		const request: SDK.HandlerContextMetadataUpdateRequest = {
+			...scope,
+			id: params.id,
+		};
+
+		if (databaseMetadataPresent) request.databaseMetadata = params.databaseMetadata;
+
+		if (additionalMetadataPresent) request.additionalMetadata = params.additionalMetadata;
+
+		if (params.acl !== undefined) request.acl = params.acl;
+
+		return this.call(
+			"/context/{id}/metadata",
+			() => this.sdk.context.updateSourceMetadata(request, req(opts)),
+			opts?.onMeta,
 		);
 	}
 
