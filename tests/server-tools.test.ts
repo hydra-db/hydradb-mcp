@@ -2012,6 +2012,20 @@ test("hydradb_update preserves whitespace in a nonblank source ID", async () => 
 	await client.close();
 });
 
+test("hydradb_update rejects a whitespace-only source ID", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_update",
+		arguments: { id: "   ", additional_metadata: { reviewed: true } },
+	});
+
+	assert.equal(result.isError, true);
+	assert.equal(calls.some((entry) => entry.method === "update"), false);
+	await client.close();
+});
+
 test("hydradb_update rejects an empty edit without calling HydraDB", async () => {
 	const { hydra, calls } = mockHydra();
 	const client = await connect(hydra);
