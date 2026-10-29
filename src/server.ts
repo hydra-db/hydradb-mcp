@@ -3639,6 +3639,20 @@ export function createHydraDBServer(
 		openWorldHint: true,
 	};
 
+	/**
+	 * Overwrites prior state AND is not safe to repeat blindly. Webhook register
+	 * replaces the current destination/event types, and setting the signing secret
+	 * invalidates the receiver's old one the moment it runs — both are destructive,
+	 * and because a fresh secret is minted per call they are not idempotent either,
+	 * so a host must not treat a repeat as a no-op.
+	 */
+	const destructiveWrite = {
+		readOnlyHint: false,
+		destructiveHint: true,
+		idempotentHint: false,
+		openWorldHint: true,
+	};
+
 	// --- Canonical tools ---
 
 	register(
@@ -4121,11 +4135,23 @@ export function createHydraDBServer(
 	// callback for indexing events and debug a failed delivery without leaving the
 	// session. On by default, withheld as a group by HYDRADB_MCP_WEBHOOK_TOOLS=0.
 	//
+	// WITHHELD from a scope-confined connection. These endpoints act on the whole
+	// ORG — they take no database/collection — so a connection the user confined to
+	// specific databases or collections (an OAuth grant) must not reach them: it
+	// could otherwise replace or delete the org's webhook, rotate its secret, or
+	// read every collection's deliveries, none of which the grant allowed. The
+	// per-call scope guard cannot catch this because these calls carry no scope, so
+	// the whole family is gated here instead. An API-key connection is unconfined
+	// (it already has full org access), so it keeps the tools.
+	//
 	// The signing secret is returned by the API exactly once, on register (with
 	// generate) and on set-signing-secret; `get` never returns it. These tools
 	// render it only on that one response, clearly labelled, and never log it, so
 	// it cannot leak into later output.
-	if (webhookToolsEnabled()) {
+	const connectionIsScopeConfined =
+		hydra.allowedDatabases != null || hydra.allowedCollections != null;
+
+	if (webhookToolsEnabled() && !connectionIsScopeConfined) {
 		const WEBHOOK_STATUSES = [
 			"pending",
 			"sweeping",
@@ -4173,7 +4199,7 @@ export function createHydraDBServer(
 
 				return textResult(formatRegistration(res));
 			},
-			additiveWrite,
+			destructiveWrite,
 		);
 
 		register(
@@ -4217,7 +4243,7 @@ export function createHydraDBServer(
 
 				return textResult(formatSigningSecret(res));
 			},
-			additiveWrite,
+			destructiveWrite,
 		);
 
 		register(

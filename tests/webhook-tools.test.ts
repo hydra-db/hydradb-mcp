@@ -226,6 +226,15 @@ test("delete and disable-signing are annotated destructive; reads are read-only"
 		assert.equal(hint(name)?.destructiveHint, true, `${name} must read as destructive`);
 	}
 
+	// Register replaces the current destination/events, and setting the secret
+	// invalidates the receiver's old one — both destructive, and non-idempotent
+	// since a fresh secret is minted per call, so a host must not treat a repeat
+	// as a safe no-op.
+	for (const name of [TOOL_NAMES.WEBHOOK_REGISTER, TOOL_NAMES.WEBHOOK_SET_SIGNING_SECRET]) {
+		assert.equal(hint(name)?.destructiveHint, true, `${name} overwrites prior state`);
+		assert.equal(hint(name)?.idempotentHint, false, `${name} is not safe to repeat blindly`);
+	}
+
 	for (const name of [
 		TOOL_NAMES.WEBHOOK_GET,
 		TOOL_NAMES.WEBHOOK_LIST_DELIVERIES,
@@ -235,6 +244,34 @@ test("delete and disable-signing are annotated destructive; reads are read-only"
 	}
 
 	await client.close();
+});
+
+// The webhook endpoints act on the whole ORG and carry no database/collection,
+// so a connection the user confined to specific databases/collections (an OAuth
+// grant) must not reach them — otherwise the grant's boundary is silently
+// bypassed. The whole family is withheld rather than refused per-call, since
+// these calls have no scope for the per-call guard to check.
+test("the webhook tools are withheld from a scope-confined connection", async () => {
+	for (const confinement of [
+		{ allowedDatabases: ["db_test"] },
+		{ allowedCollections: ["col_a"] },
+	]) {
+		const sdk = {
+			query: () => Promise.resolve({ data: { chunks: [] }, success: true }),
+			context: {},
+		} as unknown as HydraDBClient;
+		const hydra = new HydraDB({ token: "t", database: "db_test", ...confinement }, sdk);
+		const client = await connect(hydra);
+
+		const names = (await client.listTools()).tools.map((t) => t.name);
+		for (const name of WEBHOOK_TOOL_NAMES) {
+			assert.ok(!names.includes(name), `${name} must be withheld from a confined connection`);
+		}
+		// The memory surface a confined connection WAS granted is untouched.
+		assert.ok(names.includes(TOOL_NAMES.QUERY));
+
+		await client.close();
+	}
 });
 
 // --- Register ---
