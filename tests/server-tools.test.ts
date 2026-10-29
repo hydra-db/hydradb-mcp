@@ -1864,7 +1864,7 @@ test("every tool declares all four behaviour hints explicitly", async () => {
 	await client.close();
 });
 
-test("reads are read-only, writes are not, and only deletes are destructive", async () => {
+test("reads are read-only and mutating writes advertise destructive behavior", async () => {
 	process.env.HYDRADB_MCP_LEGACY_TOOLS = "1";
 	const client = await connect(mockHydra().hydra);
 	const { tools } = await client.listTools();
@@ -1887,7 +1887,6 @@ test("reads are read-only, writes are not, and only deletes are destructive", as
 	// destructive-action prompt.
 	for (const name of [
 		"hydradb_ingest",
-		"hydradb_update",
 		"hydra_db_store",
 		"hydra_db_ingest_conversation",
 	]) {
@@ -1899,8 +1898,12 @@ test("reads are read-only, writes are not, and only deletes are destructive", as
 		);
 	}
 
-	for (const name of ["hydradb_delete", "hydra_db_delete_memory"]) {
-		assert.equal(hint(name).destructiveHint, true, `${name} removes data irreversibly`);
+	for (const name of ["hydradb_update", "hydradb_delete", "hydra_db_delete_memory"]) {
+		assert.equal(
+			hint(name).destructiveHint,
+			true,
+			`${name} can overwrite or remove existing values`,
+		);
 	}
 
 	await client.close();
@@ -1960,15 +1963,23 @@ for (const [label, acl, expected] of [
 	["public", ["__public__"], ["__public__"]],
 ] as const) {
 	test(`hydradb_update maps ${label} ACL to the documented replacement`, async () => {
-		const { hydra, calls } = mockHydra();
+		const { hydra, calls } = mockHydra({
+			update: {
+				updated: true,
+				aclUpdated: true,
+				vectorAclSynced: true,
+			},
+		});
+
 		const client = await connect(hydra);
 
-		await client.callTool({
+		const result = await client.callTool({
 			name: "hydradb_update",
 			arguments: { id: "doc-1", acl },
 		});
 
 		assert.deepEqual(calls.find((entry) => entry.method === "update")?.args.acl, expected);
+		assert.notEqual(result.isError, true);
 		await client.close();
 	});
 }
@@ -2002,6 +2013,9 @@ test("hydradb_update reports partial persistence and vector sync failures as err
 	for (const update of [
 		{ updated: true, partialCommit: "Mongo updated; chunk rows failed" },
 		{ updated: true, aclUpdated: true, vectorSyncError: "Milvus unavailable" },
+		{ updated: true, aclUpdated: true, vectorSyncRequired: false },
+		{ updated: true, aclUpdated: true, vectorAclSynced: false },
+		{ updated: true, vectorSyncRequired: true, vectorSynced: false },
 	]) {
 		const { hydra } = mockHydra({ update });
 		const client = await connect(hydra);
@@ -2021,6 +2035,56 @@ test("hydradb_update reports partial persistence and vector sync failures as err
 		assert.match(first.text, /retry/i);
 		await client.close();
 	}
+});
+
+test("hydradb_update preserves successful metadata vector synchronization", async () => {
+	const { hydra } = mockHydra({
+		update: {
+			updated: true,
+			vectorSyncRequired: true,
+			vectorSynced: true,
+				vectorRowsSynced: 3,
+			},
+		});
+
+		const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_update",
+		arguments: { id: "doc-1", database_metadata: { department: "finance" } },
+	});
+
+	assert.notEqual(result.isError, true);
+	assert.equal(result.structuredContent?.vector_sync_required, true);
+	assert.equal(result.structuredContent?.vector_synced, true);
+	assert.equal(result.structuredContent?.vector_rows_synced, 3);
+	await client.close();
+});
+
+test("hydradb_update redacts structured partial-failure details", async () => {
+	const credential = "sk-live-abcdef1234567890";
+
+	const { hydra } = mockHydra({
+		update: {
+			updated: true,
+			partialCommit: `Authorization: Bearer ${credential}`,
+			vectorSyncError: `mongodb://admin:${credential}@localhost`,
+		},
+	});
+
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_update",
+		arguments: { id: "doc-1", additional_metadata: { reviewed: true } },
+	});
+
+	const serialized = JSON.stringify(result);
+
+	assert.equal(result.isError, true);
+	assert.equal(serialized.includes(credential), false);
+	assert.equal(serialized.includes("sk-live"), false);
+	await client.close();
 });
 
 // CONTRACT §1 says a source's identifier field is `id`, but one concept was

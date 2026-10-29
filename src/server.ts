@@ -1187,6 +1187,8 @@ export function createHydraDBServer(
 			structured.vector_sync_required = res.vectorSyncRequired;
 		}
 
+		if (res.vectorSynced != null) structured.vector_synced = res.vectorSynced;
+
 		if (res.vectorAclSynced != null) structured.vector_acl_synced = res.vectorAclSynced;
 
 		if (res.vectorRowsSynced != null) structured.vector_rows_synced = res.vectorRowsSynced;
@@ -1198,11 +1200,11 @@ export function createHydraDBServer(
 		const convergenceIssue =
 			res.partialCommit ??
 			res.vectorSyncError ??
-			(res.aclUpdated === true &&
-			res.vectorSyncRequired !== false &&
-			res.vectorAclSynced !== true
+			(res.aclUpdated === true && res.vectorAclSynced !== true
 				? "The ACL update was saved, but search-index ACL synchronization was not confirmed."
-				: undefined);
+				: res.vectorSyncRequired === true && res.vectorSynced !== true
+					? "The metadata update was saved, but vector synchronization was not confirmed."
+					: undefined);
 
 		if (res.updated !== true) {
 			return {
@@ -2945,10 +2947,52 @@ export function createHydraDBServer(
 
 		if (!result.isError) return result;
 
-		return {
+		const redactStructured = (
+			structured: NonNullable<ToolResult["structuredContent"]>,
+		): ListedFields => {
+			const redactValue = (value: JsonValue): JsonValue => {
+				const text = z.string().safeParse(value);
+
+				if (text.success) return hydra.redact(text.data);
+
+				if (Array.isArray(value)) return value.map(redactValue);
+
+				const record = z.record(z.custom<JsonValue>()).safeParse(value);
+
+				if (!record.success) return value;
+
+				const redacted: ListedFields = {};
+
+				for (const [key, nested] of Object.entries(record.data)) {
+					redacted[key] = redactValue(nested);
+				}
+
+				return redacted;
+			};
+
+			const redacted: ListedFields = {};
+
+			for (const [key, value] of Object.entries(structured)) {
+				const parsed = jsonValue.safeParse(value);
+
+				redacted[key] = parsed.success
+					? redactValue(parsed.data)
+					: "[unavailable non-JSON error detail]";
+			}
+
+			return redacted;
+		};
+
+		const redacted: ToolResult = {
 			...result,
 			content: result.content.map((part) => ({ ...part, text: hydra.redact(part.text) })),
 		};
+
+		if (result.structuredContent != null) {
+			redacted.structuredContent = redactStructured(result.structuredContent);
+		}
+
+		return redacted;
 	}
 
 	function register(
@@ -3129,16 +3173,7 @@ export function createHydraDBServer(
 			.nullable()
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.UPDATE].params.acl),
-		database: z
-			.string()
-			.min(1)
-			.optional()
-			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.UPDATE].params.database),
-		collection: z
-			.string()
-			.min(1)
-			.optional()
-			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.UPDATE].params.collection),
+		...scopeSchema,
 	};
 
 	const updateOutputSchema = {
@@ -3150,6 +3185,7 @@ export function createHydraDBServer(
 		additional_metadata_keys: z.array(z.string()),
 		acl_updated: z.boolean(),
 		vector_sync_required: z.boolean().optional(),
+		vector_synced: z.boolean().optional(),
 		vector_acl_synced: z.boolean().optional(),
 		vector_rows_synced: z.number().optional(),
 		partial_commit: z.string().optional(),
@@ -3654,10 +3690,10 @@ export function createHydraDBServer(
 		openWorldHint: true,
 	};
 
-	/** Changes one existing item; retrying an identical request has no extra effect. */
+	/** Changes or removes existing values; retrying an identical request has no extra effect. */
 	const idempotentWrite = {
 		readOnlyHint: false,
-		destructiveHint: false,
+		destructiveHint: true,
 		idempotentHint: true,
 		openWorldHint: true,
 	};
