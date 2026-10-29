@@ -1998,6 +1998,20 @@ test("hydradb_update omits ACL when it was not supplied", async () => {
 	await client.close();
 });
 
+test("hydradb_update preserves whitespace in a nonblank source ID", async () => {
+	const { hydra, calls } = mockHydra({ update: { updated: true } });
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_update",
+		arguments: { id: " doc-1 ", additional_metadata: { reviewed: true } },
+	});
+
+	assert.notEqual(result.isError, true);
+	assert.equal(calls.find((entry) => entry.method === "update")?.args.id, " doc-1 ");
+	await client.close();
+});
+
 test("hydradb_update rejects an empty edit without calling HydraDB", async () => {
 	const { hydra, calls } = mockHydra();
 	const client = await connect(hydra);

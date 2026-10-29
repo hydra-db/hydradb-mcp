@@ -3157,8 +3157,7 @@ export function createHydraDBServer(
 	const updateSchema = {
 		id: z
 			.string()
-			.trim()
-			.min(1)
+			.refine((id) => id.trim().length > 0, "id must not be blank")
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.UPDATE].params.id),
 		database_metadata: z
 			.record(z.unknown())
