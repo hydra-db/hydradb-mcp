@@ -34,7 +34,8 @@ Ids flow between these: `hydradb_query`, `hydradb_list` and `hydradb_subgraph` e
 | `hydradb_connector_status` | Explain connector and resource sync health in plain words |
 | `hydradb_connector_discover` | Discover resources visible through a connected provider account |
 | `hydradb_connector_resources` | List resources configured on a connector |
-| `hydradb_connector_update` | Update noncredential connector settings |
+| `hydradb_connector_create` | Return a secure dashboard link for connecting a provider |
+| `hydradb_connector_update` | Update noncredential settings, or return a secure reconnect link |
 | `hydradb_connector_delete` | Permanently delete a connector |
 | `hydradb_connector_sync` | Start a connector sync |
 | `hydradb_connector_pause` | Pause connector syncing |
@@ -63,7 +64,13 @@ unlisted resources remain unchanged.
 The provider-detail tool returns credential **schema metadata**, not credential
 values. Do not paste provider credentials into chat or any MCP tool argument.
 Defaults, examples, constants, and unknown schema extensions are removed before
-the schema reaches model context.
+the schema reaches model context. `hydradb_connector_create` accepts only a
+provider and returns `/connectors?connect=<provider>`. The mutually exclusive
+`reconnect: true` update action authorizes the connector and returns
+`/connectors?open=<connector_id>`; open the drawer and select **Reconnect**.
+Both flows set `completed: false` because the dashboard, not MCP, performs the
+credential-bearing request. `HYDRADB_OAUTH_ISSUER` selects the dashboard origin
+for both completion links and defaults to `https://app.hydradb.com`.
 
 ### Graph tools (Cypher)
 
@@ -383,6 +390,7 @@ Checks whether ingested sources have finished indexing.
 | `HYDRADB_GRAPH_COLLECTION` | Default graph collection | `default` |
 | `HYDRADB_MCP_GRAPH_TOOLS` | Register the graph tools (`0` withholds them) | *on* |
 | `HYDRADB_MCP_CONNECTOR_TOOLS` | Register the connector tools (`0` withholds them) | *on* |
+| `HYDRADB_OAUTH_ISSUER` | Authorization server and connector-completion dashboard origin | `https://app.hydradb.com` for connector links |
 
 A graph database is a **different namespace** from the memory database: the same
 name can exist as both, and Cypher aimed at the wrong one reads an empty graph
@@ -561,7 +569,7 @@ With three extra variables the hosted server also speaks the MCP authorization f
 
 | Variable | Description |
 | --- | --- |
-| `HYDRADB_OAUTH_ISSUER` | The authorization server, e.g. `https://app.hydradb.com`. Must match its `NEXTAUTH_URL` exactly |
+| `HYDRADB_OAUTH_ISSUER` | Authorization server and connector-completion dashboard origin, e.g. `https://app.hydradb.com`. Must match its `NEXTAUTH_URL` exactly for OAuth |
 | `HYDRADB_MCP_PUBLIC_URL` | This server's public URL as clients see it, e.g. `https://mcp.hydradb.com`. Tokens minted for any other audience are refused |
 | `HYDRADB_OAUTH_INTROSPECTION_SECRET` | Shared secret the issuer's `/api/oauth/introspect` expects; must equal the dashboard's `MCP_INTROSPECTION_SECRET` |
 

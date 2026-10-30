@@ -291,6 +291,49 @@ test("connector writes map requests and forward cancellation, including falsy va
 	assert.ok(calls.every((call) => call.signal === signal));
 });
 
+test("credential endpoint wrappers map synthetic create and reconnect requests", async () => {
+	const calls: Call[] = [];
+	const signal = new AbortController().signal;
+
+	const sdk = {
+		connectors: {
+			create: (request: Record<string, unknown>, options?: { abortSignal?: AbortSignal }) => {
+				calls.push({ method: "create", request, signal: options?.abortSignal });
+
+				return Promise.resolve({ connectorId: "c2", provider: "gitlab" });
+			},
+			update: (request: Record<string, unknown>, options?: { abortSignal?: AbortSignal }) => {
+				calls.push({ method: "update-credentials", request, signal: options?.abortSignal });
+
+				return Promise.resolve({ connectorId: "c2", credentialsUpdated: true });
+			},
+		},
+	} as unknown as HydraDBClient;
+
+	const resource = new ConnectorsResource(sdk);
+
+	assert.equal(
+		(await resource.createWithCredentials({ provider: "gitlab", database: "db", credentials: { token: "synthetic" } }, { signal })).connectorId,
+		"c2",
+	);
+	assert.equal(
+		(await resource.updateCredentials({ connectorId: "c2", credentials: { token: "replacement" } }, { signal })).credentialsUpdated,
+		true,
+	);
+	assert.deepEqual(calls, [
+		{
+			method: "create",
+			request: { provider: "gitlab", database: "db", credentials: { token: "synthetic" } },
+			signal,
+		},
+		{
+			method: "update-credentials",
+			request: { id: "c2", credentials: { token: "replacement" } },
+			signal,
+		},
+	]);
+});
+
 test("connector writes validate success and translate errors with encoded paths", async () => {
 	const invalid = new ConnectorsResource({
 		connectors: { sync: () => Promise.resolve({ runId: 42 }) },

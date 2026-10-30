@@ -25,7 +25,7 @@ export type ConnectorListInput = ConnectorListParams;
 
 export type ConnectorDiscoverInput = ConnectorDiscoverParams;
 
-export type ConnectorUpdateInput = ConnectorUpdateRequest;
+export type ConnectorUpdateInput = ConnectorUpdateRequest & { reconnect?: true };
 
 export type ConnectorConfigureResourceInput = ConnectorResourceMapping;
 
@@ -446,7 +446,17 @@ function renderStatus(data: Record<string, unknown>): string {
 
 /** MCP-facing connector operations, including database confinement and safe projection. */
 export class ConnectorTools {
-	constructor(private readonly hydra: HydraDB) {}
+	constructor(
+		private readonly hydra: HydraDB,
+		private readonly dashboardUrl: string,
+	) {}
+
+	private dashboardLink(parameter: "connect" | "open", value: string): string {
+		const url = new URL("/connectors", this.dashboardUrl);
+		url.searchParams.set(parameter, value);
+
+		return url.toString();
+	}
 
 	private assertMutationAllowed(): void {
 		// Connector endpoints do not atomically enforce MCP database or collection grants.
@@ -588,7 +598,38 @@ export class ConnectorTools {
 		};
 	}
 
+	async create(provider: string): Promise<ConnectorToolResponse> {
+		const dashboardUrl = this.dashboardLink("connect", provider);
+
+		return {
+			text:
+				`No connector was created by this call. Open ${dashboardUrl} to connect the provider securely. ` +
+				"Do not paste provider credentials into chat or any MCP tool.",
+			data: {
+				provider,
+				completed: false,
+				dashboard_url: dashboardUrl,
+			},
+		};
+	}
+
 	async update(input: ConnectorUpdateInput, opts?: RequestOptions): Promise<ConnectorToolResponse> {
+		if (input.reconnect === true) {
+			await this.authorizedConnector(input.connectorId, opts);
+			const dashboardUrl = this.dashboardLink("open", input.connectorId);
+
+			return {
+				text:
+					`No credentials were changed by this call. Open ${dashboardUrl} to open the connector drawer, ` +
+					"then select Reconnect. Do not paste provider credentials into chat or any MCP tool.",
+				data: {
+					connector_id: input.connectorId,
+					completed: false,
+					dashboard_url: dashboardUrl,
+				},
+			};
+		}
+
 		this.assertMutationAllowed();
 		const result = await this.hydra.connectors.update(input, opts);
 

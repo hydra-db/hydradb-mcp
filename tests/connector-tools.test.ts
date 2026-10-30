@@ -125,6 +125,7 @@ function text(result: Awaited<ReturnType<Client["callTool"]>>) {
 
 afterEach(() => {
 	delete process.env.HYDRADB_MCP_CONNECTOR_TOOLS;
+	delete process.env.HYDRADB_OAUTH_ISSUER;
 });
 
 test("all six connector read tools are registered by default and explicitly read-only", async () => {
@@ -152,11 +153,12 @@ test("all six connector read tools are registered by default and explicitly read
 	await client.close();
 });
 
-test("all nine credential-free write tools declare explicit write safety annotations", async () => {
+test("all ten credential-free connector actions declare explicit write safety annotations", async () => {
 	const client = await connect(mockHydra().hydra);
 	const { tools } = await client.listTools();
 
 	const additive = new Set([
+		"hydradb_connector_create",
 		"hydradb_connector_sync",
 		"hydradb_connector_pause",
 		"hydradb_connector_resume",
@@ -170,6 +172,7 @@ test("all nine credential-free write tools declare explicit write safety annotat
 	]);
 
 	for (const name of [
+		"hydradb_connector_create",
 		"hydradb_connector_update",
 		"hydradb_connector_delete",
 		"hydradb_connector_sync",
@@ -196,7 +199,8 @@ test("every connector write input field has client-visible help", async () => {
 	const { tools } = await client.listTools();
 
 	const expectedFields: Record<string, string[]> = {
-		hydradb_connector_update: ["connector_id", "custom_instructions", "sync_interval_seconds"],
+		hydradb_connector_create: ["provider"],
+		hydradb_connector_update: ["connector_id", "custom_instructions", "reconnect", "sync_interval_seconds"],
 		hydradb_connector_delete: ["connector_id"],
 		hydradb_connector_sync: ["connector_id"],
 		hydradb_connector_pause: ["connector_id"],
@@ -227,6 +231,7 @@ test("every connector write input field has client-visible help", async () => {
 	};
 
 	const expectedRequired: Record<string, string[]> = {
+		hydradb_connector_create: ["provider"],
 		hydradb_connector_update: ["connector_id"],
 		hydradb_connector_delete: ["connector_id"],
 		hydradb_connector_sync: ["connector_id"],
@@ -266,6 +271,80 @@ test("every connector write input field has client-visible help", async () => {
 		assert.equal(tool.inputSchema.additionalProperties, false, `${name} should reject unknown fields`);
 		assert.deepEqual(missingDescriptions(tool.inputSchema, ""), [], `${name} has undocumented fields`);
 	}
+
+	await client.close();
+});
+
+test("create and reconnect return dashboard completion links without credentials", async () => {
+	process.env.HYDRADB_OAUTH_ISSUER = "http://127.0.0.1:3000/";
+	const fixture = mockHydra();
+	const client = await connect(fixture.hydra);
+	const { tools } = await client.listTools();
+	const createTool = tools.find((tool) => tool.name === "hydradb_connector_create");
+
+	assert.ok(createTool);
+	assert.deepEqual(Object.keys(createTool.inputSchema.properties ?? {}), ["provider"]);
+	assert.equal(createTool.inputSchema.additionalProperties, false);
+
+	const create = await client.callTool({
+		name: "hydradb_connector_create",
+		arguments: { provider: "gitlab cloud" },
+	});
+
+	assert.equal(create.isError, undefined);
+	assert.deepEqual(structured(create), {
+		provider: "gitlab cloud",
+		completed: false,
+		dashboard_url: "http://127.0.0.1:3000/connectors?connect=gitlab+cloud",
+	});
+	assert.match(text(create), /no connector was created/i);
+	assert.match(text(create), /http:\/\/127\.0\.0\.1:3000\/connectors\?connect=gitlab\+cloud/);
+	assert.doesNotMatch(text(create), /credential.*:/i);
+
+	const reconnect = await client.callTool({
+		name: "hydradb_connector_update",
+		arguments: { connector_id: "allowed", reconnect: true },
+	});
+
+	assert.equal(reconnect.isError, undefined);
+	assert.deepEqual(structured(reconnect), {
+		connector_id: "allowed",
+		completed: false,
+		dashboard_url: "http://127.0.0.1:3000/connectors?open=allowed",
+	});
+	assert.match(text(reconnect), /select Reconnect/i);
+	assert.match(text(reconnect), /http:\/\/127\.0\.0\.1:3000\/connectors\?open=allowed/);
+	assert.equal(fixture.calls.some((call) => call.method === "update"), false);
+
+	await client.close();
+});
+
+test("reconnect authorizes the connector and stays mutually exclusive with settings", async () => {
+	const fixture = mockHydra(["db-a"], ["public"]);
+	const client = await connect(fixture.hydra);
+
+	const allowed = await client.callTool({
+		name: "hydradb_connector_update",
+		arguments: { connector_id: "allowed", reconnect: true },
+	});
+
+	assert.equal(allowed.isError, undefined);
+
+	const blocked = await client.callTool({
+		name: "hydradb_connector_update",
+		arguments: { connector_id: "blocked", reconnect: true },
+	});
+
+	assert.equal(blocked.isError, true);
+	assert.doesNotMatch(text(blocked), /Blocked secret/);
+
+	const mixed = await client.callTool({
+		name: "hydradb_connector_update",
+		arguments: { connector_id: "allowed", reconnect: true, custom_instructions: "do not send" },
+	});
+
+	assert.equal(mixed.isError, true);
+	assert.equal(fixture.calls.some((call) => call.method === "update"), false);
 
 	await client.close();
 });

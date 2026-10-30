@@ -49,6 +49,8 @@ export { ConnectorsResource } from "./connectors.js";
 
 export type {
 	ConnectorUpdateRequest,
+	ConnectorCredentialCreateRequest,
+	ConnectorCredentialUpdateRequest,
 	ConnectorConfigureRequest,
 	ConnectorResourceCreateRequest,
 	ConnectorResourceUpdateRequest,

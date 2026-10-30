@@ -34,7 +34,7 @@ test("canonical HYDRADB_* names are read as primary with no warning", () => {
 			database: "db",
 			collection: "default",
 		},
-		connectors: { enabled: true },
+		connectors: { enabled: true, dashboardUrl: "https://app.hydradb.com" },
 	});
 	assert.deepEqual(messages, []);
 });
@@ -187,6 +187,7 @@ test("malformed timeout and retry values fall back rather than throwing", () => 
 
 test("connector tools are enabled by default and accept normal false spellings", () => {
 	assert.equal(resolveConnectorConfig({}).enabled, true);
+	assert.equal(resolveConnectorConfig({}).dashboardUrl, "https://app.hydradb.com");
 
 	for (const value of ["0", "false", "FALSE", "no", "off", " off "]) {
 		assert.equal(
@@ -195,4 +196,43 @@ test("connector tools are enabled by default and accept normal false spellings",
 			`"${value}" should disable connector tools`,
 		);
 	}
+});
+
+test("connector dashboard links use the OAuth issuer origin", () => {
+	assert.equal(
+		resolveConnectorConfig({ HYDRADB_OAUTH_ISSUER: " http://127.0.0.1:3000/ " }).dashboardUrl,
+		"http://127.0.0.1:3000",
+	);
+	assert.equal(
+		resolveConnectorConfig({ HYDRADB_OAUTH_ISSUER: "https://dashboard.hydradb.acme.com" }).dashboardUrl,
+		"https://dashboard.hydradb.acme.com",
+	);
+	assert.equal(
+		resolveConnectorConfig({ HYDRADB_OAUTH_ISSUER: "https://user:pass@dashboard.example.com/app?x=1#y" }).dashboardUrl,
+		"https://dashboard.example.com",
+	);
+});
+
+test("connector dashboard links fall back to the hosted dashboard without a usable issuer", () => {
+	for (const value of [undefined, "", "   ", "javascript:alert(1)", "not-a-url", "ftp://dashboard.example.com"]) {
+		assert.equal(
+			resolveConnectorConfig({ HYDRADB_OAUTH_ISSUER: value }).dashboardUrl,
+			"https://app.hydradb.com",
+			`issuer ${JSON.stringify(value)} should fall back`,
+		);
+	}
+});
+
+test("the retired HYDRADB_DASHBOARD_URL no longer changes connector links", () => {
+	assert.equal(
+		resolveConnectorConfig({ HYDRADB_DASHBOARD_URL: "https://elsewhere.example.com" }).dashboardUrl,
+		"https://app.hydradb.com",
+	);
+	assert.equal(
+		resolveConnectorConfig({
+			HYDRADB_DASHBOARD_URL: "https://elsewhere.example.com",
+			HYDRADB_OAUTH_ISSUER: "https://dashboard.hydradb.com",
+		}).dashboardUrl,
+		"https://dashboard.hydradb.com",
+	);
 });

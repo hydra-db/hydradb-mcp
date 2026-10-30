@@ -779,13 +779,23 @@ Confirm with the user before deleting a collection they did not name. Take the c
 		},
 	},
 
+	[TOOL_NAMES.CONNECTOR_CREATE]: {
+		title: "Connect Provider",
+		description:
+			"Return the HydraDB dashboard link that securely connects one provider. This tool never accepts provider credentials and does not create the connector itself.",
+		params: {
+			provider: "Provider identifier from hydradb_connector_providers. The dashboard collects credentials outside model context.",
+		},
+	},
+
 	[TOOL_NAMES.CONNECTOR_UPDATE]: {
 		title: "Update Connector Settings",
 		description:
-			"Update noncredential connector settings. This can change future ingestion for every configured resource, so review the requested settings before approval. Credentials are never accepted.",
+			"Update noncredential connector settings, or return a mutually exclusive dashboard link for reconnecting credentials. Credentials are never accepted by this tool.",
 		params: {
 			connector_id: "Connector identifier from hydradb_connector_list.",
 			custom_instructions: "Connector-level ingestion instructions. Send an empty string to clear them.",
+			reconnect: "Set true by itself to get the dashboard link. Then select Reconnect in the connector drawer.",
 			sync_interval_seconds: "Scheduled sync interval in seconds. Send 0 to use the provider default.",
 		},
 	},
@@ -994,7 +1004,8 @@ CONNECTORS
 - ${TOOL_NAMES.CONNECTOR_STATUS} — plain-language connector and resource sync health.
 - ${TOOL_NAMES.CONNECTOR_DISCOVER} — resources available through a connector's stored provider account.
 - ${TOOL_NAMES.CONNECTOR_RESOURCES} — resources already configured on a connector.
-- ${TOOL_NAMES.CONNECTOR_UPDATE} — noncredential connector settings. This tool never accepts provider credentials.
+- ${TOOL_NAMES.CONNECTOR_CREATE} — secure dashboard link for connecting a provider. Never paste credentials into a tool.
+- ${TOOL_NAMES.CONNECTOR_UPDATE} — noncredential settings or a secure reconnect link. This tool never accepts provider credentials.
 - ${TOOL_NAMES.CONNECTOR_DELETE} — irreversible connector deletion. Confirm first.
 - ${TOOL_NAMES.CONNECTOR_SYNC} — start a connector sync, then monitor it with ${TOOL_NAMES.CONNECTOR_STATUS}.
 - ${TOOL_NAMES.CONNECTOR_PAUSE} — pause connector syncing.
