@@ -69,7 +69,8 @@ provider and returns `/connectors?connect=<provider>`. The mutually exclusive
 `reconnect: true` update action authorizes the connector and returns
 `/connectors?open=<connector_id>`; open the drawer and select **Reconnect**.
 Both flows set `completed: false` because the dashboard, not MCP, performs the
-credential-bearing request. `HYDRADB_DASHBOARD_URL` changes the dashboard origin.
+credential-bearing request. `HYDRADB_OAUTH_ISSUER` selects the dashboard origin
+for both completion links and defaults to `https://app.hydradb.com`.
 
 Run the local-only Inspector acceptance driver after building the package. The
 driver refuses non-loopback API and dashboard URLs. A local guard proxy rejects
@@ -107,7 +108,7 @@ loopback addresses:
 ```bash
 npm run build
 HYDRADB_BASE_URL=http://127.0.0.1:9001 \
-HYDRADB_DASHBOARD_URL=http://127.0.0.1:3000 \
+HYDRADB_OAUTH_ISSUER=http://127.0.0.1:3000 \
 HYDRADB_API_KEY=local-key HYDRADB_DATABASE=local-db \
 npm run e2e:connectors:local
 ```
@@ -433,7 +434,7 @@ Checks whether ingested sources have finished indexing.
 | `HYDRADB_GRAPH_COLLECTION` | Default graph collection | `default` |
 | `HYDRADB_MCP_GRAPH_TOOLS` | Register the graph tools (`0` withholds them) | *on* |
 | `HYDRADB_MCP_CONNECTOR_TOOLS` | Register the connector tools (`0` withholds them) | *on* |
-| `HYDRADB_DASHBOARD_URL` | Dashboard origin for connector create and reconnect links | `https://app.hydradb.com` |
+| `HYDRADB_OAUTH_ISSUER` | Authorization server and connector-completion dashboard origin | `https://app.hydradb.com` for connector links |
 
 A graph database is a **different namespace** from the memory database: the same
 name can exist as both, and Cypher aimed at the wrong one reads an empty graph
@@ -612,7 +613,7 @@ With three extra variables the hosted server also speaks the MCP authorization f
 
 | Variable | Description |
 | --- | --- |
-| `HYDRADB_OAUTH_ISSUER` | The authorization server, e.g. `https://app.hydradb.com`. Must match its `NEXTAUTH_URL` exactly |
+| `HYDRADB_OAUTH_ISSUER` | Authorization server and connector-completion dashboard origin, e.g. `https://app.hydradb.com`. Must match its `NEXTAUTH_URL` exactly for OAuth |
 | `HYDRADB_MCP_PUBLIC_URL` | This server's public URL as clients see it, e.g. `https://mcp.hydradb.com`. Tokens minted for any other audience are refused |
 | `HYDRADB_OAUTH_INTROSPECTION_SECRET` | Shared secret the issuer's `/api/oauth/introspect` expects; must equal the dashboard's `MCP_INTROSPECTION_SECRET` |
 

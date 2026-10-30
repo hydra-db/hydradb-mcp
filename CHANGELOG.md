@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 completion link. The connector update tool adds a mutually exclusive reconnect action
 that authorizes the connector and returns its dashboard drawer link. Neither flow
 accepts or returns provider credentials, and both report `completed: false` until the
-dashboard finishes the credential-bearing request. `HYDRADB_DASHBOARD_URL` selects the
+dashboard finishes the credential-bearing request. `HYDRADB_OAUTH_ISSUER` selects the
 dashboard origin and defaults to `https://app.hydradb.com`.
 
 ### Added — credential-free connector write tools

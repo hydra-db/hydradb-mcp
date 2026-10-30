@@ -133,3 +133,12 @@ test("provider-failure skip mode reports the exact reason and a partial lifecycl
 		"provider failure: not run — local backend does not surface a stopped-vendor failure within 6 minutes; sync stayed healthy and idle",
 	]);
 });
+
+test("connector dashboard documentation uses the OAuth issuer setting", () => {
+	for (const path of ["README.md", ".env.example", "CHANGELOG.md"]) {
+		const content = readFileSync(path, "utf8");
+
+		assert.doesNotMatch(content, /HYDRADB_DASHBOARD_URL/, `${path} still documents the retired setting`);
+		assert.match(content, /HYDRADB_OAUTH_ISSUER/, `${path} must document the active setting`);
+	}
+});
