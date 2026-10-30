@@ -26,7 +26,6 @@
     "test:conformance": "tsx --test conformance/*.test.ts",
     "test:integration": "tsx --test tests/*.integration.spec.ts",
     "test:all": "npm run test:unit && npm run test:integration",
-    "e2e:connectors:local": "node scripts/e2e-connectors.local.mjs",
     "smoke": "node scripts/smoke-dist.mjs",
     "smoke:http": "node scripts/smoke-http.mjs",
     "check-pack": "node scripts/assert-pack-contents.mjs",
