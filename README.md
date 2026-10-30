@@ -24,7 +24,7 @@ Run it two ways, same tools either way:
 Ids flow between these: `hydradb_query`, `hydradb_list` and `hydradb_subgraph` emit them;
 `hydradb_inspect`, `hydradb_delete`, `hydradb_status`, `hydradb_subgraph` and `hydradb_relations` accept them.
 
-### Connector reads
+### Connector tools
 
 | Tool | What it does |
 |---|---|
@@ -34,13 +34,31 @@ Ids flow between these: `hydradb_query`, `hydradb_list` and `hydradb_subgraph` e
 | `hydradb_connector_status` | Explain connector and resource sync health in plain words |
 | `hydradb_connector_discover` | Discover resources visible through a connected provider account |
 | `hydradb_connector_resources` | List resources configured on a connector |
+| `hydradb_connector_update` | Update noncredential connector settings |
+| `hydradb_connector_delete` | Permanently delete a connector |
+| `hydradb_connector_sync` | Start a connector sync |
+| `hydradb_connector_pause` | Pause connector syncing |
+| `hydradb_connector_resume` | Resume connector syncing |
+| `hydradb_connector_configure` | Configure submitted resources and start work |
+| `hydradb_connector_add_resource` | Add one discovered resource |
+| `hydradb_connector_update_resource` | Replace one resource's ACL or instructions |
+| `hydradb_connector_delete_resource` | Permanently remove one configured resource |
 
 Connector tools are on by default. Set `HYDRADB_MCP_CONNECTOR_TOOLS=0` to
-withhold the whole family. A database-confined OAuth connection sees only
-connectors assigned to an allowed database. Connectors with no database stay
+withhold the whole family. A confined OAuth connection sees only connectors
+assigned to an allowed database and collection. Connectors with no destination stay
 hidden, and every by-ID read checks the connector before reading status,
 discovery, or resources. Resource listings also check each resource's
-`database_override` and otherwise inherit the connector database.
+`database_override` and `collection_override`, then inherit the connector destination.
+
+Connector endpoints cannot enforce database or collection grants atomically with a
+mutation. Write tools therefore fail closed for every database- or collection-confined
+OAuth connection and send no connector API request. Use an organization-wide
+connection for connector mutations. Connector deletion, configure, connector settings,
+resource updates, and resource deletion are marked destructive; configure is also
+non-idempotent because it can start time-relative work. Sync, pause, resume, and
+add-resource are non-destructive writes. Configure updates submitted resources;
+unlisted resources remain unchanged.
 
 The provider-detail tool returns credential **schema metadata**, not credential
 values. Do not paste provider credentials into chat or any MCP tool argument.

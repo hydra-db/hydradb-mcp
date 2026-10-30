@@ -49,6 +49,15 @@ export const TOOL_NAMES = {
 	CONNECTOR_STATUS: "hydradb_connector_status",
 	CONNECTOR_DISCOVER: "hydradb_connector_discover",
 	CONNECTOR_RESOURCES: "hydradb_connector_resources",
+	CONNECTOR_UPDATE: "hydradb_connector_update",
+	CONNECTOR_DELETE: "hydradb_connector_delete",
+	CONNECTOR_SYNC: "hydradb_connector_sync",
+	CONNECTOR_PAUSE: "hydradb_connector_pause",
+	CONNECTOR_RESUME: "hydradb_connector_resume",
+	CONNECTOR_CONFIGURE: "hydradb_connector_configure",
+	CONNECTOR_ADD_RESOURCE: "hydradb_connector_add_resource",
+	CONNECTOR_UPDATE_RESOURCE: "hydradb_connector_update_resource",
+	CONNECTOR_DELETE_RESOURCE: "hydradb_connector_delete_resource",
 
 	// Deprecated aliases — kept working for backward compatibility.
 	SEARCH: "hydra_db_search",
@@ -99,6 +108,15 @@ export const CONNECTOR_TOOL_NAMES = [
 	TOOL_NAMES.CONNECTOR_STATUS,
 	TOOL_NAMES.CONNECTOR_DISCOVER,
 	TOOL_NAMES.CONNECTOR_RESOURCES,
+	TOOL_NAMES.CONNECTOR_UPDATE,
+	TOOL_NAMES.CONNECTOR_DELETE,
+	TOOL_NAMES.CONNECTOR_SYNC,
+	TOOL_NAMES.CONNECTOR_PAUSE,
+	TOOL_NAMES.CONNECTOR_RESUME,
+	TOOL_NAMES.CONNECTOR_CONFIGURE,
+	TOOL_NAMES.CONNECTOR_ADD_RESOURCE,
+	TOOL_NAMES.CONNECTOR_UPDATE_RESOURCE,
+	TOOL_NAMES.CONNECTOR_DELETE_RESOURCE,
 ] as const;
 
 export const DEPRECATED_TOOL_NAMES = [

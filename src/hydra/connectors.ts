@@ -1,4 +1,4 @@
-/* oxlint-disable anti-slop/no-unknown-parameters, anti-slop/no-unknown-returns, anti-slop/no-conditional-empty-object-spread -- Generated SDK payloads enter as dynamic values and every response is parsed by a concrete Zod schema before it leaves this wrapper. */
+/* oxlint-disable anti-slop/no-unsafe-dictionary-type, anti-slop/no-unknown-parameters, anti-slop/no-unknown-returns, anti-slop/no-conditional-empty-object-spread -- Generated SDK payloads and validated connector metadata use dynamic JSON at this boundary; every response is parsed before it leaves the wrapper. */
 import type { HydraDBClient } from "@hydradb/sdk";
 import { z } from "zod";
 
@@ -171,6 +171,153 @@ const configuredResourceSchema = z.object({
 
 const resourcesSchema = z.object({ resources: z.array(configuredResourceSchema) });
 
+const connectorUpdateSchema = z.object({
+	connectorId: z.string().optional(),
+	credentialsUpdated: z.boolean().optional(),
+	customInstructionsUpdated: z.boolean().optional(),
+	maxSyncIntervalSeconds: z.number().optional(),
+	minSyncIntervalSeconds: z.number().optional(),
+	nextSyncAt: z.string().optional(),
+	syncIntervalSeconds: z.number().optional(),
+});
+
+const connectorDeleteSchema = z.object({
+	connectorId: z.string().optional(),
+	deleted: z.boolean().optional(),
+});
+
+const connectorSyncSchema = z.object({
+	runId: z.string().optional(),
+	workflowId: z.string().optional(),
+});
+
+const connectorPauseSchema = z.object({
+	connectorId: z.string().optional(),
+	paused: z.boolean().optional(),
+	pausedAt: z.string().optional(),
+});
+
+const configureSchema = z.object({
+	connectorId: z.string().optional(),
+	configured: z.number().optional(),
+	backfill: z.boolean().optional(),
+	firstSyncAt: z.string().optional(),
+	message: z.string().optional(),
+	warnings: z.array(z.string()).optional(),
+	unverified: z.array(z.string()).optional(),
+	meta: z
+		.object({
+			deprecation: z
+				.array(
+					z.object({
+						deprecated: z.boolean().optional(),
+						deprecatedField: z.string().optional(),
+						deprecatedSince: z.string().optional(),
+						message: z.string().optional(),
+						preferredField: z.string().optional(),
+					}),
+				)
+				.optional(),
+		})
+		.optional(),
+});
+
+const resourceCreateSchema = configuredResourceSchema.partial().extend({
+	unverified: z.array(z.string()).optional(),
+	warnings: z.array(z.string()).optional(),
+});
+
+const resourceUpdateSchema = z.object({
+	connectorId: z.string().optional(),
+	resourceId: z.string().optional(),
+	acl: z.array(z.string()).optional(),
+	customInstructions: z.string().optional(),
+	customInstructionsUpdated: z.boolean().optional(),
+});
+
+const resourceDeleteSchema = z.object({
+	connectorId: z.string().optional(),
+	resourceId: z.string().optional(),
+	deleted: z.boolean().optional(),
+});
+
+export interface ConnectorUpdateRequest {
+	connectorId: string;
+	customInstructions?: string;
+	syncIntervalSeconds?: number;
+}
+
+export interface ConnectorResourceMapping {
+	resourceId: string;
+	resourceType?: string;
+	name?: string;
+	acl?: string[];
+	additionalMetadata?: Record<string, unknown>;
+	collection?: string;
+	customInstructions?: string;
+	database?: string;
+	metadata?: Record<string, unknown>;
+	syncMode?: "rescan" | "new_only";
+}
+
+export interface ConnectorConfigureRequest {
+	connectorId: string;
+	resources: ConnectorResourceMapping[];
+	fullVisibilityRoles?: string[];
+	lookbackDays?: number;
+	tableConfigs?: {
+		changeHistory?: string;
+		replicationKey?: string;
+		table?: string;
+	}[];
+}
+
+export interface ConnectorResourceCreateRequest {
+	connectorId: string;
+	resourceId: string;
+	acl?: string[];
+	additionalMetadata?: Record<string, unknown>;
+	collectionOverride?: string;
+	customInstructions?: string;
+	databaseOverride?: string;
+	displayName?: string;
+	filters?: Record<string, unknown>;
+	metadata?: Record<string, unknown>;
+	providerMetadata?: Record<string, unknown>;
+	resourceType?: string;
+}
+
+export interface ConnectorResourceUpdateRequest {
+	connectorId: string;
+	resourceId: string;
+	acl?: string[];
+	customInstructions?: string;
+}
+
+export type ConnectorUpdateResponse = z.infer<typeof connectorUpdateSchema>;
+
+export type ConnectorDeleteResponse = z.infer<typeof connectorDeleteSchema>;
+
+export type ConnectorSyncResponse = z.infer<typeof connectorSyncSchema>;
+
+export type ConnectorPauseResponse = z.infer<typeof connectorPauseSchema>;
+
+export type ConnectorResumeResponse = z.infer<typeof connectorPauseSchema>;
+
+export type ConnectorConfigureResponse = z.infer<typeof configureSchema>;
+
+export type ConnectorResourceCreateResponse = z.infer<
+	typeof resourceCreateSchema
+>;
+
+export type ConnectorResourceUpdateResponse = z.infer<
+	typeof resourceUpdateSchema
+>;
+
+export type ConnectorResourceDeleteResponse = z.infer<
+	typeof resourceDeleteSchema
+>;
+
 export type ConnectorProviderCatalog = z.infer<typeof providerCatalogSchema>;
 
 export type ConnectorProviderDetail = z.infer<typeof providerDetailSchema>;
@@ -314,6 +461,148 @@ export class ConnectorsResource {
 			() => this.sdk.connectors.listResources({ id }, requestOptions(opts)),
 			resourcesSchema,
 			"connector resources",
+		);
+	}
+	async update(
+		params: ConnectorUpdateRequest,
+		opts?: RequestOptions,
+	): Promise<ConnectorUpdateResponse> {
+		const { connectorId, customInstructions, syncIntervalSeconds } = params;
+
+		return this.call(
+			`/connectors/${encodeURIComponent(connectorId)}`,
+			() =>
+				this.sdk.connectors.update(
+					{
+						id: connectorId,
+						...(customInstructions !== undefined ? { customInstructions } : {}),
+						...(syncIntervalSeconds !== undefined
+							? { syncIntervalSeconds }
+							: {}),
+					},
+					requestOptions(opts),
+				),
+			connectorUpdateSchema,
+			"connector update",
+		);
+	}
+
+	async delete(
+		id: string,
+		opts?: RequestOptions,
+	): Promise<ConnectorDeleteResponse> {
+		return this.call(
+			`/connectors/${encodeURIComponent(id)}`,
+			() => this.sdk.connectors.delete({ id }, requestOptions(opts)),
+			connectorDeleteSchema,
+			"connector delete",
+		);
+	}
+
+	async sync(
+		id: string,
+		opts?: RequestOptions,
+	): Promise<ConnectorSyncResponse> {
+		return this.call(
+			`/connectors/${encodeURIComponent(id)}/sync`,
+			() => this.sdk.connectors.sync({ id }, requestOptions(opts)),
+			connectorSyncSchema,
+			"connector sync",
+		);
+	}
+
+	async pause(
+		id: string,
+		opts?: RequestOptions,
+	): Promise<ConnectorPauseResponse> {
+		return this.call(
+			`/connectors/${encodeURIComponent(id)}/pause`,
+			() => this.sdk.connectors.pause({ id }, requestOptions(opts)),
+			connectorPauseSchema,
+			"connector pause",
+		);
+	}
+
+	async resume(
+		id: string,
+		opts?: RequestOptions,
+	): Promise<ConnectorPauseResponse> {
+		return this.call(
+			`/connectors/${encodeURIComponent(id)}/resume`,
+			() => this.sdk.connectors.resume({ id }, requestOptions(opts)),
+			connectorPauseSchema,
+			"connector resume",
+		);
+	}
+
+	async configure(
+		params: ConnectorConfigureRequest,
+		opts?: RequestOptions,
+	): Promise<ConnectorConfigureResponse> {
+		const { connectorId, ...body } = params;
+
+		return this.call(
+			`/connectors/${encodeURIComponent(connectorId)}/configure`,
+			() =>
+				this.sdk.connectors.configure(
+					{ ...body, id: connectorId },
+					requestOptions(opts),
+				),
+			configureSchema,
+			"connector configure",
+		);
+	}
+
+	async createResource(
+		params: ConnectorResourceCreateRequest,
+		opts?: RequestOptions,
+	): Promise<ConnectorResourceCreateResponse> {
+		const { connectorId, ...body } = params;
+
+		return this.call(
+			`/connectors/${encodeURIComponent(connectorId)}/resources`,
+			() =>
+				this.sdk.connectors.createResource(
+					{ ...body, id: connectorId },
+					requestOptions(opts),
+				),
+			resourceCreateSchema,
+			"connector resource create",
+		);
+	}
+
+	async updateResource(
+		params: ConnectorResourceUpdateRequest,
+		opts?: RequestOptions,
+	): Promise<ConnectorResourceUpdateResponse> {
+		const { connectorId, ...body } = params;
+
+		return this.call(
+			`/connectors/${encodeURIComponent(connectorId)}/resources/${encodeURIComponent(params.resourceId)}`,
+			() =>
+				this.sdk.connectors.updateResourceAcl(
+					{ ...body, id: connectorId },
+					requestOptions(opts),
+				),
+			resourceUpdateSchema,
+			"connector resource update",
+		);
+	}
+
+	async deleteResource(
+		id: string,
+		resourceId: string,
+		opts?: RequestOptions,
+	): Promise<ConnectorResourceDeleteResponse> {
+		return this.call(
+			`/connectors/${encodeURIComponent(id)}/resources/${encodeURIComponent(resourceId)}`,
+			() =>
+				this.sdk.connectors.deleteResource(
+					{ id, resourceId },
+					requestOptions(opts),
+				),
+			resourceDeleteSchema,
+			"connector resource delete",
 		);
 	}
 }
