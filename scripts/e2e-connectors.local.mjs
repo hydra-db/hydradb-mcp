@@ -192,7 +192,7 @@ if (process.argv.includes("--oauth-error-self-test")) {
 }
 
 const api = localUrl("HYDRADB_BASE_URL");
-const dashboard = localUrl("HYDRADB_DASHBOARD_URL");
+const dashboard = localUrl("HYDRADB_OAUTH_ISSUER");
 const provider = process.env.ENG3341_PROVIDER?.trim() || "gitlab";
 const connectorId = process.env.ENG3341_CONNECTOR_ID?.trim();
 const resourceId = process.env.ENG3341_RESOURCE_ID?.trim();
@@ -225,7 +225,7 @@ const protectedEnvironment = {
 	HYDRADB_DATABASE: required("HYDRADB_DATABASE"),
 	...(process.env.HYDRADB_COLLECTION ? { HYDRADB_COLLECTION: process.env.HYDRADB_COLLECTION } : {}),
 	HYDRADB_BASE_URL: guardedApi.origin,
-	HYDRADB_DASHBOARD_URL: dashboard.origin,
+	HYDRADB_OAUTH_ISSUER: dashboard.origin,
 };
 const environmentPath = join(temporaryDirectory, "environment.json");
 writeFileSync(environmentPath, JSON.stringify(protectedEnvironment), { encoding: "utf8", mode: 0o600 });
@@ -239,7 +239,7 @@ function inspectorEnvironment() {
 		"HYDRADB_DATABASE",
 		"HYDRADB_COLLECTION",
 		"HYDRADB_BASE_URL",
-		"HYDRADB_DASHBOARD_URL",
+		"HYDRADB_OAUTH_ISSUER",
 		"ENG3341_OAUTH_ALLOWED_TOKEN",
 		"ENG3341_OAUTH_DENIED_TOKEN",
 	]) delete environment[name];

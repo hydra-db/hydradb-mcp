@@ -198,16 +198,41 @@ test("connector tools are enabled by default and accept normal false spellings",
 	}
 });
 
-test("connector dashboard links use one validated configurable origin", () => {
+test("connector dashboard links use the OAuth issuer origin", () => {
 	assert.equal(
-		resolveConnectorConfig({ HYDRADB_DASHBOARD_URL: " http://127.0.0.1:3000/ " }).dashboardUrl,
+		resolveConnectorConfig({ HYDRADB_OAUTH_ISSUER: " http://127.0.0.1:3000/ " }).dashboardUrl,
 		"http://127.0.0.1:3000",
 	);
+	assert.equal(
+		resolveConnectorConfig({ HYDRADB_OAUTH_ISSUER: "https://dashboard.hydradb.acme.com" }).dashboardUrl,
+		"https://dashboard.hydradb.acme.com",
+	);
+	assert.equal(
+		resolveConnectorConfig({ HYDRADB_OAUTH_ISSUER: "https://user:pass@dashboard.example.com/app?x=1#y" }).dashboardUrl,
+		"https://dashboard.example.com",
+	);
+});
 
-	for (const value of ["javascript:alert(1)", "not-a-url", "ftp://dashboard.example.com"]) {
-		assert.throws(
-			() => resolveConnectorConfig({ HYDRADB_DASHBOARD_URL: value }),
-			/HYDRADB_DASHBOARD_URL/,
+test("connector dashboard links fall back to the hosted dashboard without a usable issuer", () => {
+	for (const value of [undefined, "", "   ", "javascript:alert(1)", "not-a-url", "ftp://dashboard.example.com"]) {
+		assert.equal(
+			resolveConnectorConfig({ HYDRADB_OAUTH_ISSUER: value }).dashboardUrl,
+			"https://app.hydradb.com",
+			`issuer ${JSON.stringify(value)} should fall back`,
 		);
 	}
+});
+
+test("the retired HYDRADB_DASHBOARD_URL no longer changes connector links", () => {
+	assert.equal(
+		resolveConnectorConfig({ HYDRADB_DASHBOARD_URL: "https://elsewhere.example.com" }).dashboardUrl,
+		"https://app.hydradb.com",
+	);
+	assert.equal(
+		resolveConnectorConfig({
+			HYDRADB_DASHBOARD_URL: "https://elsewhere.example.com",
+			HYDRADB_OAUTH_ISSUER: "https://dashboard.hydradb.com",
+		}).dashboardUrl,
+		"https://dashboard.hydradb.com",
+	);
 });

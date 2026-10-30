@@ -125,7 +125,7 @@ function text(result: Awaited<ReturnType<Client["callTool"]>>) {
 
 afterEach(() => {
 	delete process.env.HYDRADB_MCP_CONNECTOR_TOOLS;
-	delete process.env.HYDRADB_DASHBOARD_URL;
+	delete process.env.HYDRADB_OAUTH_ISSUER;
 });
 
 test("all six connector read tools are registered by default and explicitly read-only", async () => {
@@ -276,7 +276,7 @@ test("every connector write input field has client-visible help", async () => {
 });
 
 test("create and reconnect return dashboard completion links without credentials", async () => {
-	process.env.HYDRADB_DASHBOARD_URL = "http://127.0.0.1:3000/";
+	process.env.HYDRADB_OAUTH_ISSUER = "http://127.0.0.1:3000/";
 	const fixture = mockHydra();
 	const client = await connect(fixture.hydra);
 	const { tools } = await client.listTools();

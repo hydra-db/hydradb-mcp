@@ -38,7 +38,7 @@ process.stdout.write(JSON.stringify(output));
 				HYDRADB_API_KEY: apiKey,
 				HYDRADB_DATABASE: "local-test",
 				HYDRADB_BASE_URL: "http://127.0.0.1:9999",
-				HYDRADB_DASHBOARD_URL: "http://127.0.0.1:3000",
+				HYDRADB_OAUTH_ISSUER: "http://127.0.0.1:3000",
 				MCP_INSPECTOR_BIN: inspector,
 			},
 			encoding: "utf8",
@@ -84,7 +84,7 @@ test("full lifecycle refuses a non-loopback fake-vendor control endpoint before 
 		env: {
 			...process.env,
 			HYDRADB_BASE_URL: "http://127.0.0.1:9999",
-			HYDRADB_DASHBOARD_URL: "http://127.0.0.1:3000",
+			HYDRADB_OAUTH_ISSUER: "http://127.0.0.1:3000",
 			ENG3341_FULL_LIFECYCLE: "1",
 			ENG3341_RUN_OWNED: "1",
 			ENG3341_CONNECTOR_ID: "run-owned-connector",
@@ -106,7 +106,7 @@ test("full lifecycle rejects poll timeouts outside its bounded range", () => {
 			env: {
 				...process.env,
 				HYDRADB_BASE_URL: "http://127.0.0.1:9999",
-				HYDRADB_DASHBOARD_URL: "http://127.0.0.1:3000",
+				HYDRADB_OAUTH_ISSUER: "http://127.0.0.1:3000",
 				ENG3341_POLL_TIMEOUT_SECONDS: seconds,
 			},
 			encoding: "utf8",

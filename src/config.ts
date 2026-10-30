@@ -193,30 +193,32 @@ export function resolveConfig(
 export function resolveConnectorConfig(
 	env: EnvSource = process.env,
 ): ConnectorConfig {
-	const rawDashboardUrl = env.HYDRADB_DASHBOARD_URL?.trim() || DEFAULT_DASHBOARD_URL;
-	let dashboard: URL;
-
-	try {
-		dashboard = new URL(rawDashboardUrl);
-	} catch {
-		throw new Error("HYDRADB_DASHBOARD_URL must be an absolute HTTP or HTTPS origin");
-	}
-
-	if (
-		(dashboard.protocol !== "http:" && dashboard.protocol !== "https:")
-		|| dashboard.username !== ""
-		|| dashboard.password !== ""
-		|| dashboard.pathname !== "/"
-		|| dashboard.search !== ""
-		|| dashboard.hash !== ""
-	) {
-		throw new Error("HYDRADB_DASHBOARD_URL must be an absolute HTTP or HTTPS origin");
-	}
-
 	return {
 		enabled: flag(env.HYDRADB_MCP_CONNECTOR_TOOLS, true),
-		dashboardUrl: dashboard.origin,
+		dashboardUrl: dashboardOrigin(env.HYDRADB_OAUTH_ISSUER),
 	};
+}
+
+/**
+ * The dashboard origin for connector completion links. The OAuth issuer IS the
+ * dashboard, so hosted and BYOC deployments already name it. An unset or
+ * non-HTTP(S) issuer falls back to the hosted dashboard; it never fails startup,
+ * because OAuth itself only warns about a bad issuer.
+ */
+function dashboardOrigin(issuer: string | undefined): string {
+	const value = issuer?.trim();
+
+	if (!value) return DEFAULT_DASHBOARD_URL;
+
+	try {
+		const url = new URL(value);
+
+		if (url.protocol === "http:" || url.protocol === "https:") return url.origin;
+	} catch {
+		// Not a URL: OAuth already ignores it, so links use the hosted dashboard.
+	}
+
+	return DEFAULT_DASHBOARD_URL;
 }
 
 /**
