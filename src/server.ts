@@ -644,7 +644,7 @@ export function createHydraDBServer(
 		};
 	}
 
-	function scopeText(scope: { database: string; collection?: string | null; collections?: string[] }): string {
+	function scopeText(scope: { database: string; collection?: string | null; collections?: QueryParams["collections"] }): string {
 		return `Resolved scope: database ${JSON.stringify(scope.database)}, ` +
 			(scope.collections ? `collections ${JSON.stringify(scope.collections)}` :
 				scope.collection == null ? "workspace default" : `collection ${JSON.stringify(scope.collection)}`) + ".";
@@ -668,7 +668,7 @@ export function createHydraDBServer(
 		acl?: string[];
 		database?: string;
 		collection?: string;
-		collections?: string[];
+		collections?: QueryParams["collections"];
 		additional_context?: string;
 		alpha?: number | "auto";
 		query_by?: "hybrid" | "text";
