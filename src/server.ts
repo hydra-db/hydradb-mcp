@@ -2958,8 +2958,14 @@ export function createHydraDBServer(
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.query_apps),
 		collections: z
-			.array(z.string().min(1))
-			.min(1)
+			.union([
+				z.array(z.string().min(1)).min(1),
+				z
+					.record(z.string().min(1), z.number().finite().nonnegative())
+					.refine((o) => Object.keys(o).length > 0, {
+						message: "collections must name at least one collection",
+					}),
+			])
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.collections),
 		acl: z
