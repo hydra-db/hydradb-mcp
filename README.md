@@ -28,12 +28,17 @@ Ids flow between these: `hydradb_query`, `hydradb_list` and `hydradb_subgraph` e
 
 | Tool | What it does |
 |---|---|
-| `hydradb_connector_providers` | List supported providers, or inspect one provider's credential field schema |
+| `hydradb_connector_provider_list` | List the connector providers HydraDB supports |
+| `hydradb_connector_provider_inspect` | Read one provider's setup guide and credential field schema |
 | `hydradb_connector_list` | List connected sources, optionally with health |
-| `hydradb_connector_get` | Read one connector's configuration and lifecycle |
-| `hydradb_connector_status` | Explain connector and resource sync health in plain words |
-| `hydradb_connector_discover` | Discover resources visible through a connected provider account |
-| `hydradb_connector_resources` | List resources configured on a connector |
+| `hydradb_connector_inspect` | Read one connector's configuration and lifecycle |
+| `hydradb_connector_health` | Explain connector and resource sync health in plain words |
+| `hydradb_connector_discover` | Discover resources available upstream in a connected provider account |
+| `hydradb_connector_resource_list` | List resources already added to a connector |
+
+The names follow the connector section of `CONTRACT.md`: noun first, verb last, the same
+words the CLI (`hydradb connector resource list`) and the plugin
+(`/hydradb:connector-resource-list`) use.
 
 Connector tools are on by default. Set `HYDRADB_MCP_CONNECTOR_TOOLS=0` to
 withhold the whole family. A database-confined OAuth connection sees only

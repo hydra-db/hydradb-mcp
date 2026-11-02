@@ -3966,14 +3966,15 @@ export function createHydraDBServer(
 
 	// --- Connector read tools (ENG-3341) ---
 	if (connectorConfig.enabled) {
-		const providerSchema = z
+		const providerListSchema = z.object({}).strict();
+
+		const providerInspectSchema = z
 			.object({
 				provider: z
 					.string()
 					.trim()
 					.min(1)
-					.optional()
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_PROVIDERS].params.provider),
+					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_PROVIDER_INSPECT].params.provider),
 			})
 			.strict();
 
@@ -3992,7 +3993,12 @@ export function createHydraDBServer(
 			})
 			.strict();
 
-		const connectorIdSchema = (name: typeof TOOL_NAMES.CONNECTOR_GET | typeof TOOL_NAMES.CONNECTOR_STATUS | typeof TOOL_NAMES.CONNECTOR_RESOURCES) =>
+		const connectorIdSchema = (
+			name:
+				| typeof TOOL_NAMES.CONNECTOR_INSPECT
+				| typeof TOOL_NAMES.CONNECTOR_HEALTH
+				| typeof TOOL_NAMES.CONNECTOR_RESOURCE_LIST,
+		) =>
 			z
 				.object({
 					connector_id: z
@@ -4026,11 +4032,23 @@ export function createHydraDBServer(
 			.strict();
 
 		register(
-			TOOL_NAMES.CONNECTOR_PROVIDERS,
-			providerSchema,
+			TOOL_NAMES.CONNECTOR_PROVIDER_LIST,
+			providerListSchema,
 			async (args, extra) => {
-				const input = providerSchema.parse(args);
-				const result = await connectorTools.providers(input.provider, { signal: extra?.signal });
+				providerListSchema.parse(args);
+				const result = await connectorTools.providerList({ signal: extra?.signal });
+
+				return structuredResult(result.text, result.data);
+			},
+			readOnly,
+		);
+
+		register(
+			TOOL_NAMES.CONNECTOR_PROVIDER_INSPECT,
+			providerInspectSchema,
+			async (args, extra) => {
+				const input = providerInspectSchema.parse(args);
+				const result = await connectorTools.providerInspect(input.provider, { signal: extra?.signal });
 
 				return structuredResult(result.text, result.data);
 			},
@@ -4054,9 +4072,9 @@ export function createHydraDBServer(
 		);
 
 		for (const [name, run] of [
-			[TOOL_NAMES.CONNECTOR_GET, (id: string, signal?: AbortSignal) => connectorTools.get(id, { signal })],
-			[TOOL_NAMES.CONNECTOR_STATUS, (id: string, signal?: AbortSignal) => connectorTools.status(id, { signal })],
-			[TOOL_NAMES.CONNECTOR_RESOURCES, (id: string, signal?: AbortSignal) => connectorTools.resources(id, { signal })],
+			[TOOL_NAMES.CONNECTOR_INSPECT, (id: string, signal?: AbortSignal) => connectorTools.inspect(id, { signal })],
+			[TOOL_NAMES.CONNECTOR_HEALTH, (id: string, signal?: AbortSignal) => connectorTools.health(id, { signal })],
+			[TOOL_NAMES.CONNECTOR_RESOURCE_LIST, (id: string, signal?: AbortSignal) => connectorTools.resourceList(id, { signal })],
 		] as const) {
 			const schema = connectorIdSchema(name);
 			register(

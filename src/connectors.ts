@@ -425,31 +425,29 @@ export class ConnectorTools {
 	constructor(private readonly hydra: HydraDB) {}
 
 	private async authorizedConnector(id: string, opts?: RequestOptions): Promise<ConnectorView> {
-		const connector = await this.hydra.connectors.get(id, opts);
+		const connector = await this.hydra.connectors.inspect(id, opts);
 		assertConnectorAllowed(connector, this.hydra.allowedDatabases, this.hydra.allowedCollections);
 
 		return connector;
 	}
 
-	async providers(provider?: string, opts?: RequestOptions): Promise<ConnectorToolResponse> {
-		const result = await this.hydra.connectors.listProviders(provider, opts);
+	async providerList(opts?: RequestOptions): Promise<ConnectorToolResponse> {
+		const providers = projectProviderCatalog(await this.hydra.connectors.listProviders(opts));
 
-		if ("providers" in result) {
-			const providers = projectProviderCatalog(result);
+		return {
+			text: providers.length === 0
+				? "No connector providers are available."
+				: `Available connector providers: ${providers.map((entry) => String(entry.provider)).join(", ")}.`,
+			data: { providers },
+		};
+	}
 
-			return {
-				text: providers.length === 0
-					? "No connector providers are available."
-					: `Available connector providers: ${providers.map((entry) => String(entry.provider)).join(", ")}.`,
-				data: { providers },
-			};
-		}
-
-		const detail = projectProviderDetail(result);
+	async providerInspect(provider: string, opts?: RequestOptions): Promise<ConnectorToolResponse> {
+		const result = await this.hydra.connectors.inspectProvider(provider, opts);
 
 		return {
 			text: `Provider ${result.provider} uses connector type ${result.connectorType}. Credential fields are schema metadata only; never put credential values in an MCP call.`,
-			data: detail,
+			data: projectProviderDetail(result),
 		};
 	}
 
@@ -492,7 +490,7 @@ export class ConnectorTools {
 		};
 	}
 
-	async get(id: string, opts?: RequestOptions): Promise<ConnectorToolResponse> {
+	async inspect(id: string, opts?: RequestOptions): Promise<ConnectorToolResponse> {
 		const connector = await this.authorizedConnector(id, opts);
 		const data = { connector: projectConnector(connector) };
 
@@ -502,11 +500,11 @@ export class ConnectorTools {
 		};
 	}
 
-	async status(id: string, opts?: RequestOptions): Promise<ConnectorToolResponse> {
+	async health(id: string, opts?: RequestOptions): Promise<ConnectorToolResponse> {
 		const connector = await this.authorizedConnector(id, opts);
 
 		const [status, configured] = await Promise.all([
-			this.hydra.connectors.status(id, opts),
+			this.hydra.connectors.health(id, opts),
 			this.hydra.connectors.listResources(id, opts),
 		]);
 
@@ -538,7 +536,7 @@ export class ConnectorTools {
 		return { text: `Discovered ${count} resource${count === 1 ? "" : "s"}.`, data };
 	}
 
-	async resources(id: string, opts?: RequestOptions): Promise<ConnectorToolResponse> {
+	async resourceList(id: string, opts?: RequestOptions): Promise<ConnectorToolResponse> {
 		const connector = await this.authorizedConnector(id, opts);
 		const result = await this.hydra.connectors.listResources(id, opts);
 
