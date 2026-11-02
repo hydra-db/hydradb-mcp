@@ -51,11 +51,13 @@ function fixture() {
 				warnings: [],
 			}),
 			updateResourceAcl: response("updateResourceAcl", {
+				connectorId: "c1",
 				resourceId: "r1",
 				acl: [],
 				customInstructions: "",
 			}),
 			deleteResource: response("deleteResource", {
+				connectorId: "c1",
 				resourceId: "r1",
 				deleted: true,
 			}),
@@ -308,13 +310,13 @@ test("write responses unwrap envelopes and reject invalid field types", async ()
 
 	const valid = [
 		{ connectorId: "c1" },
-		{ deleted: false },
+		{ connectorId: "c1", deleted: false },
 		{ runId: "" },
-		{ paused: false },
-		{ paused: false },
-		{ configured: 0 },
-		{ acl: [] },
-		{ deleted: false },
+		{ connectorId: "c1", paused: false },
+		{ connectorId: "c1", paused: false },
+		{ connectorId: "c1", configured: 0 },
+		{ connectorId: "c1", resourceId: "r1", acl: [] },
+		{ connectorId: "c1", resourceId: "r1", deleted: false },
 	];
 
 	const invalid = [
@@ -355,4 +357,42 @@ test("write responses unwrap envelopes and reject invalid field types", async ()
 
 		await assert.rejects(() => invoke(bad, index), /Invalid successful/);
 	}
+});
+
+test("a write response without the IDs it acted on is rejected, not reported as a success", async () => {
+	const missing = [
+		["update", (resource: ConnectorsResource) => resource.update({ connectorId: "c1" }), {}],
+		["delete", (resource: ConnectorsResource) => resource.delete("c1"), { deleted: true }],
+		["pause", (resource: ConnectorsResource) => resource.pause("c1"), { paused: true }],
+		["configure", (resource: ConnectorsResource) => resource.addResources({ connectorId: "c1", resources: [] }), { configured: 1 }],
+		["updateResourceAcl", (resource: ConnectorsResource) => resource.updateResource({ connectorId: "c1", resourceId: "r1" }), { connectorId: "c1" }],
+		["deleteResource", (resource: ConnectorsResource) => resource.deleteResource("c1", "r1"), { resourceId: "r1", deleted: true }],
+	] as const;
+
+	for (const [method, invoke, body] of missing) {
+		const resource = new ConnectorsResource({
+			connectors: { [method]: () => Promise.resolve(body) },
+		} as unknown as HydraDBClient);
+
+		await assert.rejects(() => invoke(resource), /Invalid successful/, `${method} without its IDs`);
+	}
+});
+
+test("destinations are trimmed once, and a blank override means none", async () => {
+	const resource = new ConnectorsResource({
+		connectors: {
+			get: () => Promise.resolve({ connectorId: "c1", database: "  db-a  ", collection: " " }),
+			listResources: () => Promise.resolve({
+				resources: [{ resourceId: "r1", databaseOverride: "  ", collectionOverride: " team " }],
+			}),
+		},
+	} as unknown as HydraDBClient);
+
+	const connector = await resource.inspect("c1");
+	const [configured] = (await resource.listResources("c1")).resources;
+
+	assert.equal(connector.database, "db-a");
+	assert.equal(connector.collection, undefined);
+	assert.equal(configured?.databaseOverride, undefined);
+	assert.equal(configured?.collectionOverride, "team");
 });

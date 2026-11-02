@@ -8,6 +8,9 @@ import { translateError } from "./errors.js";
 
 const nonEmpty = z.string().trim().min(1);
 
+/** A destination name, trimmed once here; blank means none, so callers never re-trim. */
+const destination = z.string().optional().transform((value) => value?.trim() || undefined);
+
 const providerCatalogEntrySchema = z.object({
 	provider: nonEmpty,
 	category: z.string().optional(),
@@ -36,10 +39,10 @@ const providerDetailSchema = z.object({
 const connectorSchema = z.object({
 	activeResourceCount: z.number().optional(),
 	authType: z.string().optional(),
-	collection: z.string().optional(),
+	collection: destination,
 	connectorId: nonEmpty,
 	customInstructions: z.string().optional(),
-	database: z.string().optional(),
+	database: destination,
 	documentsDispatched: z.number().optional(),
 	firstDataDispatchedAt: z.string().optional(),
 	lastAttemptedSyncAt: z.string().optional(),
@@ -112,7 +115,6 @@ const connectorStatusSchema = z.object({
 			action: z.string().optional(),
 			code: z.string().optional(),
 			detectedAt: z.string().optional(),
-			failureClass: z.string().optional(),
 			message: z.string().optional(),
 			retryable: z.boolean().optional(),
 		})
@@ -151,10 +153,10 @@ const configuredResourceSchema = z.object({
 	backfillError: z.string().optional(),
 	backfillErrorAt: z.string().optional(),
 	backfillOldest: z.string().optional(),
-	collectionOverride: z.string().optional(),
+	collectionOverride: destination,
 	connectorId: z.string().optional(),
 	customInstructions: z.string().optional(),
-	databaseOverride: z.string().optional(),
+	databaseOverride: destination,
 	displayName: z.string().optional(),
 	filters: z.record(z.unknown()).optional(),
 	metadata: z.record(z.unknown()).optional(),
@@ -172,7 +174,7 @@ const configuredResourceSchema = z.object({
 const resourcesSchema = z.object({ resources: z.array(configuredResourceSchema) });
 
 const connectorUpdateSchema = z.object({
-	connectorId: z.string().optional(),
+	connectorId: nonEmpty,
 	customInstructionsUpdated: z.boolean().optional(),
 	maxSyncIntervalSeconds: z.number().optional(),
 	minSyncIntervalSeconds: z.number().optional(),
@@ -181,7 +183,7 @@ const connectorUpdateSchema = z.object({
 });
 
 const connectorDeleteSchema = z.object({
-	connectorId: z.string().optional(),
+	connectorId: nonEmpty,
 	deleted: z.boolean().optional(),
 });
 
@@ -191,13 +193,13 @@ const connectorSyncSchema = z.object({
 });
 
 const connectorPauseSchema = z.object({
-	connectorId: z.string().optional(),
+	connectorId: nonEmpty,
 	paused: z.boolean().optional(),
 	pausedAt: z.string().optional(),
 });
 
 const configureSchema = z.object({
-	connectorId: z.string().optional(),
+	connectorId: nonEmpty,
 	configured: z.number().optional(),
 	backfill: z.boolean().optional(),
 	firstSyncAt: z.string().optional(),
@@ -222,16 +224,16 @@ const configureSchema = z.object({
 });
 
 const resourceUpdateSchema = z.object({
-	connectorId: z.string().optional(),
-	resourceId: z.string().optional(),
+	connectorId: nonEmpty,
+	resourceId: nonEmpty,
 	acl: z.array(z.string()).optional(),
 	customInstructions: z.string().optional(),
 	customInstructionsUpdated: z.boolean().optional(),
 });
 
 const resourceDeleteSchema = z.object({
-	connectorId: z.string().optional(),
-	resourceId: z.string().optional(),
+	connectorId: nonEmpty,
+	resourceId: nonEmpty,
 	deleted: z.boolean().optional(),
 });
 
