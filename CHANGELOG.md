@@ -9,12 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added — credential-free connector write tools
 
-Nine tools now update noncredential connector settings, start syncs, pause and
-resume connectors, configure and manage resources, and delete connectors.
+Eight tools now update noncredential connector settings, start syncs, pause and
+resume connectors, add and manage resources, and delete connectors.
 Database- and collection-confined connections fail closed before any mutation and
 send no connector API request because connector endpoints cannot enforce those grants
-atomically. Destructive annotations cover connector settings, configure, resource
-ACL/instruction changes, and deletions; configure is non-idempotent. No write schema
+atomically. Destructive annotations cover connector settings, resource add, resource
+ACL/instruction changes, and deletions; resource add is non-idempotent. No write schema
 accepts provider credentials, including credential-like metadata and private-key fields.
 
 ### Added — connector read tools

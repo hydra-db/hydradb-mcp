@@ -49,8 +49,7 @@ export { ConnectorsResource } from "./connectors.js";
 
 export type {
 	ConnectorUpdateRequest,
-	ConnectorConfigureRequest,
-	ConnectorResourceCreateRequest,
+	ConnectorResourceAddRequest,
 	ConnectorResourceUpdateRequest,
 	ConnectorUpdateResponse,
 	ConnectorDeleteResponse,
@@ -58,8 +57,7 @@ export type {
 	ConnectorPauseResponse,
 	ConnectorResumeResponse,
 	ConnectorResourceMapping,
-	ConnectorConfigureResponse,
-	ConnectorResourceCreateResponse,
+	ConnectorResourceAddResponse,
 	ConnectorResourceUpdateResponse,
 	ConnectorResourceDeleteResponse,
 	ConnectorDiscoverParams,

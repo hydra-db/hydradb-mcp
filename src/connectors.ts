@@ -5,8 +5,7 @@ import type {
 	ConnectorProviderCatalog,
 	ConnectorProviderDetail,
 	ConnectorResource,
-	ConnectorResourceCreateRequest,
-	ConnectorResourceMapping,
+	ConnectorResourceAddRequest,
 	ConnectorResourceUpdateRequest,
 	ConnectorStatus,
 	ConnectorUpdateRequest,
@@ -27,21 +26,7 @@ export type ConnectorDiscoverInput = ConnectorDiscoverParams;
 
 export type ConnectorUpdateInput = ConnectorUpdateRequest;
 
-export type ConnectorConfigureResourceInput = ConnectorResourceMapping;
-
-export interface ConnectorConfigureInput {
-	connectorId: string;
-	resources: ConnectorConfigureResourceInput[];
-	lookbackDays?: number;
-	fullVisibilityRoles?: string[];
-	tableConfigs?: Array<{
-		table: string;
-		replicationKey?: string;
-		changeHistory?: string;
-	}>;
-}
-
-export type ConnectorResourceCreateInput = ConnectorResourceCreateRequest;
+export type ConnectorResourceAddInput = ConnectorResourceAddRequest;
 
 export type ConnectorResourceUpdateInput = ConnectorResourceUpdateRequest;
 
@@ -621,7 +606,7 @@ export class ConnectorTools {
 
 		return {
 			text: result.runId
-				? "A connector sync was accepted. Use connector status to monitor it."
+				? "A connector sync was accepted. Use connector health to monitor it."
 				: "A connector sync request was accepted. An existing run may still be active.",
 			data: cleanObject({ connector_id: id, run_id: result.runId, workflow_id: result.workflowId }),
 		};
@@ -651,12 +636,15 @@ export class ConnectorTools {
 		};
 	}
 
-	async configure(input: ConnectorConfigureInput, opts?: RequestOptions): Promise<ConnectorToolResponse> {
+	async resourceAdd(input: ConnectorResourceAddInput, opts?: RequestOptions): Promise<ConnectorToolResponse> {
 		this.assertMutationAllowed();
-		const result = await this.hydra.connectors.configure(input, opts);
+		const result = await this.hydra.connectors.addResources(input, opts);
+		const needsReview = (result.warnings?.length ?? 0) > 0 || (result.unverified?.length ?? 0) > 0;
 
 		return {
-			text: "Connector resources were configured. Unlisted resources remain unchanged. A sync may have started.",
+			text: needsReview
+				? "Connector resources were added, but provider verification needs review. Check connector health after the first sync."
+				: "Connector resources were added. Resources not in the list remain unchanged. A sync may have started.",
 			data: cleanObject({
 				connector_id: result.connectorId ?? input.connectorId,
 				configured: result.configured,
@@ -668,32 +656,7 @@ export class ConnectorTools {
 		};
 	}
 
-	async addResource(input: ConnectorResourceCreateInput, opts?: RequestOptions): Promise<ConnectorToolResponse> {
-		this.assertMutationAllowed();
-		const result = await this.hydra.connectors.createResource(input, opts);
-		const needsReview = (result.warnings?.length ?? 0) > 0 || (result.unverified?.length ?? 0) > 0;
-
-		return {
-			text: needsReview
-				? "The connector resource was added, but provider verification needs review. Check connector status after its first sync."
-				: "The connector resource was added.",
-			data: cleanObject({
-				connector_id: result.connectorId ?? input.connectorId,
-				resource_id: result.resourceId ?? input.resourceId,
-				resource_type: result.resourceType,
-				display_name: result.displayName,
-				database_override: result.databaseOverride,
-				collection_override: result.collectionOverride,
-				status: result.status,
-				acl: result.acl,
-				custom_instructions: result.customInstructions,
-				unverified_resource_ids: result.unverified,
-				warning_resource_ids: result.warnings,
-			}),
-		};
-	}
-
-	async updateResource(input: ConnectorResourceUpdateInput, opts?: RequestOptions): Promise<ConnectorToolResponse> {
+	async resourceUpdate(input: ConnectorResourceUpdateInput, opts?: RequestOptions): Promise<ConnectorToolResponse> {
 		this.assertMutationAllowed();
 		const result = await this.hydra.connectors.updateResource(input, opts);
 
@@ -709,7 +672,7 @@ export class ConnectorTools {
 		};
 	}
 
-	async deleteResource(
+	async resourceDelete(
 		connectorId: string,
 		resourceId: string,
 		opts?: RequestOptions,

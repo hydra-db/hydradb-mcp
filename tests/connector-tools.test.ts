@@ -78,13 +78,11 @@ function mockHydra(allowedDatabases?: string[], allowedCollections?: string[]) {
 		sync: record("sync", { runId: "run-1", workflowId: "workflow-1" }),
 		pause: record("pause", { connectorId: "allowed", paused: true }),
 		resume: record("resume", { connectorId: "allowed", paused: false }),
-		configure: record("configure", { connectorId: "allowed", configured: 1, backfill: false }),
-		createResource: record("add-resource", {
+		addResources: record("add-resources", {
 			connectorId: "allowed",
-			resourceId: "r-new",
-			databaseOverride: "db-a",
-			collectionOverride: "public",
-		}),
+			configured: 1,
+			backfill: false,
+		}) as (args?: Record<string, unknown>) => Promise<Record<string, unknown>>,
 		updateResource: record("update-resource", {
 			connectorId: "allowed",
 			resourceId: "r-a",
@@ -132,19 +130,27 @@ afterEach(() => {
 	delete process.env.HYDRADB_MCP_CONNECTOR_TOOLS;
 });
 
-test("the connector read tools carry the CONTRACT.md §3 names", () => {
-	assert.deepEqual([...CONNECTOR_TOOL_NAMES].slice(0, 7), [
+test("the 15 connector tools carry the CONTRACT.md §3 names, in noun-then-verb order", () => {
+	assert.deepEqual([...CONNECTOR_TOOL_NAMES], [
 		"hydradb_connector_provider_list",
 		"hydradb_connector_provider_inspect",
 		"hydradb_connector_list",
 		"hydradb_connector_inspect",
 		"hydradb_connector_health",
+		"hydradb_connector_update",
+		"hydradb_connector_delete",
+		"hydradb_connector_sync",
+		"hydradb_connector_pause",
+		"hydradb_connector_resume",
 		"hydradb_connector_discover",
 		"hydradb_connector_resource_list",
+		"hydradb_connector_resource_add",
+		"hydradb_connector_resource_update",
+		"hydradb_connector_resource_delete",
 	]);
 });
 
-test("the retired connector read tool names are not registered", async () => {
+test("the retired connector tool names are not registered", async () => {
 	const client = await connect(mockHydra().hydra);
 	const names = (await client.listTools()).tools.map((tool) => tool.name);
 
@@ -153,6 +159,10 @@ test("the retired connector read tool names are not registered", async () => {
 		"hydradb_connector_get",
 		"hydradb_connector_status",
 		"hydradb_connector_resources",
+		"hydradb_connector_configure",
+		"hydradb_connector_add_resource",
+		"hydradb_connector_update_resource",
+		"hydradb_connector_delete_resource",
 	]) {
 		assert.ok(!names.includes(retired), `${retired} should not be registered`);
 	}
@@ -186,7 +196,7 @@ test("all seven connector read tools are registered by default and explicitly re
 	await client.close();
 });
 
-test("all nine credential-free write tools declare explicit write safety annotations", async () => {
+test("all eight credential-free write tools declare explicit write safety annotations", async () => {
 	const client = await connect(mockHydra().hydra);
 	const { tools } = await client.listTools();
 
@@ -194,13 +204,11 @@ test("all nine credential-free write tools declare explicit write safety annotat
 		"hydradb_connector_sync",
 		"hydradb_connector_pause",
 		"hydradb_connector_resume",
-		"hydradb_connector_add_resource",
 	]);
 
 	const nonIdempotent = new Set([
 		"hydradb_connector_sync",
-		"hydradb_connector_configure",
-		"hydradb_connector_add_resource",
+		"hydradb_connector_resource_add",
 	]);
 
 	for (const name of [
@@ -209,10 +217,9 @@ test("all nine credential-free write tools declare explicit write safety annotat
 		"hydradb_connector_sync",
 		"hydradb_connector_pause",
 		"hydradb_connector_resume",
-		"hydradb_connector_configure",
-		"hydradb_connector_add_resource",
-		"hydradb_connector_update_resource",
-		"hydradb_connector_delete_resource",
+		"hydradb_connector_resource_add",
+		"hydradb_connector_resource_update",
+		"hydradb_connector_resource_delete",
 	]) {
 		const tool = tools.find((candidate) => candidate.name === name);
 		assert.ok(tool, `${name} should be registered`);
@@ -235,29 +242,15 @@ test("every connector write input field has client-visible help", async () => {
 		hydradb_connector_sync: ["connector_id"],
 		hydradb_connector_pause: ["connector_id"],
 		hydradb_connector_resume: ["connector_id"],
-		hydradb_connector_configure: [
+		hydradb_connector_resource_add: [
 			"connector_id",
 			"full_visibility_roles",
 			"lookback_days",
 			"resources",
 			"table_configs",
 		],
-		hydradb_connector_add_resource: [
-			"acl",
-			"additional_metadata",
-			"collection_override",
-			"connector_id",
-			"custom_instructions",
-			"database_override",
-			"display_name",
-			"filters",
-			"metadata",
-			"provider_metadata",
-			"resource_id",
-			"resource_type",
-		],
-		hydradb_connector_update_resource: ["acl", "connector_id", "custom_instructions", "resource_id"],
-		hydradb_connector_delete_resource: ["connector_id", "resource_id"],
+		hydradb_connector_resource_update: ["acl", "connector_id", "custom_instructions", "resource_id"],
+		hydradb_connector_resource_delete: ["connector_id", "resource_id"],
 	};
 
 	const expectedRequired: Record<string, string[]> = {
@@ -266,10 +259,9 @@ test("every connector write input field has client-visible help", async () => {
 		hydradb_connector_sync: ["connector_id"],
 		hydradb_connector_pause: ["connector_id"],
 		hydradb_connector_resume: ["connector_id"],
-		hydradb_connector_configure: ["connector_id", "resources"],
-		hydradb_connector_add_resource: ["connector_id", "resource_id"],
-		hydradb_connector_update_resource: ["connector_id", "resource_id"],
-		hydradb_connector_delete_resource: ["connector_id", "resource_id"],
+		hydradb_connector_resource_add: ["connector_id", "resources"],
+		hydradb_connector_resource_update: ["connector_id", "resource_id"],
+		hydradb_connector_resource_delete: ["connector_id", "resource_id"],
 	};
 
 	const missingDescriptions = (schema: unknown, path: string): string[] => {
@@ -292,7 +284,7 @@ test("every connector write input field has client-visible help", async () => {
 		return [...missing, ...missingDescriptions(value.items, `${path}[]`)];
 	};
 
-	for (const name of CONNECTOR_TOOL_NAMES.slice(7)) {
+	for (const name of Object.keys(expectedFields)) {
 		const tool = tools.find((candidate) => candidate.name === name);
 		assert.ok(tool, `${name} should be registered`);
 		assert.deepEqual(Object.keys(tool.inputSchema.properties ?? {}).sort(), expectedFields[name], `${name} fields`);
@@ -366,26 +358,24 @@ test("connector write metadata rejects credential-like keys before mutation", as
 
 	for (const request of [
 		{
-			name: "hydradb_connector_add_resource",
+			name: "hydradb_connector_resource_add",
 			arguments: {
 				connector_id: "allowed",
-				resource_id: "r-new",
-				metadata: { access_token: "must-not-pass" },
+				resources: [{ resource_id: "r-new", metadata: { access_token: "must-not-pass" } }],
 			},
 		},
 		{
-			name: "hydradb_connector_configure",
+			name: "hydradb_connector_resource_add",
 			arguments: {
 				connector_id: "allowed",
-				resources: [{ resource_id: "r-new", metadata: { private_key: "must-not-pass" } }],
+				resources: [{ resource_id: "r-new", additional_metadata: { private_key: "must-not-pass" } }],
 			},
 		},
 		{
-			name: "hydradb_connector_add_resource",
+			name: "hydradb_connector_resource_add",
 			arguments: {
 				connector_id: "allowed",
-				resource_id: "r-new",
-				metadata: { nested: { ssh_key: "must-not-pass" } },
+				resources: [{ resource_id: "r-new", metadata: { nested: { ssh_key: "must-not-pass" } } }],
 			},
 		},
 	]) {
@@ -395,7 +385,7 @@ test("connector write metadata rejects credential-like keys before mutation", as
 		assert.doesNotMatch(text(result), /must-not-pass/);
 	}
 
-	assert.equal(calls.some((call) => call.method === "add-resource" || call.method === "configure"), false);
+	assert.equal(calls.some((call) => call.method === "add-resources"), false);
 
 	await client.close();
 });
@@ -694,34 +684,28 @@ test("credential-free connector writes map every public mutation with safe resul
 		{ name: "hydradb_connector_pause", arguments: { connector_id: "allowed" }, method: "pause" },
 		{ name: "hydradb_connector_resume", arguments: { connector_id: "allowed" }, method: "resume" },
 		{
-			name: "hydradb_connector_configure",
+			name: "hydradb_connector_resource_add",
 			arguments: {
 				connector_id: "allowed",
 				lookback_days: 30,
-				resources: [{ resource_id: "r-a", resource_type: "channel", name: "General", database: "db-a", collection: "public" }],
+				resources: [{
+					resource_id: "r-new",
+					resource_type: "channel",
+					display_name: "New channel",
+					database_override: "db-a",
+					collection_override: "public",
+					acl: ["user@example.com"],
+				}],
 			},
-			method: "configure",
+			method: "add-resources",
 		},
 		{
-			name: "hydradb_connector_add_resource",
-			arguments: {
-				connector_id: "allowed",
-				resource_id: "r-new",
-				resource_type: "channel",
-				display_name: "New channel",
-				database_override: "db-a",
-				collection_override: "public",
-				acl: ["user@example.com"],
-			},
-			method: "add-resource",
-		},
-		{
-			name: "hydradb_connector_update_resource",
+			name: "hydradb_connector_resource_update",
 			arguments: { connector_id: "allowed", resource_id: "r-a", custom_instructions: "Only decisions" },
 			method: "update-resource",
 		},
 		{
-			name: "hydradb_connector_delete_resource",
+			name: "hydradb_connector_resource_delete",
 			arguments: { connector_id: "allowed", resource_id: "r-a" },
 			method: "delete-resource",
 		},
@@ -739,19 +723,113 @@ test("credential-free connector writes map every public mutation with safe resul
 	await client.close();
 });
 
-test("add resource preserves safe warning and verification indicators", async () => {
+test("resource_add sends the whole list to the configure endpoint under the API's field names", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_connector_resource_add",
+		arguments: {
+			connector_id: "allowed",
+			lookback_days: 7,
+			full_visibility_roles: ["admin"],
+			table_configs: [{ table: "events", replication_key: "updated_at" }],
+			resources: [
+				{
+					resource_id: "C1",
+					resource_type: "channel",
+					display_name: "general",
+					database_override: "db-a",
+					collection_override: "public",
+					acl: [],
+					custom_instructions: "",
+					metadata: { team: "ops" },
+					additional_metadata: { source: "mcp" },
+					sync_mode: "new_only",
+				},
+				{ resource_id: "C2" },
+			],
+		},
+	});
+
+	assert.notEqual(result.isError, true);
+	assert.deepEqual(calls, [{
+		method: "add-resources",
+		args: {
+			connectorId: "allowed",
+			resources: [
+				{
+					resourceId: "C1",
+					resourceType: "channel",
+					name: "general",
+					database: "db-a",
+					collection: "public",
+					acl: [],
+					customInstructions: "",
+					metadata: { team: "ops" },
+					additionalMetadata: { source: "mcp" },
+					syncMode: "new_only",
+				},
+				{
+					resourceId: "C2",
+					resourceType: undefined,
+					name: undefined,
+					database: undefined,
+					collection: undefined,
+					acl: undefined,
+					customInstructions: undefined,
+					metadata: undefined,
+					additionalMetadata: undefined,
+					syncMode: undefined,
+				},
+			],
+			lookbackDays: 7,
+			fullVisibilityRoles: ["admin"],
+			tableConfigs: [{ table: "events", replicationKey: "updated_at", changeHistory: undefined }],
+		},
+	}]);
+	assert.deepEqual(structured(result), { connector_id: "allowed", configured: 1, backfill: false });
+
+	const empty = await client.callTool({
+		name: "hydradb_connector_resource_add",
+		arguments: { connector_id: "allowed", resources: [] },
+	});
+
+	assert.equal(empty.isError, true, "resource_add needs at least one resource");
+
+	const bareResourceId = await client.callTool({
+		name: "hydradb_connector_resource_add",
+		arguments: { connector_id: "allowed", resource_id: "C3" },
+	});
+
+	assert.equal(bareResourceId.isError, true, "resources is always a list");
+
+	for (const retiredField of [{ name: "general" }, { database: "db-a" }, { filters: {} }, { provider_metadata: {} }]) {
+		const retired = await client.callTool({
+			name: "hydradb_connector_resource_add",
+			arguments: { connector_id: "allowed", resources: [{ resource_id: "C4", ...retiredField }] },
+		});
+
+		assert.equal(retired.isError, true, `${Object.keys(retiredField)[0]} is not a resource_add field`);
+	}
+
+	assert.equal(calls.length, 1);
+	await client.close();
+});
+
+test("resource_add preserves safe warning and verification indicators", async () => {
 	const fixture = mockHydra();
-	fixture.connectorApi.createResource = async () => ({
+	fixture.connectorApi.addResources = async () => ({
 		connectorId: "allowed",
-		resourceId: "r-new",
+		configured: 1,
 		warnings: ["r-new"],
 		unverified: ["r-later"],
 	});
 	const client = await connect(fixture.hydra);
 
 	const result = await client.callTool({
-		name: "hydradb_connector_add_resource",
-		arguments: { connector_id: "allowed", resource_id: "r-new" },
+		name: "hydradb_connector_resource_add",
+		arguments: { connector_id: "allowed", resources: [{ resource_id: "r-new" }] },
 	});
 
 	assert.deepEqual(structured(result).warning_resource_ids, ["r-new"]);
@@ -768,18 +846,17 @@ test("every credential-free connector write redacts representative upstream fail
 		["hydradb_connector_pause", { connector_id: "allowed" }, "pause"],
 		["hydradb_connector_resume", { connector_id: "allowed" }, "resume"],
 		[
-			"hydradb_connector_configure",
+			"hydradb_connector_resource_add",
 			{ connector_id: "allowed", resources: [{ resource_id: "r-a" }] },
-			"configure",
+			"addResources",
 		],
-		["hydradb_connector_add_resource", { connector_id: "allowed", resource_id: "r-new" }, "createResource"],
 		[
-			"hydradb_connector_update_resource",
+			"hydradb_connector_resource_update",
 			{ connector_id: "allowed", resource_id: "r-a", acl: [] },
 			"updateResource",
 		],
 		[
-			"hydradb_connector_delete_resource",
+			"hydradb_connector_resource_delete",
 			{ connector_id: "allowed", resource_id: "r-a" },
 			"deleteResource",
 		],
@@ -810,10 +887,9 @@ test("scoped connector writes fail closed before any authorization read or mutat
 		{ name: "hydradb_connector_sync", arguments: { connector_id: "allowed" } },
 		{ name: "hydradb_connector_pause", arguments: { connector_id: "allowed" } },
 		{ name: "hydradb_connector_resume", arguments: { connector_id: "allowed" } },
-		{ name: "hydradb_connector_configure", arguments: { connector_id: "allowed", resources: [{ resource_id: "r-a" }] } },
-		{ name: "hydradb_connector_add_resource", arguments: { connector_id: "allowed", resource_id: "r-new" } },
-		{ name: "hydradb_connector_update_resource", arguments: { connector_id: "allowed", resource_id: "r-a", acl: [] } },
-		{ name: "hydradb_connector_delete_resource", arguments: { connector_id: "allowed", resource_id: "r-a" } },
+		{ name: "hydradb_connector_resource_add", arguments: { connector_id: "allowed", resources: [{ resource_id: "r-a" }] } },
+		{ name: "hydradb_connector_resource_update", arguments: { connector_id: "allowed", resource_id: "r-a", acl: [] } },
+		{ name: "hydradb_connector_resource_delete", arguments: { connector_id: "allowed", resource_id: "r-a" } },
 	];
 
 	for (const request of requests) {
@@ -834,15 +910,15 @@ test("collection-only confinement also refuses resource mutations", async () => 
 
 	const requests = [
 		{
-			name: "hydradb_connector_add_resource",
-			arguments: { connector_id: "allowed", resource_id: "new" },
+			name: "hydradb_connector_resource_add",
+			arguments: { connector_id: "allowed", resources: [{ resource_id: "new" }] },
 		},
 		{
-			name: "hydradb_connector_update_resource",
+			name: "hydradb_connector_resource_update",
 			arguments: { connector_id: "allowed", resource_id: "r-a", acl: [] },
 		},
 		{
-			name: "hydradb_connector_delete_resource",
+			name: "hydradb_connector_resource_delete",
 			arguments: { connector_id: "allowed", resource_id: "r-b" },
 		},
 	];
@@ -853,22 +929,22 @@ test("collection-only confinement also refuses resource mutations", async () => 
 		assert.equal(result.isError, true, `${request.name} should refuse collection-scoped mutation`);
 	}
 
-	for (const method of ["add-resource", "update-resource", "delete-resource"]) {
+	for (const method of ["add-resources", "update-resource", "delete-resource"]) {
 		assert.equal(calls.some((call) => call.method === method), false, `${method} must not mutate`);
 	}
 
 	await client.close();
 });
 
-test("database-only confinement refuses configure before mutation", async () => {
+test("database-only confinement refuses resource_add before mutation", async () => {
 	const fixture = mockHydra(["db-a"]);
 	const client = await connect(fixture.hydra);
 
 	const result = await client.callTool({
-		name: "hydradb_connector_configure",
+		name: "hydradb_connector_resource_add",
 		arguments: {
 			connector_id: "allowed",
-			resources: [{ resource_id: "r-new", database: "db-b", collection: "public" }],
+			resources: [{ resource_id: "r-new", database_override: "db-b", collection_override: "public" }],
 		},
 	});
 

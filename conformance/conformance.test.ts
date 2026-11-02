@@ -17,6 +17,8 @@ import { fileURLToPath } from "node:url";
 
 import type { HydraDBClient } from "@hydradb/sdk";
 
+import { z } from "zod";
+
 import { HydraDB } from "../src/hydra/index.js";
 import { ALIAS_REPLACEMENTS, CANONICAL_TOOL_NAMES } from "../src/tool-names.js";
 
@@ -95,6 +97,8 @@ const CONNECTOR_RESPONSES = {
 // What a recorded SDK call answers with: a connector body above, the query body, or empty.
 type RecordedBody = (typeof CONNECTOR_RESPONSES)[keyof typeof CONNECTOR_RESPONSES] | { chunks: [] } | Record<string, never>;
 
+// The connector-resource-add vector's resources, in wire form.
+const vectorResources = z.array(z.object({ resource_id: z.string(), display_name: z.string().optional() }));
 
 function makeRecorder(): { sdk: HydraDBClient; calls: RecordedCall[] } {
 	const calls: RecordedCall[] = [];
@@ -138,6 +142,14 @@ function makeRecorder(): { sdk: HydraDBClient; calls: RecordedCall[] } {
 			status: record("status", json, CONNECTOR_RESPONSES.status),
 			discover: record("discover", json, CONNECTOR_RESPONSES.discover),
 			listResources: record("listResources", json, CONNECTOR_RESPONSES.listResources),
+			update: record("update", json),
+			delete: record("delete", json),
+			sync: record("sync", json),
+			pause: record("pause", json),
+			resume: record("resume", json),
+			configure: record("configure", json),
+			updateResourceAcl: record("updateResourceAcl", json),
+			deleteResource: record("deleteResource", json),
 		},
 	};
 
@@ -191,8 +203,35 @@ function invoke(hydra: HydraDB, op: string, args: Record<string, unknown>): Prom
 			return hydra.connectors.health(a.id);
 		case "connector.discover":
 			return hydra.connectors.discover({ connectorId: a.id, cursor: a.cursor, limit: a.limit });
+		case "connector.update":
+			return hydra.connectors.update({
+				connectorId: a.id,
+				customInstructions: a.custom_instructions,
+				syncIntervalSeconds: a.sync_interval_seconds,
+			});
+		case "connector.delete":
+			return hydra.connectors.delete(a.id);
+		case "connector.sync":
+			return hydra.connectors.sync(a.id);
+		case "connector.pause":
+			return hydra.connectors.pause(a.id);
+		case "connector.resume":
+			return hydra.connectors.resume(a.id);
 		case "connector.resourceList":
 			return hydra.connectors.listResources(a.id);
+		case "connector.resourceAdd":
+			return hydra.connectors.addResources({
+				connectorId: a.id,
+				resources: vectorResources.parse(args.resources).map((resource) => ({
+					resourceId: resource.resource_id,
+					name: resource.display_name,
+				})),
+				lookbackDays: a.lookback_days,
+			});
+		case "connector.resourceUpdate":
+			return hydra.connectors.updateResource({ connectorId: a.id, resourceId: a.resource_id, acl: a.acl });
+		case "connector.resourceDelete":
+			return hydra.connectors.deleteResource(a.id, a.resource_id);
 		default:
 			throw new Error(`conformance: unhandled op "${op}"`);
 	}

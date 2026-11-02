@@ -50,7 +50,6 @@ function fixture() {
 				backfill: false,
 				warnings: [],
 			}),
-			createResource: response("createResource", { resourceId: "r1", acl: [] }),
 			updateResourceAcl: response("updateResourceAcl", {
 				resourceId: "r1",
 				acl: [],
@@ -222,7 +221,7 @@ test("connector writes map requests and forward cancellation, including falsy va
 	await resource.pause("c1", opts);
 	assert.equal((await resource.resume("c1", opts)).paused, false);
 	assert.deepEqual(
-		await resource.configure(
+		await resource.addResources(
 			{
 				connectorId: "c1",
 				resources: [],
@@ -233,16 +232,6 @@ test("connector writes map requests and forward cancellation, including falsy va
 			opts,
 		),
 		{ connectorId: "c1", configured: 0, backfill: false, warnings: [] },
-	);
-	await resource.createResource(
-		{
-			connectorId: "c1",
-			resourceId: "r1",
-			acl: [],
-			customInstructions: "",
-			databaseOverride: "",
-		},
-		opts,
 	);
 	await resource.updateResource(
 		{ connectorId: "c1", resourceId: "r1", acl: [], customInstructions: "" },
@@ -268,16 +257,6 @@ test("connector writes map requests and forward cancellation, including falsy va
 					fullVisibilityRoles: [],
 					lookbackDays: 0,
 					tableConfigs: [],
-				},
-			},
-			{
-				method: "createResource",
-				request: {
-					id: "c1",
-					resourceId: "r1",
-					acl: [],
-					customInstructions: "",
-					databaseOverride: "",
 				},
 			},
 			{
@@ -323,7 +302,6 @@ test("write responses unwrap envelopes and reject invalid field types", async ()
 		"pause",
 		"resume",
 		"configure",
-		"createResource",
 		"updateResourceAcl",
 		"deleteResource",
 	] as const;
@@ -335,7 +313,6 @@ test("write responses unwrap envelopes and reject invalid field types", async ()
 		{ paused: false },
 		{ paused: false },
 		{ configured: 0 },
-		{ resourceId: "r1" },
 		{ acl: [] },
 		{ deleted: false },
 	];
@@ -347,7 +324,6 @@ test("write responses unwrap envelopes and reject invalid field types", async ()
 		{ paused: 0 },
 		{ paused: 0 },
 		{ configured: "0" },
-		{ resourceId: 1 },
 		{ acl: "public" },
 		{ deleted: "yes" },
 	];
@@ -359,8 +335,7 @@ test("write responses unwrap envelopes and reject invalid field types", async ()
 			() => resource.sync("c1"),
 			() => resource.pause("c1"),
 			() => resource.resume("c1"),
-			() => resource.configure({ connectorId: "c1", resources: [] }),
-			() => resource.createResource({ connectorId: "c1", resourceId: "r1" }),
+			() => resource.addResources({ connectorId: "c1", resources: [] }),
 			() => resource.updateResource({ connectorId: "c1", resourceId: "r1" }),
 			() => resource.deleteResource("c1", "r1"),
 		][index]!();
@@ -380,15 +355,4 @@ test("write responses unwrap envelopes and reject invalid field types", async ()
 
 		await assert.rejects(() => invoke(bad, index), /Invalid successful/);
 	}
-});
-
-test("resource create accepts the SDK contract's all-optional response", async () => {
-	const resource = new ConnectorsResource({
-		connectors: { createResource: () => Promise.resolve({}) },
-	} as unknown as HydraDBClient);
-
-	assert.deepEqual(
-		await resource.createResource({ connectorId: "c1", resourceId: "r1" }),
-		{},
-	);
 });
