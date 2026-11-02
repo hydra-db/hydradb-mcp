@@ -19,9 +19,10 @@ accepts provider credentials, including credential-like metadata and private-key
 
 ### Added — connector read tools
 
-Six read-only tools now cover connector provider metadata, connector lists,
-connector details, plain-language sync status, resource discovery, and
-configured resources. `HYDRADB_MCP_CONNECTOR_TOOLS=0` withholds the family; it
+Seven read-only tools now cover the provider list, one provider's metadata,
+connector lists, connector details, plain-language sync health, resource discovery,
+and added resources. The connector tool names follow the connector section of
+`CONTRACT.md`. `HYDRADB_MCP_CONNECTOR_TOOLS=0` withholds the family; it
 is enabled by default.
 
 Database-confined OAuth connections filter connector lists, hide org-wide

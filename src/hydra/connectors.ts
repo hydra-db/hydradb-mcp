@@ -380,24 +380,21 @@ export class ConnectorsResource {
 		}
 	}
 
-	async listProviders(
-		provider?: string,
-		opts?: RequestOptions,
-	): Promise<ConnectorProviderCatalog | ConnectorProviderDetail> {
-		if (provider) {
-			return this.call(
-				"/connectors/providers",
-				() => this.sdk.listProviders({ id: provider }, requestOptions(opts)),
-				providerDetailSchema,
-				"connector provider",
-			);
-		}
-
+	async listProviders(opts?: RequestOptions): Promise<ConnectorProviderCatalog> {
 		return this.call(
 			"/connectors/providers",
 			() => this.sdk.listProviders({}, requestOptions(opts)),
 			providerCatalogSchema,
 			"connector provider list",
+		);
+	}
+
+	async inspectProvider(provider: string, opts?: RequestOptions): Promise<ConnectorProviderDetail> {
+		return this.call(
+			"/connectors/providers",
+			() => this.sdk.listProviders({ id: provider }, requestOptions(opts)),
+			providerDetailSchema,
+			"connector provider",
 		);
 	}
 
@@ -417,21 +414,21 @@ export class ConnectorsResource {
 		);
 	}
 
-	async get(id: string, opts?: RequestOptions): Promise<ConnectorView> {
+	async inspect(id: string, opts?: RequestOptions): Promise<ConnectorView> {
 		return this.call(
 			`/connectors/${encodeURIComponent(id)}`,
 			() => this.sdk.connectors.get({ id }, requestOptions(opts)),
 			connectorSchema,
-			"connector get",
+			"connector inspect",
 		);
 	}
 
-	async status(id: string, opts?: RequestOptions): Promise<ConnectorStatus> {
+	async health(id: string, opts?: RequestOptions): Promise<ConnectorStatus> {
 		return this.call(
 			`/connectors/${encodeURIComponent(id)}/status`,
 			() => this.sdk.connectors.status({ id }, requestOptions(opts)),
 			connectorStatusSchema,
-			"connector status",
+			"connector health",
 		);
 	}
 

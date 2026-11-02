@@ -160,6 +160,69 @@
         "sdk": { "method": "status", "args_scope": { "database": "db_test" } }
       },
       "aliases": { "cli": ["knowledge verify"] }
+    },
+    {
+      "id": "connector-provider-list",
+      "optional_for": ["cli", "plugin", "openclaw"],
+      "call": { "op": "connector.providerList", "args": {} },
+      "expect": {
+        "wrapper_method": "connectors.listProviders",
+        "sdk": { "method": "listProviders", "args_include": {} }
+      }
+    },
+    {
+      "id": "connector-provider-inspect",
+      "optional_for": ["cli", "plugin", "openclaw"],
+      "call": { "op": "connector.providerInspect", "args": { "provider": "slack" } },
+      "expect": {
+        "wrapper_method": "connectors.inspectProvider",
+        "sdk": { "method": "listProviders", "args_include": { "id": "slack" } }
+      }
+    },
+    {
+      "id": "connector-list",
+      "optional_for": ["cli", "plugin", "openclaw"],
+      "call": { "op": "connector.list", "args": { "provider": "slack", "include_health": true } },
+      "expect": {
+        "wrapper_method": "connectors.list",
+        "sdk": { "method": "list", "args_include": { "provider": "slack", "include": "health" } }
+      }
+    },
+    {
+      "id": "connector-inspect",
+      "optional_for": ["cli", "plugin", "openclaw"],
+      "call": { "op": "connector.inspect", "args": { "id": "conn_1" } },
+      "expect": {
+        "wrapper_method": "connectors.inspect",
+        "sdk": { "method": "get", "args_include": { "id": "conn_1" } }
+      }
+    },
+    {
+      "id": "connector-health",
+      "optional_for": ["cli", "plugin", "openclaw"],
+      "call": { "op": "connector.health", "args": { "id": "conn_1" } },
+      "expect": {
+        "wrapper_method": "connectors.health",
+        "sdk": { "method": "status", "args_include": { "id": "conn_1" } }
+      }
+    },
+    {
+      "id": "connector-discover",
+      "optional_for": ["cli", "plugin", "openclaw"],
+      "call": { "op": "connector.discover", "args": { "id": "conn_1", "cursor": "next", "limit": 25 } },
+      "expect": {
+        "wrapper_method": "connectors.discover",
+        "sdk": { "method": "discover", "args_include": { "id": "conn_1", "cursor": "next", "limit": 25 } }
+      }
+    },
+    {
+      "id": "connector-resource-list",
+      "optional_for": ["cli", "plugin", "openclaw"],
+      "call": { "op": "connector.resourceList", "args": { "id": "conn_1" } },
+      "expect": {
+        "wrapper_method": "connectors.listResources",
+        "sdk": { "method": "listResources", "args_include": { "id": "conn_1" } }
+      }
     }
   ],
   "env_aliases": [

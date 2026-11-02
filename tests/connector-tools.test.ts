@@ -52,16 +52,21 @@ function mockHydra(allowedDatabases?: string[], allowedCollections?: string[]) {
 		listProviders: record("providers", {
 			providers: [{ provider: "slack", category: "Communication", supported: true }],
 		}),
+		inspectProvider: async (provider: string): Promise<Record<string, unknown>> => {
+			calls.push({ method: "provider", args: { provider } });
+
+			return { provider, connectorType: "classic", filterableFields: [], indexedObjectTypes: [], searchableFields: [] };
+		},
 		list: record("list", {
 			connectors,
 			health: { allowed: "healthy", blocked: "failed", "org-wide": "checking" },
 		}),
-		get: async (id: string) => {
-			calls.push({ method: "get", args: { id } });
+		inspect: async (id: string) => {
+			calls.push({ method: "inspect", args: { id } });
 
 			return connectors.find((connector) => connector.connectorId === id) ?? {};
 		},
-		status: record("status", status),
+		health: record("health", status),
 		discover: record("discover", {
 			provider: "slack",
 			resources: [{ id: "r-a", name: "general", resourceType: "channel", metadata: { topic: "safe" } }],
@@ -127,17 +132,46 @@ afterEach(() => {
 	delete process.env.HYDRADB_MCP_CONNECTOR_TOOLS;
 });
 
-test("all six connector read tools are registered by default and explicitly read-only", async () => {
+test("the connector read tools carry the CONTRACT.md §3 names", () => {
+	assert.deepEqual([...CONNECTOR_TOOL_NAMES].slice(0, 7), [
+		"hydradb_connector_provider_list",
+		"hydradb_connector_provider_inspect",
+		"hydradb_connector_list",
+		"hydradb_connector_inspect",
+		"hydradb_connector_health",
+		"hydradb_connector_discover",
+		"hydradb_connector_resource_list",
+	]);
+});
+
+test("the retired connector read tool names are not registered", async () => {
+	const client = await connect(mockHydra().hydra);
+	const names = (await client.listTools()).tools.map((tool) => tool.name);
+
+	for (const retired of [
+		"hydradb_connector_providers",
+		"hydradb_connector_get",
+		"hydradb_connector_status",
+		"hydradb_connector_resources",
+	]) {
+		assert.ok(!names.includes(retired), `${retired} should not be registered`);
+	}
+
+	await client.close();
+});
+
+test("all seven connector read tools are registered by default and explicitly read-only", async () => {
 	const client = await connect(mockHydra().hydra);
 	const { tools } = await client.listTools();
 
 	for (const name of [
-		"hydradb_connector_providers",
+		"hydradb_connector_provider_list",
+		"hydradb_connector_provider_inspect",
 		"hydradb_connector_list",
-		"hydradb_connector_get",
-		"hydradb_connector_status",
+		"hydradb_connector_inspect",
+		"hydradb_connector_health",
 		"hydradb_connector_discover",
-		"hydradb_connector_resources",
+		"hydradb_connector_resource_list",
 	]) {
 		const tool = tools.find((candidate) => candidate.name === name);
 		assert.ok(tool, `${name} should be registered`);
@@ -258,7 +292,7 @@ test("every connector write input field has client-visible help", async () => {
 		return [...missing, ...missingDescriptions(value.items, `${path}[]`)];
 	};
 
-	for (const name of CONNECTOR_TOOL_NAMES.slice(6)) {
+	for (const name of CONNECTOR_TOOL_NAMES.slice(7)) {
 		const tool = tools.find((candidate) => candidate.name === name);
 		assert.ok(tool, `${name} should be registered`);
 		assert.deepEqual(Object.keys(tool.inputSchema.properties ?? {}).sort(), expectedFields[name], `${name} fields`);
@@ -315,7 +349,7 @@ test("connector schemas reject unknown fields before an API call", async () => {
 	const client = await connect(hydra);
 
 	const result = await client.callTool({
-		name: TOOL_NAMES.CONNECTOR_PROVIDERS,
+		name: TOOL_NAMES.CONNECTOR_PROVIDER_INSPECT,
 		arguments: { provider: "slack", credentials: { token: "must-not-pass" } },
 	});
 
@@ -367,29 +401,39 @@ test("connector write metadata rejects credential-like keys before mutation", as
 });
 
 test("provider tools return catalog entries and sanitize credential schemas", async () => {
-	const { hydra, connectorApi } = mockHydra();
-	connectorApi.listProviders = async (provider?: string) => provider
-		? {
-				provider,
-				connectorType: "moveit",
-				credentialSchema: {
-					type: "object",
-					required: ["token"],
-					properties: {
-						token: { type: "string", description: "Provider token", default: "secret", example: "secret-example" },
-					},
-				},
-				filterableFields: [],
-				indexedObjectTypes: ["message"],
-				searchableFields: [],
-			}
-		: { providers: [{ provider: "slack", supported: true }] };
+	const { hydra, connectorApi, calls } = mockHydra();
+	connectorApi.listProviders = async () => ({ providers: [{ provider: "slack", supported: true }] });
+	connectorApi.inspectProvider = async (provider: string) => ({
+		provider,
+		connectorType: "moveit",
+		credentialSchema: {
+			type: "object",
+			required: ["token"],
+			properties: {
+				token: { type: "string", description: "Provider token", default: "secret", example: "secret-example" },
+			},
+		},
+		filterableFields: [],
+		indexedObjectTypes: ["message"],
+		searchableFields: [],
+	});
 	const client = await connect(hydra);
 
-	const catalog = await client.callTool({ name: TOOL_NAMES.CONNECTOR_PROVIDERS, arguments: {} });
+	const catalog = await client.callTool({ name: TOOL_NAMES.CONNECTOR_PROVIDER_LIST, arguments: {} });
 	assert.deepEqual(structured(catalog).providers, [{ provider: "slack", supported: true }]);
 
-	const detail = await client.callTool({ name: TOOL_NAMES.CONNECTOR_PROVIDERS, arguments: { provider: "slack" } });
+	const catalogWithProvider = await client.callTool({
+		name: TOOL_NAMES.CONNECTOR_PROVIDER_LIST,
+		arguments: { provider: "slack" },
+	});
+
+	assert.equal(catalogWithProvider.isError, true, "provider_list takes no provider; that is provider_inspect");
+
+	const missingProvider = await client.callTool({ name: TOOL_NAMES.CONNECTOR_PROVIDER_INSPECT, arguments: {} });
+	assert.equal(missingProvider.isError, true, "provider_inspect needs a provider");
+	assert.equal(calls.length, 0);
+
+	const detail = await client.callTool({ name: TOOL_NAMES.CONNECTOR_PROVIDER_INSPECT, arguments: { provider: "slack" } });
 	const rendered = JSON.stringify(structured(detail));
 	assert.match(rendered, /Provider token/);
 	assert.doesNotMatch(rendered, /secret-example|"default"|"example"/);
@@ -422,27 +466,27 @@ test("confined list hides other databases and org-wide connectors", async () => 
 
 test("every by-ID read preflights the connector and refuses a forbidden database", async () => {
 	for (const name of [
-		TOOL_NAMES.CONNECTOR_GET,
-		TOOL_NAMES.CONNECTOR_STATUS,
+		TOOL_NAMES.CONNECTOR_INSPECT,
+		TOOL_NAMES.CONNECTOR_HEALTH,
 		TOOL_NAMES.CONNECTOR_DISCOVER,
-		TOOL_NAMES.CONNECTOR_RESOURCES,
+		TOOL_NAMES.CONNECTOR_RESOURCE_LIST,
 	]) {
 		const { hydra, calls } = mockHydra(["db-a"]);
 		const client = await connect(hydra);
 		const result = await client.callTool({ name, arguments: { connector_id: "blocked" } });
 
 		assert.equal(result.isError, true, `${name} should refuse the connector`);
-		assert.deepEqual(calls.map((call) => call.method), ["get"]);
+		assert.deepEqual(calls.map((call) => call.method), ["inspect"]);
 		assert.doesNotMatch(text(result), /Blocked secret|github|db-b/);
 		await client.close();
 	}
 });
 
-test("connector status explains sync state without echoing provider errors", async () => {
+test("connector health explains sync state without echoing provider errors", async () => {
 	const client = await connect(mockHydra(["db-a"]).hydra);
 
 	const result = await client.callTool({
-		name: TOOL_NAMES.CONNECTOR_STATUS,
+		name: TOOL_NAMES.CONNECTOR_HEALTH,
 		arguments: { connector_id: "allowed" },
 	});
 
@@ -461,7 +505,7 @@ test("resource listing filters by each resource's effective destination database
 	const client = await connect(mockHydra(["db-a"]).hydra);
 
 	const result = await client.callTool({
-		name: TOOL_NAMES.CONNECTOR_RESOURCES,
+		name: TOOL_NAMES.CONNECTOR_RESOURCE_LIST,
 		arguments: { connector_id: "allowed" },
 	});
 
@@ -498,7 +542,7 @@ test("connector reads enforce collection confinement and resource collection ove
 	);
 
 	const denied = await client.callTool({
-		name: TOOL_NAMES.CONNECTOR_GET,
+		name: TOOL_NAMES.CONNECTOR_INSPECT,
 		arguments: { connector_id: "private-collection" },
 	});
 
@@ -506,7 +550,7 @@ test("connector reads enforce collection confinement and resource collection ove
 	assert.doesNotMatch(text(denied), /Private collection|private-collection|private/);
 
 	const resources = await client.callTool({
-		name: TOOL_NAMES.CONNECTOR_RESOURCES,
+		name: TOOL_NAMES.CONNECTOR_RESOURCE_LIST,
 		arguments: { connector_id: "allowed" },
 	});
 
@@ -518,7 +562,7 @@ test("connector reads enforce collection confinement and resource collection ove
 	await client.close();
 });
 
-test("connector status filters resources outside the effective database or collection scope", async () => {
+test("connector health filters resources outside the effective database or collection scope", async () => {
 	const fixture = mockHydra(["db-a"], ["public"]);
 	fixture.resources.push({
 		connectorId: "allowed",
@@ -549,7 +593,7 @@ test("connector status filters resources outside the effective database or colle
 	const client = await connect(fixture.hydra);
 
 	const result = await client.callTool({
-		name: TOOL_NAMES.CONNECTOR_STATUS,
+		name: TOOL_NAMES.CONNECTOR_HEALTH,
 		arguments: { connector_id: "allowed" },
 	});
 
@@ -568,7 +612,7 @@ test("connector status filters resources outside the effective database or colle
 	await client.close();
 });
 
-test("connector status maps typed failures to fixed credential-safe guidance", async () => {
+test("connector health maps typed failures to fixed credential-safe guidance", async () => {
 	const cases = [
 		{
 			error: { code: "credentials_rejected", message: "secret credential detail", retryable: false },
@@ -598,7 +642,7 @@ test("connector status maps typed failures to fixed credential-safe guidance", a
 		const client = await connect(fixture.hydra);
 
 		const result = await client.callTool({
-			name: TOOL_NAMES.CONNECTOR_STATUS,
+			name: TOOL_NAMES.CONNECTOR_HEALTH,
 			arguments: { connector_id: "allowed" },
 		});
 

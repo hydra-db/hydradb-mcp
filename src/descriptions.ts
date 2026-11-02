@@ -722,12 +722,19 @@ Confirm with the user before deleting a collection they did not name. Take the c
 
 	// --- Connector lifecycle and resources (ENG-3341) ---
 
-	[TOOL_NAMES.CONNECTOR_PROVIDERS]: {
+	[TOOL_NAMES.CONNECTOR_PROVIDER_LIST]: {
 		title: "List Connector Providers",
 		description:
-			"List supported connector providers, or inspect one provider's setup and credential field schema. The schema describes fields only. Never put credential values in MCP tool arguments or chat.",
+			"List the connector providers HydraDB supports, such as slack, github, linear, notion, or gmail. Use hydradb_connector_provider_inspect for one provider's setup details.",
+		params: {},
+	},
+
+	[TOOL_NAMES.CONNECTOR_PROVIDER_INSPECT]: {
+		title: "Inspect Connector Provider",
+		description:
+			"Read one provider's setup guide and credential field schema. The schema describes fields only. Never put credential values in MCP tool arguments or chat.",
 		params: {
-			provider: "Provider identifier such as slack, github, linear, notion, or gmail. Omit it to list the provider catalog.",
+			provider: "Provider identifier from hydradb_connector_provider_list, such as slack or gmail.",
 		},
 	},
 
@@ -741,8 +748,8 @@ Confirm with the user before deleting a collection they did not name. Take the c
 		},
 	},
 
-	[TOOL_NAMES.CONNECTOR_GET]: {
-		title: "Get Connector",
+	[TOOL_NAMES.CONNECTOR_INSPECT]: {
+		title: "Inspect Connector",
 		description:
 			"Read one connector's configuration and lifecycle. Take connector_id from hydradb_connector_list; never invent it.",
 		params: {
@@ -750,8 +757,8 @@ Confirm with the user before deleting a collection they did not name. Take the c
 		},
 	},
 
-	[TOOL_NAMES.CONNECTOR_STATUS]: {
-		title: "Check Connector Status",
+	[TOOL_NAMES.CONNECTOR_HEALTH]: {
+		title: "Check Connector Health",
 		description:
 			"Explain connector and resource sync health in plain words. This separates current sync activity, the latest attempt, the last successful sync, retryability, required action, and permission warnings.",
 		params: {
@@ -762,7 +769,7 @@ Confirm with the user before deleting a collection they did not name. Take the c
 	[TOOL_NAMES.CONNECTOR_DISCOVER]: {
 		title: "Discover Connector Resources",
 		description:
-			"List resources currently visible through a connected provider account. Continue with next_cursor while has_more is true.",
+			"List resources available upstream in the connected provider account, whether or not they are added to HydraDB. Continue with next_cursor while has_more is true. Use hydradb_connector_resource_list for the resources already added.",
 		params: {
 			connector_id: "Connector identifier from hydradb_connector_list.",
 			cursor: "Opaque next_cursor returned by the previous discovery page.",
@@ -770,10 +777,10 @@ Confirm with the user before deleting a collection they did not name. Take the c
 		},
 	},
 
-	[TOOL_NAMES.CONNECTOR_RESOURCES]: {
-		title: "List Configured Connector Resources",
+	[TOOL_NAMES.CONNECTOR_RESOURCE_LIST]: {
+		title: "List Connector Resources",
 		description:
-			"List resources configured on one connector. A database-confined OAuth connection only receives resources whose effective destination database is allowed.",
+			"List the resources already added to one connector. A database-confined OAuth connection only receives resources whose effective destination database is allowed. Use hydradb_connector_discover for what is available upstream.",
 		params: {
 			connector_id: "Connector identifier from hydradb_connector_list.",
 		},
@@ -988,15 +995,16 @@ THE TOOLS
 
 CONNECTORS
 
-- ${TOOL_NAMES.CONNECTOR_PROVIDERS} — supported connector providers and one provider's credential field schema. Never send credential values through MCP.
+- ${TOOL_NAMES.CONNECTOR_PROVIDER_LIST} — the connector providers HydraDB supports.
+- ${TOOL_NAMES.CONNECTOR_PROVIDER_INSPECT} — one provider's setup guide and credential field schema. Never send credential values through MCP.
 - ${TOOL_NAMES.CONNECTOR_LIST} — connected data sources visible to this connection.
-- ${TOOL_NAMES.CONNECTOR_GET} — one connector's configuration and lifecycle.
-- ${TOOL_NAMES.CONNECTOR_STATUS} — plain-language connector and resource sync health.
-- ${TOOL_NAMES.CONNECTOR_DISCOVER} — resources available through a connector's stored provider account.
-- ${TOOL_NAMES.CONNECTOR_RESOURCES} — resources already configured on a connector.
+- ${TOOL_NAMES.CONNECTOR_INSPECT} — one connector's configuration and lifecycle.
+- ${TOOL_NAMES.CONNECTOR_HEALTH} — plain-language connector and resource sync health.
+- ${TOOL_NAMES.CONNECTOR_DISCOVER} — resources available upstream in a connector's provider account.
+- ${TOOL_NAMES.CONNECTOR_RESOURCE_LIST} — resources already added to a connector.
 - ${TOOL_NAMES.CONNECTOR_UPDATE} — noncredential connector settings. This tool never accepts provider credentials.
 - ${TOOL_NAMES.CONNECTOR_DELETE} — irreversible connector deletion. Confirm first.
-- ${TOOL_NAMES.CONNECTOR_SYNC} — start a connector sync, then monitor it with ${TOOL_NAMES.CONNECTOR_STATUS}.
+- ${TOOL_NAMES.CONNECTOR_SYNC} — start a connector sync, then monitor it with ${TOOL_NAMES.CONNECTOR_HEALTH}.
 - ${TOOL_NAMES.CONNECTOR_PAUSE} — pause connector syncing.
 - ${TOOL_NAMES.CONNECTOR_RESUME} — resume connector syncing.
 - ${TOOL_NAMES.CONNECTOR_CONFIGURE} — configure submitted resources. Unlisted resources remain unchanged.
