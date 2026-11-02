@@ -27,10 +27,10 @@ function mockHydra(allowedDatabases?: string[], allowedCollections?: string[]) {
 		{ connectorId: "allowed", resourceId: "r-inherited", displayName: "Inherited" },
 	];
 
-	const record = <T>(method: string, value: T) => (args: Record<string, unknown> = {}) => {
+	const reply = (method: string, value: unknown) => async (args: Record<string, unknown> = {}) => {
 		calls.push({ method, args });
 
-		return Promise.resolve(value);
+		return value;
 	};
 
 	const status = {
@@ -48,65 +48,50 @@ function mockHydra(allowedDatabases?: string[], allowedCollections?: string[]) {
 		],
 	};
 
-	const connectorApi = {
-		listProviders: record("providers", {
-			providers: [{ provider: "slack", category: "Communication", supported: true }],
-		}),
-		inspectProvider: async (provider: string): Promise<Record<string, unknown>> => {
-			calls.push({ method: "provider", args: { provider } });
+	// The SDK, not our wrapper: tests exercise the wrapper's own response validation.
+	const sdk = {
+		query: () => Promise.resolve({ success: true, chunks: [] }),
+		context: {},
+		listProviders: async (args: { id?: string } = {}): Promise<Record<string, unknown>> => {
+			calls.push({ method: "listProviders", args });
 
-			return { provider, connectorType: "classic", filterableFields: [], indexedObjectTypes: [], searchableFields: [] };
+			return args.id
+				? { provider: args.id, connectorType: "classic", filterableFields: [], indexedObjectTypes: [], searchableFields: [] }
+				: { providers: [{ provider: "slack", category: "Communication", supported: true }] };
 		},
-		list: record("list", {
-			connectors,
-			health: { allowed: "healthy", blocked: "failed", "org-wide": "checking" },
-		}),
-		inspect: async (id: string) => {
-			calls.push({ method: "inspect", args: { id } });
+		connectors: {
+			list: reply("list", { connectors, health: { allowed: "healthy", blocked: "failed", "org-wide": "checking" } }),
+			get: async (args: { id: string }) => {
+				calls.push({ method: "get", args });
 
-			return connectors.find((connector) => connector.connectorId === id) ?? {};
+				return connectors.find((connector) => connector.connectorId === args.id) ?? {};
+			},
+			status: reply("status", status),
+			discover: reply("discover", {
+				provider: "slack",
+				resources: [{ id: "r-a", name: "general", resourceType: "channel", metadata: { topic: "safe" } }],
+				hasMore: false,
+			}),
+			listResources: reply("listResources", { resources }),
+			update: reply("update", { connectorId: "allowed", customInstructionsUpdated: true }),
+			delete: reply("delete", { connectorId: "allowed", deleted: true }),
+			sync: reply("sync", { runId: "run-1", workflowId: "workflow-1" }),
+			pause: reply("pause", { connectorId: "allowed", paused: true }),
+			resume: reply("resume", { connectorId: "allowed", paused: false }),
+			configure: reply("configure", { connectorId: "allowed", configured: 1, backfill: false }),
+			updateResourceAcl: reply("updateResourceAcl", { connectorId: "allowed", resourceId: "r-a", customInstructionsUpdated: true }),
+			deleteResource: reply("deleteResource", { connectorId: "allowed", resourceId: "r-a", deleted: true }),
 		},
-		health: record("health", status),
-		discover: record("discover", {
-			provider: "slack",
-			resources: [{ id: "r-a", name: "general", resourceType: "channel", metadata: { topic: "safe" } }],
-			hasMore: false,
-		}),
-		listResources: record("resources", { resources }),
-		update: record("update", { connectorId: "allowed", customInstructionsUpdated: true }),
-		delete: record("delete", { connectorId: "allowed", deleted: true }),
-		sync: record("sync", { runId: "run-1", workflowId: "workflow-1" }),
-		pause: record("pause", { connectorId: "allowed", paused: true }),
-		resume: record("resume", { connectorId: "allowed", paused: false }),
-		addResources: record("add-resources", {
-			connectorId: "allowed",
-			configured: 1,
-			backfill: false,
-		}) as (args?: Record<string, unknown>) => Promise<Record<string, unknown>>,
-		updateResource: record("update-resource", {
-			connectorId: "allowed",
-			resourceId: "r-a",
-			customInstructionsUpdated: true,
-		}),
-		deleteResource: record("delete-resource", {
-			connectorId: "allowed",
-			resourceId: "r-a",
-			deleted: true,
-		}),
 	};
-
-	const sdk = { query: () => Promise.resolve({ success: true, chunks: [] }), context: {} } as unknown as HydraDBClient;
 
 	const hydra = new HydraDB({
 		token: "t",
 		database: "db-a",
 		...(allowedDatabases ? { allowedDatabases } : {}),
 		...(allowedCollections ? { allowedCollections } : {}),
-	}, sdk);
+	}, sdk as unknown as HydraDBClient);
 
-	(hydra as unknown as { connectors: unknown }).connectors = connectorApi;
-
-	return { hydra, calls, connectorApi, connectors, resources, status };
+	return { hydra, calls, sdk, connectors, resources, status };
 }
 
 async function connect(hydra: HydraDB) {
@@ -385,28 +370,29 @@ test("connector write metadata rejects credential-like keys before mutation", as
 		assert.doesNotMatch(text(result), /must-not-pass/);
 	}
 
-	assert.equal(calls.some((call) => call.method === "add-resources"), false);
+	assert.equal(calls.some((call) => call.method === "configure"), false);
 
 	await client.close();
 });
 
 test("provider tools return catalog entries and sanitize credential schemas", async () => {
-	const { hydra, connectorApi, calls } = mockHydra();
-	connectorApi.listProviders = async () => ({ providers: [{ provider: "slack", supported: true }] });
-	connectorApi.inspectProvider = async (provider: string) => ({
-		provider,
-		connectorType: "moveit",
-		credentialSchema: {
-			type: "object",
-			required: ["token"],
-			properties: {
-				token: { type: "string", description: "Provider token", default: "secret", example: "secret-example" },
-			},
-		},
-		filterableFields: [],
-		indexedObjectTypes: ["message"],
-		searchableFields: [],
-	});
+	const { hydra, sdk, calls } = mockHydra();
+	sdk.listProviders = async (args: { id?: string } = {}) => args.id
+		? {
+				provider: args.id,
+				connectorType: "moveit",
+				credentialSchema: {
+					type: "object",
+					required: ["token"],
+					properties: {
+						token: { type: "string", description: "Provider token", default: "secret", example: "secret-example" },
+					},
+				},
+				filterableFields: [],
+				indexedObjectTypes: ["message"],
+				searchableFields: [],
+			}
+		: { providers: [{ provider: "slack", supported: true }] };
 	const client = await connect(hydra);
 
 	const catalog = await client.callTool({ name: TOOL_NAMES.CONNECTOR_PROVIDER_LIST, arguments: {} });
@@ -466,7 +452,7 @@ test("every by-ID read preflights the connector and refuses a forbidden database
 		const result = await client.callTool({ name, arguments: { connector_id: "blocked" } });
 
 		assert.equal(result.isError, true, `${name} should refuse the connector`);
-		assert.deepEqual(calls.map((call) => call.method), ["inspect"]);
+		assert.deepEqual(calls.map((call) => call.method), ["get"]);
 		assert.doesNotMatch(text(result), /Blocked secret|github|db-b/);
 		await client.close();
 	}
@@ -598,6 +584,8 @@ test("connector health filters resources outside the effective database or colle
 		text(result),
 		/Forbidden database status|Private status secret|Unknown destination secret/,
 	);
+	assert.equal(structured(result).withheld_resource_count, 3);
+	assert.match(text(result), /3 resources are outside this connection's databases or collections and not shown/);
 
 	await client.close();
 });
@@ -615,12 +603,12 @@ test("connector health maps typed failures to fixed credential-safe guidance", a
 			text: /destination database is missing/i,
 		},
 		{
-			error: { code: "sync_service_failed", failureClass: "internal", message: "internal trace", retryable: false },
+			error: { code: "sync_service_failed", failure_class: "terminal_internal", message: "internal trace", retryable: false },
 			kind: "internal",
 			text: /Contact HydraDB support/,
 		},
 		{
-			error: { failureClass: "transient", message: "provider secret", retryable: true },
+			error: { failure_class: "retriable_transient", message: "provider secret", retryable: true },
 			kind: "transient",
 			text: /HydraDB will retry/,
 		},
@@ -664,7 +652,7 @@ test("discover validates pagination and forwards allowed calls", async () => {
 	assert.equal(result.isError, undefined);
 	assert.deepEqual(calls.at(-1), {
 		method: "discover",
-		args: { connectorId: "allowed", cursor: "next", limit: 25 },
+		args: { id: "allowed", cursor: "next", limit: 25 },
 	});
 
 	await client.close();
@@ -697,17 +685,17 @@ test("credential-free connector writes map every public mutation with safe resul
 					acl: ["user@example.com"],
 				}],
 			},
-			method: "add-resources",
+			method: "configure",
 		},
 		{
 			name: "hydradb_connector_resource_update",
 			arguments: { connector_id: "allowed", resource_id: "r-a", custom_instructions: "Only decisions" },
-			method: "update-resource",
+			method: "updateResourceAcl",
 		},
 		{
 			name: "hydradb_connector_resource_delete",
 			arguments: { connector_id: "allowed", resource_id: "r-a" },
-			method: "delete-resource",
+			method: "deleteResource",
 		},
 		{ name: "hydradb_connector_delete", arguments: { connector_id: "allowed" }, method: "delete" },
 	];
@@ -754,9 +742,9 @@ test("resource_add sends the whole list to the configure endpoint under the API'
 
 	assert.notEqual(result.isError, true);
 	assert.deepEqual(calls, [{
-		method: "add-resources",
+		method: "configure",
 		args: {
-			connectorId: "allowed",
+			id: "allowed",
 			resources: [
 				{
 					resourceId: "C1",
@@ -819,7 +807,7 @@ test("resource_add sends the whole list to the configure endpoint under the API'
 
 test("resource_add preserves safe warning and verification indicators", async () => {
 	const fixture = mockHydra();
-	fixture.connectorApi.addResources = async () => ({
+	fixture.sdk.connectors.configure = async () => ({
 		connectorId: "allowed",
 		configured: 1,
 		warnings: ["r-new"],
@@ -848,12 +836,12 @@ test("every credential-free connector write redacts representative upstream fail
 		[
 			"hydradb_connector_resource_add",
 			{ connector_id: "allowed", resources: [{ resource_id: "r-a" }] },
-			"addResources",
+			"configure",
 		],
 		[
 			"hydradb_connector_resource_update",
 			{ connector_id: "allowed", resource_id: "r-a", acl: [] },
-			"updateResource",
+			"updateResourceAcl",
 		],
 		[
 			"hydradb_connector_resource_delete",
@@ -864,7 +852,7 @@ test("every credential-free connector write redacts representative upstream fail
 
 	for (const [name, arguments_, method] of cases) {
 		const fixture = mockHydra();
-		(fixture.connectorApi as unknown as Record<string, unknown>)[method] = async () => {
+		fixture.sdk.connectors[method] = async () => {
 			throw new Error("provider leaked top-secret-token");
 		};
 
@@ -929,7 +917,7 @@ test("collection-only confinement also refuses resource mutations", async () => 
 		assert.equal(result.isError, true, `${request.name} should refuse collection-scoped mutation`);
 	}
 
-	for (const method of ["add-resources", "update-resource", "delete-resource"]) {
+	for (const method of ["configure", "updateResourceAcl", "deleteResource"]) {
 		assert.equal(calls.some((call) => call.method === method), false, `${method} must not mutate`);
 	}
 
