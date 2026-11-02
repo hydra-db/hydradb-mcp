@@ -185,38 +185,51 @@ export function resolveConfig(
 		...(timeoutSeconds != null ? { timeoutSeconds } : {}),
 		...(maxRetries != null ? { maxRetries } : {}),
 		graph: resolveGraphConfig(env, database),
-		connectors: resolveConnectorConfig(env),
+		connectors: resolveConnectorConfig(env, warn),
 	};
+}
+
+/**
+ * An absolute http(s) URL, or undefined. The one rule for URL settings: OAuth applies it to the
+ * issuer and public URL, and connector links accept exactly the issuers OAuth accepts.
+ */
+export function httpUrl(value: string | undefined): URL | undefined {
+	try {
+		const url = new URL(value?.trim() ?? "");
+
+		return url.protocol === "http:" || url.protocol === "https:" ? url : undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 /** Resolve the connector-family gate without requiring an API key. */
 export function resolveConnectorConfig(
 	env: EnvSource = process.env,
+	warn: WarnFn = defaultWarn,
 ): ConnectorConfig {
 	return {
 		enabled: flag(env.HYDRADB_MCP_CONNECTOR_TOOLS, true),
-		dashboardUrl: dashboardOrigin(env.HYDRADB_OAUTH_ISSUER),
+		dashboardUrl: dashboardOrigin(env.HYDRADB_OAUTH_ISSUER, warn),
 	};
 }
 
 /**
- * The dashboard origin for connector completion links. The OAuth issuer IS the
- * dashboard, so hosted and BYOC deployments already name it. An unset or
- * non-HTTP(S) issuer falls back to the hosted dashboard; it never fails startup,
- * because OAuth itself only warns about a bad issuer.
+ * The dashboard origin for connector completion links. The OAuth issuer IS the dashboard, so
+ * hosted and BYOC deployments already name it, and an unset one means the hosted dashboard. An
+ * issuer OAuth would reject also falls back, with a warning, so a BYOC typo is never silent.
  */
-function dashboardOrigin(issuer: string | undefined): string {
-	const value = issuer?.trim();
+function dashboardOrigin(issuer: string | undefined, warn: WarnFn): string {
+	if (!issuer?.trim()) return DEFAULT_DASHBOARD_URL;
 
-	if (!value) return DEFAULT_DASHBOARD_URL;
+	const url = httpUrl(issuer);
 
-	try {
-		const url = new URL(value);
+	if (url) return url.origin;
 
-		if (url.protocol === "http:" || url.protocol === "https:") return url.origin;
-	} catch {
-		// Not a URL: OAuth already ignores it, so links use the hosted dashboard.
-	}
+	warnOnce(
+		`HYDRADB_OAUTH_ISSUER "${issuer.trim()}" is not an absolute http(s) URL; connector links use ${DEFAULT_DASHBOARD_URL}.`,
+		warn,
+	);
 
 	return DEFAULT_DASHBOARD_URL;
 }

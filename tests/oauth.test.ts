@@ -3,6 +3,7 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { after, before, test } from "node:test";
 
+import { resolveConnectorConfig } from "../src/config.js";
 import { buildAllowedHosts, resolveRequestCredentials } from "../src/http-config.js";
 import { createHttpApp } from "../src/http.js";
 import {
@@ -55,6 +56,19 @@ test("a non-URL issuer disables OAuth rather than advertising garbage", () => {
 		null,
 	);
 	assert.match(warnings[0], /HYDRADB_OAUTH_ISSUER must be an absolute/);
+});
+
+test("OAuth and connector links accept exactly the same issuers", () => {
+	for (const issuer of ["https://dashboard.test", "http://127.0.0.1:3000/", "https:// broken host", "dashboard.test", "ftp://dashboard.test"]) {
+		const oauth = resolveOAuthConfig(
+			{ HYDRADB_OAUTH_ISSUER: issuer, HYDRADB_MCP_PUBLIC_URL: "https://mcp.test", HYDRADB_OAUTH_INTROSPECTION_SECRET: "s" },
+			() => {},
+		);
+
+		const links = resolveConnectorConfig({ HYDRADB_OAUTH_ISSUER: issuer }, () => {}).dashboardUrl;
+
+		assert.equal(oauth !== null, links !== "https://app.hydradb.com", `issuer ${JSON.stringify(issuer)}`);
+	}
 });
 
 const CONFIG: OAuthConfig = {

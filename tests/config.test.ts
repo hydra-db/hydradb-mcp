@@ -216,11 +216,25 @@ test("connector dashboard links use the OAuth issuer origin", () => {
 test("connector dashboard links fall back to the hosted dashboard without a usable issuer", () => {
 	for (const value of [undefined, "", "   ", "javascript:alert(1)", "not-a-url", "ftp://dashboard.example.com"]) {
 		assert.equal(
-			resolveConnectorConfig({ HYDRADB_OAUTH_ISSUER: value }).dashboardUrl,
+			resolveConnectorConfig({ HYDRADB_OAUTH_ISSUER: value }, () => {}).dashboardUrl,
 			"https://app.hydradb.com",
 			`issuer ${JSON.stringify(value)} should fall back`,
 		);
 	}
+});
+
+test("an issuer that is set but unusable warns once, naming it; an unset one is silent", () => {
+	const warnings: string[] = [];
+	const warn = (message: string) => warnings.push(message);
+
+	resolveConnectorConfig({}, warn);
+	resolveConnectorConfig({ HYDRADB_OAUTH_ISSUER: "   " }, warn);
+	assert.deepEqual(warnings, []);
+
+	resolveConnectorConfig({ HYDRADB_OAUTH_ISSUER: "dashboard.hydradb.byoc.test" }, warn);
+	resolveConnectorConfig({ HYDRADB_OAUTH_ISSUER: "dashboard.hydradb.byoc.test" }, warn);
+	assert.equal(warnings.length, 1, "once per process, not once per request");
+	assert.match(warnings[0] ?? "", /"dashboard\.hydradb\.byoc\.test" is not an absolute http\(s\) URL; connector links use https:\/\/app\.hydradb\.com/);
 });
 
 test("the retired HYDRADB_DASHBOARD_URL no longer changes connector links", () => {
