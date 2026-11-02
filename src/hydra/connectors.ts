@@ -173,7 +173,6 @@ const resourcesSchema = z.object({ resources: z.array(configuredResourceSchema) 
 
 const connectorUpdateSchema = z.object({
 	connectorId: z.string().optional(),
-	credentialsUpdated: z.boolean().optional(),
 	customInstructionsUpdated: z.boolean().optional(),
 	maxSyncIntervalSeconds: z.number().optional(),
 	minSyncIntervalSeconds: z.number().optional(),
@@ -240,25 +239,6 @@ export interface ConnectorUpdateRequest {
 	connectorId: string;
 	customInstructions?: string;
 	syncIntervalSeconds?: number;
-}
-
-/** Credential-bearing endpoint contract. Never use this type in an MCP tool schema. */
-export interface ConnectorCredentialCreateRequest {
-	provider: string;
-	authType?: string;
-	collection?: string;
-	credentials?: Record<string, unknown>;
-	customInstructions?: string;
-	database?: string;
-	name?: string;
-	providerAccountScope?: string;
-	syncIntervalSeconds?: number;
-}
-
-/** Credential-bearing endpoint contract. Never use this type in an MCP tool schema. */
-export interface ConnectorCredentialUpdateRequest {
-	connectorId: string;
-	credentials: Record<string, unknown>;
 }
 
 export interface ConnectorResourceMapping {
@@ -454,34 +434,6 @@ export class ConnectorsResource {
 			() => this.sdk.connectors.listResources({ id }, requestOptions(opts)),
 			resourcesSchema,
 			"connector resources",
-		);
-	}
-
-	async createWithCredentials(
-		params: ConnectorCredentialCreateRequest,
-		opts?: RequestOptions,
-	): Promise<ConnectorView> {
-		return this.call(
-			"/connectors",
-			() => this.sdk.connectors.create(params, requestOptions(opts)),
-			connectorSchema,
-			"connector create",
-		);
-	}
-
-	async updateCredentials(
-		params: ConnectorCredentialUpdateRequest,
-		opts?: RequestOptions,
-	): Promise<ConnectorUpdateResponse> {
-		return this.call(
-			`/connectors/${encodeURIComponent(params.connectorId)}`,
-			() =>
-				this.sdk.connectors.update(
-					{ id: params.connectorId, credentials: params.credentials },
-					requestOptions(opts),
-				),
-			connectorUpdateSchema,
-			"connector credential update",
 		);
 	}
 
