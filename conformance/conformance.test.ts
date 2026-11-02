@@ -57,7 +57,7 @@ function toSnake(name: string): string {
 function inWireForm(value: WireJson): WireJson {
 	if (Array.isArray(value)) return value.map(inWireForm);
 
-	if (value !== null && typeof value === "object") {
+	if (value instanceof Object) {
 		return Object.fromEntries(Object.entries(value).map(([key, item]) => [toSnake(key), inWireForm(item)]));
 	}
 
