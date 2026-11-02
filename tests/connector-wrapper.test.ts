@@ -178,3 +178,22 @@ test("connector wrapper preserves false, zero, empty strings and empty arrays", 
 	});
 	assert.deepEqual((await resource.health("c1")).resources, []);
 });
+
+test("destinations are trimmed once, and a blank override means none", async () => {
+	const resource = new ConnectorsResource({
+		connectors: {
+			get: () => Promise.resolve({ connectorId: "c1", database: "  db-a  ", collection: " " }),
+			listResources: () => Promise.resolve({
+				resources: [{ resourceId: "r1", databaseOverride: "  ", collectionOverride: " team " }],
+			}),
+		},
+	} as unknown as HydraDBClient);
+
+	const connector = await resource.inspect("c1");
+	const [configured] = (await resource.listResources("c1")).resources;
+
+	assert.equal(connector.database, "db-a");
+	assert.equal(connector.collection, undefined);
+	assert.equal(configured?.databaseOverride, undefined);
+	assert.equal(configured?.collectionOverride, "team");
+});
