@@ -275,7 +275,7 @@
       "call": { "op": "connector.resourceAdd", "args": { "id": "conn_1", "resources": [{ "resource_id": "C1", "display_name": "general" }], "lookback_days": 0 } },
       "expect": {
         "wrapper_method": "connectors.addResources",
-        "sdk": { "method": "configure", "args_include": { "id": "conn_1", "lookback_days": 0 } }
+        "sdk": { "method": "configure", "args_include": { "id": "conn_1", "resources": [{ "resource_id": "C1", "name": "general" }], "lookback_days": 0 } }
       }
     },
     {
