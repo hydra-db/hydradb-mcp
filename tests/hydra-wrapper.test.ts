@@ -685,15 +685,25 @@ test("database management maps the SDK methods and metadata-schema responses", a
 		addedFields?: string[];
 	};
 
-	type DatabaseRequestOptions = { abortSignal?: AbortSignal };
+	type DatabaseRequestOptions = { abortSignal?: AbortSignal; maxRetries?: number };
 
-	const calls: { method: string; request: DatabaseCall; abortSignal?: AbortSignal }[] = [];
+	const calls: {
+		method: string;
+		request: DatabaseCall;
+		abortSignal?: AbortSignal;
+		maxRetries?: number;
+	}[] = [];
 
 	const record = (method: string, data: DatabaseResponse) => (
 		request: DatabaseCall,
 		options?: DatabaseRequestOptions,
 	) => {
-		calls.push({ method, request, abortSignal: options?.abortSignal });
+		calls.push({
+			method,
+			request,
+			abortSignal: options?.abortSignal,
+			maxRetries: options?.maxRetries,
+		});
 
 		return Promise.resolve({ data, success: true });
 	};
@@ -734,7 +744,9 @@ test("database management maps the SDK methods and metadata-schema responses", a
 		addFields: [{ name: "amount", dataType: "DOUBLE" }],
 	}, { signal });
 
-	assert.ok(calls.every((call) => call.abortSignal === signal));
+	assert.ok(calls.every((call) => call.abortSignal instanceof AbortSignal));
+	assert.ok(calls.every((call) => call.abortSignal?.aborted === false));
+	assert.ok(calls.every((call) => call.maxRetries === 0));
 	assert.deepEqual(calls.map(({ method, request }) => ({ method, request })), [
 		{ method: "create", request: { database: "invoices", embeddingsDimension: 1024, databaseMetadataSchema: [{ name: "vendor", dataType: "VARCHAR" }] } },
 		{ method: "delete", request: { database: "archive" } },
