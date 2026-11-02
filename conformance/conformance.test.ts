@@ -46,6 +46,24 @@ function toCamel(name: string): string {
 	return name.replace(/_([a-z])/g, (_, c: string) => c.toUpperCase());
 }
 
+// Expected values are wire JSON, so nested SDK objects (a resource list) are
+// compared in wire spelling too: `resourceId` is checked as `resource_id`.
+type WireJson = string | number | boolean | null | WireJson[] | { [key: string]: WireJson };
+
+function toSnake(name: string): string {
+	return name.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
+}
+
+function inWireForm(value: WireJson): WireJson {
+	if (Array.isArray(value)) return value.map(inWireForm);
+
+	if (value instanceof Object) {
+		return Object.fromEntries(Object.entries(value).map(([key, item]) => [toSnake(key), inWireForm(item)]));
+	}
+
+	return value;
+}
+
 function hasField(args: Record<string, unknown>, name: string): boolean {
 	return args[name] != null || args[toCamel(name)] != null;
 }
@@ -275,8 +293,11 @@ for (const vector of suite.vectors) {
 		// Vectors name fields in wire (snake_case) form; the SDK request object
 		// carries them in camelCase, so read whichever spelling is present.
 		for (const [key, value] of Object.entries(expected.args_include ?? {})) {
+			const actual = call.args[key] !== undefined ? call.args[key] : call.args[toCamel(key)];
+
 			assert.deepEqual(
-				call.args[key] !== undefined ? call.args[key] : call.args[toCamel(key)],
+				// SAFETY: SDK request arguments are JSON the wrapper built from JSON vector args.
+				inWireForm(actual as WireJson),
 				value,
 				`${vector.id}: SDK arg "${key}" must equal ${JSON.stringify(value)}`,
 			);
