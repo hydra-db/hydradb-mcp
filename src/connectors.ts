@@ -5,8 +5,7 @@ import type {
 	ConnectorProviderCatalog,
 	ConnectorProviderDetail,
 	ConnectorResource,
-	ConnectorResourceCreateRequest,
-	ConnectorResourceMapping,
+	ConnectorResourceAddRequest,
 	ConnectorResourceUpdateRequest,
 	ConnectorStatus,
 	ConnectorUpdateRequest,
@@ -25,23 +24,9 @@ export type ConnectorListInput = ConnectorListParams;
 
 export type ConnectorDiscoverInput = ConnectorDiscoverParams;
 
-export type ConnectorUpdateInput = ConnectorUpdateRequest & { reconnect?: true };
+export type ConnectorUpdateInput = ConnectorUpdateRequest;
 
-export type ConnectorConfigureResourceInput = ConnectorResourceMapping;
-
-export interface ConnectorConfigureInput {
-	connectorId: string;
-	resources: ConnectorConfigureResourceInput[];
-	lookbackDays?: number;
-	fullVisibilityRoles?: string[];
-	tableConfigs?: Array<{
-		table: string;
-		replicationKey?: string;
-		changeHistory?: string;
-	}>;
-}
-
-export type ConnectorResourceCreateInput = ConnectorResourceCreateRequest;
+export type ConnectorResourceAddInput = ConnectorResourceAddRequest;
 
 export type ConnectorResourceUpdateInput = ConnectorResourceUpdateRequest;
 
@@ -469,31 +454,29 @@ export class ConnectorTools {
 	}
 
 	private async authorizedConnector(id: string, opts?: RequestOptions): Promise<ConnectorView> {
-		const connector = await this.hydra.connectors.get(id, opts);
+		const connector = await this.hydra.connectors.inspect(id, opts);
 		assertConnectorAllowed(connector, this.hydra.allowedDatabases, this.hydra.allowedCollections);
 
 		return connector;
 	}
 
-	async providers(provider?: string, opts?: RequestOptions): Promise<ConnectorToolResponse> {
-		const result = await this.hydra.connectors.listProviders(provider, opts);
+	async providerList(opts?: RequestOptions): Promise<ConnectorToolResponse> {
+		const providers = projectProviderCatalog(await this.hydra.connectors.listProviders(opts));
 
-		if ("providers" in result) {
-			const providers = projectProviderCatalog(result);
+		return {
+			text: providers.length === 0
+				? "No connector providers are available."
+				: `Available connector providers: ${providers.map((entry) => String(entry.provider)).join(", ")}.`,
+			data: { providers },
+		};
+	}
 
-			return {
-				text: providers.length === 0
-					? "No connector providers are available."
-					: `Available connector providers: ${providers.map((entry) => String(entry.provider)).join(", ")}.`,
-				data: { providers },
-			};
-		}
-
-		const detail = projectProviderDetail(result);
+	async providerInspect(provider: string, opts?: RequestOptions): Promise<ConnectorToolResponse> {
+		const result = await this.hydra.connectors.inspectProvider(provider, opts);
 
 		return {
 			text: `Provider ${result.provider} uses connector type ${result.connectorType}. Credential fields are schema metadata only; never put credential values in an MCP call.`,
-			data: detail,
+			data: projectProviderDetail(result),
 		};
 	}
 
@@ -536,7 +519,7 @@ export class ConnectorTools {
 		};
 	}
 
-	async get(id: string, opts?: RequestOptions): Promise<ConnectorToolResponse> {
+	async inspect(id: string, opts?: RequestOptions): Promise<ConnectorToolResponse> {
 		const connector = await this.authorizedConnector(id, opts);
 		const data = { connector: projectConnector(connector) };
 
@@ -546,11 +529,11 @@ export class ConnectorTools {
 		};
 	}
 
-	async status(id: string, opts?: RequestOptions): Promise<ConnectorToolResponse> {
+	async health(id: string, opts?: RequestOptions): Promise<ConnectorToolResponse> {
 		const connector = await this.authorizedConnector(id, opts);
 
 		const [status, configured] = await Promise.all([
-			this.hydra.connectors.status(id, opts),
+			this.hydra.connectors.health(id, opts),
 			this.hydra.connectors.listResources(id, opts),
 		]);
 
@@ -582,7 +565,7 @@ export class ConnectorTools {
 		return { text: `Discovered ${count} resource${count === 1 ? "" : "s"}.`, data };
 	}
 
-	async resources(id: string, opts?: RequestOptions): Promise<ConnectorToolResponse> {
+	async resourceList(id: string, opts?: RequestOptions): Promise<ConnectorToolResponse> {
 		const connector = await this.authorizedConnector(id, opts);
 		const result = await this.hydra.connectors.listResources(id, opts);
 
@@ -598,7 +581,7 @@ export class ConnectorTools {
 		};
 	}
 
-	async create(provider: string): Promise<ConnectorToolResponse> {
+	async connect(provider: string): Promise<ConnectorToolResponse> {
 		const dashboardUrl = this.dashboardLink("connect", provider);
 
 		return {
@@ -613,23 +596,23 @@ export class ConnectorTools {
 		};
 	}
 
+	async reconnect(id: string, opts?: RequestOptions): Promise<ConnectorToolResponse> {
+		await this.authorizedConnector(id, opts);
+		const dashboardUrl = this.dashboardLink("open", id);
+
+		return {
+			text:
+				`No credentials were changed by this call. Open ${dashboardUrl} to open the connector drawer, ` +
+				"then select Reconnect. Do not paste provider credentials into chat or any MCP tool.",
+			data: {
+				connector_id: id,
+				completed: false,
+				dashboard_url: dashboardUrl,
+			},
+		};
+	}
+
 	async update(input: ConnectorUpdateInput, opts?: RequestOptions): Promise<ConnectorToolResponse> {
-		if (input.reconnect === true) {
-			await this.authorizedConnector(input.connectorId, opts);
-			const dashboardUrl = this.dashboardLink("open", input.connectorId);
-
-			return {
-				text:
-					`No credentials were changed by this call. Open ${dashboardUrl} to open the connector drawer, ` +
-					"then select Reconnect. Do not paste provider credentials into chat or any MCP tool.",
-				data: {
-					connector_id: input.connectorId,
-					completed: false,
-					dashboard_url: dashboardUrl,
-				},
-			};
-		}
-
 		this.assertMutationAllowed();
 		const result = await this.hydra.connectors.update(input, opts);
 
@@ -664,7 +647,7 @@ export class ConnectorTools {
 
 		return {
 			text: result.runId
-				? "A connector sync was accepted. Use connector status to monitor it."
+				? "A connector sync was accepted. Use connector health to monitor it."
 				: "A connector sync request was accepted. An existing run may still be active.",
 			data: cleanObject({ connector_id: id, run_id: result.runId, workflow_id: result.workflowId }),
 		};
@@ -694,12 +677,15 @@ export class ConnectorTools {
 		};
 	}
 
-	async configure(input: ConnectorConfigureInput, opts?: RequestOptions): Promise<ConnectorToolResponse> {
+	async resourceAdd(input: ConnectorResourceAddInput, opts?: RequestOptions): Promise<ConnectorToolResponse> {
 		this.assertMutationAllowed();
-		const result = await this.hydra.connectors.configure(input, opts);
+		const result = await this.hydra.connectors.addResources(input, opts);
+		const needsReview = (result.warnings?.length ?? 0) > 0 || (result.unverified?.length ?? 0) > 0;
 
 		return {
-			text: "Connector resources were configured. Unlisted resources remain unchanged. A sync may have started.",
+			text: needsReview
+				? "Connector resources were added, but provider verification needs review. Check connector health after the first sync."
+				: "Connector resources were added. Resources not in the list remain unchanged. A sync may have started.",
 			data: cleanObject({
 				connector_id: result.connectorId ?? input.connectorId,
 				configured: result.configured,
@@ -711,32 +697,7 @@ export class ConnectorTools {
 		};
 	}
 
-	async addResource(input: ConnectorResourceCreateInput, opts?: RequestOptions): Promise<ConnectorToolResponse> {
-		this.assertMutationAllowed();
-		const result = await this.hydra.connectors.createResource(input, opts);
-		const needsReview = (result.warnings?.length ?? 0) > 0 || (result.unverified?.length ?? 0) > 0;
-
-		return {
-			text: needsReview
-				? "The connector resource was added, but provider verification needs review. Check connector status after its first sync."
-				: "The connector resource was added.",
-			data: cleanObject({
-				connector_id: result.connectorId ?? input.connectorId,
-				resource_id: result.resourceId ?? input.resourceId,
-				resource_type: result.resourceType,
-				display_name: result.displayName,
-				database_override: result.databaseOverride,
-				collection_override: result.collectionOverride,
-				status: result.status,
-				acl: result.acl,
-				custom_instructions: result.customInstructions,
-				unverified_resource_ids: result.unverified,
-				warning_resource_ids: result.warnings,
-			}),
-		};
-	}
-
-	async updateResource(input: ConnectorResourceUpdateInput, opts?: RequestOptions): Promise<ConnectorToolResponse> {
+	async resourceUpdate(input: ConnectorResourceUpdateInput, opts?: RequestOptions): Promise<ConnectorToolResponse> {
 		this.assertMutationAllowed();
 		const result = await this.hydra.connectors.updateResource(input, opts);
 
@@ -752,7 +713,7 @@ export class ConnectorTools {
 		};
 	}
 
-	async deleteResource(
+	async resourceDelete(
 		connectorId: string,
 		resourceId: string,
 		opts?: RequestOptions,

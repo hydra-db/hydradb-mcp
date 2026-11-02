@@ -50,7 +50,6 @@ function fixture() {
 				backfill: false,
 				warnings: [],
 			}),
-			createResource: response("createResource", { resourceId: "r1", acl: [] }),
 			updateResourceAcl: response("updateResourceAcl", {
 				resourceId: "r1",
 				acl: [],
@@ -83,18 +82,20 @@ function fixture() {
 	return { resource: new ConnectorsResource(sdk), calls };
 }
 
-test("connector wrapper maps all six read operations to the pinned SDK", async () => {
+test("connector wrapper maps all seven read operations to the pinned SDK", async () => {
 	const { resource, calls } = fixture();
 
 	await resource.listProviders();
+	await resource.inspectProvider("slack");
 	await resource.list({ provider: "slack", includeHealth: true });
-	await resource.get("c1");
-	await resource.status("c1");
+	await resource.inspect("c1");
+	await resource.health("c1");
 	await resource.discover({ connectorId: "c1", cursor: "next", limit: 25 });
 	await resource.listResources("c1");
 
 	assert.deepEqual(calls.map(({ method, request }) => ({ method, request })), [
 		{ method: "providers", request: {} },
+		{ method: "providers", request: { id: "slack" } },
 		{ method: "list", request: { provider: "slack", include: "health" } },
 		{ method: "get", request: { id: "c1" } },
 		{ method: "status", request: { id: "c1" } },
@@ -106,9 +107,10 @@ test("connector wrapper maps all six read operations to the pinned SDK", async (
 test("connector wrapper requests one provider by the SDK id field", async () => {
 	const { resource, calls } = fixture();
 
-	await resource.listProviders("slack");
+	const detail = await resource.inspectProvider("slack");
 
 	assert.deepEqual(calls[0]?.request, { id: "slack" });
+	assert.equal(detail.provider, "slack");
 });
 
 test("connector wrapper forwards cancellation to every SDK call", async () => {
@@ -116,14 +118,15 @@ test("connector wrapper forwards cancellation to every SDK call", async () => {
 	const controller = new AbortController();
 	const options = { signal: controller.signal };
 
-	await resource.listProviders(undefined, options);
+	await resource.listProviders(options);
+	await resource.inspectProvider("slack", options);
 	await resource.list({}, options);
-	await resource.get("c1", options);
-	await resource.status("c1", options);
+	await resource.inspect("c1", options);
+	await resource.health("c1", options);
 	await resource.discover({ connectorId: "c1" }, options);
 	await resource.listResources("c1", options);
 
-	assert.equal(calls.length, 6);
+	assert.equal(calls.length, 7);
 	assert.ok(calls.every((call) => call.signal === controller.signal));
 });
 
@@ -158,8 +161,8 @@ test("connector wrapper rejects missing result arrays instead of reporting empty
 	);
 
 	await assert.rejects(
-		() => statusResource.status("c1"),
-		/Invalid successful connector status response/,
+		() => statusResource.health("c1"),
+		/Invalid successful connector health response/,
 	);
 
 	await assert.rejects(
@@ -189,7 +192,7 @@ test("connector wrapper preserves false, zero, empty strings and empty arrays", 
 
 	const resource = new ConnectorsResource(sdk);
 
-	assert.deepEqual(await resource.get("c1"), {
+	assert.deepEqual(await resource.inspect("c1"), {
 		connectorId: "c1",
 		provider: "slack",
 		database: "db-a",
@@ -197,7 +200,7 @@ test("connector wrapper preserves false, zero, empty strings and empty arrays", 
 		documentsDispatched: 0,
 		customInstructions: "",
 	});
-	assert.deepEqual((await resource.status("c1")).resources, []);
+	assert.deepEqual((await resource.health("c1")).resources, []);
 });
 
 test("connector writes map requests and forward cancellation, including falsy values", async () => {
@@ -218,7 +221,7 @@ test("connector writes map requests and forward cancellation, including falsy va
 	await resource.pause("c1", opts);
 	assert.equal((await resource.resume("c1", opts)).paused, false);
 	assert.deepEqual(
-		await resource.configure(
+		await resource.addResources(
 			{
 				connectorId: "c1",
 				resources: [],
@@ -229,16 +232,6 @@ test("connector writes map requests and forward cancellation, including falsy va
 			opts,
 		),
 		{ connectorId: "c1", configured: 0, backfill: false, warnings: [] },
-	);
-	await resource.createResource(
-		{
-			connectorId: "c1",
-			resourceId: "r1",
-			acl: [],
-			customInstructions: "",
-			databaseOverride: "",
-		},
-		opts,
 	);
 	await resource.updateResource(
 		{ connectorId: "c1", resourceId: "r1", acl: [], customInstructions: "" },
@@ -264,16 +257,6 @@ test("connector writes map requests and forward cancellation, including falsy va
 					fullVisibilityRoles: [],
 					lookbackDays: 0,
 					tableConfigs: [],
-				},
-			},
-			{
-				method: "createResource",
-				request: {
-					id: "c1",
-					resourceId: "r1",
-					acl: [],
-					customInstructions: "",
-					databaseOverride: "",
 				},
 			},
 			{
@@ -362,7 +345,6 @@ test("write responses unwrap envelopes and reject invalid field types", async ()
 		"pause",
 		"resume",
 		"configure",
-		"createResource",
 		"updateResourceAcl",
 		"deleteResource",
 	] as const;
@@ -374,7 +356,6 @@ test("write responses unwrap envelopes and reject invalid field types", async ()
 		{ paused: false },
 		{ paused: false },
 		{ configured: 0 },
-		{ resourceId: "r1" },
 		{ acl: [] },
 		{ deleted: false },
 	];
@@ -386,7 +367,6 @@ test("write responses unwrap envelopes and reject invalid field types", async ()
 		{ paused: 0 },
 		{ paused: 0 },
 		{ configured: "0" },
-		{ resourceId: 1 },
 		{ acl: "public" },
 		{ deleted: "yes" },
 	];
@@ -398,8 +378,7 @@ test("write responses unwrap envelopes and reject invalid field types", async ()
 			() => resource.sync("c1"),
 			() => resource.pause("c1"),
 			() => resource.resume("c1"),
-			() => resource.configure({ connectorId: "c1", resources: [] }),
-			() => resource.createResource({ connectorId: "c1", resourceId: "r1" }),
+			() => resource.addResources({ connectorId: "c1", resources: [] }),
 			() => resource.updateResource({ connectorId: "c1", resourceId: "r1" }),
 			() => resource.deleteResource("c1", "r1"),
 		][index]!();
@@ -419,15 +398,4 @@ test("write responses unwrap envelopes and reject invalid field types", async ()
 
 		await assert.rejects(() => invoke(bad, index), /Invalid successful/);
 	}
-});
-
-test("resource create accepts the SDK contract's all-optional response", async () => {
-	const resource = new ConnectorsResource({
-		connectors: { createResource: () => Promise.resolve({}) },
-	} as unknown as HydraDBClient);
-
-	assert.deepEqual(
-		await resource.createResource({ connectorId: "c1", resourceId: "r1" }),
-		{},
-	);
 });

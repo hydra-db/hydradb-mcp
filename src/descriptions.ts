@@ -722,12 +722,19 @@ Confirm with the user before deleting a collection they did not name. Take the c
 
 	// --- Connector lifecycle and resources (ENG-3341) ---
 
-	[TOOL_NAMES.CONNECTOR_PROVIDERS]: {
+	[TOOL_NAMES.CONNECTOR_PROVIDER_LIST]: {
 		title: "List Connector Providers",
 		description:
-			"List supported connector providers, or inspect one provider's setup and credential field schema. The schema describes fields only. Never put credential values in MCP tool arguments or chat.",
+			"List the connector providers HydraDB supports, such as slack, github, linear, notion, or gmail. Use hydradb_connector_provider_inspect for one provider's setup details.",
+		params: {},
+	},
+
+	[TOOL_NAMES.CONNECTOR_PROVIDER_INSPECT]: {
+		title: "Inspect Connector Provider",
+		description:
+			"Read one provider's setup guide and credential field schema. The schema describes fields only. Never put credential values in MCP tool arguments or chat.",
 		params: {
-			provider: "Provider identifier such as slack, github, linear, notion, or gmail. Omit it to list the provider catalog.",
+			provider: "Provider identifier from hydradb_connector_provider_list, such as slack or gmail.",
 		},
 	},
 
@@ -741,8 +748,8 @@ Confirm with the user before deleting a collection they did not name. Take the c
 		},
 	},
 
-	[TOOL_NAMES.CONNECTOR_GET]: {
-		title: "Get Connector",
+	[TOOL_NAMES.CONNECTOR_INSPECT]: {
+		title: "Inspect Connector",
 		description:
 			"Read one connector's configuration and lifecycle. Take connector_id from hydradb_connector_list; never invent it.",
 		params: {
@@ -750,8 +757,8 @@ Confirm with the user before deleting a collection they did not name. Take the c
 		},
 	},
 
-	[TOOL_NAMES.CONNECTOR_STATUS]: {
-		title: "Check Connector Status",
+	[TOOL_NAMES.CONNECTOR_HEALTH]: {
+		title: "Check Connector Health",
 		description:
 			"Explain connector and resource sync health in plain words. This separates current sync activity, the latest attempt, the last successful sync, retryability, required action, and permission warnings.",
 		params: {
@@ -759,43 +766,31 @@ Confirm with the user before deleting a collection they did not name. Take the c
 		},
 	},
 
-	[TOOL_NAMES.CONNECTOR_DISCOVER]: {
-		title: "Discover Connector Resources",
-		description:
-			"List resources currently visible through a connected provider account. Continue with next_cursor while has_more is true.",
-		params: {
-			connector_id: "Connector identifier from hydradb_connector_list.",
-			cursor: "Opaque next_cursor returned by the previous discovery page.",
-			limit: "Maximum resources to request on this page, from 1 through 100.",
-		},
-	},
-
-	[TOOL_NAMES.CONNECTOR_RESOURCES]: {
-		title: "List Configured Connector Resources",
-		description:
-			"List resources configured on one connector. A database-confined OAuth connection only receives resources whose effective destination database is allowed.",
-		params: {
-			connector_id: "Connector identifier from hydradb_connector_list.",
-		},
-	},
-
-	[TOOL_NAMES.CONNECTOR_CREATE]: {
+	[TOOL_NAMES.CONNECTOR_CONNECT]: {
 		title: "Connect Provider",
 		description:
 			"Return the HydraDB dashboard link that securely connects one provider. This tool never accepts provider credentials and does not create the connector itself.",
 		params: {
-			provider: "Provider identifier from hydradb_connector_providers. The dashboard collects credentials outside model context.",
+			provider: "Provider identifier from hydradb_connector_provider_list. The dashboard collects credentials outside model context.",
+		},
+	},
+
+	[TOOL_NAMES.CONNECTOR_RECONNECT]: {
+		title: "Reconnect Connector",
+		description:
+			"Return the HydraDB dashboard link for replacing one connector's provider credentials. Open it, then select Reconnect in the connector drawer. This tool never accepts or changes credentials.",
+		params: {
+			connector_id: "Connector identifier from hydradb_connector_list.",
 		},
 	},
 
 	[TOOL_NAMES.CONNECTOR_UPDATE]: {
 		title: "Update Connector Settings",
 		description:
-			"Update noncredential connector settings, or return a mutually exclusive dashboard link for reconnecting credentials. Credentials are never accepted by this tool.",
+			"Update noncredential connector settings. Set custom_instructions, sync_interval_seconds, or both. To replace credentials, use hydradb_connector_reconnect.",
 		params: {
 			connector_id: "Connector identifier from hydradb_connector_list.",
 			custom_instructions: "Connector-level ingestion instructions. Send an empty string to clear them.",
-			reconnect: "Set true by itself to get the dashboard link. Then select Reconnect in the connector drawer.",
 			sync_interval_seconds: "Scheduled sync interval in seconds. Send 0 to use the provider default.",
 		},
 	},
@@ -808,7 +803,7 @@ Confirm with the user before deleting a collection they did not name. Take the c
 
 	[TOOL_NAMES.CONNECTOR_SYNC]: {
 		title: "Start Connector Sync",
-		description: "Start a connector sync. Use hydradb_connector_status to monitor the accepted run.",
+		description: "Start a connector sync. Use hydradb_connector_health to monitor the accepted run.",
 		params: { connector_id: "Connector identifier from hydradb_connector_list." },
 	},
 
@@ -824,24 +819,33 @@ Confirm with the user before deleting a collection they did not name. Take the c
 		params: { connector_id: "Connector identifier from hydradb_connector_list." },
 	},
 
-	[TOOL_NAMES.CONNECTOR_CONFIGURE]: {
-		title: "Configure Connector Resources",
+	[TOOL_NAMES.CONNECTOR_DISCOVER]: {
+		title: "Discover Connector Resources",
 		description:
-			"Configure submitted resources and start work. Unlisted resources remain unchanged. Submitted settings can overwrite routing, access, metadata, and ingestion behavior.",
+			"List resources available upstream in the connected provider account, whether or not they are added to HydraDB. Continue with next_cursor while has_more is true. Use hydradb_connector_resource_list for the resources already added.",
 		params: {
 			connector_id: "Connector identifier from hydradb_connector_list.",
-			resources: "Resources from hydradb_connector_discover to configure. Each destination must be allowed by this connection.",
-			lookback_days: "Days of history for the first sync.",
-			full_visibility_roles: "HubSpot roles whose members can see all records.",
-			table_configs: "BigQuery table replication settings.",
+			cursor: "Opaque next_cursor returned by the previous discovery page.",
+			limit: "Maximum resources to request on this page, from 1 through 100.",
 		},
 	},
 
-	[TOOL_NAMES.CONNECTOR_ADD_RESOURCE]: {
-		title: "Add Connector Resource",
-		description: "Add one discovered resource to a connector. Its effective database and collection must be allowed.",
+	[TOOL_NAMES.CONNECTOR_RESOURCE_LIST]: {
+		title: "List Connector Resources",
+		description:
+			"List the resources already added to one connector. A database-confined OAuth connection only receives resources whose effective destination database is allowed. Use hydradb_connector_discover for what is available upstream.",
 		params: {
 			connector_id: "Connector identifier from hydradb_connector_list.",
+		},
+	},
+
+	[TOOL_NAMES.CONNECTOR_RESOURCE_ADD]: {
+		title: "Add Connector Resources",
+		description:
+			"Add one or more discovered resources to a connector and start syncing them. Resources not in the list stay unchanged. Sending a resource that is already added replaces its routing, access, metadata, and instructions with the values sent.",
+		params: {
+			connector_id: "Connector identifier from hydradb_connector_list.",
+			resources: "Resources from hydradb_connector_discover to add. Each destination must be allowed by this connection.",
 			resource_id: "Resource identifier from hydradb_connector_discover.",
 			resource_type: "Provider resource type from discovery.",
 			display_name: "Human-readable resource name.",
@@ -851,29 +855,31 @@ Confirm with the user before deleting a collection they did not name. Take the c
 			custom_instructions: "Resource-specific ingestion instructions.",
 			metadata: "Safe metadata merged into every synced object.",
 			additional_metadata: "Safe additional metadata merged into every synced object.",
-			filters: "Provider-specific sync filters. Credential-like keys are rejected.",
-			provider_metadata: "Provider resource metadata from discovery. Credential-like keys are rejected.",
+			sync_mode: "Use rescan to read the resource again, or new_only to continue from new records.",
+			lookback_days: "Days of history for the first sync.",
+			full_visibility_roles: "HubSpot roles whose members can see all records.",
+			table_configs: "BigQuery table replication settings.",
 		},
 	},
 
-	[TOOL_NAMES.CONNECTOR_UPDATE_RESOURCE]: {
+	[TOOL_NAMES.CONNECTOR_RESOURCE_UPDATE]: {
 		title: "Update Connector Resource",
 		description:
 			"Replace one resource's access rule or ingestion instructions. Access changes can change who reads indexed data.",
 		params: {
 			connector_id: "Connector identifier from hydradb_connector_list.",
-			resource_id: "Configured resource identifier from hydradb_connector_resources.",
+			resource_id: "Resource identifier from hydradb_connector_resource_list.",
 			acl: "Replacement access rule. An empty list allows nobody.",
 			custom_instructions: "Replacement resource instructions. An empty string inherits connector instructions.",
 		},
 	},
 
-	[TOOL_NAMES.CONNECTOR_DELETE_RESOURCE]: {
+	[TOOL_NAMES.CONNECTOR_RESOURCE_DELETE]: {
 		title: "Delete Connector Resource",
-		description: "Permanently remove one configured resource from a connector. This action is irreversible.",
+		description: "Permanently remove one resource from a connector. This action is irreversible.",
 		params: {
 			connector_id: "Connector identifier from hydradb_connector_list.",
-			resource_id: "Configured resource identifier from hydradb_connector_resources.",
+			resource_id: "Resource identifier from hydradb_connector_resource_list.",
 		},
 	},
 
@@ -998,22 +1004,23 @@ THE TOOLS
 
 CONNECTORS
 
-- ${TOOL_NAMES.CONNECTOR_PROVIDERS} — supported connector providers and one provider's credential field schema. Never send credential values through MCP.
+- ${TOOL_NAMES.CONNECTOR_PROVIDER_LIST} — the connector providers HydraDB supports.
+- ${TOOL_NAMES.CONNECTOR_PROVIDER_INSPECT} — one provider's setup guide and credential field schema. Never send credential values through MCP.
 - ${TOOL_NAMES.CONNECTOR_LIST} — connected data sources visible to this connection.
-- ${TOOL_NAMES.CONNECTOR_GET} — one connector's configuration and lifecycle.
-- ${TOOL_NAMES.CONNECTOR_STATUS} — plain-language connector and resource sync health.
-- ${TOOL_NAMES.CONNECTOR_DISCOVER} — resources available through a connector's stored provider account.
-- ${TOOL_NAMES.CONNECTOR_RESOURCES} — resources already configured on a connector.
-- ${TOOL_NAMES.CONNECTOR_CREATE} — secure dashboard link for connecting a provider. Never paste credentials into a tool.
-- ${TOOL_NAMES.CONNECTOR_UPDATE} — noncredential settings or a secure reconnect link. This tool never accepts provider credentials.
+- ${TOOL_NAMES.CONNECTOR_INSPECT} — one connector's configuration and lifecycle.
+- ${TOOL_NAMES.CONNECTOR_HEALTH} — plain-language connector and resource sync health.
+- ${TOOL_NAMES.CONNECTOR_CONNECT} — secure dashboard link for connecting a provider. Never paste credentials into a tool.
+- ${TOOL_NAMES.CONNECTOR_RECONNECT} — secure dashboard link for replacing a connector's credentials.
+- ${TOOL_NAMES.CONNECTOR_UPDATE} — noncredential connector settings. This tool never accepts provider credentials.
 - ${TOOL_NAMES.CONNECTOR_DELETE} — irreversible connector deletion. Confirm first.
-- ${TOOL_NAMES.CONNECTOR_SYNC} — start a connector sync, then monitor it with ${TOOL_NAMES.CONNECTOR_STATUS}.
+- ${TOOL_NAMES.CONNECTOR_SYNC} — start a connector sync, then monitor it with ${TOOL_NAMES.CONNECTOR_HEALTH}.
 - ${TOOL_NAMES.CONNECTOR_PAUSE} — pause connector syncing.
 - ${TOOL_NAMES.CONNECTOR_RESUME} — resume connector syncing.
-- ${TOOL_NAMES.CONNECTOR_CONFIGURE} — configure submitted resources. Unlisted resources remain unchanged.
-- ${TOOL_NAMES.CONNECTOR_ADD_RESOURCE} — add one discovered resource with an allowed destination.
-- ${TOOL_NAMES.CONNECTOR_UPDATE_RESOURCE} — replace one resource's access rule or ingestion instructions.
-- ${TOOL_NAMES.CONNECTOR_DELETE_RESOURCE} — irreversible configured-resource deletion. Confirm first.
+- ${TOOL_NAMES.CONNECTOR_DISCOVER} — resources available upstream in a connector's provider account.
+- ${TOOL_NAMES.CONNECTOR_RESOURCE_LIST} — resources already added to a connector.
+- ${TOOL_NAMES.CONNECTOR_RESOURCE_ADD} — add discovered resources with allowed destinations and start syncing them. Unlisted resources remain unchanged.
+- ${TOOL_NAMES.CONNECTOR_RESOURCE_UPDATE} — replace one resource's access rule or ingestion instructions.
+- ${TOOL_NAMES.CONNECTOR_RESOURCE_DELETE} — irreversible resource removal. Confirm first.
 
 Ids flow between these: ${TOOL_NAMES.QUERY}, ${TOOL_NAMES.LIST} and ${TOOL_NAMES.SUBGRAPH} emit them; ${TOOL_NAMES.INSPECT}, ${TOOL_NAMES.DELETE}, ${TOOL_NAMES.RELATIONS}, ${TOOL_NAMES.STATUS} and ${TOOL_NAMES.SUBGRAPH} accept them. Never invent one.
 

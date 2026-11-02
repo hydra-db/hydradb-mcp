@@ -4024,14 +4024,15 @@ export function createHydraDBServer(
 
 	// --- Connector read tools (ENG-3341) ---
 	if (connectorConfig.enabled) {
-		const providerSchema = z
+		const providerListSchema = z.object({}).strict();
+
+		const providerInspectSchema = z
 			.object({
 				provider: z
 					.string()
 					.trim()
 					.min(1)
-					.optional()
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_PROVIDERS].params.provider),
+					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_PROVIDER_INSPECT].params.provider),
 			})
 			.strict();
 
@@ -4050,7 +4051,13 @@ export function createHydraDBServer(
 			})
 			.strict();
 
-		const connectorIdSchema = (name: typeof TOOL_NAMES.CONNECTOR_GET | typeof TOOL_NAMES.CONNECTOR_STATUS | typeof TOOL_NAMES.CONNECTOR_RESOURCES) =>
+		const connectorIdSchema = (
+			name:
+				| typeof TOOL_NAMES.CONNECTOR_INSPECT
+				| typeof TOOL_NAMES.CONNECTOR_HEALTH
+				| typeof TOOL_NAMES.CONNECTOR_RESOURCE_LIST
+				| typeof TOOL_NAMES.CONNECTOR_RECONNECT,
+		) =>
 			z
 				.object({
 					connector_id: z
@@ -4111,10 +4118,10 @@ export function createHydraDBServer(
 
 		const safeJsonObject = z.record(safeJsonKey, safeJsonValue);
 
-		const connectorCreateSchema = z
+		const connectorConnectSchema = z
 			.object({
 				provider: z.string().trim().min(1).max(100)
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_CREATE].params.provider),
+					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_CONNECT].params.provider),
 			})
 			.strict();
 
@@ -4124,8 +4131,6 @@ export function createHydraDBServer(
 					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_UPDATE].params.connector_id),
 				custom_instructions: z.string().max(4000).optional()
 					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_UPDATE].params.custom_instructions),
-				reconnect: z.literal(true).optional()
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_UPDATE].params.reconnect),
 				sync_interval_seconds: z.number().int().min(0).optional()
 					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_UPDATE].params.sync_interval_seconds),
 			})
@@ -4133,35 +4138,32 @@ export function createHydraDBServer(
 
 		const connectorUpdateSchema = connectorUpdateObjectSchema
 			.refine(
-				(input) =>
-					input.reconnect === true
-						? input.custom_instructions === undefined && input.sync_interval_seconds === undefined
-						: input.custom_instructions !== undefined || input.sync_interval_seconds !== undefined,
-				{ message: "Set reconnect by itself, or set custom_instructions or sync_interval_seconds." },
+				(input) => input.custom_instructions !== undefined || input.sync_interval_seconds !== undefined,
+				{ message: "Set custom_instructions, sync_interval_seconds, or both." },
 			);
 
-		const configureResourceSchema = z
+		const resourceAddItemSchema = z
 			.object({
 				resource_id: z.string().trim().min(1)
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_ADD_RESOURCE].params.resource_id),
+					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_RESOURCE_ADD].params.resource_id),
 				resource_type: z.string().trim().min(1).optional()
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_ADD_RESOURCE].params.resource_type),
-				name: z.string().optional()
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_ADD_RESOURCE].params.display_name),
-				database: z.string().trim().min(1).optional()
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_ADD_RESOURCE].params.database_override),
-				collection: z.string().trim().min(1).optional()
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_ADD_RESOURCE].params.collection_override),
+					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_RESOURCE_ADD].params.resource_type),
+				display_name: z.string().optional()
+					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_RESOURCE_ADD].params.display_name),
+				database_override: z.string().trim().min(1).optional()
+					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_RESOURCE_ADD].params.database_override),
+				collection_override: z.string().trim().min(1).optional()
+					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_RESOURCE_ADD].params.collection_override),
 				acl: z.array(z.string().min(1)).optional()
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_ADD_RESOURCE].params.acl),
+					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_RESOURCE_ADD].params.acl),
 				custom_instructions: z.string().max(4000).optional()
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_ADD_RESOURCE].params.custom_instructions),
+					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_RESOURCE_ADD].params.custom_instructions),
 				metadata: safeJsonObject.optional()
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_ADD_RESOURCE].params.metadata),
+					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_RESOURCE_ADD].params.metadata),
 				additional_metadata: safeJsonObject.optional()
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_ADD_RESOURCE].params.additional_metadata),
+					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_RESOURCE_ADD].params.additional_metadata),
 				sync_mode: z.enum(["rescan", "new_only"]).optional()
-					.describe("Use rescan to read the resource again, or new_only to continue from new records."),
+					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_RESOURCE_ADD].params.sync_mode),
 			})
 			.strict();
 
@@ -4179,64 +4181,35 @@ export function createHydraDBServer(
 				{ message: "Set exactly one of replication_key or change_history." },
 			);
 
-		const connectorConfigureSchema = z
+		const connectorResourceAddSchema = z
 			.object({
 				connector_id: z.string().trim().min(1)
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_CONFIGURE].params.connector_id),
-				resources: z.array(configureResourceSchema).min(1)
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_CONFIGURE].params.resources),
+					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_RESOURCE_ADD].params.connector_id),
+				resources: z.array(resourceAddItemSchema).min(1)
+					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_RESOURCE_ADD].params.resources),
 				lookback_days: z.number().int().min(0).optional()
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_CONFIGURE].params.lookback_days),
+					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_RESOURCE_ADD].params.lookback_days),
 				full_visibility_roles: z.array(z.string().min(1)).optional()
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_CONFIGURE].params.full_visibility_roles),
+					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_RESOURCE_ADD].params.full_visibility_roles),
 				table_configs: z.array(tableConfigSchema).optional()
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_CONFIGURE].params.table_configs),
+					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_RESOURCE_ADD].params.table_configs),
 			})
 			.strict();
 
-		const connectorAddResourceSchema = z
+		const connectorResourceUpdateObjectSchema = z
 			.object({
 				connector_id: z.string().trim().min(1)
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_ADD_RESOURCE].params.connector_id),
+					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_RESOURCE_UPDATE].params.connector_id),
 				resource_id: z.string().trim().min(1)
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_ADD_RESOURCE].params.resource_id),
-				resource_type: z.string().trim().min(1).optional()
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_ADD_RESOURCE].params.resource_type),
-				display_name: z.string().optional()
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_ADD_RESOURCE].params.display_name),
-				database_override: z.string().trim().min(1).optional()
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_ADD_RESOURCE].params.database_override),
-				collection_override: z.string().trim().min(1).optional()
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_ADD_RESOURCE].params.collection_override),
+					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_RESOURCE_UPDATE].params.resource_id),
 				acl: z.array(z.string().min(1)).optional()
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_ADD_RESOURCE].params.acl),
+					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_RESOURCE_UPDATE].params.acl),
 				custom_instructions: z.string().max(4000).optional()
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_ADD_RESOURCE].params.custom_instructions),
-				metadata: safeJsonObject.optional()
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_ADD_RESOURCE].params.metadata),
-				additional_metadata: safeJsonObject.optional()
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_ADD_RESOURCE].params.additional_metadata),
-				filters: safeJsonObject.optional()
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_ADD_RESOURCE].params.filters),
-				provider_metadata: safeJsonObject.optional()
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_ADD_RESOURCE].params.provider_metadata),
+					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_RESOURCE_UPDATE].params.custom_instructions),
 			})
 			.strict();
 
-		const connectorUpdateResourceObjectSchema = z
-			.object({
-				connector_id: z.string().trim().min(1)
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_UPDATE_RESOURCE].params.connector_id),
-				resource_id: z.string().trim().min(1)
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_UPDATE_RESOURCE].params.resource_id),
-				acl: z.array(z.string().min(1)).optional()
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_UPDATE_RESOURCE].params.acl),
-				custom_instructions: z.string().max(4000).optional()
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_UPDATE_RESOURCE].params.custom_instructions),
-			})
-			.strict();
-
-		const connectorUpdateResourceSchema = connectorUpdateResourceObjectSchema
+		const connectorResourceUpdateSchema = connectorResourceUpdateObjectSchema
 			.refine(
 				(input) => input.acl !== undefined || input.custom_instructions !== undefined,
 				{ message: "Set acl or custom_instructions." },
@@ -4245,18 +4218,30 @@ export function createHydraDBServer(
 		const connectorResourceIdSchema = z
 			.object({
 				connector_id: z.string().trim().min(1)
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_DELETE_RESOURCE].params.connector_id),
+					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_RESOURCE_DELETE].params.connector_id),
 				resource_id: z.string().trim().min(1)
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_DELETE_RESOURCE].params.resource_id),
+					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_RESOURCE_DELETE].params.resource_id),
 			})
 			.strict();
 
 		register(
-			TOOL_NAMES.CONNECTOR_PROVIDERS,
-			providerSchema,
+			TOOL_NAMES.CONNECTOR_PROVIDER_LIST,
+			providerListSchema,
 			async (args, extra) => {
-				const input = providerSchema.parse(args);
-				const result = await connectorTools.providers(input.provider, { signal: extra?.signal });
+				providerListSchema.parse(args);
+				const result = await connectorTools.providerList({ signal: extra?.signal });
+
+				return structuredResult(result.text, result.data);
+			},
+			readOnly,
+		);
+
+		register(
+			TOOL_NAMES.CONNECTOR_PROVIDER_INSPECT,
+			providerInspectSchema,
+			async (args, extra) => {
+				const input = providerInspectSchema.parse(args);
+				const result = await connectorTools.providerInspect(input.provider, { signal: extra?.signal });
 
 				return structuredResult(result.text, result.data);
 			},
@@ -4279,10 +4264,11 @@ export function createHydraDBServer(
 			readOnly,
 		);
 
-		for (const [name, run] of [
-			[TOOL_NAMES.CONNECTOR_GET, (id: string, signal?: AbortSignal) => connectorTools.get(id, { signal })],
-			[TOOL_NAMES.CONNECTOR_STATUS, (id: string, signal?: AbortSignal) => connectorTools.status(id, { signal })],
-			[TOOL_NAMES.CONNECTOR_RESOURCES, (id: string, signal?: AbortSignal) => connectorTools.resources(id, { signal })],
+		for (const [name, run, annotations] of [
+			[TOOL_NAMES.CONNECTOR_INSPECT, (id: string, signal?: AbortSignal) => connectorTools.inspect(id, { signal }), readOnly],
+			[TOOL_NAMES.CONNECTOR_HEALTH, (id: string, signal?: AbortSignal) => connectorTools.health(id, { signal }), readOnly],
+			[TOOL_NAMES.CONNECTOR_RESOURCE_LIST, (id: string, signal?: AbortSignal) => connectorTools.resourceList(id, { signal }), readOnly],
+			[TOOL_NAMES.CONNECTOR_RECONNECT, (id: string, signal?: AbortSignal) => connectorTools.reconnect(id, { signal }), idempotentWrite],
 		] as const) {
 			const schema = connectorIdSchema(name);
 			register(
@@ -4294,7 +4280,7 @@ export function createHydraDBServer(
 
 					return structuredResult(result.text, result.data);
 				},
-				readOnly,
+				annotations,
 			);
 		}
 
@@ -4319,11 +4305,11 @@ export function createHydraDBServer(
 		);
 
 		register(
-			TOOL_NAMES.CONNECTOR_CREATE,
-			connectorCreateSchema,
+			TOOL_NAMES.CONNECTOR_CONNECT,
+			connectorConnectSchema,
 			async (args) => {
-				const input = connectorCreateSchema.parse(args);
-				const result = await connectorTools.create(input.provider);
+				const input = connectorConnectSchema.parse(args);
+				const result = await connectorTools.connect(input.provider);
 
 				return structuredResult(result.text, result.data);
 			},
@@ -4340,7 +4326,6 @@ export function createHydraDBServer(
 					{
 						connectorId: input.connector_id,
 						customInstructions: input.custom_instructions,
-						reconnect: input.reconnect,
 						syncIntervalSeconds: input.sync_interval_seconds,
 					},
 					{ signal: extra?.signal },
@@ -4370,21 +4355,25 @@ export function createHydraDBServer(
 			);
 		}
 
+		// One way to attach resources (CONTRACT.md §3 Connectors): a list, sent to
+		// the configure endpoint, which adds them and starts syncing. Field names
+		// match what hydradb_connector_resource_list returns, so a listed resource
+		// can be sent back unchanged; they are renamed to the API's names here.
 		register(
-			TOOL_NAMES.CONNECTOR_CONFIGURE,
-			connectorConfigureSchema,
+			TOOL_NAMES.CONNECTOR_RESOURCE_ADD,
+			connectorResourceAddSchema,
 			async (args, extra) => {
-				const input = connectorConfigureSchema.parse(args);
+				const input = connectorResourceAddSchema.parse(args);
 
-				const result = await connectorTools.configure(
+				const result = await connectorTools.resourceAdd(
 					{
 						connectorId: input.connector_id,
 						resources: input.resources.map((resource) => ({
 							resourceId: resource.resource_id,
 							resourceType: resource.resource_type,
-							name: resource.name,
-							database: resource.database,
-							collection: resource.collection,
+							name: resource.display_name,
+							database: resource.database_override,
+							collection: resource.collection_override,
 							acl: resource.acl,
 							customInstructions: resource.custom_instructions,
 							metadata: resource.metadata,
@@ -4408,41 +4397,12 @@ export function createHydraDBServer(
 		);
 
 		register(
-			TOOL_NAMES.CONNECTOR_ADD_RESOURCE,
-			connectorAddResourceSchema,
+			TOOL_NAMES.CONNECTOR_RESOURCE_UPDATE,
+			connectorResourceUpdateObjectSchema,
 			async (args, extra) => {
-				const input = connectorAddResourceSchema.parse(args);
+				const input = connectorResourceUpdateSchema.parse(args);
 
-				const result = await connectorTools.addResource(
-					{
-						connectorId: input.connector_id,
-						resourceId: input.resource_id,
-						resourceType: input.resource_type,
-						displayName: input.display_name,
-						databaseOverride: input.database_override,
-						collectionOverride: input.collection_override,
-						acl: input.acl,
-						customInstructions: input.custom_instructions,
-						metadata: input.metadata,
-						additionalMetadata: input.additional_metadata,
-						filters: input.filters,
-						providerMetadata: input.provider_metadata,
-					},
-					{ signal: extra?.signal },
-				);
-
-				return structuredResult(result.text, result.data);
-			},
-			additiveWrite,
-		);
-
-		register(
-			TOOL_NAMES.CONNECTOR_UPDATE_RESOURCE,
-			connectorUpdateResourceObjectSchema,
-			async (args, extra) => {
-				const input = connectorUpdateResourceSchema.parse(args);
-
-				const result = await connectorTools.updateResource(
+				const result = await connectorTools.resourceUpdate(
 					{
 						connectorId: input.connector_id,
 						resourceId: input.resource_id,
@@ -4458,12 +4418,12 @@ export function createHydraDBServer(
 		);
 
 		register(
-			TOOL_NAMES.CONNECTOR_DELETE_RESOURCE,
+			TOOL_NAMES.CONNECTOR_RESOURCE_DELETE,
 			connectorResourceIdSchema,
 			async (args, extra) => {
 				const input = connectorResourceIdSchema.parse(args);
 
-				const result = await connectorTools.deleteResource(
+				const result = await connectorTools.resourceDelete(
 					input.connector_id,
 					input.resource_id,
 					{ signal: extra?.signal },

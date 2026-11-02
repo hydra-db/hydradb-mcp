@@ -28,22 +28,27 @@ Ids flow between these: `hydradb_query`, `hydradb_list` and `hydradb_subgraph` e
 
 | Tool | What it does |
 |---|---|
-| `hydradb_connector_providers` | List supported providers, or inspect one provider's credential field schema |
+| `hydradb_connector_provider_list` | List the connector providers HydraDB supports |
+| `hydradb_connector_provider_inspect` | Read one provider's setup guide and credential field schema |
 | `hydradb_connector_list` | List connected sources, optionally with health |
-| `hydradb_connector_get` | Read one connector's configuration and lifecycle |
-| `hydradb_connector_status` | Explain connector and resource sync health in plain words |
-| `hydradb_connector_discover` | Discover resources visible through a connected provider account |
-| `hydradb_connector_resources` | List resources configured on a connector |
-| `hydradb_connector_create` | Return a secure dashboard link for connecting a provider |
-| `hydradb_connector_update` | Update noncredential settings, or return a secure reconnect link |
+| `hydradb_connector_inspect` | Read one connector's configuration and lifecycle |
+| `hydradb_connector_health` | Explain connector and resource sync health in plain words |
+| `hydradb_connector_connect` | Return a secure dashboard link for connecting a provider |
+| `hydradb_connector_reconnect` | Return a secure dashboard link for replacing a connector's credentials |
+| `hydradb_connector_update` | Update noncredential connector settings |
 | `hydradb_connector_delete` | Permanently delete a connector |
 | `hydradb_connector_sync` | Start a connector sync |
 | `hydradb_connector_pause` | Pause connector syncing |
 | `hydradb_connector_resume` | Resume connector syncing |
-| `hydradb_connector_configure` | Configure submitted resources and start work |
-| `hydradb_connector_add_resource` | Add one discovered resource |
-| `hydradb_connector_update_resource` | Replace one resource's ACL or instructions |
-| `hydradb_connector_delete_resource` | Permanently remove one configured resource |
+| `hydradb_connector_discover` | Discover resources available upstream in a connected provider account |
+| `hydradb_connector_resource_list` | List resources already added to a connector |
+| `hydradb_connector_resource_add` | Add one or more discovered resources and start syncing them |
+| `hydradb_connector_resource_update` | Replace one resource's ACL or instructions |
+| `hydradb_connector_resource_delete` | Permanently remove one resource from a connector |
+
+The names follow the connector section of `CONTRACT.md`: noun first, verb last, the same
+words the CLI (`hydradb connector resource add`) and the plugin
+(`/hydradb:connector-resource-add`) use.
 
 Connector tools are on by default. Set `HYDRADB_MCP_CONNECTOR_TOOLS=0` to
 withhold the whole family. A confined OAuth connection sees only connectors
@@ -55,19 +60,19 @@ discovery, or resources. Resource listings also check each resource's
 Connector endpoints cannot enforce database or collection grants atomically with a
 mutation. Write tools therefore fail closed for every database- or collection-confined
 OAuth connection and send no connector API request. Use an organization-wide
-connection for connector mutations. Connector deletion, configure, connector settings,
-resource updates, and resource deletion are marked destructive; configure is also
-non-idempotent because it can start time-relative work. Sync, pause, resume, and
-add-resource are non-destructive writes. Configure updates submitted resources;
-unlisted resources remain unchanged.
+connection for connector mutations. Connector deletion, connector settings, resource
+add, resource updates, and resource deletion are marked destructive; resource add is
+also non-idempotent because it can start time-relative work. Sync, pause, and resume
+are non-destructive writes. Resource add updates the submitted resources; unlisted
+resources remain unchanged.
 
 The provider-detail tool returns credential **schema metadata**, not credential
 values. Do not paste provider credentials into chat or any MCP tool argument.
 Defaults, examples, constants, and unknown schema extensions are removed before
-the schema reaches model context. `hydradb_connector_create` accepts only a
-provider and returns `/connectors?connect=<provider>`. The mutually exclusive
-`reconnect: true` update action authorizes the connector and returns
-`/connectors?open=<connector_id>`; open the drawer and select **Reconnect**.
+the schema reaches model context. `hydradb_connector_connect` accepts only a
+provider and returns `/connectors?connect=<provider>`. `hydradb_connector_reconnect`
+authorizes the connector and returns `/connectors?open=<connector_id>`; open the
+drawer and select **Reconnect**.
 Both flows set `completed: false` because the dashboard, not MCP, performs the
 credential-bearing request. `HYDRADB_OAUTH_ISSUER` selects the dashboard origin
 for both completion links and defaults to `https://app.hydradb.com`.

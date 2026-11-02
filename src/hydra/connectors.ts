@@ -222,11 +222,6 @@ const configureSchema = z.object({
 		.optional(),
 });
 
-const resourceCreateSchema = configuredResourceSchema.partial().extend({
-	unverified: z.array(z.string()).optional(),
-	warnings: z.array(z.string()).optional(),
-});
-
 const resourceUpdateSchema = z.object({
 	connectorId: z.string().optional(),
 	resourceId: z.string().optional(),
@@ -279,7 +274,8 @@ export interface ConnectorResourceMapping {
 	syncMode?: "rescan" | "new_only";
 }
 
-export interface ConnectorConfigureRequest {
+/** One call adds every listed resource and starts syncing them (POST /connectors/{id}/configure). */
+export interface ConnectorResourceAddRequest {
 	connectorId: string;
 	resources: ConnectorResourceMapping[];
 	fullVisibilityRoles?: string[];
@@ -289,21 +285,6 @@ export interface ConnectorConfigureRequest {
 		replicationKey?: string;
 		table?: string;
 	}[];
-}
-
-export interface ConnectorResourceCreateRequest {
-	connectorId: string;
-	resourceId: string;
-	acl?: string[];
-	additionalMetadata?: Record<string, unknown>;
-	collectionOverride?: string;
-	customInstructions?: string;
-	databaseOverride?: string;
-	displayName?: string;
-	filters?: Record<string, unknown>;
-	metadata?: Record<string, unknown>;
-	providerMetadata?: Record<string, unknown>;
-	resourceType?: string;
 }
 
 export interface ConnectorResourceUpdateRequest {
@@ -323,11 +304,7 @@ export type ConnectorPauseResponse = z.infer<typeof connectorPauseSchema>;
 
 export type ConnectorResumeResponse = z.infer<typeof connectorPauseSchema>;
 
-export type ConnectorConfigureResponse = z.infer<typeof configureSchema>;
-
-export type ConnectorResourceCreateResponse = z.infer<
-	typeof resourceCreateSchema
->;
+export type ConnectorResourceAddResponse = z.infer<typeof configureSchema>;
 
 export type ConnectorResourceUpdateResponse = z.infer<
 	typeof resourceUpdateSchema
@@ -399,24 +376,21 @@ export class ConnectorsResource {
 		}
 	}
 
-	async listProviders(
-		provider?: string,
-		opts?: RequestOptions,
-	): Promise<ConnectorProviderCatalog | ConnectorProviderDetail> {
-		if (provider) {
-			return this.call(
-				"/connectors/providers",
-				() => this.sdk.listProviders({ id: provider }, requestOptions(opts)),
-				providerDetailSchema,
-				"connector provider",
-			);
-		}
-
+	async listProviders(opts?: RequestOptions): Promise<ConnectorProviderCatalog> {
 		return this.call(
 			"/connectors/providers",
 			() => this.sdk.listProviders({}, requestOptions(opts)),
 			providerCatalogSchema,
 			"connector provider list",
+		);
+	}
+
+	async inspectProvider(provider: string, opts?: RequestOptions): Promise<ConnectorProviderDetail> {
+		return this.call(
+			"/connectors/providers",
+			() => this.sdk.listProviders({ id: provider }, requestOptions(opts)),
+			providerDetailSchema,
+			"connector provider",
 		);
 	}
 
@@ -436,21 +410,21 @@ export class ConnectorsResource {
 		);
 	}
 
-	async get(id: string, opts?: RequestOptions): Promise<ConnectorView> {
+	async inspect(id: string, opts?: RequestOptions): Promise<ConnectorView> {
 		return this.call(
 			`/connectors/${encodeURIComponent(id)}`,
 			() => this.sdk.connectors.get({ id }, requestOptions(opts)),
 			connectorSchema,
-			"connector get",
+			"connector inspect",
 		);
 	}
 
-	async status(id: string, opts?: RequestOptions): Promise<ConnectorStatus> {
+	async health(id: string, opts?: RequestOptions): Promise<ConnectorStatus> {
 		return this.call(
 			`/connectors/${encodeURIComponent(id)}/status`,
 			() => this.sdk.connectors.status({ id }, requestOptions(opts)),
 			connectorStatusSchema,
-			"connector status",
+			"connector health",
 		);
 	}
 
@@ -583,10 +557,10 @@ export class ConnectorsResource {
 		);
 	}
 
-	async configure(
-		params: ConnectorConfigureRequest,
+	async addResources(
+		params: ConnectorResourceAddRequest,
 		opts?: RequestOptions,
-	): Promise<ConnectorConfigureResponse> {
+	): Promise<ConnectorResourceAddResponse> {
 		const { connectorId, ...body } = params;
 
 		return this.call(
@@ -597,25 +571,7 @@ export class ConnectorsResource {
 					requestOptions(opts),
 				),
 			configureSchema,
-			"connector configure",
-		);
-	}
-
-	async createResource(
-		params: ConnectorResourceCreateRequest,
-		opts?: RequestOptions,
-	): Promise<ConnectorResourceCreateResponse> {
-		const { connectorId, ...body } = params;
-
-		return this.call(
-			`/connectors/${encodeURIComponent(connectorId)}/resources`,
-			() =>
-				this.sdk.connectors.createResource(
-					{ ...body, id: connectorId },
-					requestOptions(opts),
-				),
-			resourceCreateSchema,
-			"connector resource create",
+			"connector resource add",
 		);
 	}
 

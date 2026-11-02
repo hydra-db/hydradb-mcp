@@ -160,6 +160,141 @@
         "sdk": { "method": "status", "args_scope": { "database": "db_test" } }
       },
       "aliases": { "cli": ["knowledge verify"] }
+    },
+    {
+      "id": "connector-provider-list",
+      "optional_for": ["cli", "plugin", "openclaw"],
+      "call": { "op": "connector.providerList", "args": {} },
+      "expect": {
+        "wrapper_method": "connectors.listProviders",
+        "sdk": { "method": "listProviders", "args_include": {} }
+      }
+    },
+    {
+      "id": "connector-provider-inspect",
+      "optional_for": ["cli", "plugin", "openclaw"],
+      "call": { "op": "connector.providerInspect", "args": { "provider": "slack" } },
+      "expect": {
+        "wrapper_method": "connectors.inspectProvider",
+        "sdk": { "method": "listProviders", "args_include": { "id": "slack" } }
+      }
+    },
+    {
+      "id": "connector-list",
+      "optional_for": ["cli", "plugin", "openclaw"],
+      "call": { "op": "connector.list", "args": { "provider": "slack", "include_health": true } },
+      "expect": {
+        "wrapper_method": "connectors.list",
+        "sdk": { "method": "list", "args_include": { "provider": "slack", "include": "health" } }
+      }
+    },
+    {
+      "id": "connector-inspect",
+      "optional_for": ["cli", "plugin", "openclaw"],
+      "call": { "op": "connector.inspect", "args": { "id": "conn_1" } },
+      "expect": {
+        "wrapper_method": "connectors.inspect",
+        "sdk": { "method": "get", "args_include": { "id": "conn_1" } }
+      }
+    },
+    {
+      "id": "connector-health",
+      "optional_for": ["cli", "plugin", "openclaw"],
+      "call": { "op": "connector.health", "args": { "id": "conn_1" } },
+      "expect": {
+        "wrapper_method": "connectors.health",
+        "sdk": { "method": "status", "args_include": { "id": "conn_1" } }
+      }
+    },
+    {
+      "id": "connector-discover",
+      "optional_for": ["cli", "plugin", "openclaw"],
+      "call": { "op": "connector.discover", "args": { "id": "conn_1", "cursor": "next", "limit": 25 } },
+      "expect": {
+        "wrapper_method": "connectors.discover",
+        "sdk": { "method": "discover", "args_include": { "id": "conn_1", "cursor": "next", "limit": 25 } }
+      }
+    },
+    {
+      "id": "connector-update",
+      "optional_for": ["cli", "plugin", "openclaw"],
+      "call": { "op": "connector.update", "args": { "id": "conn_1", "custom_instructions": "", "sync_interval_seconds": 0 } },
+      "expect": {
+        "wrapper_method": "connectors.update",
+        "sdk": { "method": "update", "args_include": { "id": "conn_1", "custom_instructions": "", "sync_interval_seconds": 0 } }
+      }
+    },
+    {
+      "id": "connector-delete",
+      "optional_for": ["cli", "plugin", "openclaw"],
+      "call": { "op": "connector.delete", "args": { "id": "conn_1" } },
+      "expect": {
+        "wrapper_method": "connectors.delete",
+        "sdk": { "method": "delete", "args_include": { "id": "conn_1" } }
+      }
+    },
+    {
+      "id": "connector-sync",
+      "optional_for": ["cli", "plugin", "openclaw"],
+      "call": { "op": "connector.sync", "args": { "id": "conn_1" } },
+      "expect": {
+        "wrapper_method": "connectors.sync",
+        "sdk": { "method": "sync", "args_include": { "id": "conn_1" } }
+      }
+    },
+    {
+      "id": "connector-pause",
+      "optional_for": ["cli", "plugin", "openclaw"],
+      "call": { "op": "connector.pause", "args": { "id": "conn_1" } },
+      "expect": {
+        "wrapper_method": "connectors.pause",
+        "sdk": { "method": "pause", "args_include": { "id": "conn_1" } }
+      }
+    },
+    {
+      "id": "connector-resume",
+      "optional_for": ["cli", "plugin", "openclaw"],
+      "call": { "op": "connector.resume", "args": { "id": "conn_1" } },
+      "expect": {
+        "wrapper_method": "connectors.resume",
+        "sdk": { "method": "resume", "args_include": { "id": "conn_1" } }
+      }
+    },
+    {
+      "id": "connector-resource-list",
+      "optional_for": ["cli", "plugin", "openclaw"],
+      "call": { "op": "connector.resourceList", "args": { "id": "conn_1" } },
+      "expect": {
+        "wrapper_method": "connectors.listResources",
+        "sdk": { "method": "listResources", "args_include": { "id": "conn_1" } }
+      }
+    },
+    {
+      "id": "connector-resource-add",
+      "optional_for": ["cli", "plugin", "openclaw"],
+      "call": { "op": "connector.resourceAdd", "args": { "id": "conn_1", "resources": [{ "resource_id": "C1", "display_name": "general" }], "lookback_days": 0 } },
+      "expect": {
+        "wrapper_method": "connectors.addResources",
+        "sdk": { "method": "configure", "args_include": { "id": "conn_1", "lookback_days": 0 } }
+      }
+    },
+    {
+      "id": "connector-resource-update",
+      "optional_for": ["cli", "plugin", "openclaw"],
+      "call": { "op": "connector.resourceUpdate", "args": { "id": "conn_1", "resource_id": "C1", "acl": [] } },
+      "expect": {
+        "wrapper_method": "connectors.updateResource",
+        "sdk": { "method": "updateResourceAcl", "args_include": { "id": "conn_1", "resource_id": "C1", "acl": [] } }
+      }
+    },
+    {
+      "id": "connector-resource-delete",
+      "optional_for": ["cli", "plugin", "openclaw"],
+      "call": { "op": "connector.resourceDelete", "args": { "id": "conn_1", "resource_id": "C1" } },
+      "expect": {
+        "wrapper_method": "connectors.deleteResource",
+        "sdk": { "method": "deleteResource", "args_include": { "id": "conn_1", "resource_id": "C1" } }
+      }
     }
   ],
   "env_aliases": [
