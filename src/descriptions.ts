@@ -119,9 +119,10 @@ const PARAM = {
 		"and relative dates ('in March 2026', not 'last week').",
 	ingest_kind:
 		"What to write: 'memory' for a personal fact, preference or conversation " +
-		"(default), or 'knowledge' to store a document as a searchable source. " +
-		"Memory-only options (turns, source_id, infer, is_markdown, user_name) do not " +
-		"apply to knowledge and are rejected rather than ignored.",
+		"(default), or 'knowledge' to store a document as a searchable source. A `file` " +
+		"is always knowledge. Memory-only options (turns, infer, is_markdown, user_name, " +
+		"and source_id except with `file`) do not apply to knowledge and are rejected " +
+		"rather than ignored.",
 	title:
 		"A short, specific label — always set it. This is the ONLY label shown next to " +
 		"this entry in later hydradb_query results, so 'Deployment rollback policy' is " +
@@ -132,6 +133,15 @@ const PARAM = {
 		"REPLACES everything previously stored under it — it does not add to it. Use a fresh " +
 		"id (or leave it unset) for each new fact, and reuse an id only when you deliberately " +
 		"mean to overwrite, such as correcting a memory you saved earlier. Leave unset if unsure.",
+	file:
+		"A file to ingest as a knowledge document: PDF, Word (.doc/.docx), PowerPoint " +
+		"(.ppt/.pptx), Excel/CSV, OpenDocument, Pages/Numbers/Keynote, images (OCR) or " +
+		"text. Give `filename` with its real extension; the document's title is `title` if " +
+		"you set it, else the filename. Pass EITHER `content_base64`, the file's bytes as base64, AT MOST 8 MB per file, " +
+		"OR `path`, an absolute path to the file on this machine, AT MOST 50 MB, which " +
+		"works on the local (stdio) server only; the hosted server cannot read your disk. " +
+		"A larger file is refused before upload: split it. Use instead of `text` and " +
+		"`turns`; `source_id` sets the document's id and `overwrite` applies as usual.",
 	overwrite:
 		"Whether ingesting with an existing source_id may replace what is stored there " +
 		"(default: true). Set false to have the server reject the write instead of " +
@@ -343,7 +353,8 @@ const STORE_BODY = `Save information to Hydra DB so it outlives this session. Hy
 Provide EXACTLY ONE of:
   \`text\`  — a note, fact, decision, or document body
   \`turns\` — user/assistant pairs from a conversation
-Passing both is an error; passing neither is an error.
+  \`file\`  — a PDF, Word, PowerPoint, spreadsheet or image file, ingested as knowledge (base64 up to 8 MB, or a local path up to 50 MB on the stdio server)
+Passing more than one is an error; passing none is an error.
 
 Save proactively: when the user states a preference, makes a decision, corrects you, or reveals a durable fact about themselves or their work, store it without being asked. Store the distilled fact rather than the raw exchange, and always set \`title\` — it is the only label shown next to this entry in later search results. Before saving something you suspect is already stored, query for it first rather than adding a near-duplicate.
 
@@ -352,7 +363,8 @@ Never store secrets, credentials, or anything the user asked you not to keep.
 Examples:
   {"text": "Prefers tabs over spaces in every language; rejected two prettier configs that used spaces.", "title": "Indentation preference"}
   {"turns": [{"user": "let's go with Postgres", "assistant": "Agreed, I'll set up the schema."}], "title": "Datastore decision"}
-  {"text": "# Runbook\\n\\nRestart order: api, worker, scheduler.", "kind": "knowledge", "title": "Restart runbook"}`;
+  {"text": "# Runbook\\n\\nRestart order: api, worker, scheduler.", "kind": "knowledge", "title": "Restart runbook"}
+  {"file": {"filename": "q3-plan.pdf", "content_base64": "JVBERi0xLjQK..."}}`;
 
 const CONVERSATION_BODY =
 	"Ingest one or more user-assistant conversation turns into Hydra DB memory. " +
@@ -497,7 +509,7 @@ export const TOOL_DESCRIPTIONS = {
 		// and contradicts it.
 		description: STORE_BODY,
 		params: {
-			text: PARAM.text,
+			text: PARAM.text.replace("`text` or `turns` — passing both", "`text`, `turns` or `file` — passing more than one"),
 			kind: PARAM.ingest_kind,
 			title: PARAM.title,
 			source_id: PARAM.source_id,
@@ -508,10 +520,11 @@ export const TOOL_DESCRIPTIONS = {
 			observation_date: PARAM.observation_date,
 			turns:
 				"The conversation to ingest, oldest first, as [{user, assistant}, ...]. Provide " +
-				"EXACTLY ONE of `text` or `turns` — passing both is an error, and so is passing " +
-				"neither. Use this when the exchange itself is worth preserving; when only the " +
+				"EXACTLY ONE of `text`, `turns` or `file` — passing more than one is an error, and so " +
+				"is passing none. Use this when the exchange itself is worth preserving; when only the " +
 				"conclusion matters, prefer `text` with the distilled fact.",
 			user_name: PARAM.user_name,
+			file: PARAM.file,
 			database: PARAM.database,
 			collection: PARAM.collection,
 		},
@@ -827,7 +840,7 @@ WHEN TO USE IT
 THE TOOLS
 
 - ${TOOL_NAMES.QUERY} — semantic search across memory and knowledge, with knowledge-graph context. Your default read. Every result carries an id.
-- ${TOOL_NAMES.INGEST} — write. A note or document via 'text', or a conversation via 'turns' (exactly one of the two).
+- ${TOOL_NAMES.INGEST} — write. A note or document via 'text', a conversation via 'turns', or a PDF, Word, slide or other file via 'file' (exactly one of the three).
 - ${TOOL_NAMES.LIST} — the full inventory of ONE family. Use it for "what do you have?"; for "what do you know about X" use ${TOOL_NAMES.QUERY} instead.
 - ${TOOL_NAMES.INSPECT} — the complete original content of one source you already have an id for.
 - ${TOOL_NAMES.DELETE} — irreversible removal of one item by id.

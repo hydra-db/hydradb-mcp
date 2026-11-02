@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { type HydraDBClient, HydraDBError } from "@hydradb/sdk";
+import { type HydraDB as Sdk, type HydraDBClient, HydraDBError } from "@hydradb/sdk";
 
 import {
 	DEFAULT_MAX_RETRIES,
@@ -48,7 +48,7 @@ test("wrapper catches SDK errors and rethrows the byte-identical message", async
 	} as unknown as HydraDBClient;
 
 	const hydra = new HydraDB(
-		{ token: "t", database: "db_test", collection: "col_test" },
+		{ token: "t", database: "db_test", collection: "col_test", maxRetries: 0 },
 		failingSdk,
 	);
 
@@ -222,73 +222,62 @@ test("non-envelope bodies still round-trip readably", () => {
 	assert.equal(translated.message, `Hydra DB /query → 404: ${JSON.stringify({ code: "NOT_FOUND" })}`);
 });
 
-// The client was constructed with only token and baseUrl, inheriting the SDK's
-// 60s timeout and 2 retries. Their product is ~3 minutes of silence on a
-// persistently failing endpoint — far longer than any MCP host waits, so the
-// host times out first and the caller gets a generic error with no HydraDB
-// diagnostic while this process keeps retrying on its behalf.
-test("the wrapper's timeout budget is tighter than the SDK's inherited default", () => {
+// The timeout used to apply to each attempt, so 30s x 3 attempts ran past the
+// 60s an MCP host waits: the host gave up with no HydraDB diagnostic while this
+// process kept working. It is now one deadline for the whole call.
+test("the default whole-call deadline ends before a 60s host timeout", () => {
 	assert.ok(
 		Number.isInteger(DEFAULT_TIMEOUT_SECONDS) && DEFAULT_TIMEOUT_SECONDS > 0,
 		"a timeout must actually be set; undefined means no deadline at all",
 	);
-	assert.ok(
-		DEFAULT_TIMEOUT_SECONDS < 60,
-		"must be tighter than the SDK's 60s default, or setting it changes nothing",
-	);
-	// worst case = timeout x (1 + retries), and it has to stay inside a typical
-	// MCP host's tool timeout or the host reports a generic failure first.
-	assert.ok(
-		DEFAULT_TIMEOUT_SECONDS * (1 + DEFAULT_MAX_RETRIES) <= 120,
-		"the worst-case call must stay under two minutes",
-	);
+	assert.ok(DEFAULT_TIMEOUT_SECONDS < 60, "retries included, the call must end inside 60s");
+	assert.ok(DEFAULT_MAX_RETRIES >= 1, "transient failures still get a retry");
+	assert.equal(new HydraDB({ token: "t", database: "db" }).deadlineMs, DEFAULT_TIMEOUT_SECONDS * 1000);
 });
 
 // A cancelled tool call must cancel the HTTP request. Without this the caller
 // has given up and the process keeps working — and keeps retrying — for it.
 test("an abort signal reaches the SDK as abortSignal", async () => {
-	const seen: unknown[] = [];
+	let seen: AbortSignal | undefined;
 	const sdk = {
-		query(_request: unknown, requestOptions: unknown) {
-			seen.push(requestOptions);
-			return Promise.resolve({ data: { chunks: [] }, success: true });
-		},
-		context: {
-			delete(_request: unknown, requestOptions: unknown) {
-				seen.push(requestOptions);
-				return Promise.resolve({ data: { success: true }, success: true });
-			},
+		query(_request: Sdk.SearchQueryRequest, requestOptions: { abortSignal: AbortSignal }) {
+			seen = requestOptions.abortSignal;
+
+			return new Promise((_resolve, reject) => {
+				seen?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+			});
 		},
 	} as unknown as HydraDBClient;
 
 	const hydra = new HydraDB({ token: "t", database: "db_test" }, sdk);
 	const controller = new AbortController();
+	const call = hydra.context.query({ query: "hi" }, { signal: controller.signal });
 
-	await hydra.context.query({ query: "hi" }, { signal: controller.signal });
-	await hydra.context.delete({ ids: ["s1"], kind: "memory" }, { signal: controller.signal });
-
-	assert.equal(seen.length, 2);
-	for (const opts of seen) {
-		assert.equal(
-			(opts as { abortSignal?: AbortSignal }).abortSignal,
-			controller.signal,
-		);
-	}
+	// Each attempt gets the call's own signal, which also carries the deadline.
+	controller.abort();
+	await assert.rejects(call, /cancelled by the caller/);
+	assert.equal(seen?.aborted, true);
 });
 
-test("no request options are sent when there is no signal", async () => {
-	const seen: unknown[] = [];
+// The SDK retried on its own: 5xx on a write, past the deadline, and not
+// interruptible between attempts. The wrapper's loop now owns every retry.
+test("every SDK call turns the SDK's own retries off", async () => {
+	const seen: { abortSignal?: AbortSignal; maxRetries?: number }[] = [];
+
 	const sdk = {
-		query(_request: unknown, requestOptions: unknown) {
+		query(_request: Sdk.SearchQueryRequest, requestOptions: { abortSignal?: AbortSignal; maxRetries?: number }) {
 			seen.push(requestOptions);
+
 			return Promise.resolve({ data: { chunks: [] }, success: true });
 		},
 	} as unknown as HydraDBClient;
 
 	const hydra = new HydraDB({ token: "t", database: "db_test" }, sdk);
+
 	await hydra.context.query({ query: "hi" });
 
-	assert.equal(seen[0], undefined, "an empty options object would be noise on the wire");
+	assert.equal(seen[0]?.maxRetries, 0);
+	assert.ok(seen[0]?.abortSignal instanceof AbortSignal);
 });
 
 // `operator` is keyword syntax and the API takes it only alongside
@@ -530,7 +519,7 @@ test("real SDK source lookup forwards caller cancellation to fetch", async (t) =
 	}, { signal: controller.signal });
 	await didStart;
 	controller.abort();
-	await assert.rejects(result, /aborted/);
+	await assert.rejects(result, /cancelled by the caller/);
 	assert.equal(signal?.aborted, true);
 });
 

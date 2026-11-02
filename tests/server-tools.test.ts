@@ -1858,7 +1858,7 @@ test("every tool declares all four behaviour hints explicitly", async () => {
 	await client.close();
 });
 
-test("reads are read-only, writes are not, and only deletes are destructive", async () => {
+test("reads are read-only; ingest, Cypher and deletes are destructive", async () => {
 	process.env.HYDRADB_MCP_LEGACY_TOOLS = "1";
 	const client = await connect(mockHydra().hydra);
 	const { tools } = await client.listTools();
@@ -1877,16 +1877,17 @@ test("reads are read-only, writes are not, and only deletes are destructive", as
 		assert.equal(hint(name).destructiveHint, false);
 	}
 
-	// Ingest writes but never removes; a host must not gate it behind a
-	// destructive-action prompt.
+	// Ingest overwrites an existing document with the same source id, and
+	// sending it twice is not a no-op.
 	for (const name of ["hydradb_ingest", "hydra_db_store", "hydra_db_ingest_conversation"]) {
 		assert.equal(hint(name).readOnlyHint, false, `${name} writes`);
-		assert.equal(
-			hint(name).destructiveHint,
-			false,
-			`${name} adds context and must not read as destructive`,
-		);
+		assert.equal(hint(name).destructiveHint, true, `${name} can overwrite stored context`);
+		assert.equal(hint(name).idempotentHint, false, `${name} is not safe to repeat`);
 	}
+
+	// Cypher can write, and a repeated CREATE duplicates nodes.
+	assert.equal(hint("hydradb_graph_query").destructiveHint, true);
+	assert.equal(hint("hydradb_graph_query").idempotentHint, false, "Cypher is not safe to repeat");
 
 	for (const name of ["hydradb_delete", "hydra_db_delete_memory"]) {
 		assert.equal(hint(name).destructiveHint, true, `${name} removes data irreversibly`);
