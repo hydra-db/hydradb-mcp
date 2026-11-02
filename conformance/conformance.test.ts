@@ -110,6 +110,8 @@ const CONNECTOR_RESPONSES = {
 	status: { connectorId: "conn_1", resources: [] },
 	discover: { provider: "slack", resources: [] },
 	listResources: { resources: [] },
+	write: { connectorId: "conn_1" },
+	resourceWrite: { connectorId: "conn_1", resourceId: "C1" },
 };
 
 // What a recorded SDK call answers with: a connector body above, the query body, or empty.
@@ -160,14 +162,14 @@ function makeRecorder(): { sdk: HydraDBClient; calls: RecordedCall[] } {
 			status: record("status", json, CONNECTOR_RESPONSES.status),
 			discover: record("discover", json, CONNECTOR_RESPONSES.discover),
 			listResources: record("listResources", json, CONNECTOR_RESPONSES.listResources),
-			update: record("update", json),
-			delete: record("delete", json),
+			update: record("update", json, CONNECTOR_RESPONSES.write),
+			delete: record("delete", json, CONNECTOR_RESPONSES.write),
 			sync: record("sync", json),
-			pause: record("pause", json),
-			resume: record("resume", json),
-			configure: record("configure", json),
-			updateResourceAcl: record("updateResourceAcl", json),
-			deleteResource: record("deleteResource", json),
+			pause: record("pause", json, CONNECTOR_RESPONSES.write),
+			resume: record("resume", json, CONNECTOR_RESPONSES.write),
+			configure: record("configure", json, CONNECTOR_RESPONSES.write),
+			updateResourceAcl: record("updateResourceAcl", json, CONNECTOR_RESPONSES.resourceWrite),
+			deleteResource: record("deleteResource", json, CONNECTOR_RESPONSES.resourceWrite),
 		},
 	};
 

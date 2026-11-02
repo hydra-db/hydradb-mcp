@@ -174,7 +174,7 @@ const configuredResourceSchema = z.object({
 const resourcesSchema = z.object({ resources: z.array(configuredResourceSchema) });
 
 const connectorUpdateSchema = z.object({
-	connectorId: z.string().optional(),
+	connectorId: nonEmpty,
 	credentialsUpdated: z.boolean().optional(),
 	customInstructionsUpdated: z.boolean().optional(),
 	maxSyncIntervalSeconds: z.number().optional(),
@@ -184,7 +184,7 @@ const connectorUpdateSchema = z.object({
 });
 
 const connectorDeleteSchema = z.object({
-	connectorId: z.string().optional(),
+	connectorId: nonEmpty,
 	deleted: z.boolean().optional(),
 });
 
@@ -194,13 +194,13 @@ const connectorSyncSchema = z.object({
 });
 
 const connectorPauseSchema = z.object({
-	connectorId: z.string().optional(),
+	connectorId: nonEmpty,
 	paused: z.boolean().optional(),
 	pausedAt: z.string().optional(),
 });
 
 const configureSchema = z.object({
-	connectorId: z.string().optional(),
+	connectorId: nonEmpty,
 	configured: z.number().optional(),
 	backfill: z.boolean().optional(),
 	firstSyncAt: z.string().optional(),
@@ -225,16 +225,16 @@ const configureSchema = z.object({
 });
 
 const resourceUpdateSchema = z.object({
-	connectorId: z.string().optional(),
-	resourceId: z.string().optional(),
+	connectorId: nonEmpty,
+	resourceId: nonEmpty,
 	acl: z.array(z.string()).optional(),
 	customInstructions: z.string().optional(),
 	customInstructionsUpdated: z.boolean().optional(),
 });
 
 const resourceDeleteSchema = z.object({
-	connectorId: z.string().optional(),
-	resourceId: z.string().optional(),
+	connectorId: nonEmpty,
+	resourceId: nonEmpty,
 	deleted: z.boolean().optional(),
 });
 

@@ -343,7 +343,7 @@ export class ConnectorTools {
 	private assertMutationAllowed(): void {
 		// Connector endpoints do not atomically enforce MCP database or collection grants.
 		// Refuse every scoped mutation so a concurrent destination change cannot cross the grant.
-		if (this.hydra.allowedDatabases !== undefined || this.hydra.allowedCollections !== undefined) {
+		if (this.scoped) {
 			throw new ConnectorScopeNotAllowedError(
 				"Scoped OAuth connections cannot modify connectors. Use an organization-wide connection.",
 			);
@@ -481,7 +481,7 @@ export class ConnectorTools {
 		return {
 			text: "Connector settings were updated. Credential settings were not accepted or changed by this tool.",
 			data: cleanObject({
-				connector_id: result.connectorId ?? input.connectorId,
+				connector_id: result.connectorId,
 				custom_instructions_updated: result.customInstructionsUpdated,
 				sync_interval_seconds: result.syncIntervalSeconds,
 				min_sync_interval_seconds: result.minSyncIntervalSeconds,
@@ -499,7 +499,7 @@ export class ConnectorTools {
 			text: result.deleted === true
 				? "The connector was deleted."
 				: "The connector delete request completed, but the response did not confirm deletion.",
-			data: cleanObject({ connector_id: result.connectorId ?? id, deleted: result.deleted }),
+			data: cleanObject({ connector_id: result.connectorId, deleted: result.deleted }),
 		};
 	}
 
@@ -523,7 +523,7 @@ export class ConnectorTools {
 			text: result.paused === true
 				? "The connector is paused."
 				: "The pause request completed, but the response did not confirm a paused state.",
-			data: cleanObject({ connector_id: result.connectorId ?? id, paused: result.paused, paused_at: result.pausedAt }),
+			data: cleanObject({ connector_id: result.connectorId, paused: result.paused, paused_at: result.pausedAt }),
 		};
 	}
 
@@ -535,7 +535,7 @@ export class ConnectorTools {
 			text: result.paused === false
 				? "The connector resumed."
 				: "The resume request completed, but the response did not confirm an active state.",
-			data: cleanObject({ connector_id: result.connectorId ?? id, paused: result.paused }),
+			data: cleanObject({ connector_id: result.connectorId, paused: result.paused }),
 		};
 	}
 
@@ -549,7 +549,7 @@ export class ConnectorTools {
 				? "Connector resources were added, but provider verification needs review. Check connector health after the first sync."
 				: "Connector resources were added. Resources not in the list remain unchanged. A sync may have started.",
 			data: cleanObject({
-				connector_id: result.connectorId ?? input.connectorId,
+				connector_id: result.connectorId,
 				configured: result.configured,
 				backfill: result.backfill,
 				first_sync_at: result.firstSyncAt,
@@ -566,8 +566,8 @@ export class ConnectorTools {
 		return {
 			text: "The connector resource access rule or instructions were updated.",
 			data: cleanObject({
-				connector_id: result.connectorId ?? input.connectorId,
-				resource_id: result.resourceId ?? input.resourceId,
+				connector_id: result.connectorId,
+				resource_id: result.resourceId,
 				acl: result.acl,
 				custom_instructions: result.customInstructions,
 				custom_instructions_updated: result.customInstructionsUpdated,
@@ -588,8 +588,8 @@ export class ConnectorTools {
 				? "The connector resource was deleted."
 				: "The resource delete request completed, but the response did not confirm deletion.",
 			data: cleanObject({
-				connector_id: result.connectorId ?? connectorId,
-				resource_id: result.resourceId ?? resourceId,
+				connector_id: result.connectorId,
+				resource_id: result.resourceId,
 				deleted: result.deleted,
 			}),
 		};

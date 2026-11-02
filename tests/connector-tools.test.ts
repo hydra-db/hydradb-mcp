@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 
-import type { HydraDBClient } from "@hydradb/sdk";
+import { type HydraDBClient, HydraDBError } from "@hydradb/sdk";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
@@ -938,5 +938,49 @@ test("database-only confinement refuses resource_add before mutation", async () 
 
 	assert.equal(result.isError, true);
 	assert.deepEqual(fixture.calls, []);
+	await client.close();
+});
+
+test("connector errors: input mistakes pass through, and API rejections never say retry", async () => {
+	const fixture = mockHydra();
+	const client = await connect(fixture.hydra);
+
+	const noSettings = await client.callTool({ name: TOOL_NAMES.CONNECTOR_UPDATE, arguments: { connector_id: "allowed" } });
+
+	assert.equal(noSettings.isError, true);
+	assert.match(text(noSettings), /Set custom_instructions, sync_interval_seconds, or both/);
+	assert.doesNotMatch(text(noSettings), /retry/i);
+
+	const rejections = [
+		[422, /rejected the request as invalid/],
+		[400, /rejected the request as invalid/],
+		[401, /refused this connection's credentials/],
+		[403, /refused this connection's credentials/],
+	] as const;
+
+	for (const [statusCode, message] of rejections) {
+		fixture.sdk.connectors.sync = async () => {
+			throw new HydraDBError({ statusCode, body: { message: "provider said top-secret-token" } });
+		};
+
+		const result = await client.callTool({ name: TOOL_NAMES.CONNECTOR_SYNC, arguments: { connector_id: "allowed" } });
+
+		assert.equal(result.isError, true);
+		assert.match(text(result), message);
+		assert.doesNotMatch(text(result), /review connector health and retry|Reconnect the connector or|top-secret-token/i);
+	}
+
+	await client.close();
+});
+
+test("a write the API answers without its ID is a tool error, not a success under the caller's ID", async () => {
+	const fixture = mockHydra();
+	fixture.sdk.connectors.delete = async () => ({ deleted: true });
+	const client = await connect(fixture.hydra);
+
+	const result = await client.callTool({ name: TOOL_NAMES.CONNECTOR_DELETE, arguments: { connector_id: "allowed" } });
+
+	assert.equal(result.isError, true);
+	assert.doesNotMatch(text(result), /was deleted/);
 	await client.close();
 });

@@ -8,10 +8,10 @@ import { jsonValue, toAddMemoryResponse, toMemoryList, toRelationList, toSourceL
 import type { JsonValue, ListedFields, PageInfo, SourceListItem } from "./adapters.js";
 import { resolveConfig, resolveConnectorConfig, resolveGraphConfig } from "./config.js";
 import type { ConnectorConfig, GraphConfig } from "./config.js";
-import { ConnectorScopeNotAllowedError, ConnectorTools } from "./connectors.js";
+import { type ConnectorToolResponse, ConnectorTools } from "./connectors.js";
 import { renderRecalledContext } from "./context.js";
 import { COLLECTION_PATTERN, MAX_BODY_BYTES, renderRows } from "./cypher.js";
-import { SERVER_INSTRUCTIONS, TOOL_DESCRIPTIONS } from "./descriptions.js";
+import { CONNECTOR_ID_HELP, SERVER_INSTRUCTIONS, TOOL_DESCRIPTIONS } from "./descriptions.js";
 import { HydraDB, HydraWrapperError, assertCollectionAllowed, assertDatabaseAllowed, hasEntries } from "./hydra/index.js";
 import type { ContextKind, MetadataFilter, QueryKind, QueryParams } from "./hydra/index.js";
 import { logger } from "./logger.js";
@@ -2872,33 +2872,35 @@ export function createHydraDBServer(
 		try {
 			return await run();
 		} catch (error) {
-			if (error instanceof ConnectorScopeNotAllowedError) {
-				throw error;
+			// Only an API failure can carry provider text, so only it is rewritten. Input and
+			// scope errors are already safe, and say what to fix, so they pass through.
+			if (!(error instanceof HydraWrapperError)) throw error;
+
+			if (error.status === 400 || error.status === 422) {
+				throw new Error("HydraDB rejected the request as invalid. Change the arguments; the same call will fail again.");
 			}
 
-			if (error instanceof HydraWrapperError) {
-				if (error.status === 401 || error.status === 403) {
-					throw new Error("HydraDB refused the connector request. Reconnect the connector or review provider access.");
-				}
-
-				if (error.status === 404) {
-					throw new Error("The connector or resource was not found.");
-				}
-
-				if (error.status === 409) {
-					throw new Error("The connector state changed before this request completed. Read it again before retrying.");
-				}
-
-				if (error.status === 429) {
-					throw new Error("HydraDB rate-limited the connector request. Retry later.");
-				}
-
-				if (error.status != null && error.status >= 500) {
-					throw new Error("The connector service is temporarily unavailable. Retry later.");
-				}
+			if (error.status === 401 || error.status === 403) {
+				throw new Error("HydraDB refused this connection's credentials for the request. Reconnecting the connector will not change that.");
 			}
 
-			throw new Error("The connector request failed. Review connector status and retry.");
+			if (error.status === 404) {
+				throw new Error("The connector or resource was not found.");
+			}
+
+			if (error.status === 409) {
+				throw new Error("The connector state changed before this request completed. Read it again before retrying.");
+			}
+
+			if (error.status === 429) {
+				throw new Error("HydraDB rate-limited the connector request. Retry later.");
+			}
+
+			if (error.status != null && error.status >= 500) {
+				throw new Error("The connector service is temporarily unavailable. Retry later.");
+			}
+
+			throw new Error("The connector request failed. Review connector health and retry.");
 		}
 	}
 
@@ -4022,82 +4024,40 @@ export function createHydraDBServer(
 		},
 	);
 
-	// --- Connector read tools (ENG-3341) ---
+	// --- Connector tools (ENG-3341) ---
+	//
+	// One call per tool: name, annotations, input fields, and the ConnectorTools method it runs.
+	// Inputs are snake_case like every tool here; each call renames them for the camelCase wrapper.
 	if (connectorConfig.enabled) {
-		const providerListSchema = z.object({}).strict();
+		const connectorTool = <Fields extends ToolInputFields>(
+			name: (typeof CONNECTOR_TOOL_NAMES)[number],
+			annotations: typeof readOnly,
+			fields: Fields,
+			run: (input: z.output<z.ZodObject<Fields, "strict">>, signal?: AbortSignal) => Promise<ConnectorToolResponse>,
+			rule?: { check: (input: z.output<z.ZodObject<Fields, "strict">>) => boolean; message: string },
+		) => {
+			const schema = z.object(fields).strict();
+			const parser = rule ? schema.refine(rule.check, { message: rule.message }) : schema;
 
-		const providerInspectSchema = z
-			.object({
-				provider: z
-					.string()
-					.trim()
-					.min(1)
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_PROVIDER_INSPECT].params.provider),
-			})
-			.strict();
+			register(
+				name,
+				schema,
+				async (args, extra) => {
+					const input = parser.safeParse(args);
 
-		const connectorListSchema = z
-			.object({
-				provider: z
-					.string()
-					.trim()
-					.min(1)
-					.optional()
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_LIST].params.provider),
-				include_health: z
-					.boolean()
-					.optional()
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_LIST].params.include_health),
-			})
-			.strict();
+					// The rule's own words, not zod's issue dump, so the model knows what to change.
+					if (!input.success) throw new Error(input.error.issues.map((issue) => issue.message).join(" "));
 
-		const connectorIdSchema = (
-			name:
-				| typeof TOOL_NAMES.CONNECTOR_INSPECT
-				| typeof TOOL_NAMES.CONNECTOR_HEALTH
-				| typeof TOOL_NAMES.CONNECTOR_RESOURCE_LIST,
-		) =>
-			z
-				.object({
-					connector_id: z
-						.string()
-						.trim()
-						.min(1)
-						.describe(TOOL_DESCRIPTIONS[name].params.connector_id),
-				})
-				.strict();
+					const result = await run(input.data, extra?.signal);
 
-		const discoverSchema = z
-			.object({
-				connector_id: z
-					.string()
-					.trim()
-					.min(1)
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_DISCOVER].params.connector_id),
-				cursor: z
-					.string()
-					.min(1)
-					.optional()
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_DISCOVER].params.cursor),
-				limit: z
-					.number()
-					.int()
-					.min(1)
-					.max(100)
-					.optional()
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_DISCOVER].params.limit),
-			})
-			.strict();
+					return structuredResult(result.text, result.data);
+				},
+				annotations,
+			);
+		};
 
-		const writeConnectorIdSchema = z
-			.object({
-				connector_id: z
-					.string()
-					.trim()
-					.min(1)
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_DELETE].params.connector_id),
-			})
-			.strict();
+		const id = (help: string) => z.string().trim().min(1).describe(help);
+		const byConnector = { connector_id: id(CONNECTOR_ID_HELP) };
 
 		const safeJsonKey = z
 			.string()
@@ -4109,57 +4069,33 @@ export function createHydraDBServer(
 
 		const safeJsonScalar = z.union([z.string(), z.number(), z.boolean(), z.null()]);
 
-		const safeJsonValue = z.union([
-			safeJsonScalar,
-			z.array(safeJsonScalar),
-			z.record(safeJsonKey, safeJsonScalar),
-		]);
+		const safeJsonObject = z.record(
+			safeJsonKey,
+			z.union([safeJsonScalar, z.array(safeJsonScalar), z.record(safeJsonKey, safeJsonScalar)]),
+		);
 
-		const safeJsonObject = z.record(safeJsonKey, safeJsonValue);
+		const list = TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_LIST].params;
+		const update = TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_UPDATE].params;
+		const discover = TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_DISCOVER].params;
+		const add = TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_RESOURCE_ADD].params;
+		const change = TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_RESOURCE_UPDATE].params;
 
-		const connectorUpdateObjectSchema = z
+		const resourceAddItem = z
 			.object({
-				connector_id: z.string().trim().min(1)
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_UPDATE].params.connector_id),
-				custom_instructions: z.string().max(4000).optional()
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_UPDATE].params.custom_instructions),
-				sync_interval_seconds: z.number().int().min(0).optional()
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_UPDATE].params.sync_interval_seconds),
+				resource_id: id(add.resource_id),
+				resource_type: z.string().trim().min(1).optional().describe(add.resource_type),
+				display_name: z.string().optional().describe(add.display_name),
+				database_override: z.string().trim().min(1).optional().describe(add.database_override),
+				collection_override: z.string().trim().min(1).optional().describe(add.collection_override),
+				acl: z.array(z.string().min(1)).optional().describe(add.acl),
+				custom_instructions: z.string().max(4000).optional().describe(add.custom_instructions),
+				metadata: safeJsonObject.optional().describe(add.metadata),
+				additional_metadata: safeJsonObject.optional().describe(add.additional_metadata),
+				sync_mode: z.enum(["rescan", "new_only"]).optional().describe(add.sync_mode),
 			})
 			.strict();
 
-		const connectorUpdateSchema = connectorUpdateObjectSchema
-			.refine(
-				(input) => input.custom_instructions !== undefined || input.sync_interval_seconds !== undefined,
-				{ message: "Set custom_instructions, sync_interval_seconds, or both." },
-			);
-
-		const resourceAddItemSchema = z
-			.object({
-				resource_id: z.string().trim().min(1)
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_RESOURCE_ADD].params.resource_id),
-				resource_type: z.string().trim().min(1).optional()
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_RESOURCE_ADD].params.resource_type),
-				display_name: z.string().optional()
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_RESOURCE_ADD].params.display_name),
-				database_override: z.string().trim().min(1).optional()
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_RESOURCE_ADD].params.database_override),
-				collection_override: z.string().trim().min(1).optional()
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_RESOURCE_ADD].params.collection_override),
-				acl: z.array(z.string().min(1)).optional()
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_RESOURCE_ADD].params.acl),
-				custom_instructions: z.string().max(4000).optional()
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_RESOURCE_ADD].params.custom_instructions),
-				metadata: safeJsonObject.optional()
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_RESOURCE_ADD].params.metadata),
-				additional_metadata: safeJsonObject.optional()
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_RESOURCE_ADD].params.additional_metadata),
-				sync_mode: z.enum(["rescan", "new_only"]).optional()
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_RESOURCE_ADD].params.sync_mode),
-			})
-			.strict();
-
-		const tableConfigSchema = z
+		const tableConfig = z
 			.object({
 				table: z.string().trim().min(1).describe("BigQuery table identifier."),
 				replication_key: z.string().trim().min(1).optional()
@@ -4173,178 +4109,80 @@ export function createHydraDBServer(
 				{ message: "Set exactly one of replication_key or change_history." },
 			);
 
-		const connectorResourceAddSchema = z
-			.object({
-				connector_id: z.string().trim().min(1)
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_RESOURCE_ADD].params.connector_id),
-				resources: z.array(resourceAddItemSchema).min(1)
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_RESOURCE_ADD].params.resources),
-				lookback_days: z.number().int().min(0).optional()
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_RESOURCE_ADD].params.lookback_days),
-				full_visibility_roles: z.array(z.string().min(1)).optional()
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_RESOURCE_ADD].params.full_visibility_roles),
-				table_configs: z.array(tableConfigSchema).optional()
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_RESOURCE_ADD].params.table_configs),
-			})
-			.strict();
+		connectorTool(TOOL_NAMES.CONNECTOR_PROVIDER_LIST, readOnly, {}, (_, signal) => connectorTools.providerList({ signal }));
 
-		const connectorResourceUpdateObjectSchema = z
-			.object({
-				connector_id: z.string().trim().min(1)
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_RESOURCE_UPDATE].params.connector_id),
-				resource_id: z.string().trim().min(1)
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_RESOURCE_UPDATE].params.resource_id),
-				acl: z.array(z.string().min(1)).optional()
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_RESOURCE_UPDATE].params.acl),
-				custom_instructions: z.string().max(4000).optional()
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_RESOURCE_UPDATE].params.custom_instructions),
-			})
-			.strict();
-
-		const connectorResourceUpdateSchema = connectorResourceUpdateObjectSchema
-			.refine(
-				(input) => input.acl !== undefined || input.custom_instructions !== undefined,
-				{ message: "Set acl or custom_instructions." },
-			);
-
-		const connectorResourceIdSchema = z
-			.object({
-				connector_id: z.string().trim().min(1)
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_RESOURCE_DELETE].params.connector_id),
-				resource_id: z.string().trim().min(1)
-					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_RESOURCE_DELETE].params.resource_id),
-			})
-			.strict();
-
-		register(
-			TOOL_NAMES.CONNECTOR_PROVIDER_LIST,
-			providerListSchema,
-			async (args, extra) => {
-				providerListSchema.parse(args);
-				const result = await connectorTools.providerList({ signal: extra?.signal });
-
-				return structuredResult(result.text, result.data);
-			},
-			readOnly,
-		);
-
-		register(
+		connectorTool(
 			TOOL_NAMES.CONNECTOR_PROVIDER_INSPECT,
-			providerInspectSchema,
-			async (args, extra) => {
-				const input = providerInspectSchema.parse(args);
-				const result = await connectorTools.providerInspect(input.provider, { signal: extra?.signal });
-
-				return structuredResult(result.text, result.data);
-			},
 			readOnly,
+			{ provider: id(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_PROVIDER_INSPECT].params.provider) },
+			(input, signal) => connectorTools.providerInspect(input.provider, { signal }),
 		);
 
-		register(
+		connectorTool(
 			TOOL_NAMES.CONNECTOR_LIST,
-			connectorListSchema,
-			async (args, extra) => {
-				const input = connectorListSchema.parse(args);
-
-				const result = await connectorTools.list(
-					{ provider: input.provider, includeHealth: input.include_health },
-					{ signal: extra?.signal },
-				);
-
-				return structuredResult(result.text, result.data);
-			},
 			readOnly,
+			{
+				provider: z.string().trim().min(1).optional().describe(list.provider),
+				include_health: z.boolean().optional().describe(list.include_health),
+			},
+			(input, signal) => connectorTools.list({ provider: input.provider, includeHealth: input.include_health }, { signal }),
 		);
 
-		for (const [name, run] of [
-			[TOOL_NAMES.CONNECTOR_INSPECT, (id: string, signal?: AbortSignal) => connectorTools.inspect(id, { signal })],
-			[TOOL_NAMES.CONNECTOR_HEALTH, (id: string, signal?: AbortSignal) => connectorTools.health(id, { signal })],
-			[TOOL_NAMES.CONNECTOR_RESOURCE_LIST, (id: string, signal?: AbortSignal) => connectorTools.resourceList(id, { signal })],
-		] as const) {
-			const schema = connectorIdSchema(name);
-			register(
-				name,
-				schema,
-				async (args, extra) => {
-					const input = schema.parse(args);
-					const result = await run(input.connector_id, extra?.signal);
+		connectorTool(TOOL_NAMES.CONNECTOR_INSPECT, readOnly, byConnector, (input, signal) => connectorTools.inspect(input.connector_id, { signal }));
+		connectorTool(TOOL_NAMES.CONNECTOR_HEALTH, readOnly, byConnector, (input, signal) => connectorTools.health(input.connector_id, { signal }));
 
-					return structuredResult(result.text, result.data);
-				},
-				readOnly,
-			);
-		}
-
-		register(
-			TOOL_NAMES.CONNECTOR_DISCOVER,
-			discoverSchema,
-			async (args, extra) => {
-				const input = discoverSchema.parse(args);
-
-				const result = await connectorTools.discover(
-					{
-						connectorId: input.connector_id,
-						cursor: input.cursor,
-						limit: input.limit,
-					},
-					{ signal: extra?.signal },
-				);
-
-				return structuredResult(result.text, result.data);
-			},
-			readOnly,
-		);
-
-		register(
+		connectorTool(
 			TOOL_NAMES.CONNECTOR_UPDATE,
-			connectorUpdateObjectSchema,
-			async (args, extra) => {
-				const input = connectorUpdateSchema.parse(args);
-
-				const result = await connectorTools.update(
-					{
-						connectorId: input.connector_id,
-						customInstructions: input.custom_instructions,
-						syncIntervalSeconds: input.sync_interval_seconds,
-					},
-					{ signal: extra?.signal },
-				);
-
-				return structuredResult(result.text, result.data);
-			},
 			destructive,
+			{
+				...byConnector,
+				custom_instructions: z.string().max(4000).optional().describe(update.custom_instructions),
+				sync_interval_seconds: z.number().int().min(0).optional().describe(update.sync_interval_seconds),
+			},
+			(input, signal) =>
+				connectorTools.update(
+					{ connectorId: input.connector_id, customInstructions: input.custom_instructions, syncIntervalSeconds: input.sync_interval_seconds },
+					{ signal },
+				),
+			{
+				check: (input) => input.custom_instructions !== undefined || input.sync_interval_seconds !== undefined,
+				message: "Set custom_instructions, sync_interval_seconds, or both.",
+			},
 		);
 
-		for (const [name, run, annotations] of [
-			[TOOL_NAMES.CONNECTOR_DELETE, (id: string, signal?: AbortSignal) => connectorTools.delete(id, { signal }), destructive],
-			[TOOL_NAMES.CONNECTOR_SYNC, (id: string, signal?: AbortSignal) => connectorTools.sync(id, { signal }), additiveWrite],
-			[TOOL_NAMES.CONNECTOR_PAUSE, (id: string, signal?: AbortSignal) => connectorTools.pause(id, { signal }), idempotentWrite],
-			[TOOL_NAMES.CONNECTOR_RESUME, (id: string, signal?: AbortSignal) => connectorTools.resume(id, { signal }), idempotentWrite],
-		] as const) {
-			register(
-				name,
-				writeConnectorIdSchema,
-				async (args, extra) => {
-					const input = writeConnectorIdSchema.parse(args);
-					const result = await run(input.connector_id, extra?.signal);
+		connectorTool(TOOL_NAMES.CONNECTOR_DELETE, destructive, byConnector, (input, signal) => connectorTools.delete(input.connector_id, { signal }));
+		connectorTool(TOOL_NAMES.CONNECTOR_SYNC, additiveWrite, byConnector, (input, signal) => connectorTools.sync(input.connector_id, { signal }));
+		connectorTool(TOOL_NAMES.CONNECTOR_PAUSE, idempotentWrite, byConnector, (input, signal) => connectorTools.pause(input.connector_id, { signal }));
+		connectorTool(TOOL_NAMES.CONNECTOR_RESUME, idempotentWrite, byConnector, (input, signal) => connectorTools.resume(input.connector_id, { signal }));
 
-					return structuredResult(result.text, result.data);
-				},
-				annotations,
-			);
-		}
+		connectorTool(
+			TOOL_NAMES.CONNECTOR_DISCOVER,
+			readOnly,
+			{
+				...byConnector,
+				cursor: z.string().min(1).optional().describe(discover.cursor),
+				limit: z.number().int().min(1).max(100).optional().describe(discover.limit),
+			},
+			(input, signal) => connectorTools.discover({ connectorId: input.connector_id, cursor: input.cursor, limit: input.limit }, { signal }),
+		);
 
-		// One way to attach resources (CONTRACT.md §3 Connectors): a list, sent to
-		// the configure endpoint, which adds them and starts syncing. Field names
-		// match what hydradb_connector_resource_list returns, so a listed resource
-		// can be sent back unchanged; they are renamed to the API's names here.
-		register(
+		connectorTool(TOOL_NAMES.CONNECTOR_RESOURCE_LIST, readOnly, byConnector, (input, signal) => connectorTools.resourceList(input.connector_id, { signal }));
+
+		// One way to attach resources (CONTRACT.md §3 Connectors): a list, sent to the configure
+		// endpoint, which adds them and starts syncing. The fields match what resource_list
+		// returns, so a listed resource can be sent back unchanged.
+		connectorTool(
 			TOOL_NAMES.CONNECTOR_RESOURCE_ADD,
-			connectorResourceAddSchema,
-			async (args, extra) => {
-				const input = connectorResourceAddSchema.parse(args);
-
-				const result = await connectorTools.resourceAdd(
+			destructiveNonIdempotent,
+			{
+				...byConnector,
+				resources: z.array(resourceAddItem).min(1).describe(add.resources),
+				lookback_days: z.number().int().min(0).optional().describe(add.lookback_days),
+				full_visibility_roles: z.array(z.string().min(1)).optional().describe(add.full_visibility_roles),
+				table_configs: z.array(tableConfig).optional().describe(add.table_configs),
+			},
+			(input, signal) =>
+				connectorTools.resourceAdd(
 					{
 						connectorId: input.connector_id,
 						resources: input.resources.map((resource) => ({
@@ -4367,50 +4205,32 @@ export function createHydraDBServer(
 							changeHistory: table.change_history,
 						})),
 					},
-					{ signal: extra?.signal },
-				);
-
-				return structuredResult(result.text, result.data);
-			},
-			destructiveNonIdempotent,
+					{ signal },
+				),
 		);
 
-		register(
+		connectorTool(
 			TOOL_NAMES.CONNECTOR_RESOURCE_UPDATE,
-			connectorResourceUpdateObjectSchema,
-			async (args, extra) => {
-				const input = connectorResourceUpdateSchema.parse(args);
-
-				const result = await connectorTools.resourceUpdate(
-					{
-						connectorId: input.connector_id,
-						resourceId: input.resource_id,
-						acl: input.acl,
-						customInstructions: input.custom_instructions,
-					},
-					{ signal: extra?.signal },
-				);
-
-				return structuredResult(result.text, result.data);
-			},
 			destructive,
+			{
+				...byConnector,
+				resource_id: id(change.resource_id),
+				acl: z.array(z.string().min(1)).optional().describe(change.acl),
+				custom_instructions: z.string().max(4000).optional().describe(change.custom_instructions),
+			},
+			(input, signal) =>
+				connectorTools.resourceUpdate(
+					{ connectorId: input.connector_id, resourceId: input.resource_id, acl: input.acl, customInstructions: input.custom_instructions },
+					{ signal },
+				),
+			{ check: (input) => input.acl !== undefined || input.custom_instructions !== undefined, message: "Set acl or custom_instructions." },
 		);
 
-		register(
+		connectorTool(
 			TOOL_NAMES.CONNECTOR_RESOURCE_DELETE,
-			connectorResourceIdSchema,
-			async (args, extra) => {
-				const input = connectorResourceIdSchema.parse(args);
-
-				const result = await connectorTools.resourceDelete(
-					input.connector_id,
-					input.resource_id,
-					{ signal: extra?.signal },
-				);
-
-				return structuredResult(result.text, result.data);
-			},
 			destructive,
+			{ ...byConnector, resource_id: id(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_RESOURCE_DELETE].params.resource_id) },
+			(input, signal) => connectorTools.resourceDelete(input.connector_id, input.resource_id, { signal }),
 		);
 	}
 
