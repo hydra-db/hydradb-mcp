@@ -281,6 +281,16 @@ function projectStatus(status: ConnectorStatus): Record<string, unknown> {
 		});
 }
 
+/** `name (id)`, or the bare id when there is no name: the id is what the next call needs. */
+function labelled(name: string | undefined, id: string): string {
+	return name ? `${name} (${id})` : id;
+}
+
+/** A header and one line per item, so a client that reads only text still gets every id. */
+function bulleted(header: string, items: string[]): string {
+	return [header, ...items.map((item) => `- ${item}`)].join("\n");
+}
+
 function renderHealth(status: ConnectorStatus, withheld: number): string {
 	const lines = [
 		`Connector health is ${status.status ?? "unknown"}; lifecycle is ${status.lifecycle ?? "unknown"}; sync activity is ${status.syncStatus ?? "unknown"}.`,
@@ -382,10 +392,15 @@ export class ConnectorTools {
 	async providerInspect(provider: string, opts?: RequestOptions): Promise<ConnectorToolResponse> {
 		const result = await this.hydra.connectors.inspectProvider(provider, opts);
 
-		return {
-			text: `Provider ${result.provider} uses connector type ${result.connectorType}. Credential fields are schema metadata only; never put credential values in an MCP call.`,
-			data: projectProviderDetail(result),
-		};
+		const lines = [
+			`Provider ${result.provider} uses connector type ${result.connectorType}. Credential fields are schema metadata only; never put credential values in an MCP call.`,
+		];
+
+		if (result.indexedObjectTypes.length > 0) lines.push(`It syncs: ${result.indexedObjectTypes.join(", ")}.`);
+
+		if (result.setupGuide?.length) lines.push(bulleted("Setup:", result.setupGuide));
+
+		return { text: lines.join("\n"), data: projectProviderDetail(result) };
 	}
 
 	async list(input: ConnectorListInput, opts?: RequestOptions): Promise<ConnectorToolResponse> {
@@ -420,7 +435,11 @@ export class ConnectorTools {
 		return {
 			text: visible.length === 0
 				? "No connectors are visible to this connection."
-				: `Visible connectors (${visible.length}): ${visible.map((connector) => connector.name ?? connector.connectorId).join(", ")}.`,
+				: bulleted(`Visible connectors (${visible.length}):`, visible.map((connector) => {
+					const state = [connector.lifecycle ?? "unknown lifecycle", health?.[connector.connectorId]].filter(Boolean).join(", ");
+
+					return `${labelled(connector.name, connector.connectorId)}: ${state}`;
+				})),
 			data: cleanObject({ connectors, health, connector_limit: connectorLimit, plan_cap: planCap }),
 		};
 	}
@@ -465,22 +484,28 @@ export class ConnectorTools {
 		const result = await this.hydra.connectors.discover(input, opts);
 		const count = result.resources.length;
 
-		return { text: `Discovered ${count} resource${count === 1 ? "" : "s"}.`, data: projectDiscovered(result) };
+		const lines = [bulleted(
+			`Discovered ${count} resource${count === 1 ? "" : "s"}.`,
+			result.resources.map((resource) => `${labelled(resource.name, resource.id)}: ${resource.resourceType}`),
+		)];
+
+		if (result.hasMore && result.nextCursor) lines.push(`More are available: call again with cursor ${result.nextCursor}.`);
+
+		return { text: lines.join("\n"), data: projectDiscovered(result) };
 	}
 
 	async resourceList(id: string, opts?: RequestOptions): Promise<ConnectorToolResponse> {
 		const connector = await this.authorizedConnector(id, opts);
 		const result = await this.hydra.connectors.listResources(id, opts);
 
-		const resources = result.resources
-			.filter((resource) => this.allowsResource(resource, connector))
-			.map(projectResource);
+		const visible = result.resources.filter((resource) => this.allowsResource(resource, connector));
 
 		return {
-			text: resources.length === 0
+			text: visible.length === 0
 				? "No configured resources are visible to this connection."
-				: `Visible configured resources: ${resources.length}.`,
-			data: { resources },
+				: bulleted(`Visible configured resources (${visible.length}):`, visible.map((resource) =>
+					`${labelled(resource.displayName, resource.resourceId)}: ${resource.status ?? "unknown status"}`)),
+			data: { resources: visible.map(projectResource) },
 		};
 	}
 

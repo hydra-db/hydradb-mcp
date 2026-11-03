@@ -1136,3 +1136,41 @@ test("a write the API answers without its ID is a tool error, not a success unde
 	assert.doesNotMatch(text(result), /was deleted/);
 	await client.close();
 });
+
+test("text alone carries every id and cursor the next call needs, for clients that drop structuredContent", async () => {
+	const { hydra, sdk } = mockHydra();
+	sdk.connectors.discover = async () => ({
+		provider: "slack",
+		resources: [{ id: "C01", name: "general", resourceType: "channel" }, { id: "C02", name: "", resourceType: "channel" }],
+		hasMore: true,
+		nextCursor: "page-2",
+	});
+	sdk.listProviders = async () => ({
+		provider: "slack",
+		connectorType: "classic",
+		filterableFields: [],
+		indexedObjectTypes: ["message"],
+		searchableFields: [],
+		setupGuide: ["Install the app.", "Invite the bot."],
+	});
+	const client = await connect(hydra);
+	const read = async (name: string, args: Record<string, unknown> = {}) => text(await client.callTool({ name, arguments: args }));
+
+	assert.equal(
+		await read(TOOL_NAMES.CONNECTOR_LIST),
+		"Visible connectors (3):\n- Allowed (allowed): unknown lifecycle, healthy\n- Blocked secret (blocked): unknown lifecycle, failed\n- Org wide (org-wide): unknown lifecycle, checking",
+	);
+	assert.equal(
+		await read(TOOL_NAMES.CONNECTOR_DISCOVER, { connector_id: "allowed" }),
+		"Discovered 2 resources.\n- general (C01): channel\n- C02: channel\nMore are available: call again with cursor page-2.",
+	);
+	assert.equal(
+		await read(TOOL_NAMES.CONNECTOR_RESOURCE_LIST, { connector_id: "allowed" }),
+		"Visible configured resources (3):\n- A (r-a): unknown status\n- B (r-b): unknown status\n- Inherited (r-inherited): unknown status",
+	);
+	assert.equal(
+		await read(TOOL_NAMES.CONNECTOR_PROVIDER_INSPECT, { provider: "slack" }),
+		"Provider slack uses connector type classic. Credential fields are schema metadata only; never put credential values in an MCP call.\nIt syncs: message.\nSetup:\n- Install the app.\n- Invite the bot.",
+	);
+	await client.close();
+});

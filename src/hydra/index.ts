@@ -24,6 +24,7 @@ export type {
 	ConversationTurn,
 	QueryParams,
 	IngestParams,
+	IngestDocument,
 	ListParams,
 	MetadataFilter,
 	MetadataFilterValue,
@@ -91,5 +92,9 @@ export {
 export { unwrap } from "./envelope.js";
 
 export { DEFAULT_BASE_URL, apiKeyId, newRawTransport, sendRaw } from "./transport.js";
+
+export { DeadlineExceeded, markDeadline, parseRetryAfter, withRetries } from "./retry.js";
+
+export type { CallBudget, RetrySafety } from "./retry.js";
 
 export type { RawTransport } from "./transport.js";
