@@ -97,6 +97,26 @@ function textResult(text: string): ToolResult {
 	return { content: [{ type: "text" as const, text }] };
 }
 
+/** Bound warning count and redact/shorten every externally supplied string. */
+function boundWarnings(warnings: ResponseWarning[] | undefined, shorten: (value: string) => string) {
+	const all = warnings ?? [];
+	return {
+		warnings: all.slice(0, 10).map((warning) => ({
+			code: shorten(warning.code),
+			message: shorten(warning.message),
+			...(warning.collections ? { collections: warning.collections.slice(0, 50).map(shorten) } : {}),
+		})),
+		omitted: Math.max(all.length - 10, 0),
+	};
+}
+
+/** Format the bounded warnings identically for query and other reads. */
+function formatWarnings(warnings: ResponseWarning[], omitted: number): string {
+	if (warnings.length === 0) return "";
+	return `\n\nWarnings:\n${warnings.map((warning) => `- ${warning.code}: ${warning.message}${warning.collections?.length ? ` (collections: ${warning.collections.join(", ")})` : ""}`).join("\n")}` +
+		(omitted ? `\n(${omitted} additional warnings omitted)` : "");
+}
+
 /**
  * A result the caller can read OR parse.
  *
@@ -852,11 +872,7 @@ export function createHydraDBServer(
 			signal,
 			onMeta: (meta: ResponseMeta) => {
 				requestId = meta.requestId;
-				omittedWarnings = Math.max((meta.warnings?.length ?? 0) - 10, 0);
-				warnings = (meta.warnings ?? []).slice(0, 10).map((warning) => ({
-					code: briefly(warning.code), message: briefly(warning.message),
-					...(warning.collections ? { collections: warning.collections.slice(0, 50).map(briefly) } : {}),
-				}));
+				({ warnings, omitted: omittedWarnings } = boundWarnings(meta.warnings, briefly));
 			},
 		};
 
@@ -887,9 +903,7 @@ export function createHydraDBServer(
 		// Independent of `detail`, which only decides how much of each chunk is
 		// shown. No outputSchema is declared on this tool, so omitting it is
 		// within spec.
-		const warningText = () => warnings.length
-			? `\n\nWarnings:\n${warnings.map((warning) => `- ${warning.code}: ${warning.message}${warning.collections?.length ? ` (collections: ${warning.collections.join(", ")})` : ""}`).join("\n")}${omittedWarnings ? `\n(${omittedWarnings} additional warnings omitted)` : ""}`
-			: "";
+		const warningText = () => formatWarnings(warnings, omittedWarnings);
 		const queryResult = (text: string, extra: Record<string, unknown> = {}) => {
 			const body = `${text}${scopeWarning ? `\n\nScope warning: ${scopeWarning}` : ""}${warningText()}`;
 			if (args.structured !== true) return textResult(body);
@@ -1131,17 +1145,11 @@ export function createHydraDBServer(
 		let warnings: ResponseWarning[] = [];
 		let omitted = 0;
 		const result = await run((meta) => {
-			omitted = Math.max((meta.warnings?.length ?? 0) - 10, 0);
-			warnings = (meta.warnings ?? []).slice(0, 10).map((warning) => ({
-				code: briefly(warning.code),
-				message: briefly(warning.message),
-				...(warning.collections ? { collections: warning.collections.slice(0, 50).map(briefly) } : {}),
-			}));
+			({ warnings, omitted } = boundWarnings(meta.warnings, briefly));
 		});
 
 		if (warnings.length === 0) return result;
-		const notice = `\n\nWarnings:\n${warnings.map((warning) => `- ${warning.code}: ${warning.message}${warning.collections?.length ? ` (collections: ${warning.collections.join(", ")})` : ""}`).join("\n")}` +
-			(omitted ? `\n(${omitted} additional warnings omitted)` : "");
+		const notice = formatWarnings(warnings, omitted);
 		return {
 			...result,
 			content: result.content.map((part, index) => index === 0 ? { ...part, text: part.text + notice } : part),
