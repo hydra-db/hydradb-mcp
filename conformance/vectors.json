@@ -176,7 +176,7 @@
       "call": { "op": "database.updateMetadataSchema", "args": { "database": "db_test", "add_fields": [{ "name": "region", "data_type": "VARCHAR" }] } },
       "expect": {
         "wrapper_method": "databases.updateMetadataSchema",
-        "sdk": { "method": "updateMetadataSchema", "args_include": { "database": "db_test" } }
+        "sdk": { "method": "updateMetadataSchema", "args_include": { "database": "db_test", "add_fields": [{ "name": "region", "data_type": "VARCHAR" }] } }
       }
     },
     {
