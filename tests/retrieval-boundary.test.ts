@@ -412,6 +412,60 @@ test("large table-only results are bounded and keep feedback identity", async (t
 	assert.deepEqual(table[0]!.rows, rows.slice(0, table[0]!.rows.length));
 });
 
+test("an escaping-heavy oversized row is omitted whole", async (t) => {
+	const oversized = `${"\"\\\n".repeat(5000)}tail`;
+	const { client } = await fixture(t, () => json({
+		...queryData(),
+		tabular_data: [{ columns: ["value"], rows: [[oversized]] }],
+	}));
+	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "q", structured: true } });
+	const body = text(result);
+	const structured = result.structuredContent as Record<string, unknown>;
+	const table = structured.tabular_data as { rows: string[][] }[];
+
+	assert.deepEqual(table[0]!.rows, []);
+	assert.equal(structured.tabular_rows_omitted, 1);
+	assert.equal(structured.tabular_tables_omitted, 0);
+	assert.ok(JSON.stringify(table).length <= 12_000);
+	assert.match(body, /1 rows and 0 tables omitted/);
+});
+
+test("oversized metadata omits a non-array table and reports every lost row", async (t) => {
+	const { client } = await fixture(t, () => json({
+		...queryData(),
+		tabular_data: { title: "m".repeat(13_000), rows: [["one"], ["two"]] },
+	}));
+	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "q", structured: true } });
+	const body = text(result);
+	const structured = result.structuredContent as Record<string, unknown>;
+
+	assert.equal(structured.tabular_data, null);
+	assert.equal(structured.tabular_rows_omitted, 2);
+	assert.equal(structured.tabular_tables_omitted, 1);
+	assert.match(body, /2 rows and 1 tables omitted/);
+});
+
+test("multiple tables share one budget without reordering retained rows", async (t) => {
+	const firstRows = [[`first-${"a".repeat(7000)}`]];
+	const secondRows = [[`second-${"b".repeat(7000)}`]];
+	const { client } = await fixture(t, () => json({
+		...queryData(),
+		tabular_data: [
+			{ columns: ["value"], rows: firstRows },
+			{ columns: ["value"], rows: secondRows },
+		],
+	}));
+	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "q", structured: true } });
+	const structured = result.structuredContent as Record<string, unknown>;
+	const tables = structured.tabular_data as { rows: string[][] }[];
+
+	assert.deepEqual(tables[0]!.rows, firstRows);
+	assert.deepEqual(tables[1]!.rows, []);
+	assert.equal(structured.tabular_rows_omitted, 1);
+	assert.equal(structured.tabular_tables_omitted, 0);
+	assert.ok(JSON.stringify(tables).length <= 12_000);
+});
+
 test("table query bridge retries and propagates cancellation", async () => {
 	let calls = 0;
 	let seenSignal: AbortSignal | null | undefined;
