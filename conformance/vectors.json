@@ -152,6 +152,34 @@
       "aliases": { "cli": ["tenant monitor"] }
     },
     {
+      "id": "database-stats",
+      "call": { "op": "database.stats", "args": { "database": "db_test" } },
+      "expect": {
+        "wrapper_method": "databases.stats",
+        "sdk": { "method": "stats", "args_include": { "database": "db_test" } }
+      }
+    },
+    {
+      "id": "database-metadata-schema-inspect",
+      "$comment": "Renamed away from `get`: the wrapper's inspectMetadataSchema maps to SDK databases.getMetadataSchema.",
+      "optional_for": ["cli", "plugin", "openclaw"],
+      "call": { "op": "database.inspectMetadataSchema", "args": { "database": "db_test" } },
+      "expect": {
+        "wrapper_method": "databases.inspectMetadataSchema",
+        "sdk": { "method": "getMetadataSchema", "args_include": { "database": "db_test" } }
+      }
+    },
+    {
+      "id": "database-metadata-schema-update",
+      "$comment": "Additive only: the request names the fields to add and nothing else.",
+      "optional_for": ["cli", "plugin", "openclaw"],
+      "call": { "op": "database.updateMetadataSchema", "args": { "database": "db_test", "add_fields": [{ "name": "region", "data_type": "VARCHAR" }] } },
+      "expect": {
+        "wrapper_method": "databases.updateMetadataSchema",
+        "sdk": { "method": "updateMetadataSchema", "args_include": { "database": "db_test" } }
+      }
+    },
+    {
       "id": "context-ingestion-status",
       "$comment": "The status disambiguation: per-source indexing progress is `ingestionStatus`, NOT `status`. Wrapper maps to SDK context.status.",
       "call": { "op": "context.ingestionStatus", "args": { "ids": ["src_123"] } },
