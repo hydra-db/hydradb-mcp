@@ -4004,12 +4004,18 @@ export function createHydraDBServer(
 		openWorldHint: true,
 	};
 
-	/** Changes or removes existing values; retrying an identical request has no extra effect. */
+	/** Changes state without removing configuration; repeating it has the same effect. */
 	const idempotentWrite = {
 		readOnlyHint: false,
-		destructiveHint: true,
+		destructiveHint: false,
 		idempotentHint: true,
 		openWorldHint: true,
+	};
+
+	/** Changes or removes existing values; retrying an identical request has no extra effect. */
+	const destructiveIdempotentWrite = {
+		...idempotentWrite,
+		destructiveHint: true,
 	};
 
 	/**
@@ -4176,7 +4182,7 @@ export function createHydraDBServer(
 			// declares exactly the fields and types accepted by runUpdate.
 			return runUpdate(args as Parameters<typeof runUpdate>[0], extra?.signal);
 		},
-		idempotentWrite,
+		destructiveIdempotentWrite,
 		updateOutputSchema,
 	);
 
