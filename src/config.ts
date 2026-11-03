@@ -22,6 +22,14 @@ export interface HydraDBConfig {
 	timeoutSeconds?: number;
 	maxRetries?: number;
 	graph: GraphConfig;
+	connectors: ConnectorConfig;
+}
+
+export interface ConnectorConfig {
+	/** Whether the connector tools are registered at all. */
+	enabled: boolean;
+	/** Browser dashboard origin used for credential completion links. */
+	dashboardUrl: string;
 }
 
 /**
@@ -47,6 +55,8 @@ export interface GraphConfig {
 
 const DEFAULT_GRAPH_COLLECTION = "default";
 
+const DEFAULT_DASHBOARD_URL = "https://app.hydradb.com";
+
 /**
  * Env flags accept the usual spellings, not just `1`.
  *
@@ -58,12 +68,16 @@ const DEFAULT_GRAPH_COLLECTION = "default";
 function flag(raw: string | undefined, fallback: boolean): boolean {
 	if (raw == null || raw.trim() === "") return fallback;
 	const value = raw.trim().toLowerCase();
+
 	if (["1", "true", "yes", "on"].includes(value)) return true;
+
 	if (["0", "false", "no", "off"].includes(value)) return false;
+
 	return fallback;
 }
 
 export type EnvSource = Record<string, string | undefined>;
+
 export type WarnFn = (message: string) => void;
 
 /**
@@ -83,9 +97,11 @@ export const LEGACY_SHARED_COLLECTION = "hydra-db-mcp";
 
 // Process-lifetime dedupe so each deprecated alias warns at most once.
 const warnedOnce = new Set<string>();
+
 function defaultWarn(message: string): void {
 	console.error(message);
 }
+
 function warnOnce(message: string, warn: WarnFn): void {
 	if (warnedOnce.has(message)) return;
 	warnedOnce.add(message);
@@ -106,17 +122,22 @@ export function readEnv(
 	warn: WarnFn = defaultWarn,
 ): string | undefined {
 	const canonicalValue = env[canonical];
+
 	if (canonicalValue != null && canonicalValue !== "") {
 		return canonicalValue;
 	}
+
 	const deprecatedValue = env[deprecated];
+
 	if (deprecatedValue != null && deprecatedValue !== "") {
 		warnOnce(
 			`[hydradb-mcp] Environment variable ${deprecated} is deprecated; use ${canonical} instead.`,
 			warn,
 		);
+
 		return deprecatedValue;
 	}
+
 	return undefined;
 }
 
@@ -125,6 +146,7 @@ export function resolveConfig(
 	warn: WarnFn = defaultWarn,
 ): HydraDBConfig {
 	const apiKey = readEnv(env, "HYDRADB_API_KEY", "HYDRA_DB_API_KEY", warn);
+
 	if (!apiKey) {
 		throw new Error(
 			"HYDRADB_API_KEY (or its deprecated alias HYDRA_DB_API_KEY) environment variable is required",
@@ -132,6 +154,7 @@ export function resolveConfig(
 	}
 
 	const database = readEnv(env, "HYDRADB_DATABASE", "HYDRA_DB_TENANT_ID", warn);
+
 	if (!database) {
 		throw new Error(
 			"HYDRADB_DATABASE (or its deprecated alias HYDRA_DB_TENANT_ID) environment variable is required",
@@ -162,7 +185,53 @@ export function resolveConfig(
 		...(timeoutSeconds != null ? { timeoutSeconds } : {}),
 		...(maxRetries != null ? { maxRetries } : {}),
 		graph: resolveGraphConfig(env, database),
+		connectors: resolveConnectorConfig(env, warn),
 	};
+}
+
+/**
+ * An absolute http(s) URL, or undefined. The one rule for URL settings: OAuth applies it to the
+ * issuer and public URL, and connector links accept exactly the issuers OAuth accepts.
+ */
+export function httpUrl(value: string | undefined): URL | undefined {
+	try {
+		const url = new URL(value?.trim() ?? "");
+
+		return url.protocol === "http:" || url.protocol === "https:" ? url : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/** Resolve the connector-family gate without requiring an API key. */
+export function resolveConnectorConfig(
+	env: EnvSource = process.env,
+	warn: WarnFn = defaultWarn,
+): ConnectorConfig {
+	return {
+		enabled: flag(env.HYDRADB_MCP_CONNECTOR_TOOLS, true),
+		dashboardUrl: dashboardOrigin(env.HYDRADB_OAUTH_ISSUER, warn),
+	};
+}
+
+/**
+ * The dashboard origin for connector completion links. The OAuth issuer IS the dashboard, so
+ * hosted and BYOC deployments already name it, and an unset one means the hosted dashboard. An
+ * issuer OAuth would reject also falls back, with a warning, so a BYOC typo is never silent.
+ */
+function dashboardOrigin(issuer: string | undefined, warn: WarnFn): string {
+	if (!issuer?.trim()) return DEFAULT_DASHBOARD_URL;
+
+	const url = httpUrl(issuer);
+
+	if (url) return url.origin;
+
+	warnOnce(
+		`HYDRADB_OAUTH_ISSUER "${issuer.trim()}" is not an absolute http(s) URL; connector links use ${DEFAULT_DASHBOARD_URL}.`,
+		warn,
+	);
+
+	return DEFAULT_DASHBOARD_URL;
 }
 
 /**
@@ -195,10 +264,12 @@ export function resolveGraphConfig(
  */
 export function positiveInt(raw: string | undefined): number | undefined {
 	const value = Number(raw);
+
 	return raw != null && Number.isInteger(value) && value > 0 ? value : undefined;
 }
 
 export function nonNegativeInt(raw: string | undefined): number | undefined {
 	const value = Number(raw);
+
 	return raw != null && Number.isInteger(value) && value >= 0 ? value : undefined;
 }

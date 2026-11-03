@@ -23,6 +23,7 @@
 
 import { createHash } from "node:crypto";
 
+import { httpUrl } from "./config.js";
 import { logger } from "./logger.js";
 
 /** Access tokens the dashboard issues carry this prefix; keys carry `sk_`. */
@@ -111,7 +112,7 @@ export function resolveOAuthConfig(
 		["HYDRADB_OAUTH_ISSUER", issuer],
 		["HYDRADB_MCP_PUBLIC_URL", resource],
 	] as const) {
-		if (!/^https?:\/\//i.test(value!)) {
+		if (!httpUrl(value)) {
 			warn(`WARNING: ${name} must be an absolute http(s) URL; OAuth stays OFF.`);
 			return null;
 		}

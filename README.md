@@ -24,6 +24,59 @@ Run it two ways, same tools either way:
 Ids flow between these: `hydradb_query`, `hydradb_list` and `hydradb_subgraph` emit them;
 `hydradb_inspect`, `hydradb_delete`, `hydradb_status`, `hydradb_subgraph` and `hydradb_relations` accept them.
 
+### Connector tools
+
+| Tool | What it does |
+|---|---|
+| `hydradb_connector_provider_list` | List the connector providers HydraDB supports |
+| `hydradb_connector_provider_inspect` | Read one provider's setup guide and credential field schema |
+| `hydradb_connector_list` | List connected sources, optionally with health |
+| `hydradb_connector_inspect` | Read one connector's configuration and lifecycle |
+| `hydradb_connector_health` | Explain connector and resource sync health in plain words |
+| `hydradb_connector_connect` | Return a secure dashboard link for connecting a provider |
+| `hydradb_connector_reconnect` | Return a secure dashboard link for replacing a connector's credentials |
+| `hydradb_connector_update` | Update noncredential connector settings |
+| `hydradb_connector_delete` | Permanently delete a connector |
+| `hydradb_connector_sync` | Start a connector sync |
+| `hydradb_connector_pause` | Pause connector syncing |
+| `hydradb_connector_resume` | Resume connector syncing |
+| `hydradb_connector_discover` | Discover resources available upstream in a connected provider account |
+| `hydradb_connector_resource_list` | List resources already added to a connector |
+| `hydradb_connector_resource_add` | Add one or more discovered resources and start syncing them |
+| `hydradb_connector_resource_update` | Replace one resource's ACL or instructions |
+| `hydradb_connector_resource_delete` | Permanently remove one resource from a connector |
+
+The names follow the connector section of `CONTRACT.md`: noun first, verb last, the same
+words the CLI (`hydradb connector resource add`) and the plugin
+(`/hydradb:connector-resource-add`) use.
+
+Connector tools are on by default. Set `HYDRADB_MCP_CONNECTOR_TOOLS=0` to
+withhold the whole family. A confined OAuth connection sees only connectors
+assigned to an allowed database and collection. Connectors with no destination stay
+hidden, and every by-ID read checks the connector before reading status,
+discovery, or resources. Resource listings also check each resource's
+`database_override` and `collection_override`, then inherit the connector destination.
+
+Connector endpoints cannot enforce database or collection grants atomically with a
+mutation. Write tools therefore fail closed for every database- or collection-confined
+OAuth connection and send no connector API request. Use an organization-wide
+connection for connector mutations. Connector deletion, connector settings, resource
+add, resource updates, and resource deletion are marked destructive; resource add is
+also non-idempotent because it can start time-relative work. Sync, pause, and resume
+are non-destructive writes. Resource add updates the submitted resources; unlisted
+resources remain unchanged.
+
+The provider-detail tool returns credential **schema metadata**, not credential
+values. Do not paste provider credentials into chat or any MCP tool argument.
+Defaults, examples, constants, and unknown schema extensions are removed before
+the schema reaches model context. `hydradb_connector_connect` accepts only a
+provider and returns `/connectors?connect=<provider>`. `hydradb_connector_reconnect`
+authorizes the connector and returns `/connectors?open=<connector_id>`; open the
+drawer and select **Reconnect**.
+Both flows set `completed: false` because the dashboard, not MCP, performs the
+credential-bearing request. `HYDRADB_OAUTH_ISSUER` selects the dashboard origin
+for both completion links and defaults to `https://app.hydradb.com`.
+
 ### Graph tools (Cypher)
 
 Hydra DB also runs **property graphs you model and own end to end**, queried in [Cypher](https://docs.hydradb.com/essentials/v2/graph-collections-byog). This is a different product surface from the memory and knowledge above, and nothing crosses between them: `hydradb_query` cannot see graph data, and `hydradb_graph_query` cannot see memories.
@@ -356,6 +409,8 @@ Checks whether ingested sources have finished indexing.
 | `HYDRADB_GRAPH_DATABASE` | Default graph database for the Cypher tools | `HYDRADB_DATABASE` |
 | `HYDRADB_GRAPH_COLLECTION` | Default graph collection | `default` |
 | `HYDRADB_MCP_GRAPH_TOOLS` | Register the graph tools (`0` withholds them) | *on* |
+| `HYDRADB_MCP_CONNECTOR_TOOLS` | Register the connector tools (`0` withholds them) | *on* |
+| `HYDRADB_OAUTH_ISSUER` | Authorization server and connector-completion dashboard origin | `https://app.hydradb.com` for connector links |
 
 #### Timeouts, retries and cancellation
 
@@ -551,7 +606,7 @@ With three extra variables the hosted server also speaks the MCP authorization f
 
 | Variable | Description |
 | --- | --- |
-| `HYDRADB_OAUTH_ISSUER` | The authorization server, e.g. `https://app.hydradb.com`. Must match its `NEXTAUTH_URL` exactly |
+| `HYDRADB_OAUTH_ISSUER` | Authorization server and connector-completion dashboard origin, e.g. `https://app.hydradb.com`. Must match its `NEXTAUTH_URL` exactly for OAuth |
 | `HYDRADB_MCP_PUBLIC_URL` | This server's public URL as clients see it, e.g. `https://mcp.hydradb.com`. Tokens minted for any other audience are refused |
 | `HYDRADB_OAUTH_INTROSPECTION_SECRET` | Shared secret the issuer's `/api/oauth/introspect` expects; must equal the dashboard's `MCP_INTROSPECTION_SECRET` |
 

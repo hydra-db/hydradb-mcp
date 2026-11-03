@@ -6,17 +6,19 @@ import { z } from "zod";
 
 import { jsonValue, toAddMemoryResponse, toMemoryList, toRelationList, toSourceList } from "./adapters.js";
 import type { JsonValue, ListedFields, PageInfo, SourceListItem } from "./adapters.js";
-import { resolveConfig, resolveGraphConfig } from "./config.js";
-import type { GraphConfig } from "./config.js";
+import { resolveConfig, resolveConnectorConfig, resolveGraphConfig } from "./config.js";
+import type { ConnectorConfig, GraphConfig } from "./config.js";
+import { type ConnectorToolResponse, ConnectorTools } from "./connectors.js";
 import { renderRecalledContext } from "./context.js";
 import { COLLECTION_PATTERN, MAX_BODY_BYTES, renderRows } from "./cypher.js";
 import { extname } from "node:path";
 
 import { decodeInline, type IngestFile, readLocal } from "./files.js";
-import { SERVER_INSTRUCTIONS, TOOL_DESCRIPTIONS } from "./descriptions.js";
+import { CONNECTOR_ID_HELP, SERVER_INSTRUCTIONS, TOOL_DESCRIPTIONS } from "./descriptions.js";
 import {
 	DeadlineExceeded,
 	HydraDB,
+	HydraWrapperError,
 	markDeadline,
 	assertCollectionAllowed,
 	assertDatabaseAllowed,
@@ -24,7 +26,7 @@ import {
 } from "./hydra/index.js";
 import type { ContextKind, MetadataFilter, QueryKind, QueryParams } from "./hydra/index.js";
 import { logger } from "./logger.js";
-import { ALIAS_REPLACEMENTS, DEPRECATED_TOOL_NAMES, TOOL_NAMES } from "./tool-names.js";
+import { ALIAS_REPLACEMENTS, CONNECTOR_TOOL_NAMES, DEPRECATED_TOOL_NAMES, TOOL_NAMES } from "./tool-names.js";
 import type { MemoryResultItem } from "./types.js";
 import { SERVER_VERSION } from "./version.js";
 
@@ -42,6 +44,10 @@ type ToolResult = {
 	structuredContent?: Record<string, unknown>;
 	isError?: boolean;
 };
+
+interface ToolInputFields {
+	[name: string]: z.ZodTypeAny;
+}
 
 /**
  * A usable title for an entry the caller did not name.
@@ -627,10 +633,12 @@ export function createHydraDBServer(
 
 	let hydra: HydraDB;
 	let graphConfig: GraphConfig;
+	let connectorConfig: ConnectorConfig;
 
 	if (hydraOverride) {
 		hydra = hydraOverride;
 		graphConfig = { ...resolveGraphConfig(), ...graphOverride };
+		connectorConfig = resolveConnectorConfig();
 	} else {
 		const config = resolveConfig();
 		hydra = new HydraDB({
@@ -644,10 +652,13 @@ export function createHydraDBServer(
 			...(config.maxRetries != null ? { maxRetries: config.maxRetries } : {}),
 		});
 		graphConfig = { ...config.graph, ...graphOverride };
+		connectorConfig = config.connectors;
 		logger.info(
 			`Hydra DB connected (database=${config.database}, collection=${config.collection})`,
 		);
 	}
+
+	const connectorTools = new ConnectorTools(hydra, connectorConfig.dashboardUrl);
 
 	// --- Handlers (shared by canonical tools and their deprecated aliases) ---
 
@@ -772,6 +783,7 @@ export function createHydraDBServer(
 			// Listing is discovery: confined like it, before anything is sent.
 			assertDatabaseAllowed(database, hydra.allowedDatabases);
 			const names = await collectionNamesBounded(database, signal);
+
 			if (names == null) scopeWarning = "Collection discovery failed; only the workspace default was searched. Named collections may contain additional results.";
 			const allowed = hydra.allowedCollections;
 			const usable = (names ?? []).filter((n) => !allowed || allowed.includes(n));
@@ -849,10 +861,13 @@ export function createHydraDBServer(
 		const searchedCollections = scopeCollections != null
 			? Array.isArray(scopeCollections) ? scopeCollections : Object.keys(scopeCollections)
 			: undefined;
+
 		const resolvedScope = searchedCollections
 			? { database, collections: searchedCollections }
 			: singleScope({ database, collection: scopeCollection });
+
 		const compact = (args.detail ?? "compact") === "compact";
+
 		// Text only unless the caller asks for `structured: true`. The default
 		// consumer is a model reading the text, and everything `structuredContent`
 		// carries is already in it — ids and collection per chunk, the resolved
@@ -863,7 +878,9 @@ export function createHydraDBServer(
 		// within spec.
 		const queryResult = (text: string, extra: Record<string, unknown> = {}) => {
 			const body = scopeWarning ? `${text}\n\nScope warning: ${scopeWarning}` : text;
+
 			if (args.structured !== true) return textResult(body);
+
 			return structuredResult(body, {
 				resolved_scope: resolvedScope, ...(requestId ? { request_id: requestId } : {}), ...extra,
 				...(scopeWarning ? { scope_warning: scopeWarning } : {}),
@@ -988,17 +1005,22 @@ export function createHydraDBServer(
 		const scopeLine = scopeText(resolvedScope);
 		const headerAllowance = 120 + scopeLine.length + (scopeWarning?.length ?? 0) + 20;
 		const sourceRefs = new Map<string, Record<string, unknown>>();
+
 		const singleCollection = "collection" in resolvedScope
 			? resolvedScope.collection
 			: searchedCollections?.length === 1 ? searchedCollections[0] : undefined;
+
 		const scopedChunks = (res.chunks ?? []).map((chunk) => {
 			const collection = chunk.collection || singleCollection;
+
 			// A multi-collection result needs per-source provenance; an id alone
 			// is not unique across partitions. Never remember a shared last scope.
 			const scopeKnown = searchedCollections
 				? typeof collection === "string" && searchedCollections.includes(collection)
 				: "collection" in resolvedScope && collection === resolvedScope.collection;
+
 			const followScope = { database, ...(collection != null ? { collection } : {}), ...(args.acl != null ? { acl: args.acl } : {}) };
+
 			const ref = {
 				id: chunk.id, collection: collection ?? null,
 				...(chunk.sourceTitle ? { title: chunk.sourceTitle } : {}),
@@ -1007,7 +1029,9 @@ export function createHydraDBServer(
 					...(kind !== "all" ? { list_args: { kind, ids: [chunk.id], ...followScope } } : {}),
 				} : { scope_unresolved: true }),
 			};
+
 			sourceRefs.set(JSON.stringify([collection, chunk.id]), ref);
+
 			return { ...chunk, ...(collection != null ? { collection } : {}) };
 		});
 
@@ -1413,6 +1437,7 @@ export function createHydraDBServer(
 			// content, including this one — a caller branching on `items` should not
 			// have to special-case the empty result.
 			const filtered = hasEntries(args.metadata) || hasEntries(args.additional_metadata);
+
 			return structuredResult(
 				args.page != null && args.page > 1
 					? `No memories on page ${args.page}.`
@@ -1501,9 +1526,13 @@ export function createHydraDBServer(
 		logger.debug(TOOL_NAMES.LIST);
 
 		const sourceFields: Record<string, string> = {};
+
 		if (args.external_id != null) sourceFields.app_external_id = args.external_id;
+
 		if (args.parent_external_id != null) sourceFields.app_parent_id = args.parent_external_id;
+
 		if (args.url != null) sourceFields.url = args.url;
+
 		if (args.provider != null) sourceFields.app_provider = args.provider;
 
 		const raw = await hydra.context.list({
@@ -1529,6 +1558,7 @@ export function createHydraDBServer(
 
 		if (sources.length === 0) {
 			const collection = args.collection?.trim() || hydra.collection;
+
 			const lookupScope = `database ${JSON.stringify(args.database?.trim() || hydra.database)}, ` +
 				(collection == null ? "workspace default" : `collection ${JSON.stringify(collection)}`);
 
@@ -1821,6 +1851,7 @@ export function createHydraDBServer(
 		const start = Math.max(0, offset ?? 0);
 		const budget = Math.min(limit ?? INSPECT_CHAR_BUDGET, INSPECT_CHAR_BUDGET);
 		const total = res.content.length;
+
 		if (start > total) throw new Error(`Inspect offset ${start} exceeds source length ${total}; restart at offset 0 if the source changed.`);
 
 		if (start === 0 && total <= budget) return res.content;
@@ -2077,9 +2108,11 @@ export function createHydraDBServer(
 		const end = content == null ? offset : Math.min(offset + (args.limit ?? INSPECT_CHAR_BUDGET), content.length);
 		const hasMoreContent = content != null && end < content.length;
 		const contentHash = content != null ? createHash("sha256").update(content).digest("hex") : undefined;
+
 		if (contentHash != null && content != null && (offset > 0 || end < content.length)) {
 			parts.push(`Content SHA-256: ${contentHash}. Each slice re-fetches the source; restart at offset 0 if this changes.`);
 		}
+
 		return structuredResult(parts.join("\n\n"), {
 			id: args.source_id, resolved_scope: resolvedScope,
 			...(mode !== "content" && res.presignedUrl ? { download_url: res.presignedUrl } : {}),
@@ -2171,6 +2204,7 @@ export function createHydraDBServer(
 		// message must name the assumption instead of asserting the id is wrong.
 		const otherKind = kind === "memory" ? "knowledge" : "memory";
 		const otherNoun = otherKind === "knowledge" ? "knowledge source" : "memory";
+
 		const assumedHint = kindAssumed
 			? ` \`kind\` was not given, so this looked in ${kind} only. If ` +
 				`${ids.length > 1 ? "these ids are" : "this id is"} a ${otherNoun}, ` +
@@ -3008,6 +3042,51 @@ export function createHydraDBServer(
 		};
 	}
 
+	async function hideConnectorFailure(run: () => Promise<ToolResult>, signal: AbortSignal): Promise<ToolResult> {
+		try {
+			return await run();
+		} catch (error) {
+			// Only an API failure can carry provider text, so only it is rewritten. Input and
+			// scope errors are already safe, and say what to fix, so they pass through.
+			if (!(error instanceof HydraWrapperError)) throw error;
+
+			// Stopped here by a cancel or the call deadline, not answered by HydraDB: say which.
+			if (error.status == null && signal.aborted) {
+				const stopped = signal.reason instanceof DeadlineExceeded
+					? `The connector request got ${signal.reason.message}.`
+					: "The connector request was cancelled.";
+
+				throw new Error(`${stopped} A change may or may not have applied; check connector health before repeating it.`);
+			}
+
+			if (error.status === 400 || error.status === 422) {
+				throw new Error("HydraDB rejected the request as invalid. Change the arguments; the same call will fail again.");
+			}
+
+			if (error.status === 401 || error.status === 403) {
+				throw new Error("HydraDB refused this connection's credentials for the request. Reconnecting the connector will not change that.");
+			}
+
+			if (error.status === 404) {
+				throw new Error("The connector or resource was not found.");
+			}
+
+			if (error.status === 409) {
+				throw new Error("The connector state changed before this request completed. Read it again before retrying.");
+			}
+
+			if (error.status === 429) {
+				throw new Error("HydraDB rate-limited the connector request. Retry later.");
+			}
+
+			if (error.status != null && error.status >= 500) {
+				throw new Error("The connector service is temporarily unavailable. Retry later.");
+			}
+
+			throw new Error("The connector request failed. Review connector health and retry.");
+		}
+	}
+
 	/**
 	 * Run one tool call under one deadline, and make it cancellable.
 	 *
@@ -3064,7 +3143,7 @@ export function createHydraDBServer(
 
 	function register(
 		name: keyof typeof TOOL_DESCRIPTIONS,
-		inputSchema: Record<string, unknown>,
+		inputSchema: ToolInputFields | z.ZodType,
 		handler: (
 			args: Record<string, unknown>,
 			extra?: { signal?: AbortSignal },
@@ -3083,7 +3162,15 @@ export function createHydraDBServer(
 		const counted = (
 			args: Record<string, unknown>,
 			extra?: ToolExtra,
-		) => trackInFlight(() => redactFailure(() => withCallBudget(extra, (signal) => handler(args, { ...extra, signal }))));
+		) => {
+			const isConnector = CONNECTOR_TOOL_NAMES.some((toolName) => toolName === name);
+
+			return trackInFlight(() => redactFailure(() => withCallBudget(extra, (signal) => {
+				const run = () => handler(args, { ...extra, signal });
+
+				return isConnector ? hideConnectorFailure(run, signal) : run();
+			})));
+		};
 
 		const wrapped = isDeprecated
 			? (args: Record<string, unknown>, extra?: { signal?: AbortSignal }) => {
@@ -3726,6 +3813,14 @@ export function createHydraDBServer(
 		openWorldHint: true,
 	};
 
+	/** Changes state without removing configuration; repeating it has the same effect. */
+	const idempotentWrite = {
+		readOnlyHint: false,
+		destructiveHint: false,
+		idempotentHint: true,
+		openWorldHint: true,
+	};
+
 	/**
 	 * Writes that can replace what is stored, and are not safe to repeat:
 	 * ingest overwrites an existing document with the same source id (and
@@ -3744,6 +3839,14 @@ export function createHydraDBServer(
 		readOnlyHint: false,
 		destructiveHint: true,
 		idempotentHint: true,
+		openWorldHint: true,
+	};
+
+	/** Can overwrite configuration and start time-relative work on every call. */
+	const destructiveNonIdempotent = {
+		readOnlyHint: false,
+		destructiveHint: true,
+		idempotentHint: false,
 		openWorldHint: true,
 	};
 
@@ -3941,12 +4044,15 @@ export function createHydraDBServer(
 				a.url != null ? "url" : null,
 				a.provider != null ? "provider" : null,
 			].filter((s): s is string => s != null);
+
 			if (a.parent_external_id != null && a.provider == null) {
 				throw new Error(`${TOOL_NAMES.LIST}: parent_external_id requires provider; parent IDs are not unique across providers.`);
 			}
+
 			if (a.parent_external_id != null && a.connector_id == null) {
 				throw new Error(`${TOOL_NAMES.LIST}: parent_external_id requires connector_id; provider alone does not identify a site/account. Resolve the parent with external_id first and copy its stored connector_id; never guess it.`);
 			}
+
 			if (a.kind !== "knowledge" && sourceSelectors.length > 0) {
 				throw new Error(
 					`${TOOL_NAMES.LIST}: ${sourceSelectors.join(", ")} ` +
@@ -4177,6 +4283,225 @@ export function createHydraDBServer(
 			deleted: z.boolean(),
 		},
 	);
+
+	// --- Connector tools (ENG-3341) ---
+	//
+	// One call per tool: name, annotations, input fields, and the ConnectorTools method it runs.
+	// Inputs are snake_case like every tool here; each call renames them for the camelCase wrapper.
+	if (connectorConfig.enabled) {
+		const connectorTool = <Fields extends ToolInputFields>(
+			name: (typeof CONNECTOR_TOOL_NAMES)[number],
+			annotations: typeof readOnly,
+			fields: Fields,
+			run: (input: z.output<z.ZodObject<Fields, "strict">>, signal?: AbortSignal) => Promise<ConnectorToolResponse>,
+			rule?: { check: (input: z.output<z.ZodObject<Fields, "strict">>) => boolean; message: string },
+		) => {
+			const schema = z.object(fields).strict();
+			const parser = rule ? schema.refine(rule.check, { message: rule.message }) : schema;
+
+			register(
+				name,
+				schema,
+				async (args, extra) => {
+					const input = parser.safeParse(args);
+
+					// The rule's own words, not zod's issue dump, so the model knows what to change.
+					if (!input.success) throw new Error(input.error.issues.map((issue) => issue.message).join(" "));
+
+					const result = await run(input.data, extra?.signal);
+
+					return structuredResult(result.text, result.data);
+				},
+				annotations,
+			);
+		};
+
+		const id = (help: string) => z.string().trim().min(1).describe(help);
+		const byConnector = { connector_id: id(CONNECTOR_ID_HELP) };
+
+		const safeJsonKey = z
+			.string()
+			.min(1)
+			.regex(
+				/^(?!.*(?:token|secret|password|passphrase|credential|authorization|api[_-]?key|(?:private|ssh|signing|access)[_-]?key|keypair|headers?|body)).+$/i,
+				"Credential-like keys are not allowed.",
+			);
+
+		const safeJsonScalar = z.union([z.string(), z.number(), z.boolean(), z.null()]);
+
+		const safeJsonObject = z.record(
+			safeJsonKey,
+			z.union([safeJsonScalar, z.array(safeJsonScalar), z.record(safeJsonKey, safeJsonScalar)]),
+		);
+
+		const list = TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_LIST].params;
+		const update = TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_UPDATE].params;
+		const discover = TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_DISCOVER].params;
+		const add = TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_RESOURCE_ADD].params;
+		const change = TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_RESOURCE_UPDATE].params;
+
+		const resourceAddItem = z
+			.object({
+				resource_id: id(add.resource_id),
+				resource_type: z.string().trim().min(1).optional().describe(add.resource_type),
+				display_name: z.string().optional().describe(add.display_name),
+				database_override: z.string().trim().min(1).optional().describe(add.database_override),
+				collection_override: z.string().trim().min(1).optional().describe(add.collection_override),
+				acl: z.array(z.string().min(1)).optional().describe(add.acl),
+				custom_instructions: z.string().max(4000).optional().describe(add.custom_instructions),
+				metadata: safeJsonObject.optional().describe(add.metadata),
+				additional_metadata: safeJsonObject.optional().describe(add.additional_metadata),
+				sync_mode: z.enum(["rescan", "new_only"]).optional().describe(add.sync_mode),
+			})
+			.strict();
+
+		const tableConfig = z
+			.object({
+				table: z.string().trim().min(1).describe("BigQuery table identifier."),
+				replication_key: z.string().trim().min(1).optional()
+					.describe("Column used to select new or changed rows. Do not combine with change_history."),
+				change_history: z.enum(["appends", "changes"]).optional()
+					.describe("Replication behavior when no replication_key exists. Do not combine with replication_key."),
+			})
+			.strict()
+			.refine(
+				(input) => Number(input.replication_key !== undefined) + Number(input.change_history !== undefined) === 1,
+				{ message: "Set exactly one of replication_key or change_history." },
+			);
+
+		connectorTool(TOOL_NAMES.CONNECTOR_PROVIDER_LIST, readOnly, {}, (_, signal) => connectorTools.providerList({ signal }));
+
+		connectorTool(
+			TOOL_NAMES.CONNECTOR_PROVIDER_INSPECT,
+			readOnly,
+			{ provider: id(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_PROVIDER_INSPECT].params.provider) },
+			(input, signal) => connectorTools.providerInspect(input.provider, { signal }),
+		);
+
+		connectorTool(
+			TOOL_NAMES.CONNECTOR_LIST,
+			readOnly,
+			{
+				provider: z.string().trim().min(1).optional().describe(list.provider),
+				include_health: z.boolean().optional().describe(list.include_health),
+			},
+			(input, signal) => connectorTools.list({ provider: input.provider, includeHealth: input.include_health }, { signal }),
+		);
+
+		connectorTool(TOOL_NAMES.CONNECTOR_INSPECT, readOnly, byConnector, (input, signal) => connectorTools.inspect(input.connector_id, { signal }));
+		connectorTool(TOOL_NAMES.CONNECTOR_HEALTH, readOnly, byConnector, (input, signal) => connectorTools.health(input.connector_id, { signal }));
+
+		connectorTool(
+			TOOL_NAMES.CONNECTOR_CONNECT,
+			idempotentWrite,
+			{ provider: z.string().trim().min(1).max(100).describe(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_CONNECT].params.provider) },
+			(input) => connectorTools.connect(input.provider),
+		);
+
+		connectorTool(TOOL_NAMES.CONNECTOR_RECONNECT, idempotentWrite, byConnector, (input, signal) => connectorTools.reconnect(input.connector_id, { signal }));
+
+		connectorTool(
+			TOOL_NAMES.CONNECTOR_UPDATE,
+			destructive,
+			{
+				...byConnector,
+				custom_instructions: z.string().max(4000).optional().describe(update.custom_instructions),
+				sync_interval_seconds: z.number().int().min(0).optional().describe(update.sync_interval_seconds),
+			},
+			(input, signal) =>
+				connectorTools.update(
+					{ connectorId: input.connector_id, customInstructions: input.custom_instructions, syncIntervalSeconds: input.sync_interval_seconds },
+					{ signal },
+				),
+			{
+				check: (input) => input.custom_instructions !== undefined || input.sync_interval_seconds !== undefined,
+				message: "Set custom_instructions, sync_interval_seconds, or both.",
+			},
+		);
+
+		connectorTool(TOOL_NAMES.CONNECTOR_DELETE, destructive, byConnector, (input, signal) => connectorTools.delete(input.connector_id, { signal }));
+		connectorTool(TOOL_NAMES.CONNECTOR_SYNC, additiveWrite, byConnector, (input, signal) => connectorTools.sync(input.connector_id, { signal }));
+		connectorTool(TOOL_NAMES.CONNECTOR_PAUSE, idempotentWrite, byConnector, (input, signal) => connectorTools.pause(input.connector_id, { signal }));
+		connectorTool(TOOL_NAMES.CONNECTOR_RESUME, idempotentWrite, byConnector, (input, signal) => connectorTools.resume(input.connector_id, { signal }));
+
+		connectorTool(
+			TOOL_NAMES.CONNECTOR_DISCOVER,
+			readOnly,
+			{
+				...byConnector,
+				cursor: z.string().min(1).optional().describe(discover.cursor),
+				limit: z.number().int().min(1).max(100).optional().describe(discover.limit),
+			},
+			(input, signal) => connectorTools.discover({ connectorId: input.connector_id, cursor: input.cursor, limit: input.limit }, { signal }),
+		);
+
+		connectorTool(TOOL_NAMES.CONNECTOR_RESOURCE_LIST, readOnly, byConnector, (input, signal) => connectorTools.resourceList(input.connector_id, { signal }));
+
+		// One way to attach resources (CONTRACT.md §3 Connectors): a list, sent to the configure
+		// endpoint, which adds them and starts syncing. Rows come from discover; a resource that
+		// is already added is changed with resource_update, so extra resource_list fields are refused.
+		connectorTool(
+			TOOL_NAMES.CONNECTOR_RESOURCE_ADD,
+			destructiveNonIdempotent,
+			{
+				...byConnector,
+				resources: z.array(resourceAddItem).min(1).describe(add.resources),
+				lookback_days: z.number().int().min(0).optional().describe(add.lookback_days),
+				full_visibility_roles: z.array(z.string().min(1)).optional().describe(add.full_visibility_roles),
+				table_configs: z.array(tableConfig).optional().describe(add.table_configs),
+			},
+			(input, signal) =>
+				connectorTools.resourceAdd(
+					{
+						connectorId: input.connector_id,
+						resources: input.resources.map((resource) => ({
+							resourceId: resource.resource_id,
+							resourceType: resource.resource_type,
+							name: resource.display_name,
+							database: resource.database_override,
+							collection: resource.collection_override,
+							acl: resource.acl,
+							customInstructions: resource.custom_instructions,
+							metadata: resource.metadata,
+							additionalMetadata: resource.additional_metadata,
+							syncMode: resource.sync_mode,
+						})),
+						lookbackDays: input.lookback_days,
+						fullVisibilityRoles: input.full_visibility_roles,
+						tableConfigs: input.table_configs?.map((table) => ({
+							table: table.table,
+							replicationKey: table.replication_key,
+							changeHistory: table.change_history,
+						})),
+					},
+					{ signal },
+				),
+		);
+
+		connectorTool(
+			TOOL_NAMES.CONNECTOR_RESOURCE_UPDATE,
+			destructive,
+			{
+				...byConnector,
+				resource_id: id(change.resource_id),
+				acl: z.array(z.string().min(1)).optional().describe(change.acl),
+				custom_instructions: z.string().max(4000).optional().describe(change.custom_instructions),
+			},
+			(input, signal) =>
+				connectorTools.resourceUpdate(
+					{ connectorId: input.connector_id, resourceId: input.resource_id, acl: input.acl, customInstructions: input.custom_instructions },
+					{ signal },
+				),
+			{ check: (input) => input.acl !== undefined || input.custom_instructions !== undefined, message: "Set acl or custom_instructions." },
+		);
+
+		connectorTool(
+			TOOL_NAMES.CONNECTOR_RESOURCE_DELETE,
+			destructive,
+			{ ...byConnector, resource_id: id(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_RESOURCE_DELETE].params.resource_id) },
+			(input, signal) => connectorTools.resourceDelete(input.connector_id, input.resource_id, { signal }),
+		);
+	}
 
 	// --- BYOG graph tools (PRO-1681) ---
 	//

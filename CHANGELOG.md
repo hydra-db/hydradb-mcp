@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — dashboard connector completion
+
+`hydradb_connector_connect` accepts only a provider and returns a safe dashboard
+completion link. `hydradb_connector_reconnect` authorizes the connector and returns
+its dashboard drawer link. Neither flow
+accepts or returns provider credentials, and both report `completed: false` until the
+dashboard finishes the credential-bearing request. `HYDRADB_OAUTH_ISSUER` selects the
+dashboard origin and defaults to `https://app.hydradb.com`.
+
+### Added — credential-free connector write tools
+
+Eight tools now update noncredential connector settings, start syncs, pause and
+resume connectors, add and manage resources, and delete connectors.
+Database- and collection-confined connections fail closed before any mutation and
+send no connector API request because connector endpoints cannot enforce those grants
+atomically. Destructive annotations cover connector settings, resource add, resource
+ACL/instruction changes, and deletions; resource add is non-idempotent. No write schema
+accepts provider credentials, including credential-like metadata and private-key fields.
+
+### Added — connector read tools
+
+Seven read-only tools now cover the provider list, one provider's metadata,
+connector lists, connector details, plain-language sync health, resource discovery,
+and added resources. The 17 connector tool names follow the connector section of
+`CONTRACT.md`. `HYDRADB_MCP_CONNECTOR_TOOLS=0` withholds the family; it
+is enabled by default.
+
+Database-confined OAuth connections filter connector lists, hide org-wide
+connectors with no database, authorize every by-ID read, and filter resources
+by their effective destination database. Provider credential schemas are
+metadata only. Defaults, examples, constants, and unknown schema extensions
+are removed before the schema enters model context.
+
 ### Added — `hydradb_ingest` takes files
 
 `hydradb_ingest` has a new `file` argument for PDF, Word, PowerPoint,
