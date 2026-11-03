@@ -11,8 +11,19 @@ import type { ConnectorConfig, GraphConfig } from "./config.js";
 import { type ConnectorToolResponse, ConnectorTools } from "./connectors.js";
 import { renderRecalledContext } from "./context.js";
 import { COLLECTION_PATTERN, MAX_BODY_BYTES, renderRows } from "./cypher.js";
+import { extname } from "node:path";
+
+import { decodeInline, type IngestFile, readLocal } from "./files.js";
 import { CONNECTOR_ID_HELP, SERVER_INSTRUCTIONS, TOOL_DESCRIPTIONS } from "./descriptions.js";
-import { HydraDB, HydraWrapperError, assertCollectionAllowed, assertDatabaseAllowed, hasEntries } from "./hydra/index.js";
+import {
+	DeadlineExceeded,
+	HydraDB,
+	HydraWrapperError,
+	markDeadline,
+	assertCollectionAllowed,
+	assertDatabaseAllowed,
+	hasEntries,
+} from "./hydra/index.js";
 import type { ContextKind, MetadataFilter, QueryKind, QueryParams } from "./hydra/index.js";
 import { logger } from "./logger.js";
 import { ALIAS_REPLACEMENTS, CONNECTOR_TOOL_NAMES, DEPRECATED_TOOL_NAMES, TOOL_NAMES } from "./tool-names.js";
@@ -103,6 +114,14 @@ function structuredResult(
 ): ToolResult {
 	return { content: [{ type: "text" as const, text }], structuredContent };
 }
+
+/** The structured result of an ingest: what `ingestOutputSchema` declares. */
+type IngestOutput = {
+	id?: string;
+	success_count: number;
+	failed_count: number;
+	indexing_pending: boolean;
+};
 
 /**
  * A failure the caller should treat as a failure, not a result.
@@ -326,6 +345,49 @@ export interface ServerOptions {
 	 * token; never for API keys, so their tool list is unchanged.
 	 */
 	oauthTools?: boolean;
+	/**
+	 * Who is calling, for cancellation that arrives on another server instance.
+	 *
+	 * The hosted transport builds a fresh server for every HTTP request, so a
+	 * `notifications/cancelled` POST lands on an instance that is not running
+	 * the call it names. With a scope set, every running call is registered
+	 * under (scope, request id) and `cancelToolCall` can stop it from anywhere
+	 * in the process. Must identify the credential itself, not something a
+	 * caller without it could reproduce.
+	 */
+	cancelScope?: string;
+	/**
+	 * Let `hydradb_ingest` read a `file.path` from this machine's disk. Only the
+	 * stdio entry point sets it: there the server runs as the user, on their
+	 * machine. On the hosted server a path would name a file on the SERVER.
+	 */
+	localFiles?: boolean;
+}
+
+/**
+ * Running tool calls by caller scope and JSON-RPC request id. A set, because
+ * two clients on one credential can use the same request id at once; a cancel
+ * for that id stops both, which only ever affects the credential's own calls.
+ */
+const cancellable = new Map<string, Set<AbortController>>();
+
+function cancelKey(scope: string, requestId: string | number): string {
+	// JSON keeps the type in the key: request id 1 and request id "1" differ.
+	return `${scope}\u0000${JSON.stringify(requestId)}`;
+}
+
+/**
+ * Cancel the running tool call `requestId` made under `scope`, on whichever
+ * server instance in this process is running it. Returns how many were stopped.
+ */
+export function cancelToolCall(scope: string, requestId: string | number, reason: Error): number {
+	const running = cancellable.get(cancelKey(scope, requestId));
+
+	if (!running) return 0;
+
+	for (const controller of running) controller.abort(reason);
+
+	return running.size;
 }
 
 
@@ -1079,6 +1141,115 @@ export function createHydraDBServer(
 		return lines.length > 0 ? `\n\nIssues:\n${lines.join("\n")}` : "";
 	}
 
+	/** The `file` argument of hydradb_ingest, as the schema accepts it. */
+	type FileArg = { filename?: string; content_base64?: string; path?: string };
+
+	/**
+	 * Ingest one file as a knowledge document (see ./files for the two ways a
+	 * file arrives and their limits). Everything that can be refused is
+	 * refused before the upload.
+	 */
+	async function runIngestFile(
+		args: Omit<Parameters<typeof runStore>[0], "text"> & {
+			text?: string;
+			turns?: ConversationTurn[];
+			user_name?: string;
+		},
+		file: FileArg,
+		signal?: AbortSignal,
+	): Promise<ToolResult> {
+		if (args.text != null || args.turns != null) {
+			throw new Error(
+				`${TOOL_NAMES.INGEST} takes exactly one of \`text\`, \`turns\` or \`file\`, not several.`,
+			);
+		}
+
+		if (args.kind === "memory") {
+			throw new Error(
+				`${TOOL_NAMES.INGEST} ingests a \`file\` as knowledge, not memory. Drop \`kind\`, or extract ` +
+				"the facts worth remembering and send them as `text`.",
+			);
+		}
+
+		const unsupported = (
+			[
+				["infer", args.infer],
+				["is_markdown", args.is_markdown],
+				["user_name", args.user_name],
+				["metadata", args.metadata],
+				["observation_date", args.observation_date],
+			] as const
+		).flatMap(([name, value]) => (value != null ? [name] : []));
+
+		if (unsupported.length > 0) {
+			throw new Error(
+				`${TOOL_NAMES.INGEST} does not support ${unsupported.join(", ")} with \`file\`.`,
+			);
+		}
+
+		if ((file.content_base64 != null) === (file.path != null)) {
+			throw new Error("`file` needs exactly one of `content_base64` (the bytes) or `path` (a local file).");
+		}
+
+		let upload: IngestFile;
+
+		if (file.path != null) {
+			if (!options.localFiles) {
+				throw new Error(
+					"`file.path` works only on the local (stdio) Hydra DB MCP server. This server cannot " +
+					"read your machine's files: send the file's bytes as `file.content_base64` (up to 8 MB) " +
+					"with its `filename`.",
+				);
+			}
+
+			upload = await readLocal(file.path, file.filename, signal);
+		} else {
+			if (file.filename == null) {
+				throw new Error("`file.filename` is required with `content_base64`, including its extension (e.g. \"plan.pdf\").");
+			}
+
+			upload = decodeInline(file.filename, file.content_base64 ?? "");
+		}
+
+		// A document's title is its filename (the API takes no title), so a
+		// `title` renames the upload, keeping the extension the format needs.
+		if (args.title != null && args.title.trim() !== "") {
+			const ext = extname(upload.filename);
+			const title = args.title.trim();
+
+			upload.filename = title.toLowerCase().endsWith(ext.toLowerCase()) ? title : `${title}${ext}`;
+		}
+
+		logger.debug(`${TOOL_NAMES.INGEST}: file ${upload.filename} (${upload.data.length} bytes)`);
+
+		const raw = await hydra.context.ingest({
+			kind: "knowledge",
+			file: { ...upload, id: args.source_id },
+			database: args.database,
+			collection: args.collection,
+			upsert: args.overwrite ?? true,
+		}, { signal });
+
+		const res = toAddMemoryResponse(raw);
+		const id = createdId(res) ?? args.source_id;
+
+		const structured: IngestOutput = {
+			success_count: res.success_count,
+			failed_count: res.failed_count,
+			indexing_pending: true,
+		};
+
+		if (id != null) structured.id = id;
+
+		return structuredResult(
+			`Saved ${upload.filename} to Hydra DB as knowledge${id ? ` (id: ${id})` : ""} ` +
+			`(${res.success_count} success, ${res.failed_count} failed).` +
+			indexingNote(res) +
+			ingestIssues(res),
+			structured,
+		);
+	}
+
 	async function runStore(args: {
 		text: string;
 		kind?: ContextKind;
@@ -1119,9 +1290,9 @@ export function createHydraDBServer(
 			...memoryOnly,
 			database: args.database,
 			collection: args.collection,
-			// Default stays true. The SDK retries POSTs, so upsert is what keeps a
-			// retried ingest from duplicating — flipping this default would trade a
-			// silent overwrite for a silent duplicate.
+			// Default stays true. An ingest is no longer retried after an unclear
+			// failure, but a caller who re-sends one after "outcome unknown" can
+			// still land it twice; upsert makes that an overwrite, not a duplicate.
 			upsert: args.overwrite ?? true,
 		}, { signal });
 
@@ -2229,7 +2400,7 @@ export function createHydraDBServer(
 	 * call: the list IS the answer, and asking the API would only show
 	 * databases the connection is not permitted to use.
 	 */
-	async function runDatabases(): Promise<ToolResult> {
+	async function runDatabases(signal?: AbortSignal): Promise<ToolResult> {
 		const defaultDatabase = hydra.database;
 		let databases: string[];
 		let confined = false;
@@ -2238,7 +2409,7 @@ export function createHydraDBServer(
 			databases = [...hydra.allowedDatabases];
 			confined = true;
 		} else {
-			const listed = await hydra.databases.list();
+			const listed = await hydra.databases.list({ signal });
 			databases = (listed.databases ?? listed.tenantIds ?? []).filter(Boolean);
 		}
 
@@ -2839,6 +3010,9 @@ export function createHydraDBServer(
 
 	// --- Registration helper ---
 
+	/** The part of the MCP request context the tool wrapper reads. */
+	type ToolExtra = { signal?: AbortSignal; requestId?: string | number };
+
 	/**
 	 * The last stop before a failure reaches the model: strip this connection's
 	 * credential, and any credential-shaped text, from whatever the tool threw or
@@ -2904,6 +3078,60 @@ export function createHydraDBServer(
 		}
 	}
 
+	/**
+	 * Run one tool call under one deadline, and make it cancellable.
+	 *
+	 * The deadline covers the whole call, however many HydraDB requests it
+	 * makes, so the defaults end before a host's 60s tool timeout. The signal
+	 * the handler gets aborts on the host's cancel, on the deadline, or on a
+	 * cancel routed here by `cancelToolCall`.
+	 */
+	async function withCallBudget(
+		extra: ToolExtra | undefined,
+		run: (signal: AbortSignal) => Promise<ToolResult>,
+	): Promise<ToolResult> {
+		const controller = new AbortController();
+
+		markDeadline(controller.signal, Date.now() + hydra.deadlineMs);
+
+		const timer = setTimeout(
+			() => controller.abort(new DeadlineExceeded(hydra.deadlineMs)),
+			hydra.deadlineMs,
+		);
+
+		const onHostAbort = () => controller.abort(extra?.signal?.reason);
+
+		if (extra?.signal?.aborted) onHostAbort();
+		else extra?.signal?.addEventListener("abort", onHostAbort, { once: true });
+
+		const key =
+			options.cancelScope != null && extra?.requestId != null
+				? cancelKey(options.cancelScope, extra.requestId)
+				: undefined;
+
+		if (key != null) {
+			const running = cancellable.get(key) ?? new Set();
+
+			running.add(controller);
+			cancellable.set(key, running);
+		}
+
+		try {
+			return await run(controller.signal);
+		} finally {
+			clearTimeout(timer);
+			extra?.signal?.removeEventListener("abort", onHostAbort);
+
+			if (key != null) {
+				const running = cancellable.get(key);
+
+				running?.delete(controller);
+
+				if (running?.size === 0) cancellable.delete(key);
+			}
+		}
+	}
+
 	function register(
 		name: keyof typeof TOOL_DESCRIPTIONS,
 		inputSchema: ToolInputFields | z.ZodType,
@@ -2924,9 +3152,9 @@ export function createHydraDBServer(
 
 		const counted = (
 			args: Record<string, unknown>,
-			extra?: { signal?: AbortSignal },
+			extra?: ToolExtra,
 		) => {
-			const run = () => handler(args, extra);
+			const run = () => withCallBudget(extra, (signal) => handler(args, { ...extra, signal }));
 
 			const safeRun = CONNECTOR_TOOL_NAMES.some((toolName) => toolName === name)
 				? () => hideConnectorFailure(run)
@@ -3149,6 +3377,16 @@ export function createHydraDBServer(
 			.string()
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.user_name),
+		// `path` is in the schema on every transport so the tool looks the same
+		// everywhere; the hosted server refuses it with a message saying why.
+		file: z
+			.object({
+				filename: z.string().trim().min(1).optional(),
+				content_base64: z.string().optional(),
+				path: z.string().trim().min(1).optional(),
+			})
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.file),
 	};
 
 	const conversationSchema = {
@@ -3543,13 +3781,10 @@ export function createHydraDBServer(
 		row_count: z.number(),
 	};
 
-	// `destructiveHint` was missing from the annotations type, so no tool could
-	// declare it — and the MCP spec defaults it to TRUE for any non-readonly
-	// tool. A spec-following host therefore read hydradb_ingest as destructive
-	// and could prompt the user before every proactive save, which is exactly the
-	// behaviour the instructions now ask for. Meanwhile hydradb_delete, which IS
-	// destructive, was landing there only by absence — one refactor adding an
-	// explicit `readOnlyHint: false` would have flipped it.
+	// The MCP spec defaults `destructiveHint` to TRUE for any non-readonly tool,
+	// so a tool that leaves it out is read as destructive by accident rather
+	// than by decision. hydradb_ingest IS destructive, deliberately: it
+	// overwrites an existing document that has the same source id.
 	//
 	// All four are stated on every tool so none of them depends on a default.
 	const readOnly = {
@@ -3574,6 +3809,19 @@ export function createHydraDBServer(
 		readOnlyHint: false,
 		destructiveHint: false,
 		idempotentHint: true,
+		openWorldHint: true,
+	};
+
+	/**
+	 * Writes that can replace what is stored, and are not safe to repeat:
+	 * ingest overwrites an existing document with the same source id (and
+	 * without one, a repeat stores a second copy); Cypher can MERGE, SET or
+	 * DELETE, and a repeated CREATE makes duplicates.
+	 */
+	const overwritingWrite = {
+		readOnlyHint: false,
+		destructiveHint: true,
+		idempotentHint: false,
 		openWorldHint: true,
 	};
 
@@ -3618,9 +3866,12 @@ export function createHydraDBServer(
 			observation_date?: string;
 			turns?: ConversationTurn[];
 			user_name?: string;
+			file?: FileArg;
 			database?: string;
 			collection?: string;
 		};
+
+		if (a.file != null) return runIngestFile(a, a.file, extra?.signal);
 
 		const hasTurns = a.turns != null && a.turns.length > 0;
 
@@ -3710,10 +3961,10 @@ export function createHydraDBServer(
 		}
 
 			throw new Error(
-				`${TOOL_NAMES.INGEST} requires either \`text\` (a note) or \`turns\` (a conversation).`,
+				`${TOOL_NAMES.INGEST} requires one of \`text\` (a note), \`turns\` (a conversation) or \`file\` (a document).`,
 			);
 		},
-		additiveWrite,
+		overwritingWrite,
 		ingestOutputSchema,
 	);
 
@@ -3973,7 +4224,7 @@ export function createHydraDBServer(
 	// there does an agent need a way to see it. Registering this for API-key
 	// connections too would change their tool list, which must stay identical.
 	if (options.oauthTools) {
-		register(TOOL_NAMES.DATABASES, {}, () => runDatabases(), readOnly);
+		register(TOOL_NAMES.DATABASES, {}, (_args, extra) => runDatabases(extra?.signal), readOnly);
 	}
 
 	register(
@@ -4258,7 +4509,8 @@ export function createHydraDBServer(
 			// DELETE is as reachable through it as MATCH. Annotating it any other
 			// way would tell a host it is safe to auto-approve, which is exactly
 			// the claim the removed read/write split could not actually back.
-			destructive,
+			// Not idempotent either: a repeated CREATE adds a second node.
+			overwritingWrite,
 			graphRowsOutputSchema,
 		);
 
@@ -4316,7 +4568,7 @@ export function createHydraDBServer(
 		TOOL_NAMES.STORE,
 		storeSchema,
 		(args, extra) => runStore(args as Parameters<typeof runStore>[0], extra?.signal),
-		additiveWrite,
+		overwritingWrite,
 	);
 
 	register(
@@ -4344,7 +4596,7 @@ export function createHydraDBServer(
 				extra?.signal,
 			);
 		},
-		additiveWrite,
+		overwritingWrite,
 	);
 
 	register(
