@@ -47,14 +47,6 @@ type ToolResult = {
 
 type RenderedWarning = ResponseWarning & { collections_omitted?: number };
 
-type BoundedTable = {
-	data: unknown;
-	json: string;
-	truncated: boolean;
-	rowsOmitted: number;
-	tablesOmitted: number;
-};
-
 interface ToolInputFields {
 	[name: string]: z.ZodTypeAny;
 }
@@ -109,7 +101,6 @@ function textResult(text: string): ToolResult {
 
 const RESPONSE_WARNING_COUNT_LIMIT = 10;
 const RESPONSE_WARNING_CHAR_BUDGET = 4_000;
-const TABULAR_DATA_CHAR_BUDGET = 12_000;
 
 function renderWarningText(warnings: RenderedWarning[], omitted: number): string {
 	if (warnings.length === 0) return "";
@@ -179,70 +170,44 @@ function boundResponseWarnings(input: ResponseWarning[], shorten: (value: string
 }
 
 
-/** Keep complete logical rows while bounding text and structured output together. */
-function boundTabularData(value: unknown): BoundedTable {
-	const arrayInput = Array.isArray(value);
-	const tables = arrayInput ? value : [value];
-	const kept: unknown[] = [];
-	let rowsOmitted = 0;
-	let tablesOmitted = 0;
-
-	const output = () => arrayInput ? kept : (kept[0] ?? null);
-	const encoded = () => JSON.stringify(output()) ?? "null";
-
-	for (const table of tables) {
-		if (table == null || typeof table !== "object" || Array.isArray(table)) {
-			kept.push(table);
-			if (encoded().length <= TABULAR_DATA_CHAR_BUDGET) continue;
-			kept.pop();
-			tablesOmitted += 1;
+/** Render complete table rows within the text budget; structured output stays intact. */
+function formatTabularData(table: unknown): string {
+	const limit = 12_000;
+	const lines = ["\n\nTabular data:"];
+	let length = lines[0]!.length;
+	let omittedRows = 0;
+	let omittedContent = 0;
+	// Reserve space for the omission summary even when the last row fits.
+	const append = (line: string) => {
+		if (length + line.length + 1 > limit - 128) return false;
+		lines.push(line);
+		length += line.length + 1;
+		return true;
+	};
+	const tables = Array.isArray(table) ? table : [table];
+	for (const [index, item] of tables.entries()) {
+		if (item == null || typeof item !== "object" || Array.isArray(item)) {
+			if (!append(JSON.stringify(item))) omittedContent++;
 			continue;
 		}
-
-		const raw = table as Record<string, unknown>;
-		const rows = Array.isArray(raw.rows) ? raw.rows : undefined;
-		const records = Array.isArray(raw.records) ? raw.records : undefined;
-		if (rows == null && records == null) {
-			kept.push(table);
-			if (encoded().length <= TABULAR_DATA_CHAR_BUDGET) continue;
-			kept.pop();
-			tablesOmitted += 1;
-			continue;
-		}
-
-		const bounded = {
-			...raw,
-			...(rows ? { rows: [] as unknown[] } : {}),
-			...(records ? { records: [] as unknown[] } : {}),
-		};
-		const logicalRows = Math.max(rows?.length ?? 0, records?.length ?? 0);
-		kept.push(bounded);
-		if (encoded().length > TABULAR_DATA_CHAR_BUDGET) {
-			kept.pop();
-			tablesOmitted += 1;
-			rowsOmitted += logicalRows;
-			continue;
-		}
-
-		for (let index = 0; index < logicalRows; index++) {
-			if (rows && index < rows.length) bounded.rows!.push(rows[index]);
-			if (records && index < records.length) bounded.records!.push(records[index]);
-			if (encoded().length <= TABULAR_DATA_CHAR_BUDGET) continue;
-			if (rows && index < rows.length) bounded.rows!.pop();
-			if (records && index < records.length) bounded.records!.pop();
-			rowsOmitted += logicalRows - index;
-			break;
+		const { rows, records, ...metadata } = item as Record<string, unknown>;
+		const rowList = Array.isArray(rows) ? rows : undefined;
+		const recordList = Array.isArray(records) ? records : undefined;
+		// Preserve unexpected shapes rather than silently dropping them.
+		if (rows != null && !rowList) metadata.rows = rows;
+		if (records != null && !recordList) metadata.records = records;
+		if (!append(`Table ${index + 1}: ${JSON.stringify(metadata)}`)) omittedContent++;
+		const count = Math.max(rowList?.length ?? 0, recordList?.length ?? 0);
+		for (let i = 0; i < count; i++) {
+			const value = rowList && recordList
+				? { ...(i < rowList.length ? { row: rowList[i] } : {}), ...(i < recordList.length ? { record: recordList[i] } : {}) }
+				: (rowList ?? recordList)![i];
+			if (!append(`Row ${i + 1}: ${JSON.stringify(value)}`)) omittedRows++;
 		}
 	}
-
-	const data = output();
-	return {
-		data,
-		json: JSON.stringify(data) ?? "null",
-		truncated: rowsOmitted > 0 || tablesOmitted > 0,
-		rowsOmitted,
-		tablesOmitted,
-	};
+	if (omittedRows) lines.push(`(${omittedRows} ${omittedRows === 1 ? "row" : "rows"} omitted)`);
+	if (omittedContent) lines.push(`(${omittedContent} table content omitted)`);
+	return lines.join("\n");
 }
 /**
  * A result the caller can read OR parse.
@@ -1081,19 +1046,8 @@ export function createHydraDBServer(
 		const res = raw;
 		const extras = raw as unknown as { tabular_data?: unknown; tabularData?: unknown };
 		const table = extras.tabular_data ?? extras.tabularData;
-		const boundedTable = table == null ? undefined : boundTabularData(table);
-		const tableNotice = boundedTable?.truncated
-			? `\n[tabular data truncated: ${boundedTable.rowsOmitted} rows and ${boundedTable.tablesOmitted} tables omitted]`
-			: "";
-		const tableText = boundedTable == null ? "" : `\n\nTabular data: ${boundedTable.json}${tableNotice}`;
-		const tableFields = boundedTable == null ? {} : {
-			tabular_data: boundedTable.data,
-			...(boundedTable.truncated ? {
-				tabular_data_truncated: true,
-				tabular_rows_omitted: boundedTable.rowsOmitted,
-				tabular_tables_omitted: boundedTable.tablesOmitted,
-			} : {}),
-		};
+		const tableText = table == null ? "" : formatTabularData(table);
+		const tableFields = table == null ? {} : { tabular_data: table };
 		const feedbackLine = requestId
 			? `\nWas this useful? Report it with ${TOOL_NAMES.FEEDBACK} using request_id: ${requestId}`
 			: "";
