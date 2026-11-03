@@ -1241,6 +1241,7 @@ export class ContextResource extends Resource {
 			}, o);
 
 			validateStatusResponse(response);
+
 			return response;
 		});
 	}
@@ -1365,6 +1366,7 @@ export class DatabasesResource extends Resource {
 			const response = await this.sdk.databases.list(o);
 
 			validateDatabasesResponse(response);
+
 			return response;
 		});
 	}
