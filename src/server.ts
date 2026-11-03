@@ -45,6 +45,16 @@ type ToolResult = {
 	isError?: boolean;
 };
 
+type RenderedWarning = ResponseWarning & { collections_omitted?: number };
+
+type BoundedTable = {
+	data: unknown;
+	json: string;
+	truncated: boolean;
+	rowsOmitted: number;
+	tablesOmitted: number;
+};
+
 interface ToolInputFields {
 	[name: string]: z.ZodTypeAny;
 }
@@ -95,26 +105,6 @@ function generatedSourceId(): string {
 
 function textResult(text: string): ToolResult {
 	return { content: [{ type: "text" as const, text }] };
-}
-
-/** Bound warning count and redact/shorten every externally supplied string. */
-function boundWarnings(warnings: ResponseWarning[] | undefined, shorten: (value: string) => string) {
-	const all = warnings ?? [];
-	return {
-		warnings: all.slice(0, 10).map((warning) => ({
-			code: shorten(warning.code),
-			message: shorten(warning.message),
-			...(warning.collections ? { collections: warning.collections.slice(0, 50).map(shorten) } : {}),
-		})),
-		omitted: Math.max(all.length - 10, 0),
-	};
-}
-
-/** Format the bounded warnings identically for query and other reads. */
-function formatWarnings(warnings: ResponseWarning[], omitted: number): string {
-	if (warnings.length === 0) return "";
-	return `\n\nWarnings:\n${warnings.map((warning) => `- ${warning.code}: ${warning.message}${warning.collections?.length ? ` (collections: ${warning.collections.join(", ")})` : ""}`).join("\n")}` +
-		(omitted ? `\n(${omitted} additional warnings omitted)` : "");
 }
 
 /**
@@ -825,7 +815,7 @@ export function createHydraDBServer(
 		// Captured per call, not stored on the resource: two tools can be in
 		// flight at once and a shared slot would hand one the other's id.
 		let requestId: string | undefined;
-		let warnings: ResponseWarning[] = [];
+		let warnings: RenderedWarning[] = [];
 		let omittedWarnings = 0;
 
 		const textRetrieval = args.operator != null || args.query_by === "text";
@@ -872,7 +862,7 @@ export function createHydraDBServer(
 			signal,
 			onMeta: (meta: ResponseMeta) => {
 				requestId = meta.requestId;
-				({ warnings, omitted: omittedWarnings } = boundWarnings(meta.warnings, briefly));
+				({ warnings, omitted: omittedWarnings } = boundResponseWarnings(meta.warnings ?? []));
 			},
 		};
 
@@ -903,7 +893,7 @@ export function createHydraDBServer(
 		// Independent of `detail`, which only decides how much of each chunk is
 		// shown. No outputSchema is declared on this tool, so omitting it is
 		// within spec.
-		const warningText = () => formatWarnings(warnings, omittedWarnings);
+		const warningText = () => renderWarningText(warnings, omittedWarnings);
 		const queryResult = (text: string, extra: Record<string, unknown> = {}) => {
 			const body = `${text}${scopeWarning ? `\n\nScope warning: ${scopeWarning}` : ""}${warningText()}`;
 			if (args.structured !== true) return textResult(body);
@@ -954,7 +944,22 @@ export function createHydraDBServer(
 		const res = raw;
 		const extras = raw as unknown as { tabular_data?: unknown; tabularData?: unknown };
 		const table = extras.tabular_data ?? extras.tabularData;
-		const tableText = table == null ? "" : `\n\nTabular data: ${JSON.stringify(table).slice(0, 12000)}`;
+		const boundedTable = table == null ? undefined : boundTabularData(table);
+		const tableNotice = boundedTable?.truncated
+			? `\n[tabular data truncated: ${boundedTable.rowsOmitted} rows and ${boundedTable.tablesOmitted} tables omitted]`
+			: "";
+		const tableText = boundedTable == null ? "" : `\n\nTabular data: ${boundedTable.json}${tableNotice}`;
+		const tableFields = boundedTable == null ? {} : {
+			tabular_data: boundedTable.data,
+			...(boundedTable.truncated ? {
+				tabular_data_truncated: true,
+				tabular_rows_omitted: boundedTable.rowsOmitted,
+				tabular_tables_omitted: boundedTable.tablesOmitted,
+			} : {}),
+		};
+		const feedbackLine = requestId
+			? `\nWas this useful? Report it with ${TOOL_NAMES.FEEDBACK} using request_id: ${requestId}`
+			: "";
 
 		// The server can return more chunks than were asked for — a live call with
 		// max_results=10 came back with 15, and all 15 were rendered. Honour the
@@ -964,7 +969,8 @@ export function createHydraDBServer(
 		}
 
 		if ((!res.chunks || res.chunks.length === 0) && table != null) {
-			return queryResult(`${scopeText(resolvedScope)}${tableText}`, { tabular_data: table });
+			const feedback = feedbackLine ? `\n\n---${feedbackLine}` : "";
+			return queryResult(`${scopeText(resolvedScope)}${tableText}${feedback}`, tableFields);
 		}
 		if (!res.chunks || res.chunks.length === 0) {
 			// Name WHERE nothing was found. "No results" is ambiguous the moment a
@@ -1026,10 +1032,6 @@ export function createHydraDBServer(
 		// cannot be reconstructed later — if it is not printed here, the feedback
 		// tool has nothing to attach a submission to. Rendered on its own line so
 		// a model copies it verbatim rather than reformatting it.
-		const feedbackLine = requestId
-			? `\nWas this useful? Report it with ${TOOL_NAMES.FEEDBACK} using request_id: ${requestId}`
-			: "";
-
 		const legend =
 			`\n\n---\nEach [id: …] is a source id: pass one to ${TOOL_NAMES.INSPECT} for that ` +
 			`source's content, or to ${TOOL_NAMES.DELETE} to remove it. Keep the resolved database, the source's collection, and your ACL on follow-up calls. ` +
@@ -1081,7 +1083,7 @@ export function createHydraDBServer(
 
 		return queryResult(
 			`Found ${shown} ${resultNoun(kind, shown)}:\n${scopeLine}\n\n${contextStr}${tableText}${legend}`,
-			{ sources: [...sourceRefs.values()], ...(table != null ? { tabular_data: table } : {}) },
+			{ sources: [...sourceRefs.values()], ...tableFields },
 		);
 	}
 
@@ -1138,18 +1140,140 @@ export function createHydraDBServer(
 		return safe.length > 200 ? `${safe.slice(0, 200)}…` : safe;
 	}
 
+	function renderWarningText(warnings: RenderedWarning[], omitted: number): string {
+		if (warnings.length === 0) return "";
+
+		const lines = warnings.map((warning) => {
+			const collections = warning.collections?.length
+				? ` (collections: ${warning.collections.join(", ")})`
+				: "";
+			const collectionsOmitted = warning.collections_omitted
+				? ` (${warning.collections_omitted} additional collections omitted)`
+				: "";
+
+			return `- ${warning.code}: ${warning.message}${collections}${collectionsOmitted}`;
+		});
+
+		return `\n\nWarnings:\n${lines.join("\n")}${omitted ? `\n(${omitted} additional warnings omitted)` : ""}`;
+	}
+
+	function warningPayloadFits(warnings: RenderedWarning[], omitted: number): boolean {
+		return Math.max(
+			renderWarningText(warnings, omitted).length,
+			JSON.stringify({ warnings, warnings_omitted: omitted }).length,
+		) <= RESPONSE_WARNING_CHAR_BUDGET;
+	}
+
+	/** Bound warning text and structured data under one shared budget. */
+	function boundResponseWarnings(input: ResponseWarning[]): { warnings: RenderedWarning[]; omitted: number } {
+		const candidates = input.slice(0, RESPONSE_WARNING_COUNT_LIMIT);
+		let omitted = Math.max(input.length - candidates.length, 0);
+		const warnings: RenderedWarning[] = [];
+
+		for (let i = 0; i < candidates.length; i++) {
+			const warning = candidates[i]!;
+			const rawCollections = warning.collections ?? [];
+			let rendered: RenderedWarning = {
+				code: briefly(warning.code),
+				message: briefly(warning.message),
+				...(rawCollections.length ? { collections_omitted: rawCollections.length } : {}),
+			};
+			const reserveOmitted = omitted + candidates.length - i - 1;
+
+			if (!warningPayloadFits([...warnings, rendered], reserveOmitted)) {
+				omitted += candidates.length - i;
+				break;
+			}
+
+			const collections: string[] = [];
+			for (const rawCollection of rawCollections) {
+				const nextCollections = [...collections, briefly(rawCollection)];
+				const next: RenderedWarning = {
+					code: rendered.code,
+					message: rendered.message,
+					collections: nextCollections,
+					...(nextCollections.length < rawCollections.length
+						? { collections_omitted: rawCollections.length - nextCollections.length }
+						: {}),
+				};
+
+				if (!warningPayloadFits([...warnings, next], reserveOmitted)) break;
+				collections.push(nextCollections.at(-1)!);
+				rendered = next;
+			}
+
+			warnings.push(rendered);
+		}
+
+		return { warnings, omitted };
+	}
+
+	/** Keep complete table rows while bounding text and structured output together. */
+	function boundTabularData(value: unknown): BoundedTable {
+		const arrayInput = Array.isArray(value);
+		const tables = arrayInput ? value : [value];
+		const kept: unknown[] = [];
+		let rowsOmitted = 0;
+		let tablesOmitted = 0;
+
+		const output = () => arrayInput ? kept : (kept[0] ?? null);
+		const encoded = () => JSON.stringify(output()) ?? "null";
+
+		for (let tableIndex = 0; tableIndex < tables.length; tableIndex++) {
+			const table = tables[tableIndex];
+			const rows = table != null && typeof table === "object" && Array.isArray((table as { rows?: unknown }).rows)
+				? (table as { rows: unknown[] }).rows
+				: undefined;
+
+			if (rows == null) {
+				kept.push(table);
+				if (encoded().length <= TABULAR_DATA_CHAR_BUDGET) continue;
+				kept.pop();
+				tablesOmitted += 1;
+				continue;
+			}
+
+			const bounded = { ...(table as Record<string, unknown>), rows: [] as unknown[] };
+			kept.push(bounded);
+			if (encoded().length > TABULAR_DATA_CHAR_BUDGET) {
+				kept.pop();
+				tablesOmitted += 1;
+				rowsOmitted += rows.length;
+				continue;
+			}
+
+			for (let rowIndex = 0; rowIndex < rows.length; rowIndex++) {
+				bounded.rows.push(rows[rowIndex]);
+				if (encoded().length <= TABULAR_DATA_CHAR_BUDGET) continue;
+				bounded.rows.pop();
+				rowsOmitted += rows.length - rowIndex;
+				break;
+			}
+		}
+
+		const data = output();
+		const json = JSON.stringify(data) ?? "null";
+		return {
+			data,
+			json,
+			truncated: rowsOmitted > 0 || tablesOmitted > 0,
+			rowsOmitted,
+			tablesOmitted,
+		};
+	}
+
 	/** Preserve bounded, non-fatal response warnings on every ACL-bearing read. */
 	async function withResponseWarnings(
 		run: (onMeta: (meta: ResponseMeta) => void) => Promise<ToolResult>,
 	): Promise<ToolResult> {
-		let warnings: ResponseWarning[] = [];
+		let warnings: RenderedWarning[] = [];
 		let omitted = 0;
 		const result = await run((meta) => {
-			({ warnings, omitted } = boundWarnings(meta.warnings, briefly));
+			({ warnings, omitted } = boundResponseWarnings(meta.warnings ?? []));
 		});
 
 		if (warnings.length === 0) return result;
-		const notice = formatWarnings(warnings, omitted);
+		const notice = renderWarningText(warnings, omitted);
 		return {
 			...result,
 			content: result.content.map((part, index) => index === 0 ? { ...part, text: part.text + notice } : part),
@@ -1857,6 +1981,9 @@ export function createHydraDBServer(
 	 */
 	const COMPACT_CHUNK_CHARS = 600;
 	const QUERY_CHAR_BUDGET = 40_000;
+	const RESPONSE_WARNING_COUNT_LIMIT = 10;
+	const RESPONSE_WARNING_CHAR_BUDGET = 4_000;
+	const TABULAR_DATA_CHAR_BUDGET = 12_000;
 
 	/** Bound any one server-supplied string, marking it when it is shortened. */
 	function clamp(text: string, budget: number): string {

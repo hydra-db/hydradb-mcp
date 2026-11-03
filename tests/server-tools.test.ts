@@ -4560,6 +4560,34 @@ test("query warnings remain bounded and account for the text budget", async () =
 	await client.close();
 });
 
+test("query warning collections share a bounded text and structured budget", async () => {
+	const collections = Array.from({ length: 50 }, (_, i) => `collection-${i}-${"x".repeat(1000)}`);
+	const warnings = Array.from({ length: 10 }, (_, i) => ({
+		code: `notice_${i}`,
+		message: "m".repeat(1000),
+		collections,
+	}));
+	const { hydra } = mockHydra({ query: async () => ({ success: true, data: { chunks: [] },
+		meta: { requestId: "r", warnings },
+	}) });
+	const client = await connect(hydra);
+	const out = await client.callTool({ name: "hydradb_query", arguments: {
+		query: "q", structured: true,
+	} });
+	const body = (out.content as { text: string }[])[0]!.text;
+	const renderedWarnings = out.structuredContent?.warnings as { collections_omitted?: number }[];
+
+	assert.ok(body.length <= 40_000);
+	assert.ok(JSON.stringify({
+		warnings: renderedWarnings,
+		warnings_omitted: out.structuredContent?.warnings_omitted,
+	}).length <= 4_000);
+	assert.ok(renderedWarnings.some((warning) => (warning.collections_omitted ?? 0) > 0));
+	assert.match(body, /additional collections omitted/);
+	assert.match(body, /additional warnings omitted/);
+	await client.close();
+});
+
 test("all ACL-bearing read tools surface enforcement warnings", async () => {
 	const warning = { code: "acl_ignored_by_connector_enforcement", message: "Request ACL ignored." };
 	const envelope = (data: unknown) => ({ success: true, data, meta: { requestId: "r-warning", warnings: [warning] } });
