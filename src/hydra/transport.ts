@@ -156,6 +156,7 @@ async function attemptRaw<T>(
 		}
 
 		onResponse?.(parsed);
+
 		return unwrap<T>(parsed);
 	} catch (err) {
 		if (err instanceof HydraWrapperError) throw err;

@@ -334,6 +334,7 @@ function provenance(record: z.infer<typeof relationEndRecord> | z.infer<typeof r
 
 	return result;
 }
+
 const relationEndRecord = z.object({
 	...graphProvenance,
 	name: optionalText,
