@@ -406,6 +406,60 @@ test("large table-only results are bounded and keep feedback identity", async (t
 	assert.deepEqual(table[0]!.rows, rows);
 });
 
+test("an escaping-heavy oversized row is omitted whole", async (t) => {
+	const oversized = `${"\"\\\n".repeat(5000)}tail`;
+	const { client } = await fixture(t, () => json({
+		...queryData(),
+		tabular_data: [{ columns: ["value"], rows: [[oversized]] }],
+	}));
+	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "q", structured: true } });
+	const body = text(result);
+	const structured = result.structuredContent as Record<string, unknown>;
+	const table = structured.tabular_data as { rows: string[][] }[];
+
+	assert.deepEqual(table[0]!.rows, [[oversized]]);
+	assert.doesNotMatch(body, /tail/);
+	assert.match(body, /1 row omitted/);
+	assert.ok(body.length <= 40_000);
+});
+
+test("oversized metadata is omitted while complete rows and structured data remain", async (t) => {
+	const { client } = await fixture(t, () => json({
+		...queryData(),
+		tabular_data: { title: "m".repeat(13_000), rows: [["one"], ["two"]] },
+	}));
+	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "q", structured: true } });
+	const body = text(result);
+	const structured = result.structuredContent as Record<string, unknown>;
+
+	assert.deepEqual(structured.tabular_data, { title: "m".repeat(13_000), rows: [["one"], ["two"]] });
+	assert.match(body, /table content omitted/);
+	assert.match(body, /Row 1: \["one"\]/);
+	assert.match(body, /Row 2: \["two"\]/);
+});
+
+test("multiple tables share one budget without reordering retained rows", async (t) => {
+	const firstRows = [[`first-${"a".repeat(7000)}`]];
+	const secondRows = [[`second-${"b".repeat(7000)}`]];
+	const { client } = await fixture(t, () => json({
+		...queryData(),
+		tabular_data: [
+			{ columns: ["value"], rows: firstRows },
+			{ columns: ["value"], rows: secondRows },
+		],
+	}));
+	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "q", structured: true } });
+	const structured = result.structuredContent as Record<string, unknown>;
+	const tables = structured.tabular_data as { rows: string[][] }[];
+
+	assert.deepEqual(tables[0]!.rows, firstRows);
+	assert.deepEqual(tables[1]!.rows, secondRows);
+	assert.match(text(result), /first-a/);
+	assert.doesNotMatch(text(result), /second-b/);
+	assert.match(text(result), /1 row omitted/);
+	assert.ok(text(result).length <= 40_000);
+});
+
 test("table query bridge retries and propagates cancellation", async () => {
 	let calls = 0;
 	let seenSignal: AbortSignal | null | undefined;
