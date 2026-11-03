@@ -3042,13 +3042,22 @@ export function createHydraDBServer(
 		};
 	}
 
-	async function hideConnectorFailure(run: () => Promise<ToolResult>): Promise<ToolResult> {
+	async function hideConnectorFailure(run: () => Promise<ToolResult>, signal: AbortSignal): Promise<ToolResult> {
 		try {
 			return await run();
 		} catch (error) {
 			// Only an API failure can carry provider text, so only it is rewritten. Input and
 			// scope errors are already safe, and say what to fix, so they pass through.
 			if (!(error instanceof HydraWrapperError)) throw error;
+
+			// Stopped here by a cancel or the call deadline, not answered by HydraDB: say which.
+			if (error.status == null && signal.aborted) {
+				const stopped = signal.reason instanceof DeadlineExceeded
+					? `The connector request got ${signal.reason.message}.`
+					: "The connector request was cancelled.";
+
+				throw new Error(`${stopped} A change may or may not have applied; check connector health before repeating it.`);
+			}
 
 			if (error.status === 400 || error.status === 422) {
 				throw new Error("HydraDB rejected the request as invalid. Change the arguments; the same call will fail again.");
@@ -3154,13 +3163,13 @@ export function createHydraDBServer(
 			args: Record<string, unknown>,
 			extra?: ToolExtra,
 		) => {
-			const run = () => withCallBudget(extra, (signal) => handler(args, { ...extra, signal }));
+			const isConnector = CONNECTOR_TOOL_NAMES.some((toolName) => toolName === name);
 
-			const safeRun = CONNECTOR_TOOL_NAMES.some((toolName) => toolName === name)
-				? () => hideConnectorFailure(run)
-				: run;
+			return trackInFlight(() => redactFailure(() => withCallBudget(extra, (signal) => {
+				const run = () => handler(args, { ...extra, signal });
 
-			return trackInFlight(() => redactFailure(safeRun));
+				return isConnector ? hideConnectorFailure(run, signal) : run();
+			})));
 		};
 
 		const wrapped = isDeprecated
@@ -4429,8 +4438,8 @@ export function createHydraDBServer(
 		connectorTool(TOOL_NAMES.CONNECTOR_RESOURCE_LIST, readOnly, byConnector, (input, signal) => connectorTools.resourceList(input.connector_id, { signal }));
 
 		// One way to attach resources (CONTRACT.md §3 Connectors): a list, sent to the configure
-		// endpoint, which adds them and starts syncing. The fields match what resource_list
-		// returns, so a listed resource can be sent back unchanged.
+		// endpoint, which adds them and starts syncing. Rows come from discover; a resource that
+		// is already added is changed with resource_update, so extra resource_list fields are refused.
 		connectorTool(
 			TOOL_NAMES.CONNECTOR_RESOURCE_ADD,
 			destructiveNonIdempotent,
