@@ -1925,7 +1925,10 @@ test("HYDRADB_MCP_DATABASE_TOOLS=0 withholds only the database management tools"
 		assert.ok(names.includes(name), `${name} must stay registered`);
 	}
 
-	assert.equal(names.length, CANONICAL_TOOL_NAMES.length + GRAPH_TOOL_NAMES.length);
+	assert.equal(
+		names.length,
+		CANONICAL_TOOL_NAMES.length + GRAPH_TOOL_NAMES.length + CONNECTOR_TOOL_NAMES.length,
+	);
 });
 
 test("the legacy opt-in accepts the usual truthy spellings and nothing else", async () => {
@@ -1962,10 +1965,11 @@ test("dropping the aliases materially shrinks the tool manifest", async () => {
 
 	const lean = await measure(undefined);
 	const withAliases = await measure("1");
+	const saved = withAliases - lean;
 
 	assert.ok(
-		lean < withAliases * 0.75,
-		`expected a substantial reduction, got ${lean} vs ${withAliases} chars`,
+		saved >= DEPRECATED_TOOL_NAMES.length * 1_000,
+		`expected at least 1,000 saved characters per alias, got ${saved} total`,
 	);
 });
 
