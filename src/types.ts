@@ -9,6 +9,8 @@
 export type MemoryResultItem = {
 	source_id: string;
 	title?: string | null;
+	/** The title or filename HydraDB actually stored for this item. */
+	stored_title?: string | null;
 	status: string;
 	error?: string | null;
 	/** Machine-readable classification for `error`, when the server sent one. */
@@ -27,4 +29,32 @@ export type AddMemoryResponse = {
 	results: MemoryResultItem[];
 	success_count: number;
 	failed_count: number;
+};
+
+export type IngestRejectedItem = {
+	id: string;
+	stored_title?: string;
+	error: string;
+	error_code?: string;
+};
+
+export type IngestOutcome = {
+	id?: string;
+	stored_title?: string;
+	accepted_ids: string[];
+	rejected_items: IngestRejectedItem[];
+	success_count: number;
+	failed_count: number;
+	indexing_pending: boolean;
+	items?: IngestItemOutcome[];
+};
+
+export type IngestItemOutcome = {
+	index: number;
+	id: string;
+	status: string;
+	accepted: boolean | null;
+	error?: string;
+	error_code?: string;
+	relations_error?: string;
 };

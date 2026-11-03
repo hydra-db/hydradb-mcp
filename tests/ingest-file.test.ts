@@ -30,8 +30,30 @@ interface Upload {
 	files: File[];
 }
 
+interface UploadResponse {
+	success: boolean;
+	message: string;
+	results: Array<{
+		id: string;
+		filename?: string;
+		status: string;
+		error?: string;
+	}>;
+	success_count: number;
+	failed_count: number;
+}
+
 /** Capture each ingest's multipart body as the API would parse it. */
-function captureUploads(t: { mock: { method: typeof import("node:test").mock.method } }): Upload[] {
+function captureUploads(
+	t: { mock: { method: typeof import("node:test").mock.method } },
+	response: UploadResponse = {
+		success: true,
+		message: "Upload completed; files are queued for asynchronous processing.",
+		results: [],
+		success_count: 1,
+		failed_count: 0,
+	},
+): Upload[] {
 	const uploads: Upload[] = [];
 
 	t.mock.method(globalThis, "fetch", async (input: Request | string | URL, init?: RequestInit) => {
@@ -54,11 +76,10 @@ function captureUploads(t: { mock: { method: typeof import("node:test").mock.met
 			JSON.stringify({
 				success: true,
 				data: {
-					success: true,
-					message: "Upload completed; files are queued for asynchronous processing.",
-					results: [{ id: fields.get("document_metadata") ? "doc-1" : "gen-1", filename: files[0]?.name, status: "queued" }],
-					success_count: 1,
-					failed_count: 0,
+					...response,
+					results: response.results.length > 0
+						? response.results
+						: [{ id: fields.get("document_metadata") ? "doc-1" : "gen-1", filename: files[0]?.name, status: "queued" }],
 				},
 			}),
 			{ status: 202, headers: { "content-type": "application/json" } },
@@ -84,6 +105,8 @@ interface IngestArgs {
 	file?: { filename?: string; content_base64?: string; path?: string };
 	text?: string;
 	turns?: { user: string; assistant: string }[];
+	items?: Array<{ text: string }>;
+	app_knowledge?: Array<{ kind: "message"; fields: { body: string } }>;
 	kind?: string;
 	title?: string;
 	source_id?: string;
@@ -118,6 +141,27 @@ test("a PDF sent as base64 is uploaded as a knowledge document, byte for byte", 
 	assert.equal(file?.name, "quillmoor-tide-log.pdf");
 	assert.equal(file?.type, "application/pdf");
 	assert.ok(Buffer.from(await file!.arrayBuffer()).equals(bytes), "the bytes arrive unchanged");
+});
+
+test("an all-failed file upload does not claim the file was saved", async (t) => {
+	const uploads = captureUploads(t, {
+		success: false,
+		message: "Upload rejected.",
+		results: [{ id: "bad-file", filename: "bad.pdf", status: "failed", error: "file rejected" }],
+		success_count: 0,
+		failed_count: 1,
+	});
+
+	const client = await connect();
+
+	const result = await ingest(client, {
+		file: { filename: "bad.pdf", content_base64: "aGVsbG8=" },
+	});
+
+	assert.equal(result.isError, true);
+	assert.doesNotMatch(result.text, /^Saved /);
+	assert.match(result.text, /rejected every ingest item/i);
+	assert.equal(uploads.length, 1);
 });
 
 test("on the stdio server a DOCX can be ingested by path", async (t) => {
@@ -198,8 +242,10 @@ test("file is exclusive with text and turns, is knowledge only, and takes no tit
 	const file = { filename: "a.pdf", content_base64: "aGVsbG8=" };
 
 	const cases: [IngestArgs, RegExp][] = [
-		[{ file, text: "x" }, /exactly one of `text`, `turns` or `file`/],
-		[{ file, turns: [{ user: "u", assistant: "a" }] }, /exactly one of `text`, `turns` or `file`/],
+		[{ file, text: "x" }, /exactly one of `text`, `turns`, `items`, `app_knowledge`, or `file`/],
+		[{ file, turns: [{ user: "u", assistant: "a" }] }, /exactly one of `text`, `turns`, `items`, `app_knowledge`, or `file`/],
+		[{ file, items: [{ text: "x" }] }, /exactly one of `text`, `turns`, `items`, `app_knowledge`, or `file`/],
+		[{ file, app_knowledge: [{ kind: "message", fields: { body: "x" } }] }, /exactly one of `text`, `turns`, `items`, `app_knowledge`, or `file`/],
 		[{ file, kind: "memory" }, /as knowledge, not memory/],
 		[{ file: { filename: "a.pdf" } }, /exactly one of `content_base64`/],
 		[{ file: { content_base64: "aGVsbG8=" } }, /filename` is required/],

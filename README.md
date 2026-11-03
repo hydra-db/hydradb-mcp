@@ -172,12 +172,15 @@ resolve the collection before inspecting. Explicit scope is never widened.
 ### **hydradb_ingest**
 
 Saves information so it outlives the session. Provide **exactly one** of `text`,
-`turns` or `file`.
+`turns`, `items`, `app_knowledge`, or `file`. A batch contains 1 to 100 same-kind
+items and sends one API request. Batch text has an 8 MiB total UTF-8 limit.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `text` | string | No\* | A note, fact, decision, or document body |
 | `turns` | array | No\* | Conversation turns, each with `user` and `assistant` |
+| `items` | array | No\* | Batch of 1 to 100 items; each item has exactly one of `text` or `turns` |
+| `app_knowledge` | array | No\* | Batch of 1 to 100 structured app records with `kind`, `fields`, and optional ACL data; split databases only |
 | `file` | object | No\* | A PDF, Word, PowerPoint, spreadsheet, image or text file, ingested as knowledge. See below |
 | `kind` | string | No | `memory` (default) or `knowledge` for a document |
 | `title` | string | No | Label shown in later search results — always set it |
@@ -186,10 +189,26 @@ Saves information so it outlives the session. Provide **exactly one** of `text`,
 | `infer` | boolean | No | Extract insights and graph entities (default: true) |
 | `is_markdown` | boolean | No | Chunk on markdown structure (default: false) |
 | `metadata` | object | No | Key/value metadata, matchable later via `metadata_filters` |
+| `additional_metadata` | object | No | Free-form fields stored with the item; supported on memory and knowledge |
+| `custom_instructions` | string | No | Memory extraction guidance, up to 4000 characters; replaces the MCP default and requires inference |
+| `graph` | object | No | Caller-supplied `entities` and `relations`; MCP keys it by the item id |
 | `observation_date` | string | No | When the fact was true, as `YYYY-MM-DD` (e.g. `2026-07-04`), vs when it was stored |
 | `user_name` | string | No | What to call the user, used with `turns` (default: `User`) |
 
-\* Passing more than one is an error; passing none is an error.
+\* Combining any input modes is an error. Each single item or `items` entry requires
+exactly one of `text` or `turns`. Knowledge items require `text`.
+
+Use plain `text` with `kind: "knowledge"` for an unstructured document. Use
+`app_knowledge` for structured `email`, `message`, `ticket`, `knowledge_base`,
+`comment`, `meeting`, or `custom` records. Each app record supports `id`, `title`,
+`description`, `url`, `timestamp`, `provider`, `external_id`, `fields`, `metadata`,
+`additional_metadata`, `attachments`, `relations`, and `acl`.
+
+An omitted app-record `acl` makes the item unrestricted. Send `["__private__"]`
+for private ingest or `["__public__"]` for public ingest. An empty list is refused.
+Re-ingesting an existing `id` without `acl` removes its previous access list. If
+`__public__` appears with other principals, the item is public and HydraDB drops the
+other principals.
 
 **Files.** `file` takes `filename` (with its real extension) and one of the two
 below. The document's title is `title` when set, otherwise the filename.
@@ -653,7 +672,7 @@ owns scope injection, envelope unwrapping and error translation; the tools call
 it and render the results.
 
 - **hydradb_query** retrieves relevant memories and returns graph-enriched context (entity paths, chunk relations, extra context). Supports `fast` and `thinking` recall modes.
-- **hydradb_ingest** stores a note (`text`), a conversation (`turns`) or a file such as a PDF or DOCX (`file`), with configurable `infer`, `is_markdown`, `title`, and `source_id`. Hydra DB extracts insights and builds a knowledge graph automatically.
+- **hydradb_ingest** stores a note (`text`), conversation (`turns`), file such as a PDF or DOCX (`file`), structured app records (`app_knowledge`), or a batch of up to 100 items. It supports caller extraction instructions, additional metadata, and a caller-supplied graph.
 - **hydradb_list** browses stored memories (`kind: memory`) or ingested knowledge sources (`kind: knowledge`, with an optional `source_ids` filter).
 - **hydradb_inspect** retrieves the original ingested content of a source, with mode options (`content`, `url`, or `both`).
 - **hydradb_delete** removes a memory or knowledge source by ID.
