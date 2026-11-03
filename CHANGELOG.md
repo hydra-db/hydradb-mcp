@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-11-03
+
 ### Added — dashboard connector completion
 
 `hydradb_connector_connect` accepts only a provider and returns a safe dashboard
