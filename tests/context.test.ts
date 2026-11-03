@@ -1128,3 +1128,11 @@ test("a named ticket lists its links and a linked ticket says how it is linked",
 	assert.match(out, /Source: OBH \$250 threshold experiment: outcome and recommendation\nRelation: REV-3158 linked_to REV-2933\nMetadata: app_external_id: REV-3158\n/);
 	assert.doesNotMatch(out, /app_links:|app_relation:/, "trail keys are not repeated on the metadata line");
 });
+
+test("temporal facts retain their observation time", () => {
+	const response = { chunks: [{ id: "s1", chunkContent: "body" }], temporalFacts: [
+		{ subject: "Alice", relation: "joined", object: "Acme", observed_at: "2026-01-03T00:00:00Z" },
+	] };
+
+	assert.match(buildRecalledContext(response), /observed: 2026-01-03T00:00:00Z/);
+});

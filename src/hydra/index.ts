@@ -20,6 +20,8 @@ export type {
 	HydraConfig,
 	ContextKind,
 	RequestOptions,
+	ResponseMeta,
+	ResponseWarning,
 	QueryKind,
 	ConversationTurn,
 	QueryParams,

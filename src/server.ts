@@ -24,7 +24,7 @@ import {
 	assertDatabaseAllowed,
 	hasEntries,
 } from "./hydra/index.js";
-import type { ContextKind, MetadataFilter, QueryKind, QueryParams } from "./hydra/index.js";
+import type { ContextKind, MetadataFilter, QueryKind, QueryParams, ResponseMeta, ResponseWarning } from "./hydra/index.js";
 import { logger } from "./logger.js";
 import { ALIAS_REPLACEMENTS, CONNECTOR_TOOL_NAMES, DEPRECATED_TOOL_NAMES, TOOL_NAMES } from "./tool-names.js";
 import type { MemoryResultItem } from "./types.js";
@@ -44,6 +44,8 @@ type ToolResult = {
 	structuredContent?: Record<string, unknown>;
 	isError?: boolean;
 };
+
+type RenderedWarning = ResponseWarning & { collections_omitted?: number };
 
 interface ToolInputFields {
 	[name: string]: z.ZodTypeAny;
@@ -97,6 +99,159 @@ function textResult(text: string): ToolResult {
 	return { content: [{ type: "text" as const, text }] };
 }
 
+const RESPONSE_WARNING_COUNT_LIMIT = 10;
+
+const RESPONSE_WARNING_CHAR_BUDGET = 4_000;
+
+function renderWarningText(warnings: RenderedWarning[], omitted: number): string {
+	if (warnings.length === 0) return "";
+
+	const lines = warnings.map((warning) => {
+		const collections = warning.collections?.length
+			? ` (collections: ${warning.collections.join(", ")})`
+			: "";
+
+		const collectionsOmitted = warning.collections_omitted
+			? ` (${warning.collections_omitted} additional collections omitted)`
+			: "";
+
+		return `- ${warning.code}: ${warning.message}${collections}${collectionsOmitted}`;
+	});
+
+	return `\n\nWarnings:\n${lines.join("\n")}${omitted ? `\n(${omitted} additional warnings omitted)` : ""}`;
+}
+
+function warningPayloadFits(warnings: RenderedWarning[], omitted: number): boolean {
+	return Math.max(
+		renderWarningText(warnings, omitted).length,
+		JSON.stringify({ warnings, warnings_omitted: omitted }).length,
+	) <= RESPONSE_WARNING_CHAR_BUDGET;
+}
+
+/** Bound warning text and structured data under one shared budget. */
+function boundResponseWarnings(input: ResponseWarning[], shorten: (value: string) => string) {
+	const candidates = input.slice(0, RESPONSE_WARNING_COUNT_LIMIT);
+	let omitted = Math.max(input.length - candidates.length, 0);
+	const warnings: RenderedWarning[] = [];
+
+	for (let i = 0; i < candidates.length; i++) {
+		const warning = candidates[i]!;
+		const rawCollections = warning.collections ?? [];
+
+		let rendered: RenderedWarning = {
+			code: shorten(warning.code),
+			message: shorten(warning.message),
+		};
+
+		if (warning.collections) rendered.collections = [];
+
+		if (rawCollections.length) rendered.collections_omitted = rawCollections.length;
+
+		const reserveOmitted = omitted + candidates.length - i - 1;
+
+		if (!warningPayloadFits([...warnings, rendered], reserveOmitted)) {
+			omitted += candidates.length - i;
+			break;
+		}
+
+		for (const rawCollection of rawCollections.slice(0, 50)) {
+			const nextCollections = [...(rendered.collections ?? []), shorten(rawCollection)];
+
+			const next: RenderedWarning = {
+				code: rendered.code,
+				message: rendered.message,
+				collections: nextCollections,
+			};
+
+			if (nextCollections.length < rawCollections.length) {
+				next.collections_omitted = rawCollections.length - nextCollections.length;
+			}
+
+			if (!warningPayloadFits([...warnings, next], reserveOmitted)) break;
+			rendered = next;
+		}
+
+		warnings.push(rendered);
+	}
+
+	return { warnings, omitted };
+}
+
+
+interface TableRowPair { row?: unknown; record?: unknown }
+
+const tableObjectSchema = z.record(z.unknown());
+
+// Keep the original opaque record: parsing with z.record would discard __proto__ keys.
+const tableObject = z.custom<z.infer<typeof tableObjectSchema>>(
+	(value) => value != null && Object(value) === value && !Array.isArray(value),
+);
+
+interface RelationSummary { source?: ReturnType<typeof toRelationList>["relations"][number]["source"]; target?: ReturnType<typeof toRelationList>["relations"][number]["target"]; database?: string | null; collection?: string | null; source_id?: string | null; read_status?: string | null; from: string | null; from_type: string | null; predicate: string | null; to: string | null; to_type: string | null; evidence: string | null; chunk_id: string | null }
+
+interface QueryFields { resolved_scope: { database: string; collection?: string | null; collections?: string[] }; request_id?: string; scope_warning?: string; warnings?: RenderedWarning[]; warnings_omitted?: number }
+
+/** Render complete table rows within the text budget; structured output stays intact. */
+function formatTabularData<T>(table: T): string {
+	const limit = 12_000;
+	const lines = ["\n\nTabular data:"];
+	let length = lines[0]!.length;
+	let omittedRows = 0;
+	let omittedContent = 0;
+	// Reserve space for the omission summary even when the last row fits.
+
+	const append = (line: string) => {
+		if (length + line.length + 1 > limit - 128) return false;
+		lines.push(line);
+		length += line.length + 1;
+
+		return true;
+	};
+
+	const tables = Array.isArray(table) ? table : [table];
+
+	for (const [index, item] of tables.entries()) {
+		const parsed = tableObject.safeParse(item);
+
+		if (!parsed.success || Array.isArray(item)) {
+			if (!append(JSON.stringify(item))) omittedContent++;
+			continue;
+		}
+
+		const { rows, records, ...metadata } = parsed.data;
+		const rowList = Array.isArray(rows) ? rows : undefined;
+		const recordList = Array.isArray(records) ? records : undefined;
+		// Preserve unexpected shapes rather than silently dropping them.
+
+		if (rows != null && !rowList) metadata.rows = rows;
+
+		if (records != null && !recordList) metadata.records = records;
+
+		if (!append(`Table ${index + 1}: ${JSON.stringify(metadata)}`)) omittedContent++;
+		const count = Math.max(rowList?.length ?? 0, recordList?.length ?? 0);
+
+		for (let i = 0; i < count; i++) {
+			let value = (rowList ?? recordList)![i];
+
+			if (rowList && recordList) {
+				const pair: TableRowPair = {};
+
+				if (i < rowList.length) pair.row = rowList[i];
+
+				if (i < recordList.length) pair.record = recordList[i];
+				value = pair;
+			}
+
+			if (!append(`Row ${i + 1}: ${JSON.stringify(value)}`)) omittedRows++;
+		}
+	}
+
+	if (omittedRows) lines.push(`(${omittedRows} ${omittedRows === 1 ? "row" : "rows"} omitted)`);
+
+	if (omittedContent) lines.push(`(${omittedContent} table content omitted)`);
+
+	return lines.join("\n");
+}
 /**
  * A result the caller can read OR parse.
  *
@@ -746,6 +901,8 @@ export function createHydraDBServer(
 		query_by?: "hybrid" | "text";
 		query_forceful_relations?: boolean;
 		temporal_reasoning?: boolean;
+		include_table_sql?: boolean;
+		table_limit?: number;
 		response_format?: "structured" | "markdown";
 	}, signal?: AbortSignal): Promise<ToolResult> {
 		// Host-owned default (CONTRACT §2 rule 5): search BOTH families. This tool
@@ -803,6 +960,8 @@ export function createHydraDBServer(
 		// Captured per call, not stored on the resource: two tools can be in
 		// flight at once and a shared slot would hand one the other's id.
 		let requestId: string | undefined;
+		let warnings: RenderedWarning[] = [];
+		let omittedWarnings = 0;
 
 		const textRetrieval = args.operator != null || args.query_by === "text";
 
@@ -840,12 +999,15 @@ export function createHydraDBServer(
 			additionalContext: args.additional_context,
 			queryForcefulRelations: args.query_forceful_relations,
 			temporalReasoning: args.temporal_reasoning,
+			includeTableSql: args.include_table_sql,
+			tableLimit: args.table_limit,
 		};
 
 		const requestOptions = {
 			signal,
-			onMeta: (meta: { requestId?: string }) => {
+			onMeta: (meta: ResponseMeta) => {
 				requestId = meta.requestId;
+				({ warnings, omitted: omittedWarnings } = boundResponseWarnings(meta.warnings ?? [], briefly));
 			},
 		};
 
@@ -876,15 +1038,23 @@ export function createHydraDBServer(
 		// Independent of `detail`, which only decides how much of each chunk is
 		// shown. No outputSchema is declared on this tool, so omitting it is
 		// within spec.
+		const warningText = () => renderWarningText(warnings, omittedWarnings);
 		const queryResult = (text: string, extra: Record<string, unknown> = {}) => {
-			const body = scopeWarning ? `${text}\n\nScope warning: ${scopeWarning}` : text;
-
+			const body = `${text}${scopeWarning ? `\n\nScope warning: ${scopeWarning}` : ""}${warningText()}`;
 			if (args.structured !== true) return textResult(body);
 
-			return structuredResult(body, {
-				resolved_scope: resolvedScope, ...(requestId ? { request_id: requestId } : {}), ...extra,
-				...(scopeWarning ? { scope_warning: scopeWarning } : {}),
-			});
+			const fields: QueryFields = { resolved_scope: resolvedScope };
+
+			if (requestId) fields.request_id = requestId;
+			Object.assign(fields, extra);
+
+			if (scopeWarning) fields.scope_warning = scopeWarning;
+
+			if (warnings.length) fields.warnings = warnings;
+
+			if (omittedWarnings) fields.warnings_omitted = omittedWarnings;
+
+			return structuredResult(body, { ...fields });
 		};
 
 		// The API's own Markdown rendering is the answer as it stands: it carries
@@ -907,7 +1077,7 @@ export function createHydraDBServer(
 				`\n\n(truncated: ${markdown.length} characters, showing ${showing})`;
 
 			const framing =
-				`${scopeText(resolvedScope)}\n\n`.length + feedback.length + warning.length;
+				`${scopeText(resolvedScope)}\n\n`.length + feedback.length + warning.length + warningText().length;
 
 			const budget = Math.max(QUERY_CHAR_BUDGET - framing - note(QUERY_CHAR_BUDGET).length, 0);
 
@@ -923,6 +1093,14 @@ export function createHydraDBServer(
 		// The renderer reads the SDK payload directly; there is no longer a
 		// snake_case mirror to convert into.
 		const res = raw;
+		const extras = z.object({ tabular_data: z.unknown().optional(), tabularData: z.unknown().optional() }).parse(raw);
+		const table = extras.tabular_data ?? extras.tabularData;
+		const tableText = table == null ? "" : formatTabularData(table);
+		const tableFields = table == null ? {} : { tabular_data: table };
+
+		const feedbackLine = requestId
+			? `\nWas this useful? Report it with ${TOOL_NAMES.FEEDBACK} using request_id: ${requestId}`
+			: "";
 
 		// The server can return more chunks than were asked for — a live call with
 		// max_results=10 came back with 15, and all 15 were rendered. Honour the
@@ -931,6 +1109,11 @@ export function createHydraDBServer(
 			res.chunks = res.chunks.slice(0, maxResults);
 		}
 
+		if ((!res.chunks || res.chunks.length === 0) && table != null) {
+			const feedback = feedbackLine ? `\n\n---${feedbackLine}` : "";
+
+			return queryResult(`${scopeText(resolvedScope)}${tableText}${feedback}`, tableFields);
+		}
 		if (!res.chunks || res.chunks.length === 0) {
 			// Name WHERE nothing was found. "No results" is ambiguous the moment a
 			// database has more than one collection: a pinned collection can be the
@@ -991,10 +1174,6 @@ export function createHydraDBServer(
 		// cannot be reconstructed later — if it is not printed here, the feedback
 		// tool has nothing to attach a submission to. Rendered on its own line so
 		// a model copies it verbatim rather than reformatting it.
-		const feedbackLine = requestId
-			? `\nWas this useful? Report it with ${TOOL_NAMES.FEEDBACK} using request_id: ${requestId}`
-			: "";
-
 		const legend =
 			`\n\n---\nEach [id: …] is a source id: pass one to ${TOOL_NAMES.INSPECT} for that ` +
 			`source's content, or to ${TOOL_NAMES.DELETE} to remove it. Keep the resolved database, the source's collection, and your ACL on follow-up calls. ` +
@@ -1003,7 +1182,7 @@ export function createHydraDBServer(
 			feedbackLine;
 
 		const scopeLine = scopeText(resolvedScope);
-		const headerAllowance = 120 + scopeLine.length + (scopeWarning?.length ?? 0) + 20;
+		const headerAllowance = 120 + scopeLine.length + (scopeWarning?.length ?? 0) + 20 + warningText().length + tableText.length;
 		const sourceRefs = new Map<string, Record<string, unknown>>();
 
 		const singleCollection = "collection" in resolvedScope
@@ -1045,8 +1224,8 @@ export function createHydraDBServer(
 		});
 
 		return queryResult(
-			`Found ${shown} ${resultNoun(kind, shown)}:\n${scopeLine}\n\n${contextStr}${legend}`,
-			{ sources: [...sourceRefs.values()] },
+			`Found ${shown} ${resultNoun(kind, shown)}:\n${scopeLine}\n\n${contextStr}${tableText}${legend}`,
+			{ sources: [...sourceRefs.values()], ...tableFields },
 		);
 	}
 
@@ -1101,6 +1280,35 @@ export function createHydraDBServer(
 		const safe = hydra.redact(message);
 
 		return safe.length > 200 ? `${safe.slice(0, 200)}…` : safe;
+	}
+
+	/** Preserve bounded, non-fatal response warnings on every ACL-bearing read. */
+	async function withResponseWarnings(
+		run: (onMeta: (meta: ResponseMeta) => void) => Promise<ToolResult>,
+	): Promise<ToolResult> {
+		let warnings: RenderedWarning[] = [];
+		let omitted = 0;
+
+		const result = await run((meta) => {
+			({ warnings, omitted } = boundResponseWarnings(meta.warnings ?? [], briefly));
+		});
+
+		if (warnings.length === 0) return result;
+		const notice = renderWarningText(warnings, omitted);
+
+		const enriched: ToolResult = {
+			...result,
+			content: result.content.map((part, index) => index === 0 ? { ...part, text: part.text + notice } : part),
+		};
+
+		if (result.structuredContent) {
+			const fields = { ...result.structuredContent, warnings };
+			enriched.structuredContent = fields;
+
+			if (omitted) enriched.structuredContent.warnings_omitted = omitted;
+		}
+
+		return enriched;
 	}
 
 	/**
@@ -1414,7 +1622,7 @@ export function createHydraDBServer(
 		acl?: string[];
 		database?: string;
 		collection?: string;
-	} = {}, signal?: AbortSignal): Promise<ToolResult> {
+	} = {}, signal?: AbortSignal, onMeta?: (meta: ResponseMeta) => void): Promise<ToolResult> {
 		logger.debug(TOOL_NAMES.LIST);
 
 		const raw = await hydra.context.list({
@@ -1427,7 +1635,7 @@ export function createHydraDBServer(
 			acl: args.acl,
 			database: args.database,
 			collection: args.collection,
-		}, { signal });
+		}, { signal, onMeta });
 
 		const { memories, page } = toMemoryList(raw);
 		const resolvedScope = singleScope(args);
@@ -1522,7 +1730,7 @@ export function createHydraDBServer(
 		acl?: string[];
 		database?: string;
 		collection?: string;
-	}, signal?: AbortSignal): Promise<ToolResult> {
+	}, signal?: AbortSignal, onMeta?: (meta: ResponseMeta) => void): Promise<ToolResult> {
 		logger.debug(TOOL_NAMES.LIST);
 
 		const sourceFields: Record<string, string> = {};
@@ -1549,7 +1757,7 @@ export function createHydraDBServer(
 			acl: args.acl,
 			database: args.database,
 			collection: args.collection,
-		}, { signal });
+		}, { signal, onMeta });
 
 		const { sources, page } = toSourceList(raw, args.include_fields);
 		const noun = args.kind === "all" ? "items (memories and knowledge together)" : "sources";
@@ -1662,6 +1870,7 @@ export function createHydraDBServer(
 			collection?: string;
 		},
 		signal?: AbortSignal,
+		onMeta?: (meta: ResponseMeta) => void,
 	): Promise<ToolResult> {
 		// Like subgraph: blank is refused, anything else goes out byte for byte.
 		// A blank id would otherwise read as "omitted" and return the whole
@@ -1687,7 +1896,7 @@ export function createHydraDBServer(
 					database: args.database,
 					collection: args.collection,
 				},
-				{ signal },
+				{ signal, onMeta },
 			),
 		);
 
@@ -1700,15 +1909,32 @@ export function createHydraDBServer(
 		// and saying "more exist" with no way to reach them is still the truth.
 		const hasMoreRelations = res.is_truncated && res.next_cursor != null;
 
-		const relations = res.relations.map((r) => ({
-			from: r.source.name ?? r.source.entity_id,
-			from_type: r.source.type,
-			predicate: r.predicate,
-			to: r.target.name ?? r.target.entity_id,
-			to_type: r.target.type,
-			evidence: r.context != null ? clampPreview(r.context) : null,
-			chunk_id: r.chunk_id,
-		}));
+		const relations = res.relations.map((r) => {
+			const relation: Partial<RelationSummary> = {};
+
+			if (r.source.database != null || r.source.collection != null || r.source.source_id != null || r.source.read_status != null) relation.source = r.source;
+
+			if (r.target.database != null || r.target.collection != null || r.target.source_id != null || r.target.read_status != null) relation.target = r.target;
+
+			if (r.database != null) relation.database = r.database;
+
+			if (r.collection != null) relation.collection = r.collection;
+
+			if (r.source_id != null) relation.source_id = r.source_id;
+
+			if (r.read_status != null) relation.read_status = r.read_status;
+
+			return {
+				...relation,
+				from: r.source.name ?? r.source.entity_id,
+				from_type: r.source.type,
+				predicate: r.predicate,
+				to: r.target.name ?? r.target.entity_id,
+				to_type: r.target.type,
+				evidence: r.context != null ? clampPreview(r.context) : null,
+				chunk_id: r.chunk_id,
+			};
+		});
 
 		const structured = {
 			id: args.id ?? null,
@@ -1926,6 +2152,7 @@ export function createHydraDBServer(
 			collection?: string;
 		},
 		signal?: AbortSignal,
+		onMeta?: (meta: ResponseMeta) => void,
 	): Promise<ToolResult> {
 		// Blank is rejected; anything else is forwarded byte for byte. The
 		// server treats an item id as opaque (ingest stores a caller's
@@ -1952,7 +2179,7 @@ export function createHydraDBServer(
 				database: args.database,
 				collection: args.collection,
 			},
-			{ signal },
+			{ signal, onMeta },
 		);
 
 		// Soft failure, like inspect: the server's own message, flagged.
@@ -2064,7 +2291,7 @@ export function createHydraDBServer(
 		acl?: string[];
 		database?: string;
 		collection?: string;
-	}, signal?: AbortSignal): Promise<ToolResult> {
+	}, signal?: AbortSignal, onMeta?: (meta: ResponseMeta) => void): Promise<ToolResult> {
 		logger.debug(`${TOOL_NAMES.INSPECT}: ${args.source_id}`);
 
 		const res = await hydra.context.inspect({
@@ -2074,7 +2301,7 @@ export function createHydraDBServer(
 			acl: args.acl,
 			database: args.database,
 			collection: args.collection,
-		}, { signal });
+		}, { signal, onMeta });
 
 		// Soft failure: return a normal (non-error) text result, matching v1.
 		if (!res.success || res.error) {
@@ -3301,6 +3528,8 @@ export function createHydraDBServer(
 			.boolean()
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.temporal_reasoning),
+		include_table_sql: z.boolean().optional().describe("Include SQL used to retrieve tabular data."),
+		table_limit: z.number().int().min(1).max(100).optional().describe("Maximum number of table rows to return (1–100)."),
 		response_format: z
 			.enum(["structured", "markdown"])
 			.optional()
@@ -4088,10 +4317,12 @@ export function createHydraDBServer(
 				);
 			}
 
-			if (a.kind === "knowledge" || a.kind === "all") {
-				return runListSources(
-					{
-						kind: a.kind,
+				if (a.kind === "knowledge" || a.kind === "all") {
+					const sourceKind = a.kind;
+
+					return withResponseWarnings((onMeta) => runListSources(
+						{
+							kind: sourceKind,
 						source_ids: ids,
 						external_id: a.external_id,
 						parent_external_id: a.parent_external_id,
@@ -4109,10 +4340,11 @@ export function createHydraDBServer(
 						collection: a.collection,
 					},
 					extra?.signal,
-				);
+					onMeta,
+				));
 			}
 
-			return runListMemories(
+			return withResponseWarnings((onMeta) => runListMemories(
 				{
 					source_ids: ids,
 					page: a.page,
@@ -4124,7 +4356,8 @@ export function createHydraDBServer(
 					collection: a.collection,
 				},
 				extra?.signal,
-			);
+				onMeta,
+			));
 		},
 		readOnly,
 		listOutputSchema,
@@ -4133,14 +4366,15 @@ export function createHydraDBServer(
 	register(
 		TOOL_NAMES.INSPECT,
 		inspectSchema,
-		(args, extra) => runInspect(toInspectArgs(args), extra?.signal),
+		(args, extra) => withResponseWarnings((onMeta) => runInspect(toInspectArgs(args), extra?.signal, onMeta)),
 		readOnly,
 	);
 
 	register(
 		TOOL_NAMES.SUBGRAPH,
 		subgraphSchema,
-		(args, extra) => runSubgraph(args as Parameters<typeof runSubgraph>[0], extra?.signal),
+		(args, extra) => withResponseWarnings((onMeta) =>
+			runSubgraph(args, extra?.signal, onMeta)),
 		readOnly,
 	);
 
@@ -4149,7 +4383,8 @@ export function createHydraDBServer(
 		relationsSchema,
 		// SAFETY: the MCP SDK validated args against relationsSchema, whose keys
 		// and types are exactly runRelations' parameter.
-		(args, extra) => runRelations(args as Parameters<typeof runRelations>[0], extra?.signal),
+		(args, extra) => withResponseWarnings((onMeta) =>
+			runRelations(args as Parameters<typeof runRelations>[0], extra?.signal, onMeta)),
 		readOnly,
 		relationsOutputSchema,
 	);

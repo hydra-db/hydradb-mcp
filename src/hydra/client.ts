@@ -43,13 +43,24 @@ export { DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT_SECONDS };
  * MCP tool call leaves the outbound HTTP request in flight: the caller has given
  * up, and the process keeps working and keeps retrying on its behalf.
  */
+export interface ResponseWarning {
+	code: string;
+	message: string;
+	collections?: string[];
+}
+
+export interface ResponseMeta {
+	requestId?: string;
+	warnings?: ResponseWarning[];
+}
+
 export interface RequestOptions {
 	signal?: AbortSignal;
 	/**
 	 * Receives the envelope's `meta` for this one call.
 	 *
 	 * `unwrap` keeps only `data`, which is right for every caller that just wants
-	 * the payload — but it drops `request_id`, and that is the ONLY key
+	 * the payload — but it drops warnings and `request_id`, which is the ONLY key
 	 * POST /feedback accepts to correlate a submission with the query it is
 	 * about. Without it an agent can run a query and then have nothing to say
 	 * feedback ON.
@@ -58,7 +69,7 @@ export interface RequestOptions {
 	 * be in flight at once, and a `lastRequestId` would hand one of them the
 	 * other's id. Opt-in, so no existing caller changes.
 	 */
-	onMeta?: (meta: { requestId?: string }) => void;
+	onMeta?: (meta: ResponseMeta) => void;
 }
 
 /**
@@ -209,6 +220,8 @@ export interface QueryParams {
 	maxResults?: number;
 	mode?: "fast" | "thinking" | "auto";
 	graphContext?: boolean;
+	includeTableSql?: boolean;
+	tableLimit?: number;
 	/**
 	 * Hybrid balance between keyword and vector retrieval: 0 to 1, or "auto".
 	 * Hybrid only, so it is refused alongside keyword retrieval; see `query`.
@@ -606,22 +619,41 @@ export function assertCollectionAllowed(
  * silently returns undefined on the rest.
  */
 const requestMetaEnvelopeSchema = z.object({
-	meta: z
-		.object({
-			requestId: z.string().optional(),
-			request_id: z.string().optional(),
-		})
-		.optional(),
+	meta: z.object({
+		requestId: z.unknown().optional(),
+		request_id: z.unknown().optional(),
+		warnings: z.unknown().optional(),
+	}).optional(),
 });
+// SDK 2.1.8 has no generated warnings field, but its parser currently passes
+// unknown fields through. Validate that untyped field at this boundary.
 
-function readRequestId<T>(value: T): string | undefined {
+const responseWarningSchema = z.object({ code: z.string(), message: z.string(), collections: z.array(z.string()).optional() });
+
+function readResponseMeta<T>(value: T): ResponseMeta {
 	const parsed = requestMetaEnvelopeSchema.safeParse(value);
 
-	if (!parsed.success) return undefined;
+	if (!parsed.success) return { requestId: undefined };
+	const meta = parsed.data.meta;
+	const camelId = z.string().safeParse(meta?.requestId);
+	const id = camelId.success ? camelId.data : meta?.request_id;
 
-	const id = parsed.data.meta?.requestId ?? parsed.data.meta?.request_id;
+	const entries = z.array(z.unknown()).safeParse(meta?.warnings);
 
-	return id !== "" ? id : undefined;
+	const warnings = entries.success
+		? entries.data.flatMap((entry) => {
+			const warning = responseWarningSchema.safeParse(entry);
+
+			return warning.success ? [warning.data] : [];
+		})
+		: [];
+
+	const parsedId = z.string().safeParse(id);
+	const result: ResponseMeta = { requestId: parsedId.success && parsedId.data !== "" ? parsedId.data : undefined };
+
+	if (warnings.length) result.warnings = warnings;
+
+	return result;
 }
 
 abstract class Resource {
@@ -732,7 +764,7 @@ abstract class Resource {
 			attempt: (signal) => fn({ abortSignal: signal, maxRetries: 0 }),
 		});
 
-		opts?.onMeta?.({ requestId: readRequestId(raw) });
+		opts?.onMeta?.(readResponseMeta(raw));
 
 		return unwrap<T>(raw);
 	}
@@ -836,6 +868,30 @@ export class ContextResource extends Resource {
 		};
 	}
 
+	/** SDK 2.1.8 strips unknown request keys. Inject only these fields after its
+	 * serialization, keeping its parser and the shared retry/cancellation policy.
+	 * Remove this bridge when a released SDK serializes both fields itself. */
+	private queryClient(params: QueryParams): HydraDBClient {
+		if (params.includeTableSql == null && params.tableLimit == null) return this.sdk;
+
+		if (!this.raw) throw new Error("Table query options require a configured HTTP transport.");
+		const raw = this.raw;
+
+		const fetchFn: typeof fetch = (input, init) => {
+			const body = z.record(z.string(), z.unknown()).parse(JSON.parse(String(init?.body)));
+
+			if (params.includeTableSql != null) body.include_table_sql = params.includeTableSql;
+
+			if (params.tableLimit != null) body.table_limit = params.tableLimit;
+
+			return (raw.fetchFn ?? fetch)(input, { ...init, body: JSON.stringify(body) });
+		};
+
+		return new HydraDBClient({ token: raw.token, baseUrl: raw.baseUrl, fetch: fetchFn,
+			headers: raw.headers, timeoutInSeconds: raw.timeoutMs / 1000 + 5, maxRetries: 0,
+			logging: { logger: STDERR_LOGGER } });
+	}
+
 	/**
 	 * The single retrieval entry point (SDK `client.query`).
 	 *
@@ -847,10 +903,10 @@ export class ContextResource extends Resource {
 		opts?: RequestOptions,
 	): Promise<SDK.SearchV2RetrievalResult> {
 		const request = this.queryRequest(params);
-
+		const client = this.queryClient(params);
 
 		return this.call("/query", "idempotent", opts, async (o) => {
-			const response = await this.sdk.query(request, o);
+			const response = await client.query(request, o);
 			validateQueryResponse(response);
 			return response;
 		});
@@ -865,9 +921,10 @@ export class ContextResource extends Resource {
 		opts?: RequestOptions,
 	): Promise<string> {
 		const request: SDK.SearchQueryRequest = { ...this.queryRequest(params), responseFormat: "markdown" };
+		const client = this.queryClient(params);
 
 		return this.call("/query", "idempotent", opts, async (o) => {
-			const response = await this.sdk.query(request, o);
+			const response = await client.query(request, o);
 
 			// The SDK types `data` as the result object and passes the string
 			// through unparsed. Anything else is not a successful Markdown answer.
@@ -1231,7 +1288,10 @@ export class ContextResource extends Resource {
 		for (const principal of params.acl ?? []) query.append("acl", principal);
 		const path = `/context/${encodeURIComponent(params.id)}/subgraph?${query.toString()}`;
 
-		return sendRaw<SubgraphResult>(this.raw, path, "GET", undefined, opts);
+		return sendRaw<SubgraphResult>(this.raw, path, "GET", undefined, {
+			signal: opts?.signal,
+			onResponse: (value) => opts?.onMeta?.(readResponseMeta(value)),
+		});
 	}
 
 	/** Knowledge-graph relations (SDK `context.relations`). */
