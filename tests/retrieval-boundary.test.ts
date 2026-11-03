@@ -342,11 +342,11 @@ test("query exposes tabular results, chunk metadata and warning collections", as
 	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "q", structured: true } });
 	assert.match(text(result), /Ada/);
 	assert.match(text(result), /page/);
-	assert.deepEqual((result.structuredContent as Record<string, unknown>).warnings, [{ code: "PARTIAL", message: "incomplete", collections: ["docs"] }]);
+	assert.deepEqual(output<{ warnings: { code: string; message: string; collections: string[] }[] }>(result).warnings, [{ code: "PARTIAL", message: "incomplete", collections: ["docs"] }]);
 });
 
 test("table query options reach the wire through SDK serialization", async (t) => {
-	const seen: Record<string, unknown>[] = [];
+	const seen: { include_table_sql?: boolean; table_limit?: number }[] = [];
 
 	const fetchFn: typeof fetch = async (_url, init) => {
 		seen.push(JSON.parse(String(init?.body)));
@@ -373,7 +373,7 @@ test("table-only results are not reported as empty", async (t) => {
 	assert.match(text(result), /only-table/);
 	assert.doesNotMatch(text(result), /No relevant/);
 	assert.match(text(result), /request_id: table-request/);
-	assert.equal((result.structuredContent as Record<string, unknown>).request_id, "table-request");
+	assert.equal(output<{ request_id: string }>(result).request_id, "table-request");
 });
 
 test("large tabular results keep complete rows in text and preserve structured output", async (t) => {
@@ -386,8 +386,8 @@ test("large tabular results keep complete rows in text and preserve structured o
 
 	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "q", structured: true } });
 	const body = text(result);
-	const structured = result.structuredContent as Record<string, unknown>;
-	const table = structured.tabular_data as { rows: string[][] }[];
+	const structured = output<{ tabular_data: { rows: string[][] }[]; request_id?: string }>(result);
+	const table = structured.tabular_data;
 
 	assert.ok(body.length <= 40_000);
 	assert.match(body, /\d+ rows omitted/);
@@ -405,8 +405,8 @@ test("large table-only results are bounded and keep feedback identity", async (t
 
 	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "q", structured: true } });
 	const body = text(result);
-	const structured = result.structuredContent as Record<string, unknown>;
-	const table = structured.tabular_data as { rows: string[][] }[];
+	const structured = output<{ tabular_data: { rows: string[][] }[]; request_id?: string }>(result);
+	const table = structured.tabular_data;
 
 	assert.ok(body.length <= 40_000);
 	assert.match(body, /request_id: large-table-request/);
@@ -425,8 +425,8 @@ test("an escaping-heavy oversized row is omitted whole", async (t) => {
 
 	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "q", structured: true } });
 	const body = text(result);
-	const structured = result.structuredContent as Record<string, unknown>;
-	const table = structured.tabular_data as { rows: string[][] }[];
+	const structured = output<{ tabular_data: { rows: string[][] }[]; request_id?: string }>(result);
+	const table = structured.tabular_data;
 
 	assert.deepEqual(table[0]!.rows, [[oversized]]);
 	assert.doesNotMatch(body, /tail/);
@@ -442,7 +442,7 @@ test("oversized metadata is omitted while complete rows and structured data rema
 
 	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "q", structured: true } });
 	const body = text(result);
-	const structured = result.structuredContent as Record<string, unknown>;
+	const structured = output<{ tabular_data: { title: string; rows: string[][] } }>(result);
 
 	assert.deepEqual(structured.tabular_data, { title: "m".repeat(13_000), rows: [["one"], ["two"]] });
 	assert.match(body, /table content omitted/);
@@ -463,8 +463,8 @@ test("multiple tables share one budget without reordering retained rows", async 
 	}));
 
 	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "q", structured: true } });
-	const structured = result.structuredContent as Record<string, unknown>;
-	const tables = structured.tabular_data as { rows: string[][] }[];
+	const structured = output<{ tabular_data: { rows: string[][] }[] }>(result);
+	const tables = structured.tabular_data;
 
 	assert.deepEqual(tables[0]!.rows, firstRows);
 	assert.deepEqual(tables[1]!.rows, secondRows);
@@ -560,7 +560,7 @@ test("table text preserves complete paired rows alongside chunks and structured 
 	const ordinary = await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
 	const structured = await client.callTool({ name: "hydradb_query", arguments: { query: "q", structured: true } });
 	assert.equal(text(ordinary), text(structured));
-	assert.deepEqual((structured.structuredContent as Record<string, unknown>).tabular_data, table);
+	assert.deepEqual(output<{ tabular_data: typeof table }>(structured).tabular_data, table);
 	assert.match(text(ordinary), /\d+ rows omitted/);
 	const row = text(ordinary).split("\n").find((line) => line.startsWith("Row 1: "));
 	assert.ok(row);
@@ -572,7 +572,7 @@ test("oversized structured tables preserve complete data while text remains boun
 	const table = { rows: [["oversized-" + "x".repeat(20000)], ["later-row"]] };
 	const { client } = await fixture(t, () => json({ chunks: [], tabular_data: table }));
 	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "q", structured: true } });
-	assert.deepEqual((result.structuredContent as Record<string, unknown>).tabular_data, table);
+	assert.deepEqual(output<{ tabular_data: typeof table }>(result).tabular_data, table);
 	assert.match(text(result), /later-row/);
 	assert.match(text(result), /1 row omitted/);
 	assert.ok(text(result).length < 13000);

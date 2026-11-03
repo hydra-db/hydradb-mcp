@@ -630,25 +630,30 @@ const requestMetaEnvelopeSchema = z.object({
 
 const responseWarningSchema = z.object({ code: z.string(), message: z.string(), collections: z.array(z.string()).optional() });
 
-function readResponseMeta(value: unknown): ResponseMeta {
+function readResponseMeta<T>(value: T): ResponseMeta {
 	const parsed = requestMetaEnvelopeSchema.safeParse(value);
 
 	if (!parsed.success) return { requestId: undefined };
 	const meta = parsed.data.meta;
-	const id = typeof meta?.requestId === "string" ? meta.requestId : meta?.request_id;
+	const camelId = z.string().safeParse(meta?.requestId);
+	const id = camelId.success ? camelId.data : meta?.request_id;
 
-	const warnings = Array.isArray(meta?.warnings)
-		? meta.warnings.flatMap((entry: unknown) => {
+	const entries = z.array(z.unknown()).safeParse(meta?.warnings);
+
+	const warnings = entries.success
+		? entries.data.flatMap((entry) => {
 			const warning = responseWarningSchema.safeParse(entry);
 
 			return warning.success ? [warning.data] : [];
 		})
 		: [];
 
-	return {
-		requestId: typeof id === "string" && id !== "" ? id : undefined,
-		...(warnings.length ? { warnings } : {}),
-	};
+	const parsedId = z.string().safeParse(id);
+	const result: ResponseMeta = { requestId: parsedId.success && parsedId.data !== "" ? parsedId.data : undefined };
+
+	if (warnings.length) result.warnings = warnings;
+
+	return result;
 }
 
 abstract class Resource {
@@ -873,7 +878,7 @@ export class ContextResource extends Resource {
 		const raw = this.raw;
 
 		const fetchFn: typeof fetch = (input, init) => {
-			const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+			const body = z.record(z.string(), z.unknown()).parse(JSON.parse(String(init?.body)));
 
 			if (params.includeTableSql != null) body.include_table_sql = params.includeTableSql;
 

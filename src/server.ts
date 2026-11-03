@@ -144,6 +144,7 @@ function boundResponseWarnings(input: ResponseWarning[], shorten: (value: string
 		};
 
 		if (warning.collections) rendered.collections = [];
+
 		if (rawCollections.length) rendered.collections_omitted = rawCollections.length;
 
 		const reserveOmitted = omitted + candidates.length - i - 1;
@@ -177,8 +178,21 @@ function boundResponseWarnings(input: ResponseWarning[], shorten: (value: string
 }
 
 
+interface TableRowPair { row?: unknown; record?: unknown }
+
+const tableObjectSchema = z.record(z.unknown());
+
+// Keep the original opaque record: parsing with z.record would discard __proto__ keys.
+const tableObject = z.custom<z.infer<typeof tableObjectSchema>>(
+	(value) => value != null && Object(value) === value && !Array.isArray(value),
+);
+
+interface RelationSummary { source?: ReturnType<typeof toRelationList>["relations"][number]["source"]; target?: ReturnType<typeof toRelationList>["relations"][number]["target"]; database?: string | null; collection?: string | null; source_id?: string | null; read_status?: string | null; from: string | null; from_type: string | null; predicate: string | null; to: string | null; to_type: string | null; evidence: string | null; chunk_id: string | null }
+
+interface QueryFields { resolved_scope: { database: string; collection?: string | null; collections?: string[] }; request_id?: string; scope_warning?: string; warnings?: RenderedWarning[]; warnings_omitted?: number }
+
 /** Render complete table rows within the text budget; structured output stays intact. */
-function formatTabularData(table: unknown): string {
+function formatTabularData<T>(table: T): string {
 	const limit = 12_000;
 	const lines = ["\n\nTabular data:"];
 	let length = lines[0]!.length;
@@ -197,12 +211,14 @@ function formatTabularData(table: unknown): string {
 	const tables = Array.isArray(table) ? table : [table];
 
 	for (const [index, item] of tables.entries()) {
-		if (item == null || typeof item !== "object" || Array.isArray(item)) {
+		const parsed = tableObject.safeParse(item);
+
+		if (!parsed.success || Array.isArray(item)) {
 			if (!append(JSON.stringify(item))) omittedContent++;
 			continue;
 		}
 
-		const { rows, records, ...metadata } = item as Record<string, unknown>;
+		const { rows, records, ...metadata } = parsed.data;
 		const rowList = Array.isArray(rows) ? rows : undefined;
 		const recordList = Array.isArray(records) ? records : undefined;
 		// Preserve unexpected shapes rather than silently dropping them.
@@ -215,9 +231,16 @@ function formatTabularData(table: unknown): string {
 		const count = Math.max(rowList?.length ?? 0, recordList?.length ?? 0);
 
 		for (let i = 0; i < count; i++) {
-			const value = rowList && recordList
-				? { ...(i < rowList.length ? { row: rowList[i] } : {}), ...(i < recordList.length ? { record: recordList[i] } : {}) }
-				: (rowList ?? recordList)![i];
+			let value = (rowList ?? recordList)![i];
+
+			if (rowList && recordList) {
+				const pair: TableRowPair = {};
+
+				if (i < rowList.length) pair.row = rowList[i];
+
+				if (i < recordList.length) pair.record = recordList[i];
+				value = pair;
+			}
 
 			if (!append(`Row ${i + 1}: ${JSON.stringify(value)}`)) omittedRows++;
 		}
@@ -1020,12 +1043,18 @@ export function createHydraDBServer(
 			const body = `${text}${scopeWarning ? `\n\nScope warning: ${scopeWarning}` : ""}${warningText()}`;
 			if (args.structured !== true) return textResult(body);
 
-			return structuredResult(body, {
-				resolved_scope: resolvedScope, ...(requestId ? { request_id: requestId } : {}), ...extra,
-				...(scopeWarning ? { scope_warning: scopeWarning } : {}),
-				...(warnings.length ? { warnings } : {}),
-				...(omittedWarnings ? { warnings_omitted: omittedWarnings } : {}),
-			});
+			const fields: QueryFields = { resolved_scope: resolvedScope };
+
+			if (requestId) fields.request_id = requestId;
+			Object.assign(fields, extra);
+
+			if (scopeWarning) fields.scope_warning = scopeWarning;
+
+			if (warnings.length) fields.warnings = warnings;
+
+			if (omittedWarnings) fields.warnings_omitted = omittedWarnings;
+
+			return structuredResult(body, { ...fields });
 		};
 
 		// The API's own Markdown rendering is the answer as it stands: it carries
@@ -1064,7 +1093,7 @@ export function createHydraDBServer(
 		// The renderer reads the SDK payload directly; there is no longer a
 		// snake_case mirror to convert into.
 		const res = raw;
-		const extras = raw as unknown as { tabular_data?: unknown; tabularData?: unknown };
+		const extras = z.object({ tabular_data: z.unknown().optional(), tabularData: z.unknown().optional() }).parse(raw);
 		const table = extras.tabular_data ?? extras.tabularData;
 		const tableText = table == null ? "" : formatTabularData(table);
 		const tableFields = table == null ? {} : { tabular_data: table };
@@ -1267,17 +1296,19 @@ export function createHydraDBServer(
 		if (warnings.length === 0) return result;
 		const notice = renderWarningText(warnings, omitted);
 
-		return {
+		const enriched: ToolResult = {
 			...result,
 			content: result.content.map((part, index) => index === 0 ? { ...part, text: part.text + notice } : part),
-			...(result.structuredContent ? {
-				structuredContent: {
-					...result.structuredContent,
-					warnings,
-					...(omitted ? { warnings_omitted: omitted } : {}),
-				},
-			} : {}),
 		};
+
+		if (result.structuredContent) {
+			const fields = { ...result.structuredContent, warnings };
+			enriched.structuredContent = fields;
+
+			if (omitted) enriched.structuredContent.warnings_omitted = omitted;
+		}
+
+		return enriched;
 	}
 
 	/**
@@ -1878,21 +1909,32 @@ export function createHydraDBServer(
 		// and saying "more exist" with no way to reach them is still the truth.
 		const hasMoreRelations = res.is_truncated && res.next_cursor != null;
 
-		const relations = res.relations.map((r) => ({
-			...(r.source.database != null || r.source.collection != null || r.source.source_id != null || r.source.read_status != null ? { source: r.source } : {}),
-			...(r.target.database != null || r.target.collection != null || r.target.source_id != null || r.target.read_status != null ? { target: r.target } : {}),
-			...(r.database != null ? { database: r.database } : {}),
-			...(r.collection != null ? { collection: r.collection } : {}),
-			...(r.source_id != null ? { source_id: r.source_id } : {}),
-			...(r.read_status != null ? { read_status: r.read_status } : {}),
-			from: r.source.name ?? r.source.entity_id,
-			from_type: r.source.type,
-			predicate: r.predicate,
-			to: r.target.name ?? r.target.entity_id,
-			to_type: r.target.type,
-			evidence: r.context != null ? clampPreview(r.context) : null,
-			chunk_id: r.chunk_id,
-		}));
+		const relations = res.relations.map((r) => {
+			const relation: Partial<RelationSummary> = {};
+
+			if (r.source.database != null || r.source.collection != null || r.source.source_id != null || r.source.read_status != null) relation.source = r.source;
+
+			if (r.target.database != null || r.target.collection != null || r.target.source_id != null || r.target.read_status != null) relation.target = r.target;
+
+			if (r.database != null) relation.database = r.database;
+
+			if (r.collection != null) relation.collection = r.collection;
+
+			if (r.source_id != null) relation.source_id = r.source_id;
+
+			if (r.read_status != null) relation.read_status = r.read_status;
+
+			return {
+				...relation,
+				from: r.source.name ?? r.source.entity_id,
+				from_type: r.source.type,
+				predicate: r.predicate,
+				to: r.target.name ?? r.target.entity_id,
+				to_type: r.target.type,
+				evidence: r.context != null ? clampPreview(r.context) : null,
+				chunk_id: r.chunk_id,
+			};
+		});
 
 		const structured = {
 			id: args.id ?? null,
@@ -4332,7 +4374,7 @@ export function createHydraDBServer(
 		TOOL_NAMES.SUBGRAPH,
 		subgraphSchema,
 		(args, extra) => withResponseWarnings((onMeta) =>
-			runSubgraph(args as Parameters<typeof runSubgraph>[0], extra?.signal, onMeta)),
+			runSubgraph(args, extra?.signal, onMeta)),
 		readOnly,
 	);
 

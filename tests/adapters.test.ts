@@ -161,7 +161,8 @@ test("toSourceList reads source rows and total", () => {
 
 test("relations preserve graph provenance and read status", async () => {
 	const { toRelationList } = await import("../src/adapters.js");
-	const result = toRelationList({ relations: [{ source: { name: "a", database: "db", collection: "docs", source_id: "s1", read_status: "ready" }, target: { name: "b" }, relations: [{ canonical_predicate: "links", source_id: "s2", read_status: "ready", database: "db", collection: "docs" }] }], is_truncated: false } as unknown as SDK.GraphGraphRelationsResponse);
-	assert.equal((result.relations[0]!.source as unknown as Record<string, unknown>).source_id, "s1");
-	assert.equal((result.relations[0] as unknown as Record<string, unknown>).source_id, "s2");
+	const fixture = { relations: [{ source: { name: "a", database: "db", collection: "docs", source_id: "s1", read_status: "ready" }, target: { name: "b" }, relations: [{ canonical_predicate: "links", source_id: "s2", read_status: "ready", database: "db", collection: "docs" }] }], is_truncated: false };
+	const result = toRelationList(fixture);
+	assert.equal(result.relations[0]!.source.source_id, "s1");
+	assert.equal(result.relations[0]!.source_id, "s2");
 });

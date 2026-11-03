@@ -325,8 +325,11 @@ function provenance(record: z.infer<typeof relationEndRecord> | z.infer<typeof r
 	const readStatus = record.read_status ?? record.readStatus;
 
 	if (record.database != null) result.database = record.database;
+
 	if (record.collection != null) result.collection = record.collection;
+
 	if (sourceId != null) result.source_id = sourceId;
+
 	if (readStatus != null) result.read_status = readStatus;
 
 	return result;

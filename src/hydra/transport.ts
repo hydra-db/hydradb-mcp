@@ -73,7 +73,7 @@ export interface RawRequestOptions {
 	 */
 	safety?: RetrySafety;
 	/** Observe the successful wire response before envelope unwrapping. */
-	onResponse?: (value: unknown) => void;
+	onResponse?: <T>(value: T) => void;
 }
 
 export function newRawTransport(config: {
@@ -120,7 +120,7 @@ async function attemptRaw<T>(
 	method: "GET" | "POST" | "DELETE",
 	body: unknown,
 	signal: AbortSignal,
-	onResponse?: (value: unknown) => void,
+	onResponse?: <T>(value: T) => void,
 ): Promise<T> {
 	const doFetch = t.fetchFn ?? fetch;
 

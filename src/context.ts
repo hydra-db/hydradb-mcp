@@ -273,7 +273,7 @@ function formatTemporal(response: RecallResponse): string[] {
 		const end = epochDate(f.eventEnd);
 		let when = start && end && end !== start ? ` | ${start} → ${end}` : start ? ` | ${start}` : end ? ` | until ${end}` : "";
 		if (when && (f.datePrecision === "month" || f.datePrecision === "year")) when += ` (~${f.datePrecision})`;
-		const observed = f as unknown as { observed_at?: unknown; observedAt?: unknown };
+		const observed = z.object({ observed_at: z.unknown().optional(), observedAt: z.unknown().optional() }).parse(f);
 		const observedAt = observed.observed_at ?? observed.observedAt;
 
 		if (observedAt != null) when += ` | observed: ${String(observedAt)}`;
@@ -511,7 +511,7 @@ function render(
 		}
 
 		lines.push(...trailLines(chunk));
-		const extraChunk = chunk as unknown as { chunk_metadata?: unknown; chunkMetadata?: unknown };
+		const extraChunk = z.object({ chunk_metadata: z.unknown().optional(), chunkMetadata: z.unknown().optional() }).parse(chunk);
 		const chunkMetadata = extraChunk.chunk_metadata ?? extraChunk.chunkMetadata;
 
 		if (chunkMetadata != null) lines.push(`Chunk metadata: ${JSON.stringify(chunkMetadata)}`);

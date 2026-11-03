@@ -99,7 +99,9 @@ function mockHydra(
 					? responses.list
 					: { sources: [], total: 0 };
 
-			const body = data != null && typeof data === "object" && "success" in data
+			const parsed = z.record(z.string(), z.unknown()).safeParse(data);
+
+			const body = parsed.success && "success" in parsed.data
 				? data
 				: { success: true, data };
 
@@ -2645,7 +2647,7 @@ test("hydradb_query keyword retrieval gets no default alpha and refuses an expli
 
 		assert.equal(out.isError, true);
 		// SAFETY: every tool result here is text content.
-		assert.match((out.content as { text: string }[])[0]!.text, /alpha balances hybrid retrieval/);
+		assert.match(z.array(z.object({ text: z.string() })).parse(out.content)[0]!.text, /alpha balances hybrid retrieval/);
 		assert.equal(calls.filter((c) => c.method === "query").length, 0, "refused before the wire");
 	}
 
@@ -2662,7 +2664,7 @@ test("hydradb_query response_format markdown returns Hydra DB's Markdown with sc
 	});
 
 	// SAFETY: every tool result here is text content.
-	const text = (out.content as { text: string }[])[0]!.text;
+	const text = z.array(z.object({ text: z.string() })).parse(out.content)[0]!.text;
 
 	assert.notEqual(out.isError, true);
 	assert.equal(calls.find((c) => c.method === "query")?.args.responseFormat, "markdown");
@@ -2683,7 +2685,7 @@ test("hydradb_query markdown stays within the text cap when many collections are
 	});
 
 	// SAFETY: every tool result here is text content.
-	const text = (out.content as { text: string }[])[0]!.text;
+	const text = z.array(z.object({ text: z.string() })).parse(out.content)[0]!.text;
 
 	assert.notEqual(out.isError, true, text);
 	assert.match(text, /collection-with-a-long-name-09/);
@@ -2703,7 +2705,7 @@ test("hydradb_query response_format markdown refuses a response that is not Mark
 
 	assert.equal(out.isError, true);
 	// SAFETY: every tool result here is text content.
-	assert.match((out.content as { text: string }[])[0]!.text, /expected a Markdown string/);
+	assert.match(z.array(z.object({ text: z.string() })).parse(out.content)[0]!.text, /expected a Markdown string/);
 	await client.close();
 });
 
@@ -4540,11 +4542,11 @@ test("query surfaces non-fatal API warnings in text and structured results", asy
 		const client = await connect(hydra);
 
 		const out = await client.callTool({ name: "hydradb_query", arguments: {
-			query: "q", structured: true, ...(format ? { response_format: format } : {}),
+			query: "q", structured: true, response_format: format,
 		} });
 
 		assert.notEqual(out.isError, true);
-		assert.match((out.content as { text: string }[])[0]!.text, /acl_ignored_by_connector_enforcement/);
+		assert.match(z.array(z.object({ text: z.string() })).parse(out.content)[0]!.text, /acl_ignored_by_connector_enforcement/);
 		assert.deepEqual(out.structuredContent?.warnings, [warning]);
 		assert.equal(out.structuredContent?.request_id, "r-warning");
 		await client.close();
@@ -4564,7 +4566,7 @@ test("query warnings remain bounded and account for the text budget", async () =
 		query: "q", structured: true, response_format: "markdown",
 	} });
 
-	const text = (out.content as { text: string }[])[0]!.text;
+	const text = z.array(z.object({ text: z.string() })).parse(out.content)[0]!.text;
 	assert.ok(text.length <= 40_000);
 	assert.match(text, /2 additional warnings omitted/);
 	assert.equal(out.structuredContent?.warnings_omitted, 2);
@@ -4590,8 +4592,8 @@ test("query warning collections share a bounded text and structured budget", asy
 		query: "q", structured: true,
 	} });
 
-	const body = (out.content as { text: string }[])[0]!.text;
-	const renderedWarnings = out.structuredContent?.warnings as { collections_omitted?: number }[];
+	const body = z.array(z.object({ text: z.string() })).parse(out.content)[0]!.text;
+	const renderedWarnings = z.array(z.object({ collections_omitted: z.number().optional() })).parse(out.structuredContent?.warnings);
 
 	assert.ok(body.length <= 40_000);
 	assert.ok(JSON.stringify({
@@ -4606,7 +4608,7 @@ test("query warning collections share a bounded text and structured budget", asy
 
 test("all ACL-bearing read tools surface enforcement warnings", async () => {
 	const warning = { code: "acl_ignored_by_connector_enforcement", message: "Request ACL ignored." };
-	const envelope = (data: unknown) => ({ success: true, data, meta: { requestId: "r-warning", warnings: [warning] } });
+	const envelope = <T>(data: T) => ({ success: true, data, meta: { requestId: "r-warning", warnings: [warning] } });
 
 	const { hydra } = mockHydra({
 		list: async () => envelope({ inner: { sources: [], total: 0 } }),
@@ -4614,7 +4616,7 @@ test("all ACL-bearing read tools surface enforcement warnings", async () => {
 		relations: async () => envelope({ relations: [], isTruncated: false }),
 	});
 
-	(hydra.context as unknown as { subgraph: (args: unknown, opts?: { onMeta?: (meta: unknown) => void }) => Promise<unknown> }).subgraph = async (_args, opts) => {
+	hydra.context.subgraph = async (_args, opts) => {
 		opts?.onMeta?.({ requestId: "r-warning", warnings: [warning] });
 
 		return { success: true, seed_source_id: "s1", sources: [], relations: [], auxiliary_relations: [], is_truncated: false, auxiliary_truncated: false, max_depth_reached: 0 };
@@ -4629,7 +4631,7 @@ test("all ACL-bearing read tools surface enforcement warnings", async () => {
 		{ name: "hydradb_subgraph", arguments: { id: "s1", acl: ["user@example.com"] } },
 	]) {
 		const out = await client.callTool(request);
-		assert.match((out.content as { text: string }[])[0]!.text, /acl_ignored_by_connector_enforcement/);
+		assert.match(z.array(z.object({ text: z.string() })).parse(out.content)[0]!.text, /acl_ignored_by_connector_enforcement/);
 		assert.deepEqual(out.structuredContent?.warnings, [warning]);
 	}
 
@@ -4638,7 +4640,7 @@ test("all ACL-bearing read tools surface enforcement warnings", async () => {
 
 test("all non-query ACL reads bound warnings across every list path", async () => {
 	const warnings = Array.from({ length: 12 }, (_, i) => ({ code: `notice_${i}`, message: "x".repeat(1000) }));
-	const envelope = (data: unknown) => ({ success: true, data, meta: { requestId: "r-warning", warnings } });
+	const envelope = <T>(data: T) => ({ success: true, data, meta: { requestId: "r-warning", warnings } });
 
 	const { hydra } = mockHydra({
 		list: async () => envelope({ inner: { sources: [], total: 0 } }),
@@ -4647,7 +4649,7 @@ test("all non-query ACL reads bound warnings across every list path", async () =
 		relations: async () => envelope({ relations: [], isTruncated: false }),
 	});
 
-	(hydra.context as unknown as { subgraph: (args: unknown, opts?: { onMeta?: (meta: unknown) => void }) => Promise<unknown> }).subgraph = async (_args, opts) => {
+	hydra.context.subgraph = async (_args, opts) => {
 		opts?.onMeta?.({ requestId: "r-warning", warnings });
 
 		return { success: true, seed_source_id: "s1", sources: [], relations: [], auxiliary_relations: [], is_truncated: false, auxiliary_truncated: false, max_depth_reached: 0 };
@@ -4665,12 +4667,12 @@ test("all non-query ACL reads bound warnings across every list path", async () =
 		{ name: "hydradb_subgraph", arguments: { id: "s1", acl: ["user@example.com"] } },
 	]) {
 		const out = await client.callTool(request);
-		const text = (out.content as { text: string }[])[0]!.text;
+		const text = z.array(z.object({ text: z.string() })).parse(out.content)[0]!.text;
 		assert.match(text, /2 additional warnings omitted/);
-		assert.equal((out.structuredContent?.warnings as unknown[]).length, 10);
+		assert.equal(z.array(z.unknown()).parse(out.structuredContent?.warnings).length, 10);
 		assert.equal(out.structuredContent?.warnings_omitted, 2);
 
-		for (const warning of out.structuredContent?.warnings as { message: string }[]) {
+		for (const warning of z.array(z.object({ message: z.string() })).parse(out.structuredContent?.warnings)) {
 			assert.ok(warning.message.length <= 201);
 		}
 	}
@@ -4680,7 +4682,7 @@ test("all non-query ACL reads bound warnings across every list path", async () =
 
 test("all non-query ACL reads omit warning fields when metadata has none", async () => {
 	const { hydra } = mockHydra({ listFetch: { success: true, data: { sources: [], total: 0 } } });
-	(hydra.context as unknown as { subgraph: () => Promise<unknown> }).subgraph = async () => ({
+	hydra.context.subgraph = async () => ({
 		success: true, seed_source_id: "s1", sources: [], relations: [], auxiliary_relations: [], is_truncated: false, auxiliary_truncated: false, max_depth_reached: 0,
 	});
 	const client = await connect(hydra);
@@ -4695,7 +4697,7 @@ test("all non-query ACL reads omit warning fields when metadata has none", async
 		{ name: "hydradb_subgraph", arguments: { id: "s1", acl: ["user@example.com"] } },
 	]) {
 		const out = await client.callTool(request);
-		assert.doesNotMatch((out.content as { text: string }[])[0]!.text, /Warnings:/);
+		assert.doesNotMatch(z.array(z.object({ text: z.string() })).parse(out.content)[0]!.text, /Warnings:/);
 		assert.equal(out.structuredContent?.warnings, undefined);
 		assert.equal(out.structuredContent?.warnings_omitted, undefined);
 	}
