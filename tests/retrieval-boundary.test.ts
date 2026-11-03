@@ -371,7 +371,7 @@ test("table-only results are not reported as empty", async (t) => {
 	assert.equal((result.structuredContent as Record<string, unknown>).request_id, "table-request");
 });
 
-test("large tabular results keep complete rows in text and preserve structured output", async (t) => {
+test("large tabular results keep complete rows and bound text and structured output", async (t) => {
 	const rows = Array.from({ length: 30 }, (_, i) => [`row-${i}-${"x".repeat(1000)}`]);
 	const { client } = await fixture(t, () => json({
 		...queryData(),
@@ -383,8 +383,12 @@ test("large tabular results keep complete rows in text and preserve structured o
 	const table = structured.tabular_data as { rows: string[][] }[];
 
 	assert.ok(body.length <= 40_000);
-	assert.match(body, /\d+ rows omitted/);
-	assert.deepEqual(table[0]!.rows, rows);
+	assert.match(body, /tabular data truncated/);
+	assert.equal(structured.tabular_data_truncated, true);
+	assert.ok((structured.tabular_rows_omitted as number) > 0);
+	assert.ok(JSON.stringify(table).length <= 12_000);
+	assert.ok(table[0]!.rows.length < rows.length);
+	assert.deepEqual(table[0]!.rows, rows.slice(0, table[0]!.rows.length));
 });
 
 test("large table-only results are bounded and keep feedback identity", async (t) => {
@@ -401,9 +405,11 @@ test("large table-only results are bounded and keep feedback identity", async (t
 
 	assert.ok(body.length <= 40_000);
 	assert.match(body, /request_id: large-table-request/);
-	assert.match(body, /\d+ rows omitted/);
+	assert.match(body, /tabular data truncated/);
 	assert.equal(structured.request_id, "large-table-request");
-	assert.deepEqual(table[0]!.rows, rows);
+	assert.equal(structured.tabular_data_truncated, true);
+	assert.ok(JSON.stringify(table).length <= 12_000);
+	assert.deepEqual(table[0]!.rows, rows.slice(0, table[0]!.rows.length));
 });
 
 test("an escaping-heavy oversized row is omitted whole", async (t) => {
@@ -417,13 +423,16 @@ test("an escaping-heavy oversized row is omitted whole", async (t) => {
 	const structured = result.structuredContent as Record<string, unknown>;
 	const table = structured.tabular_data as { rows: string[][] }[];
 
-	assert.deepEqual(table[0]!.rows, [[oversized]]);
+	assert.deepEqual(table[0]!.rows, []);
+	assert.equal(structured.tabular_rows_omitted, 1);
+	assert.equal(structured.tabular_tables_omitted, 0);
+	assert.ok(JSON.stringify(table).length <= 12_000);
 	assert.doesNotMatch(body, /tail/);
-	assert.match(body, /1 row omitted/);
+	assert.match(body, /1 rows and 0 tables omitted/);
 	assert.ok(body.length <= 40_000);
 });
 
-test("oversized metadata is omitted while complete rows and structured data remain", async (t) => {
+test("oversized metadata omits a non-array table and reports every lost row", async (t) => {
 	const { client } = await fixture(t, () => json({
 		...queryData(),
 		tabular_data: { title: "m".repeat(13_000), rows: [["one"], ["two"]] },
@@ -432,10 +441,10 @@ test("oversized metadata is omitted while complete rows and structured data rema
 	const body = text(result);
 	const structured = result.structuredContent as Record<string, unknown>;
 
-	assert.deepEqual(structured.tabular_data, { title: "m".repeat(13_000), rows: [["one"], ["two"]] });
-	assert.match(body, /table content omitted/);
-	assert.match(body, /Row 1: \["one"\]/);
-	assert.match(body, /Row 2: \["two"\]/);
+	assert.equal(structured.tabular_data, null);
+	assert.equal(structured.tabular_rows_omitted, 2);
+	assert.equal(structured.tabular_tables_omitted, 1);
+	assert.match(body, /2 rows and 1 tables omitted/);
 });
 
 test("multiple tables share one budget without reordering retained rows", async (t) => {
@@ -453,10 +462,12 @@ test("multiple tables share one budget without reordering retained rows", async 
 	const tables = structured.tabular_data as { rows: string[][] }[];
 
 	assert.deepEqual(tables[0]!.rows, firstRows);
-	assert.deepEqual(tables[1]!.rows, secondRows);
+	assert.deepEqual(tables[1]!.rows, []);
 	assert.match(text(result), /first-a/);
 	assert.doesNotMatch(text(result), /second-b/);
-	assert.match(text(result), /1 row omitted/);
+	assert.equal(structured.tabular_rows_omitted, 1);
+	assert.equal(structured.tabular_tables_omitted, 0);
+	assert.ok(JSON.stringify(tables).length <= 12_000);
 	assert.ok(text(result).length <= 40_000);
 });
 
@@ -484,7 +495,7 @@ test("table query bridge retries and propagates cancellation", async () => {
 	assert.equal(seenSignal?.aborted, true);
 });
 
-test("oversized tabular text retains complete records and reports omissions", async (t) => {
+test("oversized tabular text retains a complete record prefix and reports omissions", async (t) => {
 	const records = Array.from({ length: 200 }, (_, i) => ({ id: i, value: `row-${i}-` + "x".repeat(120) }));
 	const table = { status: "ok", columns: [{ name: "value" }], records };
 	const { client } = await fixture(t, () => json({ chunks: [], tabular_data: table }));
@@ -492,20 +503,22 @@ test("oversized tabular text retains complete records and reports omissions", as
 	const body = text(result);
 	assert.equal(result.structuredContent, undefined);
 	assert.match(body, /row-0-/);
-	assert.match(body, /\d+ (?:rows|records) omitted/i);
+	assert.match(body, /tabular data truncated/i);
 	assert.ok(body.length < 13000);
-	for (const line of body.split("\n").filter((item) => /^Row \d+: /.test(item))) {
-		assert.doesNotThrow(() => JSON.parse(line.replace(/^Row \d+: /, "")));
-	}
+	const encoded = body.match(/Tabular data: (.*)\n\[tabular data truncated:/)?.[1];
+	assert.ok(encoded);
+	const bounded = JSON.parse(encoded) as { records: typeof records };
+	assert.ok(bounded.records.length < records.length);
+	assert.deepEqual(bounded.records, records.slice(0, bounded.records.length));
 });
 
 test("oversized table metadata and individual rows are reported as omitted", async (t) => {
 	const table = { sql: "s".repeat(20000), rows: [["a".repeat(20000)], ["complete-row"]] };
 	const { client } = await fixture(t, () => json({ chunks: [], tabular_data: table }));
 	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
-	assert.match(text(result), /content omitted/i);
-	assert.match(text(result), /1 (?:rows|row) omitted/i);
-	assert.match(text(result), /complete-row/);
+	assert.match(text(result), /2 rows and 1 tables omitted/i);
+	assert.match(text(result), /Tabular data: null/);
+	assert.doesNotMatch(text(result), /complete-row/);
 	assert.ok(text(result).length < 13000);
 });
 
@@ -534,11 +547,13 @@ test("table text preserves complete paired rows alongside chunks and structured 
 	const { client } = await fixture(t, () => json({ chunks: [{ id: "s1", chunk_content: "context" }], tabular_data: table }));
 	const ordinary = await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
 	const structured = await client.callTool({ name: "hydradb_query", arguments: { query: "q", structured: true } });
+	const bounded = (structured.structuredContent as Record<string, unknown>).tabular_data as typeof table;
 	assert.equal(text(ordinary), text(structured));
-	assert.deepEqual((structured.structuredContent as Record<string, unknown>).tabular_data, table);
-	assert.match(text(ordinary), /\d+ rows omitted/);
-	const row = text(ordinary).split("\n").find((line) => line.startsWith("Row 1: "));
-	assert.ok(row);
-	assert.deepEqual(JSON.parse(row.slice("Row 1: ".length)), { row: table.rows[0], record: table.records[0] });
+	assert.ok(bounded.rows.length < table.rows.length);
+	assert.equal(bounded.rows.length, bounded.records.length);
+	assert.deepEqual(bounded.rows, table.rows.slice(0, bounded.rows.length));
+	assert.deepEqual(bounded.records, table.records.slice(0, bounded.records.length));
+	assert.match(text(ordinary), /tabular data truncated/);
+	assert.ok(JSON.stringify(bounded).length <= 12_000);
 	assert.ok(text(ordinary).length <= 40000);
 });
