@@ -656,6 +656,11 @@ abstract class Resource {
 			: { database };
 	}
 
+	/** Collection allowlist carried by an OAuth grant, when the grant is collection-confined. */
+	protected collectionConfinement(): readonly string[] | undefined {
+		return this.allowedCollections;
+	}
+
 	/**
 	 * Scope for a query that names SEVERAL collections.
 	 *
@@ -1266,6 +1271,21 @@ export class ContextResource extends Resource {
 	}
 }
 
+/**
+ * A database response with the fields the database tools report. The API
+ * always sets them; the generated types mark them optional only because swag
+ * never marks a response field required.
+ */
+type Reported<Response, Field extends keyof Response> = Response & Required<Pick<Response, Field>>;
+
+const reportsDatabase = z.object({ database: z.string().min(1) });
+
+const reportsStatus = reportsDatabase.extend({ status: z.string().min(1) });
+
+const reportsFields = reportsDatabase.extend({ fields: z.array(z.unknown()) });
+
+const reportsAddedFields = reportsDatabase.extend({ addedFields: z.array(z.string()) });
+
 export class DatabasesResource extends Resource {
 	// The base constructor is `protected`, so this one is what makes the class
 	// instantiable from outside the file. Removing it fails with TS2674.
@@ -1281,21 +1301,59 @@ export class DatabasesResource extends Resource {
 		super(sdk, database, collection, allowedDatabases, allowedCollections, raw);
 	}
 
-	create(
+	async create(
 		params: CreateDatabaseParams,
-	): Promise<SDK.TenantsTenantCreateAcceptedResponse> {
-		return this.call("/databases", "unsafe", undefined, (o) =>
+		opts?: RequestOptions,
+	): Promise<Reported<SDK.TenantsTenantCreateAcceptedResponse, "database" | "status">> {
+		const database = this.scope(undefined, params.database).database;
+		const allowedCollections = this.collectionConfinement();
+
+		if (allowedCollections) {
+			throw new Error(
+				`This connection is confined to collection ${allowedCollections
+					.map((collection) => `"${collection}"`)
+					.join(", ")}, and creating a database changes state outside those collections. ` +
+					"Nothing was created. Reconnect without collection confinement before creating a database.",
+			);
+		}
+
+		return this.reported("/databases", "unsafe", opts, reportsStatus, (o) =>
 			this.sdk.databases.create({
-				database: params.database,
+				database,
 				databaseMetadataSchema: params.databaseMetadataSchema,
 				embeddingsDimension: params.embeddingsDimension,
 			}, o),
 		);
 	}
 
-	delete(database: string): Promise<SDK.TenantsTenantDeleteResponse> {
-		return this.call("/databases", "unsafe", undefined, (o) =>
-			this.sdk.databases.delete({ database }, o),
+	async delete(
+		database: string,
+		opts?: RequestOptions,
+	): Promise<Reported<SDK.TenantsTenantDeleteResponse, "database" | "status">> {
+		const scoped = this.scope(undefined, database).database;
+		const connectionDefault = this.scope().database;
+
+		if (scoped === connectionDefault) {
+			throw new Error(
+				`Refusing to delete database "${scoped}" because it is this connection's ` +
+					"default database. Connect through a different default database, then retry the deletion.",
+			);
+		}
+
+		const allowedCollections = this.collectionConfinement();
+
+		if (allowedCollections) {
+			throw new Error(
+				`This connection is confined to collection ${allowedCollections
+					.map((collection) => `"${collection}"`)
+					.join(", ")}, and deleting database "${scoped}" removes every collection in it, ` +
+					"including ones this connection was not granted. Nothing was deleted. " +
+					"Reconnect without collection confinement before deleting a whole database.",
+			);
+		}
+
+		return this.reported("/databases", "unsafe", opts, reportsStatus, (o) =>
+			this.sdk.databases.delete({ database: scoped }, o),
 		);
 	}
 
@@ -1312,17 +1370,87 @@ export class DatabasesResource extends Resource {
 		);
 	}
 
-	stats(database: string, opts?: RequestOptions): Promise<SDK.TenantsTenantStatsResponse> {
-		return this.call("/databases/stats", "idempotent", opts, (o) =>
-			this.sdk.databases.stats({ database }, o),
+	async stats(
+		database: string,
+		opts?: RequestOptions,
+	): Promise<Reported<SDK.TenantsTenantStatsResponse, "database">> {
+		const scoped = this.scope(undefined, database).database;
+
+		return this.reported("/databases/stats", "idempotent", opts, reportsDatabase, (o) =>
+			this.sdk.databases.stats({ database: scoped }, o),
 		);
 	}
 
 	/** Infra provisioning readiness — renamed away from `status` (SDK `databases.status`). */
-	readiness(database: string): Promise<SDK.TenantsInfraStatusResponseV2> {
-		return this.call("/databases/status", "idempotent", undefined, (o) =>
-			this.sdk.databases.status({ database }, o),
+	async readiness(
+		database: string,
+		opts?: RequestOptions,
+	): Promise<Reported<SDK.TenantsInfraStatusResponseV2, "database">> {
+		const scoped = this.scope(undefined, database).database;
+
+		return this.reported("/databases/status", "idempotent", opts, reportsDatabase, (o) =>
+			this.sdk.databases.status({ database: scoped }, o),
 		);
+	}
+
+	/** The metadata fields a database declares (SDK `databases.getMetadataSchema`). */
+	async inspectMetadataSchema(
+		database: string,
+		opts?: RequestOptions,
+	): Promise<Reported<SDK.TenantsTenantMetadataSchemaResponse, "database" | "fields">> {
+		const scoped = this.scope(undefined, database).database;
+
+		return this.reported("/databases/metadata-schema", "idempotent", opts, reportsFields, (o) =>
+			this.sdk.databases.getMetadataSchema({ database: scoped }, o),
+		);
+	}
+
+	async updateMetadataSchema(
+		database: string,
+		addFields: SDK.TenantsCustomPropertyDefinition[],
+		opts?: RequestOptions,
+	): Promise<Reported<SDK.HandlerMetadataSchemaUpdateResponse, "database" | "addedFields">> {
+		const scoped = this.scope(undefined, database).database;
+		const allowedCollections = this.collectionConfinement();
+
+		if (allowedCollections) {
+			throw new Error(
+				`This connection is confined to collection ${allowedCollections
+					.map((collection) => `"${collection}"`)
+					.join(", ")}, and adding metadata fields changes the database-wide schema for ` +
+					`"${scoped}", including collections this connection was not granted. Nothing was changed. ` +
+					"Reconnect without collection confinement before changing a database metadata schema.",
+			);
+		}
+
+		return this.reported("/databases/metadata-schema", "unsafe", opts, reportsAddedFields, (o) =>
+			this.sdk.databases.updateMetadataSchema({ database: scoped, addFields }, o),
+		);
+	}
+
+	/**
+	 * `call`, refusing a successful response that lacks a field the database
+	 * tools report, so no caller has to guess it.
+	 */
+	private reported<T, Response>(
+		path: string,
+		safety: RetrySafety,
+		opts: RequestOptions | undefined,
+		expected: z.AnyZodObject,
+		fn: (sdkOptions: SdkRequestOptions) => Promise<Response>,
+	): Promise<T> {
+		return this.call(path, safety, opts, async (o) => {
+			const response = await fn(o);
+
+			if (!expected.safeParse(unwrap(response)).success) {
+				throw new HydraDBError({ statusCode: 200, body: { error: {
+					code: "INVALID_DATABASE_RESPONSE",
+					message: `Invalid successful database response: expected ${Object.keys(expected.shape).join(" and ")}.`,
+				} } });
+			}
+
+			return response;
+		});
 	}
 
 	/**

@@ -20,6 +20,15 @@ Run it two ways, same tools either way:
 | `hydradb_subgraph` | Everything connected to one item — its thread, replies, parents, children, links |
 | `hydradb_relations` | The knowledge-graph relations of one item or a whole collection, page by page |
 | `hydradb_feedback` | Report whether a query's results were useful, by its `request_id` |
+| `hydradb_databases` | List databases this connection can address |
+| `hydradb_database_create` | Create a database with an optional metadata schema and embedding dimension |
+| `hydradb_database_delete` | Delete a database irreversibly |
+| `hydradb_database_readiness` | Check whether database provisioning finished |
+| `hydradb_database_stats` | Read database-wide knowledge and memory row counts |
+| `hydradb_database_schema_inspect` | Read the metadata fields declared for a database |
+| `hydradb_database_schema_update` | Add fields to a database metadata schema (additive only) |
+| `hydradb_list_collections` | List collections inside a database |
+| `hydradb_delete_collection` | Delete one collection irreversibly |
 
 Ids flow between these: `hydradb_query`, `hydradb_list` and `hydradb_subgraph` emit them;
 `hydradb_inspect`, `hydradb_delete`, `hydradb_status`, `hydradb_subgraph` and `hydradb_relations` accept them.
@@ -131,6 +140,44 @@ HYDRADB_MCP_LEGACY_TOOLS=1
 | `hydra_db_list_memories`, `hydra_db_list_sources` | `hydradb_list` |
 | `hydra_db_fetch_content` | `hydradb_inspect` |
 | `hydra_db_delete_memory` | `hydradb_delete` |
+
+### Database tools
+
+Database tools are available over stdio, API-key HTTP, and OAuth HTTP connections.
+`hydradb_databases` marks the connection default. On a confined OAuth connection,
+it returns only approved databases, and every database tool refuses other names
+before sending an API request. A connection limited to specific collections cannot
+create or delete a whole database or change its database-wide metadata schema.
+
+| Tool | Required input | Notes |
+|---|---|---|
+| `hydradb_databases` | None | Lists accessible databases and marks the default |
+| `hydradb_database_create` | `database` | Optional `embeddings_dimension` and `database_metadata_schema`; creation is asynchronous |
+| `hydradb_database_delete` | `database` | Destructive. Refuses the connection default |
+| `hydradb_database_readiness` | None | Optional `database`; poll until `ready_for_ingestion` is true |
+| `hydradb_database_stats` | None | Optional `database`; returns knowledge and memory row counts |
+| `hydradb_database_schema_inspect` | None | Optional `database`; returns declared field names and types |
+| `hydradb_database_schema_update` | `add_fields` | Optional `database`; additive only, with no delete, rename, or retype |
+
+Metadata fields use `name` and `data_type`. Supported types are `BOOL`, `INT8`,
+`INT16`, `INT32`, `INT64`, `FLOAT`, `DOUBLE`, `VARCHAR`, and `JSON`. Optional
+settings are `max_length`, `enable_match`, `enable_dense_embedding`, and
+`enable_sparse_embedding`.
+
+After `hydradb_database_create` accepts a request, call
+`hydradb_database_readiness` until the database is ready. A 403 from a write
+tool can indicate missing write permission. Read-only credentials cannot perform
+database writes; verify the credential's permissions or reconnect with write
+permission.
+
+To turn the database management tools off entirely:
+
+```
+HYDRADB_MCP_DATABASE_TOOLS=0   # withhold the six database management tools
+```
+
+`hydradb_databases`, `hydradb_list_collections` and `hydradb_delete_collection`
+stay registered.
 
 ### **hydradb_query**
 
@@ -411,6 +458,7 @@ Checks whether ingested sources have finished indexing.
 | `HYDRADB_MCP_GRAPH_TOOLS` | Register the graph tools (`0` withholds them) | *on* |
 | `HYDRADB_MCP_CONNECTOR_TOOLS` | Register the connector tools (`0` withholds them) | *on* |
 | `HYDRADB_OAUTH_ISSUER` | Authorization server and connector-completion dashboard origin | `https://app.hydradb.com` for connector links |
+| `HYDRADB_MCP_DATABASE_TOOLS` | Register the database management tools (`0` withholds them) | *on* |
 
 #### Timeouts, retries and cancellation
 
