@@ -1022,3 +1022,16 @@ test("text alone carries every id and cursor the next call needs, for clients th
 	);
 	await client.close();
 });
+
+test("a connector call stopped by the call deadline says so, instead of advising a retry", async () => {
+	const { sdk } = mockHydra();
+	sdk.connectors.sync = (_args: unknown, options?: { abortSignal?: AbortSignal }) =>
+		new Promise((_resolve, reject) => options?.abortSignal?.addEventListener("abort", () => reject(new Error("aborted"))));
+	const client = await connect(new HydraDB({ token: "t", database: "db-a", timeoutSeconds: 1 }, sdk as unknown as HydraDBClient));
+
+	const result = await client.callTool({ name: TOOL_NAMES.CONNECTOR_SYNC, arguments: { connector_id: "allowed" } });
+
+	assert.equal(result.isError, true);
+	assert.match(text(result), /^The connector request got no answer within the 1s deadline for the whole call\. A change may or may not have applied; check connector health before repeating it\.$/);
+	await client.close();
+});
