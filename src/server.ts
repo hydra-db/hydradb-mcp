@@ -1185,9 +1185,8 @@ export function createHydraDBServer(
 				break;
 			}
 
-			const collections: string[] = [];
 			for (const rawCollection of rawCollections) {
-				const nextCollections = [...collections, briefly(rawCollection)];
+				const nextCollections = [...(rendered.collections ?? []), briefly(rawCollection)];
 				const next: RenderedWarning = {
 					code: rendered.code,
 					message: rendered.message,
@@ -1198,7 +1197,6 @@ export function createHydraDBServer(
 				};
 
 				if (!warningPayloadFits([...warnings, next], reserveOmitted)) break;
-				collections.push(nextCollections.at(-1)!);
 				rendered = next;
 			}
 
