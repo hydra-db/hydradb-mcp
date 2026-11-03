@@ -396,3 +396,9 @@ test("destinations are trimmed once, and a blank override means none", async () 
 	assert.equal(configured?.databaseOverride, undefined);
 	assert.equal(configured?.collectionOverride, "team");
 });
+
+test("connector wrapper preserves paused reason", async () => {
+	const sdk = { connectors: { get: async () => ({ connectorId: "c1", paused_reason: "quota" }) } } as unknown as HydraDBClient;
+	const result = await new ConnectorsResource(sdk).inspect("c1");
+	assert.equal(result.paused_reason, "quota");
+});

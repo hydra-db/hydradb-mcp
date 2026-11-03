@@ -277,13 +277,20 @@ export function toSourceList(data: SDK.ListV2ListResponse, fields: readonly stri
 	};
 }
 
-export interface RelationEnd {
+interface GraphProvenance {
+	database?: string | null;
+	collection?: string | null;
+	source_id?: string | null;
+	read_status?: string | null;
+}
+
+export interface RelationEnd extends GraphProvenance {
 	name: string | null;
 	type: string | null;
 	entity_id: string | null;
 }
 
-export interface RelationItem {
+export interface RelationItem extends GraphProvenance {
 	source: RelationEnd;
 	target: RelationEnd;
 	/** canonical_predicate, else raw_predicate, of the first evidence entry. */
@@ -304,7 +311,22 @@ export interface RelationList {
 }
 
 // Both spellings: the SDK hands back camelCase, the raw wire is snake_case.
+const graphProvenance = {
+	database: optionalText, collection: optionalText,
+	source_id: optionalText, sourceId: optionalText,
+	read_status: optionalText, readStatus: optionalText,
+};
+function provenance(record: z.infer<typeof relationEndRecord> | z.infer<typeof relationEvidenceRecord> | undefined): GraphProvenance {
+	if (!record) return {};
+	return {
+		...(record.database != null ? { database: record.database } : {}),
+		...(record.collection != null ? { collection: record.collection } : {}),
+		...((record.source_id ?? record.sourceId) != null ? { source_id: record.source_id ?? record.sourceId } : {}),
+		...((record.read_status ?? record.readStatus) != null ? { read_status: record.read_status ?? record.readStatus } : {}),
+	};
+}
 const relationEndRecord = z.object({
+	...graphProvenance,
 	name: optionalText,
 	type: optionalText,
 	entity_id: optionalText,
@@ -312,6 +334,7 @@ const relationEndRecord = z.object({
 });
 
 const relationEvidenceRecord = z.object({
+	...graphProvenance,
 	canonical_predicate: optionalText,
 	canonicalPredicate: optionalText,
 	raw_predicate: optionalText,
@@ -349,6 +372,7 @@ const relationsResponseRecord = z.object({
 
 function relationEnd(record: z.infer<typeof relationEndRecord> | undefined): RelationEnd {
 	return {
+		...provenance(record),
 		name: record?.name ?? null,
 		type: record?.type ?? null,
 		entity_id: record?.entity_id ?? record?.entityId ?? null,
@@ -375,6 +399,7 @@ export function toRelationList(data: SDK.GraphGraphRelationsResponse): RelationL
 		return {
 			source: relationEnd(triplet.source),
 			target: relationEnd(triplet.target),
+			...provenance(first),
 			predicate:
 				first?.canonical_predicate ?? first?.canonicalPredicate ?? first?.raw_predicate ?? first?.rawPredicate ?? null,
 			context: first?.context || null,

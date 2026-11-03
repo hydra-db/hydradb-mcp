@@ -158,3 +158,10 @@ test("toSourceList reads source rows and total", () => {
 		{ id: "s2", title: undefined, type: "slack" },
 	]);
 });
+
+test("relations preserve graph provenance and read status", async () => {
+	const { toRelationList } = await import("../src/adapters.js");
+	const result = toRelationList({ relations: [{ source: { name: "a", database: "db", collection: "docs", source_id: "s1", read_status: "ready" }, target: { name: "b" }, relations: [{ canonical_predicate: "links", source_id: "s2", read_status: "ready", database: "db", collection: "docs" }] }], is_truncated: false } as unknown as SDK.GraphGraphRelationsResponse);
+	assert.equal((result.relations[0]!.source as unknown as Record<string, unknown>).source_id, "s1");
+	assert.equal((result.relations[0] as unknown as Record<string, unknown>).source_id, "s2");
+});

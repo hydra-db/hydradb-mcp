@@ -332,3 +332,59 @@ test("query returns text only unless structured: true, in either detail mode", a
 		assert.equal(output<QueryOutput>(structured).request_id, "request-1");
 	}
 });
+
+test("query exposes tabular results, chunk metadata and warning collections", async (t) => {
+	const { client } = await fixture(t, () => new Response(JSON.stringify({ success: true, data: {
+		chunks: [{ id: "s1", chunk_content: "body", chunk_metadata: { page: 4 } }],
+		tabular_data: [{ columns: ["name"], rows: [["Ada"]] }],
+	}, meta: { warnings: [{ code: "PARTIAL", message: "incomplete", collections: ["docs"] }] } })));
+	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "q", structured: true } });
+	assert.match(text(result), /Ada/);
+	assert.match(text(result), /page/);
+	assert.deepEqual((result.structuredContent as Record<string, unknown>).warnings, [{ code: "PARTIAL", message: "incomplete", collections: ["docs"] }]);
+});
+
+test("table query options reach the wire through SDK serialization", async (t) => {
+	const seen: Record<string, unknown>[] = [];
+	const fetchFn: typeof fetch = async (_url, init) => {
+		seen.push(JSON.parse(String(init?.body)));
+		return json({ chunks: [] });
+	};
+	const { client } = await fixture(t, () => { throw new Error("unexpected SDK call"); }, { fetchFn });
+	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "q", include_table_sql: true, table_limit: 3 } });
+	assert.equal(result.isError, undefined, text(result));
+	assert.equal(seen[0]?.include_table_sql, true);
+	assert.equal(seen[0]?.table_limit, 3);
+});
+
+test("table-only results are not reported as empty", async (t) => {
+	const { client } = await fixture(t, () => json({ chunks: [], tabular_data: [{ rows: [["only-table"]] }] }));
+	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "q", structured: true } });
+	assert.equal(result.isError, undefined);
+	assert.match(text(result), /only-table/);
+	assert.doesNotMatch(text(result), /No relevant/);
+});
+
+test("table query bridge retries and propagates cancellation", async () => {
+	let calls = 0;
+	let seenSignal: AbortSignal | null | undefined;
+	const fetchFn: typeof fetch = async (_input, init) => {
+		calls++;
+		seenSignal = init?.signal;
+		if (calls === 1) return new Response("unavailable", { status: 503 });
+		return new Promise<Response>((_, reject) => {
+			init?.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+		});
+	};
+	const hydra = new HydraDB({ token: "token", database: "db", baseUrl: "https://offline.invalid", fetchFn, maxRetries: 1 });
+	const controller = new AbortController();
+	const pending = hydra.context.query({ query: "q", includeTableSql: true }, { signal: controller.signal });
+	await new Promise<void>((resolve) => {
+		const check = () => calls >= 2 ? resolve() : setTimeout(check, 10);
+		check();
+	});
+	controller.abort();
+	await assert.rejects(pending);
+	assert.equal(calls, 2);
+	assert.equal(seenSignal?.aborted, true);
+});

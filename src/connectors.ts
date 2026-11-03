@@ -58,6 +58,7 @@ function projectConnector(connector: ConnectorView): Record<string, unknown> {
 		lifecycle: connector.lifecycle,
 		sync_status: connector.syncStatus,
 		paused: connector.paused,
+		paused_reason: connector.pausedReason ?? connector.paused_reason,
 		needs_reauth: connector.needsReauth,
 		sync_blocked: connector.syncBlocked,
 		active_resource_count: connector.activeResourceCount,

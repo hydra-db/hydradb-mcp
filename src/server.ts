@@ -746,6 +746,8 @@ export function createHydraDBServer(
 		query_by?: "hybrid" | "text";
 		query_forceful_relations?: boolean;
 		temporal_reasoning?: boolean;
+		include_table_sql?: boolean;
+		table_limit?: number;
 		response_format?: "structured" | "markdown";
 	}, signal?: AbortSignal): Promise<ToolResult> {
 		// Host-owned default (CONTRACT §2 rule 5): search BOTH families. This tool
@@ -842,6 +844,8 @@ export function createHydraDBServer(
 			additionalContext: args.additional_context,
 			queryForcefulRelations: args.query_forceful_relations,
 			temporalReasoning: args.temporal_reasoning,
+			includeTableSql: args.include_table_sql,
+			tableLimit: args.table_limit,
 		};
 
 		const requestOptions = {
@@ -851,6 +855,7 @@ export function createHydraDBServer(
 				omittedWarnings = Math.max((meta.warnings?.length ?? 0) - 10, 0);
 				warnings = (meta.warnings ?? []).slice(0, 10).map((warning) => ({
 					code: briefly(warning.code), message: briefly(warning.message),
+					...(warning.collections ? { collections: warning.collections.slice(0, 50).map(briefly) } : {}),
 				}));
 			},
 		};
@@ -883,7 +888,7 @@ export function createHydraDBServer(
 		// shown. No outputSchema is declared on this tool, so omitting it is
 		// within spec.
 		const warningText = () => warnings.length
-			? `\n\nWarnings:\n${warnings.map((warning) => `- ${warning.code}: ${warning.message}`).join("\n")}${omittedWarnings ? `\n(${omittedWarnings} additional warnings omitted)` : ""}`
+			? `\n\nWarnings:\n${warnings.map((warning) => `- ${warning.code}: ${warning.message}${warning.collections?.length ? ` (collections: ${warning.collections.join(", ")})` : ""}`).join("\n")}${omittedWarnings ? `\n(${omittedWarnings} additional warnings omitted)` : ""}`
 			: "";
 		const queryResult = (text: string, extra: Record<string, unknown> = {}) => {
 			const body = `${text}${scopeWarning ? `\n\nScope warning: ${scopeWarning}` : ""}${warningText()}`;
@@ -933,6 +938,9 @@ export function createHydraDBServer(
 		// The renderer reads the SDK payload directly; there is no longer a
 		// snake_case mirror to convert into.
 		const res = raw;
+		const extras = raw as unknown as { tabular_data?: unknown; tabularData?: unknown };
+		const table = extras.tabular_data ?? extras.tabularData;
+		const tableText = table == null ? "" : `\n\nTabular data: ${JSON.stringify(table).slice(0, 12000)}`;
 
 		// The server can return more chunks than were asked for — a live call with
 		// max_results=10 came back with 15, and all 15 were rendered. Honour the
@@ -941,6 +949,9 @@ export function createHydraDBServer(
 			res.chunks = res.chunks.slice(0, maxResults);
 		}
 
+		if ((!res.chunks || res.chunks.length === 0) && table != null) {
+			return queryResult(`${scopeText(resolvedScope)}${tableText}`, { tabular_data: table });
+		}
 		if (!res.chunks || res.chunks.length === 0) {
 			// Name WHERE nothing was found. "No results" is ambiguous the moment a
 			// database has more than one collection: a pinned collection can be the
@@ -1013,7 +1024,7 @@ export function createHydraDBServer(
 			feedbackLine;
 
 		const scopeLine = scopeText(resolvedScope);
-		const headerAllowance = 120 + scopeLine.length + (scopeWarning?.length ?? 0) + 20 + warningText().length;
+		const headerAllowance = 120 + scopeLine.length + (scopeWarning?.length ?? 0) + 20 + warningText().length + tableText.length;
 		const sourceRefs = new Map<string, Record<string, unknown>>();
 
 		const singleCollection = "collection" in resolvedScope
@@ -1055,8 +1066,8 @@ export function createHydraDBServer(
 		});
 
 		return queryResult(
-			`Found ${shown} ${resultNoun(kind, shown)}:\n${scopeLine}\n\n${contextStr}${legend}`,
-			{ sources: [...sourceRefs.values()] },
+			`Found ${shown} ${resultNoun(kind, shown)}:\n${scopeLine}\n\n${contextStr}${tableText}${legend}`,
+			{ sources: [...sourceRefs.values()], ...(table != null ? { tabular_data: table } : {}) },
 		);
 	}
 
@@ -1124,11 +1135,12 @@ export function createHydraDBServer(
 			warnings = (meta.warnings ?? []).slice(0, 10).map((warning) => ({
 				code: briefly(warning.code),
 				message: briefly(warning.message),
+				...(warning.collections ? { collections: warning.collections.slice(0, 50).map(briefly) } : {}),
 			}));
 		});
 
 		if (warnings.length === 0) return result;
-		const notice = `\n\nWarnings:\n${warnings.map((warning) => `- ${warning.code}: ${warning.message}`).join("\n")}` +
+		const notice = `\n\nWarnings:\n${warnings.map((warning) => `- ${warning.code}: ${warning.message}${warning.collections?.length ? ` (collections: ${warning.collections.join(", ")})` : ""}`).join("\n")}` +
 			(omitted ? `\n(${omitted} additional warnings omitted)` : "");
 		return {
 			...result,
@@ -1742,6 +1754,12 @@ export function createHydraDBServer(
 		const hasMoreRelations = res.is_truncated && res.next_cursor != null;
 
 		const relations = res.relations.map((r) => ({
+			...(r.source.database != null || r.source.collection != null || r.source.source_id != null || r.source.read_status != null ? { source: r.source } : {}),
+			...(r.target.database != null || r.target.collection != null || r.target.source_id != null || r.target.read_status != null ? { target: r.target } : {}),
+			...(r.database != null ? { database: r.database } : {}),
+			...(r.collection != null ? { collection: r.collection } : {}),
+			...(r.source_id != null ? { source_id: r.source_id } : {}),
+			...(r.read_status != null ? { read_status: r.read_status } : {}),
 			from: r.source.name ?? r.source.entity_id,
 			from_type: r.source.type,
 			predicate: r.predicate,
@@ -3343,6 +3361,8 @@ export function createHydraDBServer(
 			.boolean()
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.temporal_reasoning),
+		include_table_sql: z.boolean().optional().describe("Include SQL used to retrieve tabular data."),
+		table_limit: z.number().int().positive().optional().describe("Maximum number of tables to return."),
 		response_format: z
 			.enum(["structured", "markdown"])
 			.optional()

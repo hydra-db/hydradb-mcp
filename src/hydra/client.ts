@@ -46,6 +46,7 @@ export { DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT_SECONDS };
 export interface ResponseWarning {
 	code: string;
 	message: string;
+	collections?: string[];
 }
 
 export interface ResponseMeta {
@@ -219,6 +220,8 @@ export interface QueryParams {
 	maxResults?: number;
 	mode?: "fast" | "thinking" | "auto";
 	graphContext?: boolean;
+	includeTableSql?: boolean;
+	tableLimit?: number;
 	/**
 	 * Hybrid balance between keyword and vector retrieval: 0 to 1, or "auto".
 	 * Hybrid only, so it is refused alongside keyword retrieval; see `query`.
@@ -624,7 +627,7 @@ const requestMetaEnvelopeSchema = z.object({
 });
 // SDK 2.1.8 has no generated warnings field, but its parser currently passes
 // unknown fields through. Validate that untyped field at this boundary.
-const responseWarningSchema = z.object({ code: z.string(), message: z.string() });
+const responseWarningSchema = z.object({ code: z.string(), message: z.string(), collections: z.array(z.string()).optional() });
 
 function readResponseMeta(value: unknown): ResponseMeta {
 	const parsed = requestMetaEnvelopeSchema.safeParse(value);
@@ -855,6 +858,24 @@ export class ContextResource extends Resource {
 		};
 	}
 
+	/** SDK 2.1.8 strips unknown request keys. Inject only these fields after its
+	 * serialization, keeping its parser and the shared retry/cancellation policy.
+	 * Remove this bridge when a released SDK serializes both fields itself. */
+	private queryClient(params: QueryParams): HydraDBClient {
+		if (params.includeTableSql == null && params.tableLimit == null) return this.sdk;
+		if (!this.raw) throw new Error("Table query options require a configured HTTP transport.");
+		const raw = this.raw;
+		const fetchFn: typeof fetch = (input, init) => {
+			const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+			if (params.includeTableSql != null) body.include_table_sql = params.includeTableSql;
+			if (params.tableLimit != null) body.table_limit = params.tableLimit;
+			return (raw.fetchFn ?? fetch)(input, { ...init, body: JSON.stringify(body) });
+		};
+		return new HydraDBClient({ token: raw.token, baseUrl: raw.baseUrl, fetch: fetchFn,
+			headers: raw.headers, timeoutInSeconds: raw.timeoutMs / 1000 + 5, maxRetries: 0,
+			logging: { logger: STDERR_LOGGER } });
+	}
+
 	/**
 	 * The single retrieval entry point (SDK `client.query`).
 	 *
@@ -866,10 +887,10 @@ export class ContextResource extends Resource {
 		opts?: RequestOptions,
 	): Promise<SDK.SearchV2RetrievalResult> {
 		const request = this.queryRequest(params);
-
+		const client = this.queryClient(params);
 
 		return this.call("/query", "idempotent", opts, async (o) => {
-			const response = await this.sdk.query(request, o);
+			const response = await client.query(request, o);
 			validateQueryResponse(response);
 			return response;
 		});
@@ -884,9 +905,10 @@ export class ContextResource extends Resource {
 		opts?: RequestOptions,
 	): Promise<string> {
 		const request: SDK.SearchQueryRequest = { ...this.queryRequest(params), responseFormat: "markdown" };
+		const client = this.queryClient(params);
 
 		return this.call("/query", "idempotent", opts, async (o) => {
-			const response = await this.sdk.query(request, o);
+			const response = await client.query(request, o);
 
 			// The SDK types `data` as the result object and passes the string
 			// through unparsed. Anything else is not a successful Markdown answer.
