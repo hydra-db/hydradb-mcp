@@ -461,9 +461,11 @@ There is no create-collection action: collections come into existence on their f
 
 const DATABASES_BODY = `List the databases this connection can address, with the default marked. Use it before passing \`database\` to another tool, when the user asks which databases exist, or when a call was refused for naming a database this connection is confined to. If the list has one entry, that is the only database this connection may use.`;
 
-const DATABASE_PARAM = "Database name. Use hydradb_databases to discover valid names. Omit it only on tools that explicitly use this connection's default database.";
+/** The optional `database` of the database tools that default to the connection's own. */
+export const DATABASE_PARAM = `Database name. Omit it to use this connection's default database. Use ${TOOL_NAMES.DATABASES} to discover valid names.`;
 
-const METADATA_FIELD_PARAMS = {
+/** One metadata field, as both database_metadata_schema and add_fields take it. */
+export const METADATA_FIELD_PARAMS = {
 	name: "New metadata key. Required and immutable after creation. Use a stable snake_case name that callers can later use in exact-match metadata filters.",
 	data_type: "Stored field type: BOOL, INT8, INT16, INT32, INT64, FLOAT, DOUBLE, VARCHAR, or JSON. Choose VARCHAR for text and set max_length when a smaller limit is useful.",
 	max_length: "Maximum VARCHAR length in bytes. Use it only with data_type VARCHAR.",
@@ -484,18 +486,17 @@ export const TOOL_DESCRIPTIONS = {
 		params: {},
 	},
 
-	[TOOL_NAMES.CREATE_DATABASE]: {
+	[TOOL_NAMES.DATABASE_CREATE]: {
 		title: "Create a Hydra DB Database",
 		description: `Create a database. Creation is asynchronous: after this accepts the request, poll ${TOOL_NAMES.DATABASE_READINESS} until ready_for_ingestion is true. An OAuth connection confined to named databases may create only a name already approved for that connection.`,
 		params: {
 			database: "New database name. Required. On a confined OAuth connection, this name must already be in hydradb_databases.",
 			embeddings_dimension: "Embedding vector dimension. Omit it to use Hydra DB's default. Set it only when the embedding model requires a specific dimension.",
 			database_metadata_schema: "Metadata fields to create with the database. Field names and types cannot later be removed, renamed, or changed.",
-			...METADATA_FIELD_PARAMS,
 		},
 	},
 
-	[TOOL_NAMES.DELETE_DATABASE]: {
+	[TOOL_NAMES.DATABASE_DELETE]: {
 		title: "Delete a Hydra DB Database",
 		description: `Permanently delete a database and all data inside it. This cannot be undone. Confirm the exact name with ${TOOL_NAMES.DATABASES}. The connection's own default database is refused because deleting it would break the active connection.`,
 		params: { database: "Database to delete. Required. It cannot be this connection's default database." },
@@ -507,19 +508,18 @@ export const TOOL_DESCRIPTIONS = {
 		params: { database: DATABASE_PARAM },
 	},
 
-	[TOOL_NAMES.GET_METADATA_SCHEMA]: {
-		title: "Get Database Metadata Schema",
+	[TOOL_NAMES.DATABASE_SCHEMA_INSPECT]: {
+		title: "Inspect Database Metadata Schema",
 		description: "Read the metadata keys declared for a database. Use this before building metadata filters or adding fields, so you know the valid key names and stored types.",
 		params: { database: DATABASE_PARAM },
 	},
 
-	[TOOL_NAMES.ADD_METADATA_FIELDS]: {
-		title: "Add Database Metadata Fields",
-		description: "Add fields to a database metadata schema. This operation is additive only: existing fields cannot be deleted, renamed, or retyped. Read the current schema first and add only missing fields.",
+	[TOOL_NAMES.DATABASE_SCHEMA_UPDATE]: {
+		title: "Update Database Metadata Schema",
+		description: `Update a database metadata schema by adding fields. The update is additive only: existing fields cannot be deleted, renamed, or retyped. Read the current schema with ${TOOL_NAMES.DATABASE_SCHEMA_INSPECT} first and add only missing fields.`,
 		params: {
 			database: DATABASE_PARAM,
 			add_fields: "One or more new metadata fields. Required. Repeating an existing field can fail with a conflict.",
-			...METADATA_FIELD_PARAMS,
 		},
 	},
 
@@ -1070,11 +1070,11 @@ THE TOOLS
 - ${TOOL_NAMES.RELATIONS} — the knowledge-graph relations extracted from one item, or from a whole collection, page by page.
 - ${TOOL_NAMES.SUBGRAPH} — everything connected to one item you already have an id for: the rest of its thread, its replies, its parents and children, the items it links to. Reach for it when one result is not enough and you need what surrounds it.
 - ${TOOL_NAMES.DATABASES} — which databases this connection can address, with the default marked. Every tool takes an optional \`database\`; call this before naming one, or when a call was refused because the user confined this connection to a single database.
-- ${TOOL_NAMES.CREATE_DATABASE} — create a database with an optional metadata schema and embedding dimension, then poll ${TOOL_NAMES.DATABASE_READINESS}.
-- ${TOOL_NAMES.DELETE_DATABASE} — irreversibly delete a database. It refuses this connection's default database.
+- ${TOOL_NAMES.DATABASE_CREATE} — create a database with an optional metadata schema and embedding dimension, then poll ${TOOL_NAMES.DATABASE_READINESS}.
+- ${TOOL_NAMES.DATABASE_DELETE} — irreversibly delete a database. It refuses this connection's default database.
 - ${TOOL_NAMES.DATABASE_READINESS} — check whether database provisioning finished and ingestion can start.
-- ${TOOL_NAMES.GET_METADATA_SCHEMA} — read the metadata keys and types a database accepts.
-- ${TOOL_NAMES.ADD_METADATA_FIELDS} — add fields to a database's metadata schema. Fields cannot be removed or retyped.
+- ${TOOL_NAMES.DATABASE_SCHEMA_INSPECT} — read the metadata keys and types a database accepts.
+- ${TOOL_NAMES.DATABASE_SCHEMA_UPDATE} — add fields to a database's metadata schema. Fields cannot be removed or retyped.
 - ${TOOL_NAMES.DATABASE_STATS} — read database-wide knowledge and memory row counts.
 - ${TOOL_NAMES.LIST_COLLECTIONS} — the collections inside a database, with this connection's default marked. Call it before choosing a collection when the connection has no default.
 - ${TOOL_NAMES.FEEDBACK} — report whether a query's results were actually useful, using the request_id that query printed. Say what the right answer was (\`ground_truth_answer\`) or which sources held it (\`ground_truth_source_ids\`) when you know — that is machine-checkable and worth far more than prose. It records a signal; it never changes the query's result or the stored data.
@@ -1123,4 +1123,4 @@ Choose by the question, not the vocabulary: "what has the user told me about X" 
 
 Working against an unfamiliar collection, discover its structure by querying it — \`MATCH (n) UNWIND labels(n) AS l RETURN l, count(*) AS c ORDER BY l\` — rather than guessing labels, which yields empty results that look like missing data.
 
-All tools require HYDRADB_API_KEY and HYDRADB_DATABASE in the environment. The graph tools additionally read HYDRADB_GRAPH_DATABASE and HYDRADB_GRAPH_COLLECTION for their default scope, and can be disabled with HYDRADB_MCP_GRAPH_TOOLS=0.`;
+All tools require HYDRADB_API_KEY and HYDRADB_DATABASE in the environment. The graph tools additionally read HYDRADB_GRAPH_DATABASE and HYDRADB_GRAPH_COLLECTION for their default scope, and can be disabled with HYDRADB_MCP_GRAPH_TOOLS=0. The database management tools (create, delete, readiness, stats and the two metadata schema tools) can be disabled with HYDRADB_MCP_DATABASE_TOOLS=0; ${TOOL_NAMES.DATABASES} stays.`;

@@ -25,12 +25,14 @@ export const TOOL_NAMES = {
 	// agent working across several databases can find their names without
 	// asking the user, and so a confined connection can see its own limits.
 	DATABASES: "hydradb_databases",
-	CREATE_DATABASE: "hydradb_create_database",
-	DELETE_DATABASE: "hydradb_delete_database",
+	// Database management (ENG-3340), named per CONTRACT.md §3 "Databases": noun
+	// first, verb last. None of these shipped under another name, so no aliases.
+	DATABASE_CREATE: "hydradb_database_create",
+	DATABASE_DELETE: "hydradb_database_delete",
 	DATABASE_READINESS: "hydradb_database_readiness",
-	GET_METADATA_SCHEMA: "hydradb_get_metadata_schema",
-	ADD_METADATA_FIELDS: "hydradb_add_metadata_fields",
 	DATABASE_STATS: "hydradb_database_stats",
+	DATABASE_SCHEMA_INSPECT: "hydradb_database_schema_inspect",
+	DATABASE_SCHEMA_UPDATE: "hydradb_database_schema_update",
 	LIST_COLLECTIONS: "hydradb_list_collections",
 	// Feedback about a query that already ran (PRO-1805 / POST /feedback). New
 	// capability, so no alias: there is no prior spelling to keep working, the
@@ -92,15 +94,19 @@ export const CANONICAL_TOOL_NAMES = [
 	TOOL_NAMES.SUBGRAPH,
 	TOOL_NAMES.RELATIONS,
 	TOOL_NAMES.DATABASES,
-	TOOL_NAMES.CREATE_DATABASE,
-	TOOL_NAMES.DELETE_DATABASE,
-	TOOL_NAMES.DATABASE_READINESS,
-	TOOL_NAMES.GET_METADATA_SCHEMA,
-	TOOL_NAMES.ADD_METADATA_FIELDS,
-	TOOL_NAMES.DATABASE_STATS,
 	TOOL_NAMES.LIST_COLLECTIONS,
 	TOOL_NAMES.DELETE_COLLECTION,
 	TOOL_NAMES.FEEDBACK,
+] as const;
+
+/** Database management, registered together and gated by HYDRADB_MCP_DATABASE_TOOLS. */
+export const DATABASE_TOOL_NAMES = [
+	TOOL_NAMES.DATABASE_CREATE,
+	TOOL_NAMES.DATABASE_DELETE,
+	TOOL_NAMES.DATABASE_READINESS,
+	TOOL_NAMES.DATABASE_STATS,
+	TOOL_NAMES.DATABASE_SCHEMA_INSPECT,
+	TOOL_NAMES.DATABASE_SCHEMA_UPDATE,
 ] as const;
 
 /** The BYOG graph family, registered together and gated together. */

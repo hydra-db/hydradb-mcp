@@ -15,7 +15,7 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import type { HydraDBClient } from "@hydradb/sdk";
+import type { HydraDB as SDK, HydraDBClient } from "@hydradb/sdk";
 
 import { z } from "zod";
 
@@ -114,11 +114,19 @@ const CONNECTOR_RESPONSES = {
 	resourceWrite: { connectorId: "conn_1", resourceId: "C1" },
 };
 
-// What a recorded SDK call answers with: a connector body above, the query body, or empty.
-type RecordedBody = (typeof CONNECTOR_RESPONSES)[keyof typeof CONNECTOR_RESPONSES] | { chunks: [] } | Record<string, never>;
-
 // The connector-resource-add vector's resources, in wire form.
 const vectorResources = z.array(z.object({ resource_id: z.string(), display_name: z.string().optional() }));
+
+// The database wrapper refuses a response without the fields its tools report,
+// so the database SDK methods answer with one body that carries all of them.
+const DATABASE_RESPONSE = { database: "db_test", status: "ok", fields: [], addedFields: [] };
+
+// What a recorded SDK call answers with: a connector or database body, the query body, or empty.
+type RecordedBody =
+	| (typeof CONNECTOR_RESPONSES)[keyof typeof CONNECTOR_RESPONSES]
+	| typeof DATABASE_RESPONSE
+	| { chunks: [] }
+	| Record<string, never>;
 
 function makeRecorder(): { sdk: HydraDBClient; calls: RecordedCall[] } {
 	const calls: RecordedCall[] = [];
@@ -143,12 +151,14 @@ function makeRecorder(): { sdk: HydraDBClient; calls: RecordedCall[] } {
 			status: record("status", "application/json"),
 		},
 		databases: {
-			create: record("create", "application/json"),
-			delete: record("delete", "application/json"),
+			create: record("create", "application/json", DATABASE_RESPONSE),
+			delete: record("delete", "application/json", DATABASE_RESPONSE),
 			list: record("list", "application/json"),
 			collections: record("collections", "application/json"),
-			stats: record("stats", "application/json"),
-			status: record("status", "application/json"),
+			stats: record("stats", "application/json", DATABASE_RESPONSE),
+			status: record("status", "application/json", DATABASE_RESPONSE),
+			getMetadataSchema: record("getMetadataSchema", "application/json", DATABASE_RESPONSE),
+			updateMetadataSchema: record("updateMetadataSchema", "application/json", DATABASE_RESPONSE),
 		},
 		listProviders: (args?: { id?: string }) =>
 			record(
@@ -206,11 +216,21 @@ function invoke(hydra: HydraDB, op: string, args: Record<string, unknown>): Prom
 		case "database.create":
 			return hydra.databases.create({ database: a.database });
 		case "database.delete":
-			return hydra.databases.delete({ database: a.database });
+			return hydra.databases.delete(a.database);
 		case "database.collections":
 			return hydra.databases.collections(a.database);
 		case "database.readiness":
-			return hydra.databases.readiness({ database: a.database });
+			return hydra.databases.readiness(a.database);
+		case "database.stats":
+			return hydra.databases.stats(a.database);
+		case "database.inspectMetadataSchema":
+			return hydra.databases.inspectMetadataSchema(a.database);
+		case "database.updateMetadataSchema":
+			return hydra.databases.updateMetadataSchema(
+				a.database,
+				// SAFETY: the only vector with this op lists add_fields as name and data_type pairs.
+				(args.add_fields as { name: string; data_type: SDK.TenantsMetadataDataType }[]).map((f) => ({ name: f.name, dataType: f.data_type })),
+			);
 		case "connector.providerList":
 			return hydra.connectors.listProviders();
 		case "connector.providerInspect":

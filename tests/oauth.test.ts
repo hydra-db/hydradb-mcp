@@ -432,11 +432,11 @@ test("a confined OAuth connection refuses every database tool outside its approv
 	introspectAnswer = () => ({ status: 200, body: active({ database: "personal", databases: ["personal"] }) });
 
 	for (const [name, args] of [
-		["hydradb_create_database", { database: "work" }],
-		["hydradb_delete_database", { database: "work" }],
+		["hydradb_database_create", { database: "work" }],
+		["hydradb_database_delete", { database: "work" }],
 		["hydradb_database_readiness", { database: "work" }],
-		["hydradb_get_metadata_schema", { database: "work" }],
-		["hydradb_add_metadata_fields", { database: "work", add_fields: [{ name: "region", data_type: "VARCHAR" }] }],
+		["hydradb_database_schema_inspect", { database: "work" }],
+		["hydradb_database_schema_update", { database: "work", add_fields: [{ name: "region", data_type: "VARCHAR" }] }],
 		["hydradb_database_stats", { database: "work" }],
 	] as const) {
 		const res = await request(
@@ -474,7 +474,7 @@ test("a collection-confined OAuth connection cannot delete an approved database"
 			jsonrpc: "2.0",
 			id: 1,
 			method: "tools/call",
-			params: { name: "hydradb_delete_database", arguments: { database: "archive" } },
+			params: { name: "hydradb_database_delete", arguments: { database: "archive" } },
 		}),
 	);
 
@@ -507,7 +507,7 @@ test("a collection-confined OAuth connection cannot change the database metadata
 			id: 1,
 			method: "tools/call",
 			params: {
-				name: "hydradb_add_metadata_fields",
+				name: "hydradb_database_schema_update",
 				arguments: { database: "personal", add_fields: [{ name: "region", data_type: "VARCHAR" }] },
 			},
 		}),
@@ -541,7 +541,7 @@ test("a collection-confined OAuth connection cannot create an approved database"
 			jsonrpc: "2.0",
 			id: 1,
 			method: "tools/call",
-			params: { name: "hydradb_create_database", arguments: { database: "archive" } },
+			params: { name: "hydradb_database_create", arguments: { database: "archive" } },
 		}),
 	);
 
@@ -616,11 +616,11 @@ test("database tools are registered for OAuth and API-key connections", async ()
 
 	for (const name of [
 		"hydradb_databases",
-		"hydradb_create_database",
-		"hydradb_delete_database",
+		"hydradb_database_create",
+		"hydradb_database_delete",
 		"hydradb_database_readiness",
-		"hydradb_get_metadata_schema",
-		"hydradb_add_metadata_fields",
+		"hydradb_database_schema_inspect",
+		"hydradb_database_schema_update",
 		"hydradb_database_stats",
 	]) {
 		assert.ok(toolNames(viaToken).includes(name), `${name} missing from OAuth tools`);

@@ -86,13 +86,14 @@ spreadsheets, OpenDocument, iWork, images and text files. They are uploaded as
 
 ### Added — MCP database management tools
 
-Added separate tools to create and delete databases, check provisioning
-readiness, read and extend metadata schemas, and get database statistics.
-`hydradb_databases` and the new tools are available to API-key, stdio, and OAuth
-connections. OAuth database confinement now applies before create, delete,
+Added `hydradb_database_create`, `hydradb_database_delete`,
+`hydradb_database_readiness`, `hydradb_database_stats`,
+`hydradb_database_schema_inspect` and `hydradb_database_schema_update` (additive
+only). `hydradb_databases` and the new tools are available to API-key, stdio, and
+OAuth connections. OAuth database confinement now applies before create, delete,
 readiness, stats, and metadata-schema requests. Deleting the connection's own
 default database is refused, and write-permission failures explain how to use a
-writable credential.
+writable credential. `HYDRADB_MCP_DATABASE_TOOLS=0` withholds the six new tools.
 
 ## [1.6.0] - 2026-10-28
 

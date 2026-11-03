@@ -157,10 +157,10 @@ test(
 
 			exists = true;
 
-			assert.equal(created.database ?? created.tenantId, database);
+			assert.equal(created.database, database);
 
 			const provisioned = await pollUntil("database is ready for ingestion", async () => {
-				const status = await hydra.databases.readiness({ database });
+				const status = await hydra.databases.readiness(database);
 
 				return {
 					value: status.infra?.readyForIngestion === true ? status : null,
@@ -170,26 +170,25 @@ test(
 
 			assert.ok(provisioned.value, `database did not become ready: ${JSON.stringify(provisioned.observed)}`);
 
-			const initialSchema = await hydra.databases.getMetadataSchema({ database });
-			assert.ok(initialSchema.fields?.some((field) => field.name === "vendor"));
+			const initialSchema = await hydra.databases.inspectMetadataSchema(database);
+			assert.ok(initialSchema.fields.some((field) => field.name === "vendor"));
 
-			const updated = await hydra.databases.updateMetadataSchema({
-				database,
-				addFields: [{ name: "amount", dataType: "DOUBLE", enableMatch: true }],
-			});
+			const updated = await hydra.databases.updateMetadataSchema(database, [
+				{ name: "amount", dataType: "DOUBLE", enableMatch: true },
+			]);
 
-			assert.ok(updated.addedFields?.includes("amount"));
+			assert.ok(updated.addedFields.includes("amount"));
 
-			const finalSchema = await hydra.databases.getMetadataSchema({ database });
-			assert.ok(finalSchema.fields?.some((field) => field.name === "amount"));
+			const finalSchema = await hydra.databases.inspectMetadataSchema(database);
+			assert.ok(finalSchema.fields.some((field) => field.name === "amount"));
 
-			const stats = await hydra.databases.stats({ database });
+			const stats = await hydra.databases.stats(database);
 
-			assert.equal(stats.database ?? stats.tenantId, database);
+			assert.equal(stats.database, database);
 			assert.ok(Number.isFinite(Number(stats.knowledgeCollection?.rowCount)));
 			assert.ok(Number.isFinite(Number(stats.memoryCollection?.rowCount)));
 
-			await hydra.databases.delete({ database });
+			await hydra.databases.delete(database);
 			exists = false;
 
 			const removed = await pollUntil("database disappears from list", async () => {
@@ -201,7 +200,7 @@ test(
 
 			assert.equal(removed.value, true, `database still listed: ${JSON.stringify(removed.observed)}`);
 		} finally {
-			if (exists) await hydra.databases.delete({ database });
+			if (exists) await hydra.databases.delete(database);
 		}
 	},
 );
