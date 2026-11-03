@@ -117,6 +117,46 @@ function formatWarnings(warnings: ResponseWarning[], omitted: number): string {
 		(omitted ? `\n(${omitted} additional warnings omitted)` : "");
 }
 
+/** Render complete table rows within the text budget; structured output stays intact. */
+function formatTabularData(table: unknown): string {
+	const limit = 12_000;
+	const lines = ["\n\nTabular data:"];
+	let length = lines[0]!.length;
+	let omittedRows = 0;
+	let omittedContent = 0;
+	// Reserve space for the omission summary even when the last row fits.
+	const append = (line: string) => {
+		if (length + line.length + 1 > limit - 128) return false;
+		lines.push(line);
+		length += line.length + 1;
+		return true;
+	};
+	const tables = Array.isArray(table) ? table : [table];
+	for (const [index, item] of tables.entries()) {
+		if (item == null || typeof item !== "object" || Array.isArray(item)) {
+			if (!append(JSON.stringify(item))) omittedContent++;
+			continue;
+		}
+		const { rows, records, ...metadata } = item as Record<string, unknown>;
+		const rowList = Array.isArray(rows) ? rows : undefined;
+		const recordList = Array.isArray(records) ? records : undefined;
+		// Preserve unexpected shapes rather than silently dropping them.
+		if (rows != null && !rowList) metadata.rows = rows;
+		if (records != null && !recordList) metadata.records = records;
+		if (!append(`Table ${index + 1}: ${JSON.stringify(metadata)}`)) omittedContent++;
+		const count = Math.max(rowList?.length ?? 0, recordList?.length ?? 0);
+		for (let i = 0; i < count; i++) {
+			const value = rowList && recordList
+				? { ...(i < rowList.length ? { row: rowList[i] } : {}), ...(i < recordList.length ? { record: recordList[i] } : {}) }
+				: (rowList ?? recordList)![i];
+			if (!append(`Row ${i + 1}: ${JSON.stringify(value)}`)) omittedRows++;
+		}
+	}
+	if (omittedRows) lines.push(`(${omittedRows} ${omittedRows === 1 ? "row" : "rows"} omitted)`);
+	if (omittedContent) lines.push(`(${omittedContent} table content omitted)`);
+	return lines.join("\n");
+}
+
 /**
  * A result the caller can read OR parse.
  *
@@ -954,7 +994,7 @@ export function createHydraDBServer(
 		const res = raw;
 		const extras = raw as unknown as { tabular_data?: unknown; tabularData?: unknown };
 		const table = extras.tabular_data ?? extras.tabularData;
-		const tableText = table == null ? "" : `\n\nTabular data: ${JSON.stringify(table).slice(0, 12000)}`;
+		const tableText = table == null ? "" : formatTabularData(table);
 
 		// The server can return more chunks than were asked for — a live call with
 		// max_results=10 came back with 15, and all 15 were rendered. Honour the
@@ -3370,7 +3410,7 @@ export function createHydraDBServer(
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.temporal_reasoning),
 		include_table_sql: z.boolean().optional().describe("Include SQL used to retrieve tabular data."),
-		table_limit: z.number().int().positive().optional().describe("Maximum number of tables to return."),
+		table_limit: z.number().int().min(1).max(100).optional().describe("Maximum number of table rows to return (1–100)."),
 		response_format: z
 			.enum(["structured", "markdown"])
 			.optional()
