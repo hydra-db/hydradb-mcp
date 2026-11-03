@@ -84,6 +84,13 @@ spreadsheets, OpenDocument, iWork, images and text files. They are uploaded as
 - The SDK's own retry loop is turned off (`maxRetries: 0`); one policy in
   `src/hydra/retry.ts` now covers SDK and hand-rolled calls alike.
 
+### Fixed — OAuth discovery behind an MCP path prefix
+
+Path-prefixed MCP deployments now serve protected-resource metadata through
+both prefix-preserving and prefix-stripping proxies, including the RFC 9728
+path-inserted alias. Unsupported `HYDRADB_MCP_PUBLIC_URL` layouts now fail at
+startup with a clear error instead of silently disabling OAuth.
+
 ## [1.6.0] - 2026-10-28
 
 ### Fixed — `hydradb_query` title filter missed documents saved through `hydradb_ingest`
