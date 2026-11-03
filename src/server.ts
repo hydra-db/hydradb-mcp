@@ -100,6 +100,7 @@ function textResult(text: string): ToolResult {
 }
 
 const RESPONSE_WARNING_COUNT_LIMIT = 10;
+
 const RESPONSE_WARNING_CHAR_BUDGET = 4_000;
 
 function renderWarningText(warnings: RenderedWarning[], omitted: number): string {
@@ -109,6 +110,7 @@ function renderWarningText(warnings: RenderedWarning[], omitted: number): string
 		const collections = warning.collections?.length
 			? ` (collections: ${warning.collections.join(", ")})`
 			: "";
+
 		const collectionsOmitted = warning.collections_omitted
 			? ` (${warning.collections_omitted} additional collections omitted)`
 			: "";
@@ -127,7 +129,7 @@ function warningPayloadFits(warnings: RenderedWarning[], omitted: number): boole
 }
 
 /** Bound warning text and structured data under one shared budget. */
-function boundResponseWarnings(input: ResponseWarning[], shorten: (value: string) => string): { warnings: RenderedWarning[]; omitted: number } {
+function boundResponseWarnings(input: ResponseWarning[], shorten: (value: string) => string) {
 	const candidates = input.slice(0, RESPONSE_WARNING_COUNT_LIMIT);
 	let omitted = Math.max(input.length - candidates.length, 0);
 	const warnings: RenderedWarning[] = [];
@@ -135,12 +137,15 @@ function boundResponseWarnings(input: ResponseWarning[], shorten: (value: string
 	for (let i = 0; i < candidates.length; i++) {
 		const warning = candidates[i]!;
 		const rawCollections = warning.collections ?? [];
+
 		let rendered: RenderedWarning = {
 			code: shorten(warning.code),
 			message: shorten(warning.message),
-			...(warning.collections ? { collections: [] } : {}),
-			...(rawCollections.length ? { collections_omitted: rawCollections.length } : {}),
 		};
+
+		if (warning.collections) rendered.collections = [];
+		if (rawCollections.length) rendered.collections_omitted = rawCollections.length;
+
 		const reserveOmitted = omitted + candidates.length - i - 1;
 
 		if (!warningPayloadFits([...warnings, rendered], reserveOmitted)) {
@@ -150,14 +155,16 @@ function boundResponseWarnings(input: ResponseWarning[], shorten: (value: string
 
 		for (const rawCollection of rawCollections.slice(0, 50)) {
 			const nextCollections = [...(rendered.collections ?? []), shorten(rawCollection)];
+
 			const next: RenderedWarning = {
 				code: rendered.code,
 				message: rendered.message,
 				collections: nextCollections,
-				...(nextCollections.length < rawCollections.length
-					? { collections_omitted: rawCollections.length - nextCollections.length }
-					: {}),
 			};
+
+			if (nextCollections.length < rawCollections.length) {
+				next.collections_omitted = rawCollections.length - nextCollections.length;
+			}
 
 			if (!warningPayloadFits([...warnings, next], reserveOmitted)) break;
 			rendered = next;
@@ -178,35 +185,48 @@ function formatTabularData(table: unknown): string {
 	let omittedRows = 0;
 	let omittedContent = 0;
 	// Reserve space for the omission summary even when the last row fits.
+
 	const append = (line: string) => {
 		if (length + line.length + 1 > limit - 128) return false;
 		lines.push(line);
 		length += line.length + 1;
+
 		return true;
 	};
+
 	const tables = Array.isArray(table) ? table : [table];
+
 	for (const [index, item] of tables.entries()) {
 		if (item == null || typeof item !== "object" || Array.isArray(item)) {
 			if (!append(JSON.stringify(item))) omittedContent++;
 			continue;
 		}
+
 		const { rows, records, ...metadata } = item as Record<string, unknown>;
 		const rowList = Array.isArray(rows) ? rows : undefined;
 		const recordList = Array.isArray(records) ? records : undefined;
 		// Preserve unexpected shapes rather than silently dropping them.
+
 		if (rows != null && !rowList) metadata.rows = rows;
+
 		if (records != null && !recordList) metadata.records = records;
+
 		if (!append(`Table ${index + 1}: ${JSON.stringify(metadata)}`)) omittedContent++;
 		const count = Math.max(rowList?.length ?? 0, recordList?.length ?? 0);
+
 		for (let i = 0; i < count; i++) {
 			const value = rowList && recordList
 				? { ...(i < rowList.length ? { row: rowList[i] } : {}), ...(i < recordList.length ? { record: recordList[i] } : {}) }
 				: (rowList ?? recordList)![i];
+
 			if (!append(`Row ${i + 1}: ${JSON.stringify(value)}`)) omittedRows++;
 		}
 	}
+
 	if (omittedRows) lines.push(`(${omittedRows} ${omittedRows === 1 ? "row" : "rows"} omitted)`);
+
 	if (omittedContent) lines.push(`(${omittedContent} table content omitted)`);
+
 	return lines.join("\n");
 }
 /**
@@ -1048,6 +1068,7 @@ export function createHydraDBServer(
 		const table = extras.tabular_data ?? extras.tabularData;
 		const tableText = table == null ? "" : formatTabularData(table);
 		const tableFields = table == null ? {} : { tabular_data: table };
+
 		const feedbackLine = requestId
 			? `\nWas this useful? Report it with ${TOOL_NAMES.FEEDBACK} using request_id: ${requestId}`
 			: "";
@@ -1061,6 +1082,7 @@ export function createHydraDBServer(
 
 		if ((!res.chunks || res.chunks.length === 0) && table != null) {
 			const feedback = feedbackLine ? `\n\n---${feedbackLine}` : "";
+
 			return queryResult(`${scopeText(resolvedScope)}${tableText}${feedback}`, tableFields);
 		}
 		if (!res.chunks || res.chunks.length === 0) {
@@ -1237,12 +1259,14 @@ export function createHydraDBServer(
 	): Promise<ToolResult> {
 		let warnings: RenderedWarning[] = [];
 		let omitted = 0;
+
 		const result = await run((meta) => {
 			({ warnings, omitted } = boundResponseWarnings(meta.warnings ?? [], briefly));
 		});
 
 		if (warnings.length === 0) return result;
 		const notice = renderWarningText(warnings, omitted);
+
 		return {
 			...result,
 			content: result.content.map((part, index) => index === 0 ? { ...part, text: part.text + notice } : part),
@@ -4253,6 +4277,7 @@ export function createHydraDBServer(
 
 				if (a.kind === "knowledge" || a.kind === "all") {
 					const sourceKind = a.kind;
+
 					return withResponseWarnings((onMeta) => runListSources(
 						{
 							kind: sourceKind,

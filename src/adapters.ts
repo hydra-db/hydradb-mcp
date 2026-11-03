@@ -316,14 +316,20 @@ const graphProvenance = {
 	source_id: optionalText, sourceId: optionalText,
 	read_status: optionalText, readStatus: optionalText,
 };
+
 function provenance(record: z.infer<typeof relationEndRecord> | z.infer<typeof relationEvidenceRecord> | undefined): GraphProvenance {
 	if (!record) return {};
-	return {
-		...(record.database != null ? { database: record.database } : {}),
-		...(record.collection != null ? { collection: record.collection } : {}),
-		...((record.source_id ?? record.sourceId) != null ? { source_id: record.source_id ?? record.sourceId } : {}),
-		...((record.read_status ?? record.readStatus) != null ? { read_status: record.read_status ?? record.readStatus } : {}),
-	};
+
+	const result: GraphProvenance = {};
+	const sourceId = record.source_id ?? record.sourceId;
+	const readStatus = record.read_status ?? record.readStatus;
+
+	if (record.database != null) result.database = record.database;
+	if (record.collection != null) result.collection = record.collection;
+	if (sourceId != null) result.source_id = sourceId;
+	if (readStatus != null) result.read_status = readStatus;
+
+	return result;
 }
 const relationEndRecord = z.object({
 	...graphProvenance,

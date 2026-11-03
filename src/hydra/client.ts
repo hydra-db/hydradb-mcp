@@ -627,19 +627,24 @@ const requestMetaEnvelopeSchema = z.object({
 });
 // SDK 2.1.8 has no generated warnings field, but its parser currently passes
 // unknown fields through. Validate that untyped field at this boundary.
+
 const responseWarningSchema = z.object({ code: z.string(), message: z.string(), collections: z.array(z.string()).optional() });
 
 function readResponseMeta(value: unknown): ResponseMeta {
 	const parsed = requestMetaEnvelopeSchema.safeParse(value);
+
 	if (!parsed.success) return { requestId: undefined };
 	const meta = parsed.data.meta;
 	const id = typeof meta?.requestId === "string" ? meta.requestId : meta?.request_id;
+
 	const warnings = Array.isArray(meta?.warnings)
 		? meta.warnings.flatMap((entry: unknown) => {
 			const warning = responseWarningSchema.safeParse(entry);
+
 			return warning.success ? [warning.data] : [];
 		})
 		: [];
+
 	return {
 		requestId: typeof id === "string" && id !== "" ? id : undefined,
 		...(warnings.length ? { warnings } : {}),
@@ -863,14 +868,20 @@ export class ContextResource extends Resource {
 	 * Remove this bridge when a released SDK serializes both fields itself. */
 	private queryClient(params: QueryParams): HydraDBClient {
 		if (params.includeTableSql == null && params.tableLimit == null) return this.sdk;
+
 		if (!this.raw) throw new Error("Table query options require a configured HTTP transport.");
 		const raw = this.raw;
+
 		const fetchFn: typeof fetch = (input, init) => {
 			const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+
 			if (params.includeTableSql != null) body.include_table_sql = params.includeTableSql;
+
 			if (params.tableLimit != null) body.table_limit = params.tableLimit;
+
 			return (raw.fetchFn ?? fetch)(input, { ...init, body: JSON.stringify(body) });
 		};
+
 		return new HydraDBClient({ token: raw.token, baseUrl: raw.baseUrl, fetch: fetchFn,
 			headers: raw.headers, timeoutInSeconds: raw.timeoutMs / 1000 + 5, maxRetries: 0,
 			logging: { logger: STDERR_LOGGER } });

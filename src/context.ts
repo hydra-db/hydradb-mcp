@@ -275,6 +275,7 @@ function formatTemporal(response: RecallResponse): string[] {
 		if (when && (f.datePrecision === "month" || f.datePrecision === "year")) when += ` (~${f.datePrecision})`;
 		const observed = f as unknown as { observed_at?: unknown; observedAt?: unknown };
 		const observedAt = observed.observed_at ?? observed.observedAt;
+
 		if (observedAt != null) when += ` | observed: ${String(observedAt)}`;
 		const phrase = f.evidencePhrase?.trim();
 		facts.push(`  [${f.subject ?? ""}] → ${f.relation ?? ""} → [${f.object ?? ""}]${when}${phrase ? ` — "${phrase}"` : ""}`);
@@ -512,6 +513,7 @@ function render(
 		lines.push(...trailLines(chunk));
 		const extraChunk = chunk as unknown as { chunk_metadata?: unknown; chunkMetadata?: unknown };
 		const chunkMetadata = extraChunk.chunk_metadata ?? extraChunk.chunkMetadata;
+
 		if (chunkMetadata != null) lines.push(`Chunk metadata: ${JSON.stringify(chunkMetadata)}`);
 		const metaLine = metadataLine(chunk);
 		if (metaLine) lines.push(metaLine);

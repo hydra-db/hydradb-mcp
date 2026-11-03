@@ -338,6 +338,7 @@ test("query exposes tabular results, chunk metadata and warning collections", as
 		chunks: [{ id: "s1", chunk_content: "body", chunk_metadata: { page: 4 } }],
 		tabular_data: [{ columns: ["name"], rows: [["Ada"]] }],
 	}, meta: { warnings: [{ code: "PARTIAL", message: "incomplete", collections: ["docs"] }] } })));
+
 	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "q", structured: true } });
 	assert.match(text(result), /Ada/);
 	assert.match(text(result), /page/);
@@ -346,10 +347,13 @@ test("query exposes tabular results, chunk metadata and warning collections", as
 
 test("table query options reach the wire through SDK serialization", async (t) => {
 	const seen: Record<string, unknown>[] = [];
+
 	const fetchFn: typeof fetch = async (_url, init) => {
 		seen.push(JSON.parse(String(init?.body)));
+
 		return json({ chunks: [] });
 	};
+
 	const { client } = await fixture(t, () => { throw new Error("unexpected SDK call"); }, { fetchFn });
 	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "q", include_table_sql: true, table_limit: 3 } });
 	assert.equal(result.isError, undefined, text(result));
@@ -363,6 +367,7 @@ test("table-only results are not reported as empty", async (t) => {
 		data: { chunks: [], tabular_data: [{ rows: [["only-table"]] }] },
 		meta: { request_id: "table-request" },
 	})));
+
 	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "q", structured: true } });
 	assert.equal(result.isError, undefined);
 	assert.match(text(result), /only-table/);
@@ -373,10 +378,12 @@ test("table-only results are not reported as empty", async (t) => {
 
 test("large tabular results keep complete rows in text and preserve structured output", async (t) => {
 	const rows = Array.from({ length: 30 }, (_, i) => [`row-${i}-${"x".repeat(1000)}`]);
+
 	const { client } = await fixture(t, () => json({
 		...queryData(),
 		tabular_data: [{ columns: ["value"], rows }],
 	}));
+
 	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "q", structured: true } });
 	const body = text(result);
 	const structured = result.structuredContent as Record<string, unknown>;
@@ -389,11 +396,13 @@ test("large tabular results keep complete rows in text and preserve structured o
 
 test("large table-only results are bounded and keep feedback identity", async (t) => {
 	const rows = Array.from({ length: 30 }, (_, i) => [`row-${i}-${"y".repeat(1000)}`]);
+
 	const { client } = await fixture(t, () => new Response(JSON.stringify({
 		success: true,
 		data: { chunks: [], tabular_data: [{ columns: ["value"], rows }] },
 		meta: { request_id: "large-table-request" },
 	})));
+
 	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "q", structured: true } });
 	const body = text(result);
 	const structured = result.structuredContent as Record<string, unknown>;
@@ -408,10 +417,12 @@ test("large table-only results are bounded and keep feedback identity", async (t
 
 test("an escaping-heavy oversized row is omitted whole", async (t) => {
 	const oversized = `${"\"\\\n".repeat(5000)}tail`;
+
 	const { client } = await fixture(t, () => json({
 		...queryData(),
 		tabular_data: [{ columns: ["value"], rows: [[oversized]] }],
 	}));
+
 	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "q", structured: true } });
 	const body = text(result);
 	const structured = result.structuredContent as Record<string, unknown>;
@@ -428,6 +439,7 @@ test("oversized metadata is omitted while complete rows and structured data rema
 		...queryData(),
 		tabular_data: { title: "m".repeat(13_000), rows: [["one"], ["two"]] },
 	}));
+
 	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "q", structured: true } });
 	const body = text(result);
 	const structured = result.structuredContent as Record<string, unknown>;
@@ -441,6 +453,7 @@ test("oversized metadata is omitted while complete rows and structured data rema
 test("multiple tables share one budget without reordering retained rows", async (t) => {
 	const firstRows = [[`first-${"a".repeat(7000)}`]];
 	const secondRows = [[`second-${"b".repeat(7000)}`]];
+
 	const { client } = await fixture(t, () => json({
 		...queryData(),
 		tabular_data: [
@@ -448,6 +461,7 @@ test("multiple tables share one budget without reordering retained rows", async 
 			{ columns: ["value"], rows: secondRows },
 		],
 	}));
+
 	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "q", structured: true } });
 	const structured = result.structuredContent as Record<string, unknown>;
 	const tables = structured.tabular_data as { rows: string[][] }[];
@@ -463,14 +477,18 @@ test("multiple tables share one budget without reordering retained rows", async 
 test("table query bridge retries and propagates cancellation", async () => {
 	let calls = 0;
 	let seenSignal: AbortSignal | null | undefined;
+
 	const fetchFn: typeof fetch = async (_input, init) => {
 		calls++;
 		seenSignal = init?.signal;
+
 		if (calls === 1) return new Response("unavailable", { status: 503 });
+
 		return new Promise<Response>((_, reject) => {
 			init?.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
 		});
 	};
+
 	const hydra = new HydraDB({ token: "token", database: "db", baseUrl: "https://offline.invalid", fetchFn, maxRetries: 1 });
 	const controller = new AbortController();
 	const pending = hydra.context.query({ query: "q", includeTableSql: true }, { signal: controller.signal });
@@ -494,6 +512,7 @@ test("oversized tabular text retains complete records and reports omissions", as
 	assert.match(body, /row-0-/);
 	assert.match(body, /\d+ (?:rows|records) omitted/i);
 	assert.ok(body.length < 13000);
+
 	for (const line of body.split("\n").filter((item) => /^Row \d+: /.test(item))) {
 		assert.doesNotThrow(() => JSON.parse(line.replace(/^Row \d+: /, "")));
 	}
@@ -511,15 +530,20 @@ test("oversized table metadata and individual rows are reported as omitted", asy
 
 test("table_limit accepts row bounds and rejects 101", async (t) => {
 	const seen: number[] = [];
+
 	const fetchFn: typeof fetch = async (_url, init) => {
 		seen.push(JSON.parse(String(init?.body)).table_limit);
+
 		return json({ chunks: [] });
 	};
+
 	const { client } = await fixture(t, () => { throw new Error("unexpected SDK call"); }, { fetchFn });
+
 	for (const limit of [1, 100]) {
 		const result = await client.callTool({ name: "hydradb_query", arguments: { query: "q", table_limit: limit } });
 		assert.equal(result.isError, undefined, text(result));
 	}
+
 	const rejected = await client.callTool({ name: "hydradb_query", arguments: { query: "q", table_limit: 101 } });
 	assert.equal(rejected.isError, true);
 	assert.deepEqual(seen, [1, 100]);
@@ -531,6 +555,7 @@ test("table text preserves complete paired rows alongside chunks and structured 
 		rows: Array.from({ length: 110 }, (_, i) => [`row-${i}-${"v".repeat(150)}`]),
 		records: Array.from({ length: 110 }, (_, i) => ({ name: `row-${i}-${"v".repeat(150)}` })),
 	};
+
 	const { client } = await fixture(t, () => json({ chunks: [{ id: "s1", chunk_content: "context" }], tabular_data: table }));
 	const ordinary = await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
 	const structured = await client.callTool({ name: "hydradb_query", arguments: { query: "q", structured: true } });

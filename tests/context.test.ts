@@ -1133,5 +1133,6 @@ test("temporal facts retain their observation time", () => {
 	const response = { chunks: [{ id: "s1", chunkContent: "body" }], temporalFacts: [
 		{ subject: "Alice", relation: "joined", object: "Acme", observed_at: "2026-01-03T00:00:00Z" },
 	] };
+
 	assert.match(buildRecalledContext(response as never), /observed: 2026-01-03T00:00:00Z/);
 });

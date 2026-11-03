@@ -1119,6 +1119,7 @@ test("real SDK markdown query sends response_format=markdown and returns the str
 
 test("query metadata retains warnings for camelCase and snake_case envelopes", async () => {
 	const warning = { code: "acl_ignored_by_connector_enforcement", message: "Request ACL ignored." };
+
 	for (const meta of [{ requestId: "r1", warnings: [warning] }, { request_id: "r1", warnings: [warning] }]) {
 		const sdk = { query: async () => ({ success: true, data: { chunks: [] }, meta }) } as unknown as HydraDBClient;
 		const hydra = new HydraDB({ token: "t", database: "db_test" }, sdk);
@@ -1132,6 +1133,7 @@ test("malformed warning entries do not discard the request id or valid warnings"
 	const sdk = { query: async () => ({ success: true, data: { chunks: [] }, meta: {
 		request_id: "r1", warnings: [null, { code: 42 }, { code: "notice", message: "ok" }],
 	} }) } as unknown as HydraDBClient;
+
 	const hydra = new HydraDB({ token: "t", database: "db_test" }, sdk);
 	let received: unknown;
 	await hydra.context.query({ query: "q" }, { onMeta: (value) => { received = value; } });
@@ -1152,6 +1154,7 @@ test("released SDK query retains wire warning metadata", async (t) => {
 test("every ACL-bearing context read retains response warnings", async () => {
 	const warning = { code: "acl_ignored_by_connector_enforcement", message: "Request ACL ignored." };
 	const envelope = (data: unknown) => ({ success: true, data, meta: { request_id: "r", warnings: [warning] } });
+
 	const sdk = {
 		context: {
 			list: async () => envelope({ inner: { sources: [] } }),
@@ -1159,6 +1162,7 @@ test("every ACL-bearing context read retains response warnings", async () => {
 			relations: async () => envelope({ relations: [], isTruncated: false }),
 		},
 	} as unknown as HydraDBClient;
+
 	const { fetchFn } = fakeRawFetch(() => ({
 		status: 200,
 		body: envelope({
@@ -1172,6 +1176,7 @@ test("every ACL-bearing context read retains response warnings", async () => {
 			max_depth_reached: 0,
 		}),
 	}));
+
 	const hydra = new HydraDB({ token: "t", database: "db_test", baseUrl: "https://h.test", fetchFn }, sdk);
 
 	for (const call of [
