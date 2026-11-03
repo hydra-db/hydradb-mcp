@@ -1049,10 +1049,8 @@ export class ContextResource extends Resource {
 
 		if (params.acl !== undefined) request.acl = params.acl;
 
-		return this.call(
-			"/context/{id}/metadata",
-			() => this.sdk.context.updateSourceMetadata(request, req(opts)),
-			opts?.onMeta,
+		return this.call("/context/{id}/metadata", "idempotent", opts, (o) =>
+			this.sdk.context.updateSourceMetadata(request, o),
 		);
 	}
 
