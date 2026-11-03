@@ -21,6 +21,50 @@ by their effective destination database. Provider credential schemas are
 metadata only. Defaults, examples, constants, and unknown schema extensions
 are removed before the schema enters model context.
 
+### Added — `hydradb_ingest` takes files
+
+`hydradb_ingest` has a new `file` argument for PDF, Word, PowerPoint,
+spreadsheets, OpenDocument, iWork, images and text files. They are uploaded as
+`documents` on POST /context/ingest and indexed as knowledge. The title is
+`title` when given (the upload is renamed to it), otherwise the filename.
+
+- `file.content_base64` carries the bytes in the tool call, up to 8 MB. This is
+  how files reach the hosted server, which cannot read the caller's disk.
+- `file.path` reads a local file, up to the API's 50 MB, on the stdio server
+  only; the hosted server refuses it.
+- Oversized files and unreadable formats are refused before upload, with the
+  limit or the accepted formats in the message. The limits are in the tool
+  description.
+- The hosted server's request body limit is now 16 MB (was 8 MB), so an 8 MB
+  file fits in one call.
+
+### Changed — retries, timeouts and cancellation
+
+- **One deadline per tool call.** `HYDRADB_TIMEOUT_SECONDS` now bounds the
+  whole call, every attempt and wait included, instead of each attempt. The
+  default is 45s (was 30s per attempt, up to ~90s with retries), so a call ends
+  before a 60s host timeout. The error names the deadline and lists every
+  attempt, not just the last one.
+- **No blind retry of writes.** Ingest, Cypher, feedback and database or
+  collection creation and deletion are retried only after a failure that shows
+  Hydra DB did not act on them (429, 408, connection refused). After a 5xx, a
+  dropped connection or the deadline they are not retried, and the error says
+  the outcome is unknown. Reads retry as before.
+- **`Retry-After` is honoured** in both forms (seconds and HTTP date) on every
+  call, within the deadline. A wait that would end past the deadline fails at
+  once with the server's answer.
+- **Cancellation stops retrying.** A cancel during the wait between attempts
+  ends the call with no new attempt.
+- **Cancel works on the hosted server.** Each HTTP request gets its own MCP
+  server instance, so a `notifications/cancelled` POST never reached the call
+  it named. Running calls are now registered by caller and request id, and a
+  cancel from the same credential stops the call and its upstream request.
+- **Tool annotations.** `hydradb_ingest` (and its legacy aliases) is marked
+  destructive, since it overwrites a document with the same source id, and
+  not idempotent. `hydradb_graph_query` is marked not idempotent.
+- The SDK's own retry loop is turned off (`maxRetries: 0`); one policy in
+  `src/hydra/retry.ts` now covers SDK and hand-rolled calls alike.
+
 ## [1.6.0] - 2026-10-28
 
 ### Fixed — `hydradb_query` title filter missed documents saved through `hydradb_ingest`

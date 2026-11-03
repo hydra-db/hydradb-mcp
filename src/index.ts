@@ -122,7 +122,8 @@ function installLifecycle(server: Server) {
 }
 
 async function main() {
-	const server = createHydraDBServer();
+	// stdio runs as the user on their own machine, so it may read a file path.
+	const server = createHydraDBServer(undefined, undefined, { localFiles: true });
 	installLifecycle(server);
 	const transport = new StdioServerTransport();
 	await server.connect(transport);

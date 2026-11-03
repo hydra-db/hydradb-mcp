@@ -27,11 +27,13 @@ export class HydraWrapperError extends Error {
 	readonly body?: unknown;
 	/** The original SDK error, preserved as the cause. */
 	readonly cause?: unknown;
+	/** Response headers, when there was a response; the retry loop reads `Retry-After`. */
+	readonly headers?: Headers;
 
 	constructor(
 		message: string,
 		path: string,
-		opts?: { status?: number; body?: unknown; cause?: unknown },
+		opts?: { status?: number; body?: unknown; cause?: unknown; headers?: Headers },
 	) {
 		super(message);
 		this.name = "HydraWrapperError";
@@ -39,6 +41,7 @@ export class HydraWrapperError extends Error {
 		this.status = opts?.status;
 		this.body = opts?.body;
 		this.cause = opts?.cause;
+		this.headers = opts?.headers;
 		Object.setPrototypeOf(this, HydraWrapperError.prototype);
 	}
 }
@@ -200,11 +203,12 @@ export function responseError(
 	status: number,
 	body: unknown,
 	known: readonly string[] = [],
+	headers?: Headers,
 ): HydraWrapperError {
 	return new HydraWrapperError(
 		`Hydra DB ${path} → ${status}: ${bodyToString(body, known)}`,
 		path,
-		{ status, body },
+		{ status, body, headers },
 	);
 }
 

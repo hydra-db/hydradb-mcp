@@ -20,6 +20,7 @@
  */
 
 import { HydraWrapperError, scrub } from "./errors.js";
+import { DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT_SECONDS, type RetrySafety } from "./retry.js";
 import { newRawTransport, type RawTransport, sendRaw } from "./transport.js";
 
 export interface GraphConfig {
@@ -48,14 +49,6 @@ export type GraphRow = Record<string, unknown>;
 export interface RequestOptions {
 	signal?: AbortSignal;
 }
-
-/**
- * Status codes worth retrying.
- *
- * 429 and 5xx are documented as transient. 4xx other than 429 are not: a
- * rejected construct, a Cypher error and a bad collection name all fail
- * identically on retry, so retrying them only delays the message.
- */
 
 /**
  * A 2xx whose body is not the shape this endpoint promises.
@@ -96,7 +89,10 @@ export class GraphResource {
 	private readonly transport: RawTransport;
 
 	constructor(config: GraphConfig) {
-		this.transport = newRawTransport(config, { timeoutSeconds: 30, maxRetries: 2 });
+		this.transport = newRawTransport(config, {
+			timeoutSeconds: DEFAULT_TIMEOUT_SECONDS,
+			maxRetries: DEFAULT_MAX_RETRIES,
+		});
 	}
 
 	/**
@@ -192,7 +188,9 @@ export class GraphResource {
 		params: { database: string; collection: string },
 		opts?: RequestOptions,
 	): Promise<Record<string, unknown>> {
-		return this.send("/byog/collections", "DELETE", params, opts);
+		// Dropping what is already gone changes nothing, so this one write may
+		// be retried after an unclear failure.
+		return this.send("/byog/collections", "DELETE", params, opts, "idempotent");
 	}
 
 	/**
@@ -216,7 +214,8 @@ export class GraphResource {
 		method: "GET" | "POST" | "DELETE",
 		body: unknown,
 		opts?: RequestOptions,
+		safety?: RetrySafety,
 	): Promise<T> {
-		return sendRaw<T>(this.transport, path, method, body, opts);
+		return sendRaw<T>(this.transport, path, method, body, { signal: opts?.signal, safety });
 	}
 }
