@@ -1324,6 +1324,8 @@ export function createHydraDBServer(
 			title?: string;
 			isMarkdown?: boolean;
 			overwrite?: boolean;
+			metadata?: Record<string, unknown>;
+			observationDate?: string;
 			database?: string;
 			collection?: string;
 		},
@@ -1341,6 +1343,8 @@ export function createHydraDBServer(
 			infer: opts?.infer ?? true,
 			title: opts?.title,
 			isMarkdown: opts?.isMarkdown,
+			metadata: opts?.metadata,
+			observationDate: opts?.observationDate,
 			customInstructions: INGEST_INSTRUCTIONS,
 			upsert: opts?.overwrite ?? true,
 			database: opts?.database,
@@ -4003,6 +4007,8 @@ export function createHydraDBServer(
 					title: a.title,
 					isMarkdown: a.is_markdown,
 					overwrite: a.overwrite,
+					metadata: a.metadata,
+					observationDate: a.observation_date,
 					database: a.database,
 					collection: a.collection,
 				},
