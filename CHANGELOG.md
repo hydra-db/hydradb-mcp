@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-11-03
+
 ### Added — dashboard connector completion
 
 `hydradb_connector_connect` accepts only a provider and returns a safe dashboard
@@ -112,6 +114,17 @@ spreadsheets, OpenDocument, iWork, images and text files. They are uploaded as
   not idempotent. `hydradb_graph_query` is marked not idempotent.
 - The SDK's own retry loop is turned off (`maxRetries: 0`); one policy in
   `src/hydra/retry.ts` now covers SDK and hand-rolled calls alike.
+
+### Added — MCP database management tools
+
+Added `hydradb_database_create`, `hydradb_database_delete`,
+`hydradb_database_readiness`, `hydradb_database_stats`,
+`hydradb_database_schema_inspect` and `hydradb_database_schema_update` (additive
+only). `hydradb_databases` and the new tools are available to API-key, stdio, and
+OAuth connections. OAuth database confinement now applies before create, delete,
+readiness, stats, and metadata-schema requests. Deleting the connection's own
+default database is refused, and write-permission failures explain how to use a
+writable credential. `HYDRADB_MCP_DATABASE_TOOLS=0` withholds the six new tools.
 
 ## [1.6.0] - 2026-10-28
 
