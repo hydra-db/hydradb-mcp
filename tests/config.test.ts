@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { resolveConfig } from "../src/config.js";
+import { resolveConfig, resolveConnectorConfig, resolveDatabaseToolsConfig } from "../src/config.js";
 import { LogLevel, resolveLogLevel } from "../src/logger.js";
 
 // A fresh warning sink per call keeps assertions isolated from the module-level
@@ -34,6 +34,8 @@ test("canonical HYDRADB_* names are read as primary with no warning", () => {
 			database: "db",
 			collection: "default",
 		},
+		connectors: { enabled: true, dashboardUrl: "https://app.hydradb.com" },
+		databaseTools: { enabled: true },
 	});
 	assert.deepEqual(messages, []);
 });
@@ -180,6 +182,84 @@ test("malformed timeout and retry values fall back rather than throwing", () => 
 			config.timeoutSeconds,
 			undefined,
 			`"${bad}" should be ignored, not adopted`,
+		);
+	}
+});
+
+test("connector tools are enabled by default and accept normal false spellings", () => {
+	assert.equal(resolveConnectorConfig({}).enabled, true);
+	assert.equal(resolveConnectorConfig({}).dashboardUrl, "https://app.hydradb.com");
+
+	for (const value of ["0", "false", "FALSE", "no", "off", " off "]) {
+		assert.equal(
+			resolveConnectorConfig({ HYDRADB_MCP_CONNECTOR_TOOLS: value }).enabled,
+			false,
+			`"${value}" should disable connector tools`,
+		);
+	}
+});
+
+test("connector dashboard links use the OAuth issuer origin", () => {
+	assert.equal(
+		resolveConnectorConfig({ HYDRADB_OAUTH_ISSUER: " http://127.0.0.1:3000/ " }).dashboardUrl,
+		"http://127.0.0.1:3000",
+	);
+	assert.equal(
+		resolveConnectorConfig({ HYDRADB_OAUTH_ISSUER: "https://dashboard.hydradb.acme.com" }).dashboardUrl,
+		"https://dashboard.hydradb.acme.com",
+	);
+	assert.equal(
+		resolveConnectorConfig({ HYDRADB_OAUTH_ISSUER: "https://user:pass@dashboard.example.com/app?x=1#y" }).dashboardUrl,
+		"https://dashboard.example.com",
+	);
+});
+
+test("connector dashboard links fall back to the hosted dashboard without a usable issuer", () => {
+	for (const value of [undefined, "", "   ", "javascript:alert(1)", "not-a-url", "ftp://dashboard.example.com"]) {
+		assert.equal(
+			resolveConnectorConfig({ HYDRADB_OAUTH_ISSUER: value }, () => {}).dashboardUrl,
+			"https://app.hydradb.com",
+			`issuer ${JSON.stringify(value)} should fall back`,
+		);
+	}
+});
+
+test("an issuer that is set but unusable warns once, naming it; an unset one is silent", () => {
+	const warnings: string[] = [];
+	const warn = (message: string) => warnings.push(message);
+
+	resolveConnectorConfig({}, warn);
+	resolveConnectorConfig({ HYDRADB_OAUTH_ISSUER: "   " }, warn);
+	assert.deepEqual(warnings, []);
+
+	resolveConnectorConfig({ HYDRADB_OAUTH_ISSUER: "dashboard.hydradb.byoc.test" }, warn);
+	resolveConnectorConfig({ HYDRADB_OAUTH_ISSUER: "dashboard.hydradb.byoc.test" }, warn);
+	assert.equal(warnings.length, 1, "once per process, not once per request");
+	assert.match(warnings[0] ?? "", /"dashboard\.hydradb\.byoc\.test" is not an absolute http\(s\) URL; connector links use https:\/\/app\.hydradb\.com/);
+});
+
+test("the retired HYDRADB_DASHBOARD_URL no longer changes connector links", () => {
+	assert.equal(
+		resolveConnectorConfig({ HYDRADB_DASHBOARD_URL: "https://elsewhere.example.com" }).dashboardUrl,
+		"https://app.hydradb.com",
+	);
+	assert.equal(
+		resolveConnectorConfig({
+			HYDRADB_DASHBOARD_URL: "https://elsewhere.example.com",
+			HYDRADB_OAUTH_ISSUER: "https://dashboard.hydradb.com",
+		}).dashboardUrl,
+		"https://dashboard.hydradb.com",
+	);
+});
+
+test("database tools are enabled by default and accept normal false spellings", () => {
+	assert.equal(resolveDatabaseToolsConfig({}).enabled, true);
+
+	for (const value of ["0", "false", "FALSE", "no", "off", " off "]) {
+		assert.equal(
+			resolveDatabaseToolsConfig({ HYDRADB_MCP_DATABASE_TOOLS: value }).enabled,
+			false,
+			`"${value}" should disable the database tools`,
 		);
 	}
 });

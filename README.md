@@ -13,15 +13,78 @@ Run it two ways, same tools either way:
 |---|---|
 | `hydradb_query` | Search memories and knowledge together, with knowledge-graph context |
 | `hydradb_ingest` | Save a note, a document, or a conversation |
-| `hydradb_list` | Enumerate one family — every memory, or every knowledge source |
+| `hydradb_list` | Enumerate what is stored — memories, knowledge sources, or both in one page |
 | `hydradb_inspect` | Fetch one source's full content by id |
 | `hydradb_delete` | Remove one or more items by id, irreversibly |
 | `hydradb_status` | Check whether an ingested source has finished indexing |
 | `hydradb_subgraph` | Everything connected to one item — its thread, replies, parents, children, links |
+| `hydradb_relations` | The knowledge-graph relations of one item or a whole collection, page by page |
 | `hydradb_feedback` | Report whether a query's results were useful, by its `request_id` |
+| `hydradb_databases` | List databases this connection can address |
+| `hydradb_database_create` | Create a database with an optional metadata schema and embedding dimension |
+| `hydradb_database_delete` | Delete a database irreversibly |
+| `hydradb_database_readiness` | Check whether database provisioning finished |
+| `hydradb_database_stats` | Read database-wide knowledge and memory row counts |
+| `hydradb_database_schema_inspect` | Read the metadata fields declared for a database |
+| `hydradb_database_schema_update` | Add fields to a database metadata schema (additive only) |
+| `hydradb_list_collections` | List collections inside a database |
+| `hydradb_delete_collection` | Delete one collection irreversibly |
 
 Ids flow between these: `hydradb_query`, `hydradb_list` and `hydradb_subgraph` emit them;
-`hydradb_inspect`, `hydradb_delete`, `hydradb_status` and `hydradb_subgraph` accept them.
+`hydradb_inspect`, `hydradb_delete`, `hydradb_status`, `hydradb_subgraph` and `hydradb_relations` accept them.
+
+### Connector tools
+
+| Tool | What it does |
+|---|---|
+| `hydradb_connector_provider_list` | List the connector providers HydraDB supports |
+| `hydradb_connector_provider_inspect` | Read one provider's setup guide and credential field schema |
+| `hydradb_connector_list` | List connected sources, optionally with health |
+| `hydradb_connector_inspect` | Read one connector's configuration and lifecycle |
+| `hydradb_connector_health` | Explain connector and resource sync health in plain words |
+| `hydradb_connector_connect` | Return a secure dashboard link for connecting a provider |
+| `hydradb_connector_reconnect` | Return a secure dashboard link for replacing a connector's credentials |
+| `hydradb_connector_update` | Update noncredential connector settings |
+| `hydradb_connector_delete` | Permanently delete a connector |
+| `hydradb_connector_sync` | Start a connector sync |
+| `hydradb_connector_pause` | Pause connector syncing |
+| `hydradb_connector_resume` | Resume connector syncing |
+| `hydradb_connector_discover` | Discover resources available upstream in a connected provider account |
+| `hydradb_connector_resource_list` | List resources already added to a connector |
+| `hydradb_connector_resource_add` | Add one or more discovered resources and start syncing them |
+| `hydradb_connector_resource_update` | Replace one resource's ACL or instructions |
+| `hydradb_connector_resource_delete` | Permanently remove one resource from a connector |
+
+The names follow the connector section of `CONTRACT.md`: noun first, verb last, the same
+words the CLI (`hydradb connector resource add`) and the plugin
+(`/hydradb:connector-resource-add`) use.
+
+Connector tools are on by default. Set `HYDRADB_MCP_CONNECTOR_TOOLS=0` to
+withhold the whole family. A confined OAuth connection sees only connectors
+assigned to an allowed database and collection. Connectors with no destination stay
+hidden, and every by-ID read checks the connector before reading status,
+discovery, or resources. Resource listings also check each resource's
+`database_override` and `collection_override`, then inherit the connector destination.
+
+Connector endpoints cannot enforce database or collection grants atomically with a
+mutation. Write tools therefore fail closed for every database- or collection-confined
+OAuth connection and send no connector API request. Use an organization-wide
+connection for connector mutations. Connector deletion, connector settings, resource
+add, resource updates, and resource deletion are marked destructive; resource add is
+also non-idempotent because it can start time-relative work. Sync, pause, and resume
+are non-destructive writes. Resource add updates the submitted resources; unlisted
+resources remain unchanged.
+
+The provider-detail tool returns credential **schema metadata**, not credential
+values. Do not paste provider credentials into chat or any MCP tool argument.
+Defaults, examples, constants, and unknown schema extensions are removed before
+the schema reaches model context. `hydradb_connector_connect` accepts only a
+provider and returns `/connectors?connect=<provider>`. `hydradb_connector_reconnect`
+authorizes the connector and returns `/connectors?open=<connector_id>`; open the
+drawer and select **Reconnect**.
+Both flows set `completed: false` because the dashboard, not MCP, performs the
+credential-bearing request. `HYDRADB_OAUTH_ISSUER` selects the dashboard origin
+for both completion links and defaults to `https://app.hydradb.com`.
 
 ### Graph tools (Cypher)
 
@@ -78,6 +141,44 @@ HYDRADB_MCP_LEGACY_TOOLS=1
 | `hydra_db_fetch_content` | `hydradb_inspect` |
 | `hydra_db_delete_memory` | `hydradb_delete` |
 
+### Database tools
+
+Database tools are available over stdio, API-key HTTP, and OAuth HTTP connections.
+`hydradb_databases` marks the connection default. On a confined OAuth connection,
+it returns only approved databases, and every database tool refuses other names
+before sending an API request. A connection limited to specific collections cannot
+create or delete a whole database or change its database-wide metadata schema.
+
+| Tool | Required input | Notes |
+|---|---|---|
+| `hydradb_databases` | None | Lists accessible databases and marks the default |
+| `hydradb_database_create` | `database` | Optional `embeddings_dimension` and `database_metadata_schema`; creation is asynchronous |
+| `hydradb_database_delete` | `database` | Destructive. Refuses the connection default |
+| `hydradb_database_readiness` | None | Optional `database`; poll until `ready_for_ingestion` is true |
+| `hydradb_database_stats` | None | Optional `database`; returns knowledge and memory row counts |
+| `hydradb_database_schema_inspect` | None | Optional `database`; returns declared field names and types |
+| `hydradb_database_schema_update` | `add_fields` | Optional `database`; additive only, with no delete, rename, or retype |
+
+Metadata fields use `name` and `data_type`. Supported types are `BOOL`, `INT8`,
+`INT16`, `INT32`, `INT64`, `FLOAT`, `DOUBLE`, `VARCHAR`, and `JSON`. Optional
+settings are `max_length`, `enable_match`, `enable_dense_embedding`, and
+`enable_sparse_embedding`.
+
+After `hydradb_database_create` accepts a request, call
+`hydradb_database_readiness` until the database is ready. A 403 from a write
+tool can indicate missing write permission. Read-only credentials cannot perform
+database writes; verify the credential's permissions or reconnect with write
+permission.
+
+To turn the database management tools off entirely:
+
+```
+HYDRADB_MCP_DATABASE_TOOLS=0   # withhold the six database management tools
+```
+
+`hydradb_databases`, `hydradb_list_collections` and `hydradb_delete_collection`
+stay registered.
+
 ### **hydradb_query**
 
 Searches **both** memories and ingested knowledge sources. Returns matching
@@ -90,6 +191,7 @@ chunks with their source id, a relevance score, and knowledge-graph context.
 | `max_results` | number | No | Maximum chunks to return (1-50, default: 10) |
 | `mode` | string | No | `fast`, `thinking` (default), or `auto` |
 | `detail` | string | No | `compact` (default) trims each chunk; `full` returns them whole |
+| `structured` | boolean | No | Also return `structuredContent` (`resolved_scope`, `request_id`, `sources` with `inspect_args`). Default: false — text only |
 | `graph_context` | boolean | No | Include knowledge-graph relations (default: true) |
 | `operator` | string | No | `or`, `and`, or `phrase`. Switches the query to keyword retrieval (`query_by=text`), which is the only mode Hydra DB accepts an operator on — semantic matching is off for that query. Unset (the default) is hybrid semantic search |
 | `source_ids` | array | No | Restrict the search to these sources |
@@ -97,24 +199,33 @@ chunks with their source id, a relevance score, and knowledge-graph context.
 | `metadata_filters` | object | No | Exact-match filters over stored metadata |
 | `num_related_chunks` | number | No | Adjacent chunks to attach per match (0-5, default: 0) |
 | `recency_bias` | number | No | Favour recently-updated sources when ranking, 0-1 (default: 0). Re-ranks only; it never excludes older sources |
-| `query_apps` | boolean | No | App-aware retrieval over connector sources — exact IDs and actors, thread reconstruction, parent/child expansion (default: false) |
+| `query_apps` | boolean | No | App-aware retrieval over connector sources — exact IDs and actors, thread reconstruction, linked and parent/child items (on by default: Hydra DB applies it when omitted; pass `false` to skip) |
 | `collections` | array | No | Search several collections at once. Pass either this or `collection`, never both |
+| `additional_context` | string | No | Background text prepended to the query to steer retrieval; not searched for itself |
+| `alpha` | number or `auto` | No | Hybrid balance, 0 (keyword) to 1 (vector), or `auto` (default: 0.8). Hybrid only: refused with `operator` or `query_by: text` |
+| `query_by` | string | No | `hybrid` (default) or `text` (keyword only). Setting `operator` implies `text` |
+| `query_forceful_relations` | boolean | No | In thinking mode, also follow relations declared at ingest and return their chunks |
+| `temporal_reasoning` | boolean | No | Resolve time-based questions using dated facts (Hydra DB default: true) |
+| `response_format` | string | No | `structured` (the default rendering, with source ids) or `markdown` (Hydra DB's own Markdown rendering, returned as-is, without per-chunk ids) |
 
-Results include `resolved_scope` and per-source `inspect_args` when the source's
-collection is known. Copy those arguments, including your ACL, to follow-up calls;
+Results are text only by default: each chunk carries its source id and
+collection, and the header names the resolved scope. With `structured: true`,
+results also include structured `resolved_scope` and per-source `inspect_args` when
+the source's collection is known. Copy those arguments, including your ACL, to follow-up calls;
 tools never inherit a previous call's scope. With multiple collections, an ID
 alone is not enough: use the collection attached to that source. If it is missing,
 resolve the collection before inspecting. Explicit scope is never widened.
 
 ### **hydradb_ingest**
 
-Saves information so it outlives the session. Provide **exactly one** of `text`
-or `turns`.
+Saves information so it outlives the session. Provide **exactly one** of `text`,
+`turns` or `file`.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `text` | string | No\* | A note, fact, decision, or document body |
 | `turns` | array | No\* | Conversation turns, each with `user` and `assistant` |
+| `file` | object | No\* | A PDF, Word, PowerPoint, spreadsheet, image or text file, ingested as knowledge. See below |
 | `kind` | string | No | `memory` (default) or `knowledge` for a document |
 | `title` | string | No | Label shown in later search results — always set it |
 | `source_id` | string | No | Identifier for this entry. **Reusing one REPLACES what is stored under it** |
@@ -125,19 +236,34 @@ or `turns`.
 | `observation_date` | string | No | When the fact was true, as `YYYY-MM-DD` (e.g. `2026-07-04`), vs when it was stored |
 | `user_name` | string | No | What to call the user, used with `turns` (default: `User`) |
 
-\* Passing both is an error; passing neither is an error.
+\* Passing more than one is an error; passing none is an error.
+
+**Files.** `file` takes `filename` (with its real extension) and one of the two
+below. The document's title is `title` when set, otherwise the filename.
+
+- `content_base64`: the file's bytes as base64, **up to 8 MB**. Works on every
+  transport, and is the only way on the hosted server, which cannot read your disk.
+- `path`: an absolute path to a file on your machine, **up to 50 MB** (the
+  API's own limit). Local (stdio) server only: the bytes go straight to Hydra DB
+  instead of through the conversation. The hosted server refuses it.
+
+A larger file, or a format Hydra DB cannot read (`.heic`, `.html`, `.zip`, ...),
+is refused before anything is uploaded. `source_id` sets the document's id and
+`overwrite` applies as usual; `infer`, `metadata` and the other memory options
+do not apply to files.
 
 Ingestion is **asynchronous** — content is not searchable the instant it is
 saved. Use `hydradb_status` to confirm.
 
 ### **hydradb_list**
 
-Enumerates one family at a time. These are separate corpora: listing memories
-tells you nothing about which knowledge sources exist.
+Enumerates memories, knowledge sources, or both together (`kind: "all"`). These
+are separate corpora: listing memories tells you nothing about which knowledge
+sources exist.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `kind` | string | **Yes** | `memory` or `knowledge` |
+| `kind` | string | **Yes** | `memory`, `knowledge`, or `all` (both in one page, as source rows) |
 | `ids` | array | No | Restrict to these ids |
 | `source_ids` | array | No | Deprecated alias for `ids` |
 | `external_id` | string | No | Exact originating-system ID, such as a Confluence page ID or Drive file ID; knowledge only |
@@ -147,6 +273,10 @@ tells you nothing about which knowledge sources exist.
 | `provider` | string | No | Connector provider, such as `confluence` or `google_drive`; knowledge only |
 | `page` | number | No | Page to return, 1-indexed (default: 1) |
 | `page_size` | number | No | Items per page (1-100) |
+| `metadata` | object | No | Exact-match filter on each item's `metadata`, as `{key: value}` |
+| `additional_metadata` | object | No | Exact-match filter on each item's `additional_metadata`; merged with `connector_id` |
+| `include_fields` | array | No | Return only these fields per row (plus id): `title`, `type`, `description`, `note`, `timestamp`, `relations`, `metadata`, `additional_metadata`, `context_category`. Knowledge and `all` only |
+| `group_threads` | boolean | No | Nest comments and replies under the item they belong to (default false). Knowledge and `all` only |
 
 The response reports how many of the total it showed and how to reach the rest.
 
@@ -237,6 +367,26 @@ stored data. Rows are labelled `source: agent`, because everything reaching this
 server came from a model — agent feedback is a different population from human
 feedback and is separated at write time.
 
+### **hydradb_relations**
+
+Returns the knowledge-graph relations Hydra DB extracted from stored content —
+`(entity) —predicate→ (entity)` triplets, each with the passage that evidences
+it — for one item, or for the whole collection when `id` is omitted
+(`GET /context/relations`).
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `id` | string | No | The item to read, from `hydradb_query` or `hydradb_list`. Omit for the whole collection |
+| `kind` | string | No | `knowledge` (default) or `memory` — the two graphs are separate |
+| `limit` | number | No | Relations per call (default 50, max 200) |
+| `cursor` | number | No | The `next_cursor` of the previous call, to read the next page |
+| `acl` | array | No | Principals to answer as; only relations from sources they may see are returned |
+| `database`, `collection` | string | No | Scope overrides |
+
+`structuredContent` carries each relation as `{from, from_type, predicate, to,
+to_type, evidence, chunk_id}`, plus `has_more`, `next_cursor` and ready-made
+`next_args` for the next page.
+
 ### **hydradb_subgraph**
 
 Returns the connected subgraph of one item: every item reachable from it through
@@ -300,12 +450,32 @@ Checks whether ingested sources have finished indexing.
 | `HYDRADB_COLLECTION` | Collection (sub-tenant) for partitioning | *none* — unset means the workspace's own collection; the model can also name one per call via `collection`/`collections` (see `hydradb_list_collections`) |
 | `HYDRADB_BASE_URL`   | Base URL override                    | `https://api.hydradb.com` |
 | `HYDRADB_LOG_LEVEL`  | Log level: DEBUG, INFO, WARN, ERROR  | `ERROR`                   |
-| `HYDRADB_TIMEOUT_SECONDS` | Per-attempt request timeout     | `30`                      |
-| `HYDRADB_MAX_RETRIES` | Retries per request (0 disables)    | `2`                       |
+| `HYDRADB_TIMEOUT_SECONDS` | Deadline for a whole tool call, every attempt and retry wait included | `45` |
+| `HYDRADB_MAX_RETRIES` | Retries per request, inside that deadline (0 disables) | `2`                       |
 | `HYDRADB_MCP_LEGACY_TOOLS` | Register the deprecated `hydra_db_*` tools | *off* |
 | `HYDRADB_GRAPH_DATABASE` | Default graph database for the Cypher tools | `HYDRADB_DATABASE` |
 | `HYDRADB_GRAPH_COLLECTION` | Default graph collection | `default` |
 | `HYDRADB_MCP_GRAPH_TOOLS` | Register the graph tools (`0` withholds them) | *on* |
+| `HYDRADB_MCP_CONNECTOR_TOOLS` | Register the connector tools (`0` withholds them) | *on* |
+| `HYDRADB_OAUTH_ISSUER` | Authorization server and connector-completion dashboard origin | `https://app.hydradb.com` for connector links |
+| `HYDRADB_MCP_DATABASE_TOOLS` | Register the database management tools (`0` withholds them) | *on* |
+
+#### Timeouts, retries and cancellation
+
+One deadline (`HYDRADB_TIMEOUT_SECONDS`, default 45s) covers a whole tool call,
+so with the defaults a call ends before the 60s most MCP hosts wait. When the
+deadline passes, the error names it and lists every attempt.
+
+- Reads are retried after `429`, `408`, `5xx` and dropped connections.
+- Writes that are not safe to repeat (ingest, Cypher, feedback, creating or
+  deleting a database or collection) are retried only when the failure shows
+  Hydra DB did not act on them (`429`, `408`, connection refused). After a
+  `5xx`, a dropped connection or the deadline, the error says the outcome is
+  unknown: check before sending it again.
+- `Retry-After` (seconds or HTTP date) sets the wait. If the wait would end
+  past the deadline, the call fails at once with Hydra DB's answer.
+- Cancelling a tool call stops the request in flight and starts no new attempt,
+  on stdio and on the hosted HTTP server.
 
 A graph database is a **different namespace** from the memory database: the same
 name can exist as both, and Cypher aimed at the wrong one reads an empty graph
@@ -484,7 +654,7 @@ With three extra variables the hosted server also speaks the MCP authorization f
 
 | Variable | Description |
 | --- | --- |
-| `HYDRADB_OAUTH_ISSUER` | The authorization server, e.g. `https://app.hydradb.com`. Must match its `NEXTAUTH_URL` exactly |
+| `HYDRADB_OAUTH_ISSUER` | Authorization server and connector-completion dashboard origin, e.g. `https://app.hydradb.com`. Must match its `NEXTAUTH_URL` exactly for OAuth |
 | `HYDRADB_MCP_PUBLIC_URL` | This server's public URL as clients see it, e.g. `https://mcp.hydradb.com`. Tokens minted for any other audience are refused |
 | `HYDRADB_OAUTH_INTROSPECTION_SECRET` | Shared secret the issuer's `/api/oauth/introspect` expects; must equal the dashboard's `MCP_INTROSPECTION_SECRET` |
 
@@ -531,7 +701,7 @@ owns scope injection, envelope unwrapping and error translation; the tools call
 it and render the results.
 
 - **hydradb_query** retrieves relevant memories and returns graph-enriched context (entity paths, chunk relations, extra context). Supports `fast` and `thinking` recall modes.
-- **hydradb_ingest** stores a note (`text`) or a conversation (`turns`) as a memory, with configurable `infer`, `is_markdown`, `title`, and `source_id`. Hydra DB extracts insights and builds a knowledge graph automatically.
+- **hydradb_ingest** stores a note (`text`), a conversation (`turns`) or a file such as a PDF or DOCX (`file`), with configurable `infer`, `is_markdown`, `title`, and `source_id`. Hydra DB extracts insights and builds a knowledge graph automatically.
 - **hydradb_list** browses stored memories (`kind: memory`) or ingested knowledge sources (`kind: knowledge`, with an optional `source_ids` filter).
 - **hydradb_inspect** retrieves the original ingested content of a source, with mode options (`content`, `url`, or `both`).
 - **hydradb_delete** removes a memory or knowledge source by ID.

@@ -59,7 +59,7 @@ test("real SDK/MCP ordinary, titles and list→source queries retain content, gr
 	assert.equal(listed.isError, undefined);
 	const id = output<ListOutput>(listed).items[0]!.id;
 	for (const selectors of [{}, { titles: ["📘 Example Architecture"] }, { source_ids: [id] }, { source_ids: [id], titles: ["📘 Example Architecture"] }]) {
-		const result = await client.callTool({ name: "hydradb_query", arguments: { query: "build", detail: "full", kind: "knowledge", acl, ...selectors } });
+		const result = await client.callTool({ name: "hydradb_query", arguments: { query: "build", detail: "full", structured: true, kind: "knowledge", acl, ...selectors } });
 		assert.equal(result.isError, undefined, text(result));
 		for (const expected of ["Canonical synthetic body", "📘 Example Architecture", "95%", "Synthetic dependency relation", "Synthetic extra context", "request-1", 'collection "docs"']) assert.ok(text(result).includes(expected), expected);
 		const structured = output<QueryOutput>(result);
@@ -140,7 +140,7 @@ test("overlapping source IDs in concurrent collection queries keep independent f
 		if (url.pathname === "/context/list") return json({ sources: [{ id: "shared-id", title: body.collection }], total: 1 });
 		throw new Error(`Unexpected route ${url.pathname}`);
 	}, { collection: undefined });
-	const results = await Promise.all(["a", "b"].map((collection) => client.callTool({ name: "hydradb_query", arguments: { query: "build", kind: "knowledge", database: `db-${collection}`, collection, acl: [`${collection}@example.invalid`] } })));
+	const results = await Promise.all(["a", "b"].map((collection) => client.callTool({ name: "hydradb_query", arguments: { query: "build", structured: true, kind: "knowledge", database: `db-${collection}`, collection, acl: [`${collection}@example.invalid`] } })));
 	for (const [i, collection] of ["a", "b"].entries()) {
 		const result = results[i]!;
 		assert.equal(result.isError, undefined);
@@ -166,13 +166,13 @@ test("implicit single-collection query reports copyable scope; multi-collection 
 		if (url.pathname === "/context/list") return json({ sources: body.collection === "docs" ? [{ id: "shared-id" }] : [], total: body.collection === "docs" ? 1 : 0 });
 		throw new Error(`Unexpected route ${url.pathname}`);
 	}, { collection: undefined });
-	const single = await client.callTool({ name: "hydradb_query", arguments: { query: "build", kind: "knowledge" } });
+	const single = await client.callTool({ name: "hydradb_query", arguments: { query: "build", structured: true, kind: "knowledge" } });
 	assert.deepEqual(output<QueryOutput>(single).resolved_scope, { database: "synthetic-db", collection: "docs" });
 	const list = await client.callTool({ name: "hydradb_list", arguments: output<QueryOutput>(single).sources[0]!.list_args });
 	assert.equal(output<ListOutput>(list).items.length, 1);
 	const unscopedList = await client.callTool({ name: "hydradb_list", arguments: { kind: "knowledge", external_id: "123456" } });
 	assert.equal(output<ListOutput>(unscopedList).items.length, 0, "an earlier query must not mutate a later call's scope");
-	const multi = await client.callTool({ name: "hydradb_query", arguments: { query: "build", detail: "full", collections: ["a", "b"] } });
+	const multi = await client.callTool({ name: "hydradb_query", arguments: { query: "build", detail: "full", structured: true, collections: ["a", "b"] } });
 	const sources = output<QueryOutput>(multi).sources;
 	assert.deepEqual(sources.slice(0, 2).map((s) => [s.id, s.inspect_args.collection]), [["shared-id", "a"], ["shared-id", "b"]]);
 	assert.equal([...text(multi).matchAll(/Canonical synthetic body/g)].length, 2, "same source ID in another collection is not the same source for body deduplication");
@@ -269,7 +269,7 @@ test("failed collection discovery preserves legitimate default searches with an 
 		throw new Error(`Unexpected route ${url.pathname}`);
 	}, { collection: undefined });
 	for (empty of [false, true]) {
-		const result = await client.callTool({ name: "hydradb_query", arguments: { query: "build" } });
+		const result = await client.callTool({ name: "hydradb_query", arguments: { query: "build", structured: true } });
 		assert.equal(result.isError, undefined);
 		assert.match(text(result), /Collection discovery failed; only the workspace default/);
 		assert.match(output<QueryOutput>(result).scope_warning!, /Named collections may contain additional results/);
@@ -306,4 +306,29 @@ test("identity lookups preserve multiple candidates; connector filtering disambi
 	assert.deepEqual(output<ListOutput>(connectorOnly).items.map((item) => item.id), ["source-connector-a"]);
 	assert.equal(calls[2]!.body.filters?.source_fields, undefined);
 	assert.deepEqual(calls[2]!.body.filters?.additional_metadata, { connector_id: "connector-a" });
+});
+
+// Text only by default, in either detail mode: the model reads the text, so
+// everything a follow-up needs must be in it. `structured: true` opts in.
+test("query returns text only unless structured: true, in either detail mode", async (t) => {
+	const { client } = await fixture(t, ({ url }) => {
+		if (url.pathname === "/query") return new Response(JSON.stringify({ success: true, data: queryData(), meta: { request_id: "request-1" } }));
+		throw new Error(`Unexpected route ${url.pathname}`);
+	});
+	for (const detail of ["compact", "full"] as const) {
+		const plain = await client.callTool({ name: "hydradb_query", arguments: { query: "build", kind: "knowledge", detail } });
+		assert.equal(plain.isError, undefined);
+		assert.equal(plain.structuredContent, undefined, `${detail}: no structuredContent by default`);
+		const body = text(plain);
+		assert.match(body, /\[id: shared-id\]/);
+		assert.match(body, /Collection: "docs"/);
+		assert.match(body, /database "synthetic-db"/);
+		assert.match(body, /request_id: request-1/);
+		assert.match(body, /Synthetic dependency relation/);
+
+		const structured = await client.callTool({ name: "hydradb_query", arguments: { query: "build", kind: "knowledge", detail, structured: true } });
+		assert.equal(text(structured), body, `${detail}: the text is the same either way`);
+		assert.equal(output<QueryOutput>(structured).sources[0]!.id, "shared-id");
+		assert.equal(output<QueryOutput>(structured).request_id, "request-1");
+	}
 });

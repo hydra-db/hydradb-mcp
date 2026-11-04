@@ -68,7 +68,7 @@ test("buildRecalledContext includes entity paths, graph relations and extra cont
 	assert.match(output, /Chunk 1/);
 	assert.match(output, /Source: Doc A/);
 	assert.match(output, /Graph Relations:/);
-	assert.match(output, /\(Alice\) —\[likes\]→ \(Tea\) \[morning routine\]/);
+	assert.match(output, /\[Alice\] → likes → \[Tea\]: morning routine/);
 	assert.match(output, /Extra Context:/);
 	assert.match(output, /Related Context \(Doc B\): Tea helps Alice focus/);
 });
@@ -299,7 +299,7 @@ test("buildRecalledContext capped primary groups do not trigger fallback", () =>
 	);
 });
 
-test("buildRecalledContext filters low-score relations by default", () => {
+test("buildRecalledContext renders low-score relations by default, like buildString", () => {
 	const response = {
 		chunks: [
 			{
@@ -335,10 +335,15 @@ test("buildRecalledContext filters low-score relations by default", () => {
 		},
 	};
 
+	// Live chunk_relations score 0.05–0.13 while being exactly the facts the
+	// chunk was extracted into; a default floor removed all of them.
 	const output = buildRecalledContext(response);
+	assert.match(output, /Graph Relations:\n {2}\[Alice\] → likes → \[Tea\]/);
 
-	assert.doesNotMatch(output, /Graph Relations:/);
-	assert.doesNotMatch(output, /Alice/);
+	// An explicit floor still applies.
+	const floored = buildRecalledContext(response, { minEvidenceScore: 0.4 });
+	assert.doesNotMatch(floored, /Graph Relations:/);
+	assert.doesNotMatch(floored, /Alice/);
 });
 
 
@@ -478,7 +483,7 @@ test("buildRecalledContext does not double-attach a relation linked both ways", 
 });
 
 // The direct route must not suppress the score filter.
-test("buildRecalledContext still drops low-scoring relations linked directly", () => {
+test("an explicit score floor still drops low-scoring relations linked directly", () => {
 	const out = buildRecalledContext({
 		chunks: [{ chunkUuid: "c1", id: "s1", chunkContent: "body" }],
 		graphContext: {
@@ -499,7 +504,7 @@ test("buildRecalledContext still drops low-scoring relations linked directly", (
 			],
 			chunkIdToGroupIds: {},
 		},
-	} as never);
+	} as never, { minEvidenceScore: 0.4 });
 
 	assert.doesNotMatch(out, /Bob/);
 });
@@ -969,4 +974,157 @@ test("compact rendering never collapses bodies into a pointer", () => {
 	// promise content the rendered response does not contain.
 	assert.doesNotMatch(out, /same text as Chunk/);
 	assert.match(out, new RegExp(shared.slice(0, 50)), "the second body is rendered");
+});
+
+// Live /query, hydra_internal_docs, Sep 2026: the one query path carried 80
+// triplets AND a combined_context that is only a summary label. The renderer
+// printed the label instead of the triplets, so the output announced
+// "80 of 80 ranked facts" and showed none of them.
+test("a query path renders its triplets, then its combined context", () => {
+	const out = buildRecalledContext({
+		chunks: [{ chunkUuid: "c1", id: "s1", chunkContent: "body" }],
+		graphContext: {
+			queryPaths: [
+				{
+					relevancyScore: 1,
+					combinedContext: "Graph summary cluster 1 — 2 of 2 ranked facts",
+					triplets: [
+						{
+							source: { name: "hydradb" },
+							relation: { canonical_predicate: "uses", context: "HydraDB uses Milvus.", timestamp: 1787740800 },
+							target: { name: "milvus" },
+						},
+						{
+							source: { name: "hydradb" },
+							relation: { canonical_predicate: "formerly known as", temporal_details: "2025-01-01T00:00:00Z" },
+							target: { name: "cortex" },
+						},
+					],
+				},
+			],
+			chunkRelations: [],
+			chunkIdToGroupIds: {},
+		},
+	} as never);
+
+	assert.match(out, /=== ENTITY PATHS ===\nPath 1 \(score: 1\.00\)/);
+	assert.match(out, / {2}\[hydradb\] → uses → \[milvus\] \(as of 2026-08-26\): HydraDB uses Milvus\./);
+	assert.match(out, / {2}\[hydradb\] → formerly known as → \[cortex\] \(as of 2025-01-01\)/);
+	assert.match(out, / {2}Combined: Graph summary cluster 1/);
+	assert.ok(
+		out.indexOf("[milvus]") < out.indexOf("Combined:"),
+		"triplets come before the combined label",
+	);
+});
+
+test("a chunk renders its metadata on one line, schema metadata winning", () => {
+	const out = buildRecalledContext({
+		chunks: [
+			{
+				chunkUuid: "c1",
+				id: "s1",
+				sourceTitle: "Doc",
+				chunkContent: "body",
+				additionalMetadata: { title: "Doc", section: "old", repo: "docs" },
+				metadata: { section: "concepts", empty: "", missing: null },
+			},
+		],
+	} as never);
+
+	assert.match(out, /Source: Doc\nMetadata: repo: docs \| section: concepts\n/);
+	assert.doesNotMatch(out, /title: Doc/, "title is already the Source line");
+});
+
+test("dated facts render unless the response says the temporal filter was not applied", () => {
+	const base = {
+		chunks: [{ chunkUuid: "c1", id: "s1", chunkContent: "body" }],
+		temporalDuration: { days: 30, fromDate: "2026-01-01", toDate: "2026-01-31" },
+		temporalFacts: [
+			{ subject: "Alice", relation: "joined", object: "Acme", eventStart: 1767225600, datePrecision: "month", evidencePhrase: " in January " },
+		],
+	};
+
+	// SDK 2.1.8 no longer carries the diagnostic: the facts are the answer.
+	for (const response of [base, { ...base, temporalFilter: { applied: true } }]) {
+		// SAFETY: the fixture carries exactly the fields formatTemporal reads.
+		const out = buildRecalledContext(response as never);
+		assert.match(out, /=== DATED FACTS ===\nCOMPUTED DURATION: 30 days \(2026-01-01 → 2026-01-31\)/);
+		assert.match(out, / {2}\[Alice\] → joined → \[Acme\] \| 2026-01-01 \(~month\) — "in January"/);
+	}
+
+	// An older response that says the filter degraded still renders nothing,
+	// under either spelling (SDK 2.1.8 passes the untyped key through as sent).
+	for (const degraded of [{ temporalFilter: { applied: false } }, { temporal_filter: { applied: false } }]) {
+		// SAFETY: the fixture carries exactly the fields formatTemporal reads.
+		assert.doesNotMatch(buildRecalledContext({ ...base, ...degraded } as never), /DATED FACTS/);
+	}
+});
+
+test("triplets render the same from SDK 2.1.8's camelCase relations", () => {
+	const response = {
+		chunks: [{ chunkUuid: "c1", id: "s1", chunkContent: "Chunk A" }],
+		graphContext: {
+			queryPaths: [],
+			chunkRelations: [
+				{
+					relevancyScore: 0.9,
+					groupId: "g1",
+					triplets: [
+						{
+							source: { name: "Bob", type: "person", entityId: "e1" },
+							relation: {
+								canonicalPredicate: "works_at",
+								rawPredicate: "works at",
+								context: "since the merger",
+								relationshipId: "r1",
+								chunkId: "c1",
+								temporalDetails: "2025-03-01T00:00:00Z",
+							},
+							target: { name: "Acme", type: "org", entityId: "e2" },
+						},
+					],
+				},
+			],
+		},
+	};
+
+	// SAFETY: the fixture carries exactly the chunk and relation fields read.
+	const out = buildRecalledContext(response as never);
+
+	// Matched to its chunk by chunkId (the fallback scan), worded by the raw
+	// predicate, dated by temporalDetails.
+	assert.match(out, /\[Bob\] → works at → \[Acme\] \(as of 2025-03-01\): since the merger/);
+});
+
+test("a named ticket lists its links and a linked ticket says how it is linked", () => {
+	// SAFETY: the fixture carries exactly the chunk fields buildRecalledContext reads.
+	const out = buildRecalledContext({
+		chunks: [
+			{
+				chunkUuid: "c1",
+				id: "s-2933",
+				sourceTitle: "Outstanding Balance Holds $250 Threshold",
+				chunkContent: "epic body",
+				additionalMetadata: {
+					app_external_id: "REV-2933",
+					app_status: "Done",
+					app_links: "REV-3158 (linked_to): OBH $250 threshold experiment: outcome and recommendation; REV-2679 (parent)",
+				},
+			},
+			{
+				chunkUuid: "c2",
+				id: "s-3158",
+				sourceTitle: "OBH $250 threshold experiment: outcome and recommendation",
+				chunkContent: "decision body",
+				additionalMetadata: { app_external_id: "REV-3158", app_relation: "REV-3158 linked_to REV-2933" },
+			},
+		],
+	} as never);
+
+	assert.match(
+		out,
+		/Source: Outstanding Balance Holds \$250 Threshold\nLinks \(query a key to follow it\): REV-3158 \(linked_to\): OBH \$250 threshold experiment: outcome and recommendation; REV-2679 \(parent\)\nMetadata: app_external_id: REV-2933 \| app_status: Done\n/,
+	);
+	assert.match(out, /Source: OBH \$250 threshold experiment: outcome and recommendation\nRelation: REV-3158 linked_to REV-2933\nMetadata: app_external_id: REV-3158\n/);
+	assert.doesNotMatch(out, /app_links:|app_relation:/, "trail keys are not repeated on the metadata line");
 });

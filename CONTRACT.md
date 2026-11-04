@@ -57,11 +57,15 @@ recorded as such, not treated as drift for the other group to catch up on.
 |---|---|---|
 | **database** | isolated tenancy container | tenant, namespace, workspace (as a scope), knowledge base |
 | **collection** | partition within a database | sub-tenant, sub_tenant_id |
+| **metadata schema** | the metadata fields a database declares, each with a name and a stored type | custom properties, tenant metadata schema |
 | **context** | the stored-unit family (memory + knowledge) | — |
 | **memory** | a context item of kind `memory` | user memory, preference |
 | **knowledge** | a context item of kind `knowledge` | document, file, source-as-kind |
 | **source** | one ingested item; its identifier field is `id` | source_id, file_id, doc_id |
 | **chunk** | one retrieved fragment of a source | — |
+| **connector** | one connected provider account that syncs into a database | integration, data source, source (a source is one ingested item) |
+| **provider** | the external system a connector reads, such as `slack`, `gmail` or `jira` | app, integration type |
+| **resource** | one container inside a provider that a connector syncs, such as a Slack channel or a Drive folder | mapping, configured resource, channel or folder as the general term |
 
 `context` names **one** thing: the stored-unit family. Its two other historical senses are
 expressed as compounds, never as a bare `context`:
@@ -83,6 +87,21 @@ project directory) and must never denote a database, collection, or org.
 | **relations** | graph_relations, graph_relations_by_id |
 | **subgraph** | source_subgraph, connected subgraph, thread (as a graph read) — Group 2 only |
 
+### Connector verbs
+
+The connector family uses `list`, `inspect`, `update` and `delete` with the meanings above,
+and adds the verbs below. These apply to connectors only.
+
+| Canonical | Absorbs | Notes |
+|---|---|---|
+| **connect** | create (a connector), install, authorize | returns a dashboard link; never takes credentials |
+| **reconnect** | reauthorize, rotate credentials | returns a dashboard link; never takes credentials |
+| **health** | status (of a connector), check | see the `status` table below |
+| **discover** | browse upstream, available resources | what the provider account has, added to HydraDB or not |
+| **add** | configure, create resource, attach | resources only: attaches resources to a connector and starts syncing them. It does not ingest; adding a context item is still **ingest** |
+| **sync** | run, trigger, refresh | starts a connector run. Local file sync is still **ingest** |
+| **pause** / **resume** | stop, disable / start, enable | scheduling only; nothing is deleted |
+
 ### The `status` disambiguation (mandatory)
 
 `status` currently names four unrelated things. Two are poll-until-ready calls; picking the wrong
@@ -93,6 +112,7 @@ one silently polls the wrong subject. Clients MUST use these names instead:
 | per-source indexing progress | **ingestionStatus** / `ingestion-status` | is this source indexed yet |
 | database infra provisioning | **readiness** / `readiness` | is the database ready for ingestion |
 | local client health | **doctor** | config present + endpoint reachable |
+| connector sync health | **health** / `connector health` | is this connector syncing, and are its resources working |
 
 ### Environment variables — canonical prefix `HYDRADB_`
 
@@ -129,6 +149,8 @@ current SDK method internally. Language casing: `snake_case` in Python, `camelCa
 | `databases.deleteCollection(database, collection)` | *(none — raw `DELETE /databases/collections`)* | not on the pinned SDK yet |
 | `databases.stats(database)` | `databases.stats(database=…)` | row counts |
 | `databases.readiness(database)` | `databases.status(database=…)` | **renamed away from `status`** |
+| `databases.inspectMetadataSchema(database)` | `databases.getMetadataSchema(database=…)` | **renamed away from `get`** |
+| `databases.updateMetadataSchema(database, addFields)` | `databases.updateMetadataSchema(database=…, add_fields=…)` | additive only |
 | `context.ingest(database, kind, …)` | `context.ingest(…)` | multipart; `kind` ∈ {memory, knowledge} |
 | `context.query(database, query, kind?, …)` | `client.query(…)` | the single retrieval entry point |
 | `context.list(database, kind?, …)` | `context.list(…)` | — |
@@ -142,6 +164,26 @@ current SDK method internally. Language casing: `snake_case` in Python, `camelCa
 | `graph.collections(database)` | *(none — raw `GET /byog/collections`)* | — |
 | `graph.dropCollection(database, collection)` | *(none — raw `DELETE /byog/collections`)* | idempotent |
 | `graph.dropDatabase(database)` | *(none — raw `DELETE /byog/databases`)* | `deleted:false` ⇒ collections only |
+
+### Connector wrapper methods
+
+`connectors.*` follows the same rules. `connect` and `reconnect` make no SDK call: they return a
+dashboard link, so they have no wrapper method.
+
+| Wrapper method | SDK call today | Notes |
+|---|---|---|
+| `connectors.listProviders()` | `listProviders({})` | the provider catalog |
+| `connectors.inspectProvider(provider)` | `listProviders({ id })` | one provider's setup guide and credential schema (field metadata only) |
+| `connectors.list(provider?, includeHealth?)` | `connectors.list(…)` | |
+| `connectors.inspect(id)` | `connectors.get({ id })` | **renamed away from `get`** |
+| `connectors.health(id)` | `connectors.status({ id })` | **renamed away from `status`** |
+| `connectors.discover(id, cursor?, limit?)` | `connectors.discover(…)` | resources upstream, added or not |
+| `connectors.listResources(id)` | `connectors.listResources({ id })` | resources already added |
+| `connectors.update(id, customInstructions?, syncIntervalSeconds?)` | `connectors.update(…)` | noncredential settings only |
+| `connectors.delete(id)`, `.sync(id)`, `.pause(id)`, `.resume(id)` | same names | |
+| `connectors.addResources(id, resources[], lookbackDays?, fullVisibilityRoles?, tableConfigs?)` | `connectors.configure(…)` | **the one way to attach resources**: adds the list and starts a sync |
+| `connectors.updateResource(id, resourceId, acl?, customInstructions?)` | `connectors.updateResourceAcl(…)` | **renamed away from `updateResourceAcl`** |
+| `connectors.deleteResource(id, resourceId)` | `connectors.deleteResource(…)` | |
 
 Rules every wrapper obeys:
 
@@ -218,11 +260,101 @@ skill files and persisted to `state.json`; the CLI's `--output json` is a docume
 | `/hydradb:ingest` | `/hydradb:remember`, `/hydradb:save-session`, `/hydradb:sync-workspace`, `reindex` |
 | `/hydradb:doctor` | `/hydradb:status` |
 
+### Databases
+
+Database management on MCP is named noun first and verb last: `hydradb_database_<verb>`, and
+`hydradb_database_schema_<verb>` for the metadata schema.
+
+| Action | MCP tool |
+|---|---|
+| list databases | `hydradb_databases` |
+| create a database | `hydradb_database_create` |
+| delete a database | `hydradb_database_delete` |
+| provisioning readiness | `hydradb_database_readiness` |
+| row counts | `hydradb_database_stats` |
+| inspect the metadata schema | `hydradb_database_schema_inspect` |
+| update the metadata schema | `hydradb_database_schema_update` |
+| list collections | `hydradb_list_collections` |
+| delete a collection | `hydradb_delete_collection` |
+
+Rules:
+
+- **Shipped names stay.** `hydradb_databases`, `hydradb_list_collections` and
+  `hydradb_delete_collection` shipped before this naming and keep their names. The other tools
+  never shipped under another name, so they have no aliases.
+- **Schema update is additive only.** It adds fields and never removes, renames or retypes one.
+  The verb is `update`, not `add`.
+- **Default exposure.** Every database action is on by default, including the irreversible
+  `hydradb_database_delete`. It carries the surface's destructive marker (MCP
+  `destructiveHint: true`), so the host asks before running it, and it refuses the connection's
+  own default database. `HYDRADB_MCP_DATABASE_TOOLS=0` withholds create, delete, readiness, stats,
+  schema inspect and schema update. `hydradb_databases` and the collection tools stay.
+- **Other clients.** The CLI's `hydradb database …` commands keep their names. A client that adds
+  metadata schema commands names them `schema inspect` and `schema update`.
+- **Conformance.** The `database-metadata-schema-*` vectors list every client that does not ship
+  those wrapper methods yet in `optional_for`. A client removes itself from that list in the
+  change that ships them.
+
 ---
+
+### Connectors
+
+One name per action, noun first and verb last, so the three surfaces map one to one: CLI
+`hydradb connector [provider|resource] <verb>`, MCP `hydradb_connector_[provider_|resource_]<verb>`,
+plugin `/hydradb:connector-[provider-|resource-]<verb>`.
+
+| Action | CLI | MCP tool | Claude Code plugin |
+|---|---|---|---|
+| list providers | `hydradb connector provider list` | `hydradb_connector_provider_list` | `/hydradb:connector-provider-list` |
+| inspect one provider | `hydradb connector provider inspect <provider>` | `hydradb_connector_provider_inspect` | `/hydradb:connector-provider-inspect` |
+| list connectors | `hydradb connector list` | `hydradb_connector_list` | `/hydradb:connector-list` |
+| inspect one connector | `hydradb connector inspect <id>` | `hydradb_connector_inspect` | `/hydradb:connector-inspect` |
+| connector health | `hydradb connector health <id>` | `hydradb_connector_health` | `/hydradb:connector-health` |
+| connect a provider | `hydradb connector connect <provider>` | `hydradb_connector_connect` | `/hydradb:connector-connect` |
+| reconnect a connector | `hydradb connector reconnect <id>` | `hydradb_connector_reconnect` | `/hydradb:connector-reconnect` |
+| update settings | `hydradb connector update <id>` | `hydradb_connector_update` | `/hydradb:connector-update` |
+| delete a connector | `hydradb connector delete <id>` | `hydradb_connector_delete` | `/hydradb:connector-delete` |
+| start a sync | `hydradb connector sync <id>` | `hydradb_connector_sync` | `/hydradb:connector-sync` |
+| pause | `hydradb connector pause <id>` | `hydradb_connector_pause` | `/hydradb:connector-pause` |
+| resume | `hydradb connector resume <id>` | `hydradb_connector_resume` | `/hydradb:connector-resume` |
+| discover upstream resources | `hydradb connector discover <id>` | `hydradb_connector_discover` | `/hydradb:connector-discover` |
+| list added resources | `hydradb connector resource list <id>` | `hydradb_connector_resource_list` | `/hydradb:connector-resource-list` |
+| add resources | `hydradb connector resource add <id> …` | `hydradb_connector_resource_add` | `/hydradb:connector-resource-add` |
+| update one resource | `hydradb connector resource update <id> <resource_id>` | `hydradb_connector_resource_update` | `/hydradb:connector-resource-update` |
+| delete one resource | `hydradb connector resource delete <id> <resource_id>` | `hydradb_connector_resource_delete` | `/hydradb:connector-resource-delete` |
+
+Rules for every surface:
+
+- **Connect and reconnect never take credentials.** They return the dashboard links
+  `/connectors?connect=<provider>` and `/connectors?open=<id>`. The dashboard sends the credentials.
+- **Resource add takes a list** and is the only way to attach resources. Each resource uses the
+  fields resource list returns (`resource_id`, `resource_type`, `display_name`, `database_override`,
+  `collection_override`, `acl`, `custom_instructions`, `metadata`, `additional_metadata`, `sync_mode`),
+  so a listed resource can be sent back unchanged.
+- **Default exposure.** Every connector action is on by default, including the irreversible
+  `delete` and `resource delete`. Those two carry the surface's destructive marker (MCP
+  `destructiveHint: true`), so the host asks before running them. `HYDRADB_MCP_CONNECTOR_TOOLS=0`
+  withholds the whole MCP family.
+- **Aliases.** The MCP and plugin names are new, so they have none. The CLI's existing
+  `hydradb connectors …` commands become deprecated aliases with one warning each:
+  `connectors providers` → `connector provider list` / `connector provider inspect`,
+  `connectors get` → `connector inspect`, `connectors status` → `connector health`,
+  `connectors resources` → `connector resource list`, `connectors configure` and
+  `connectors resource add` → `connector resource add`, `connectors resource remove` →
+  `connector resource delete`, and `connectors list`, `discover`, `sync` and `delete` → the same
+  verb under `connector`. `connectors create` and `connectors rotate-credentials` send credentials
+  from the terminal; the CLI change decides whether they stay CLI-only or become aliases of
+  `connect` and `reconnect`.
+- **OpenClaw** has no connector surface in this change. If it adds one, it uses the plugin column's
+  names.
 
 ## 4. Conformance
 
 Each repo ships a runner that feeds `conformance/vectors.json` (identical across repos) through its
 wrapper and asserts the canonical call it produces. This is the anti-drift gate: a client that
-renames an action, changes a default, or diverges in ingest behaviour fails its own CI. See
+renames an action, changes a default, or diverges in ingest behaviour fails its own CI.
+
+The `connector-*` vectors list every client that does not ship the connector surface yet in
+`optional_for`. A client removes itself from that list in the change that ships the surface.
+`connect` and `reconnect` have no vector because they make no SDK call. See
 `conformance/README.md` in each repo.

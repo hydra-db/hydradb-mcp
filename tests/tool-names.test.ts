@@ -4,6 +4,8 @@ import assert from "node:assert/strict";
 import { SERVER_INSTRUCTIONS, TOOL_DESCRIPTIONS } from "../src/descriptions.js";
 import {
 	CANONICAL_TOOL_NAMES,
+	CONNECTOR_TOOL_NAMES,
+	DATABASE_TOOL_NAMES,
 	DEPRECATED_TOOL_NAMES,
 	TOOL_NAMES,
 } from "../src/tool-names.js";
@@ -12,6 +14,19 @@ test("all tool names are unique", () => {
 	const names = Object.values(TOOL_NAMES);
 	const unique = new Set(names);
 	assert.equal(unique.size, names.length);
+});
+
+test("database management uses the contract names, noun first and verb last", () => {
+	assert.deepEqual([...DATABASE_TOOL_NAMES], [
+		"hydradb_database_create",
+		"hydradb_database_delete",
+		"hydradb_database_readiness",
+		"hydradb_database_stats",
+		"hydradb_database_schema_inspect",
+		"hydradb_database_schema_update",
+	]);
+	// Discovery is not part of the gated family: it is always registered.
+	assert.ok(new Set<string>(CANONICAL_TOOL_NAMES).has("hydradb_databases"));
 });
 
 test("all tool names have corresponding descriptions", () => {
@@ -28,7 +43,7 @@ test("all tool names have corresponding descriptions", () => {
 // `hydra_db_ingest_conversation` exists before it had even seen the tool list —
 // and those names beat the canonical ones on literal match.
 test("server instructions reference every canonical tool", () => {
-	for (const toolName of CANONICAL_TOOL_NAMES) {
+	for (const toolName of [...CANONICAL_TOOL_NAMES, ...CONNECTOR_TOOL_NAMES, ...DATABASE_TOOL_NAMES]) {
 		assert.match(
 			SERVER_INSTRUCTIONS,
 			new RegExp(toolName),

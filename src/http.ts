@@ -18,13 +18,18 @@
  * shared process serving many independent callers builds a fresh server +
  * transport per request and tears it down when the response closes. That is the
  * transport's documented stateless mode (`sessionIdGenerator: undefined`).
+ * Because of that, a `notifications/cancelled` POST reaches a different server
+ * instance than the call it names; `forwardCancels` routes it across.
  */
+
+import { createHash } from "node:crypto";
 
 import cors from "cors";
 import express, { type Express } from "express";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { z } from "zod";
 
-import { HydraDB } from "./hydra/index.js";
+import { HydraDB, type HydraConfig, apiKeyId } from "./hydra/index.js";
 import {
 	buildAllowedHosts,
 	type HttpServerConfig,
@@ -47,6 +52,7 @@ import {
 import {
 	awaitInFlight,
 	beginShutdown,
+	cancelToolCall,
 	createHydraDBServer,
 	inFlightCount,
 } from "./server.js";
@@ -54,13 +60,13 @@ import {
 /**
  * The largest request body accepted before parsing.
  *
- * Sized above the tool layer's own ceilings — memory ingest caps `text` at 1M
- * characters (~4 MB as UTF-8 with a JSON envelope), which is the biggest
- * legitimate body — so a valid large ingest is not rejected at the door while an
- * unbounded body cannot exhaust memory. Anything genuinely oversized is still
- * refused by the per-tool checks with a message naming the real limit.
+ * Sized above the tool layer's own ceilings — a file sent inline to
+ * `hydradb_ingest` is at most 8 MB, which as base64 in a JSON envelope is about
+ * 11 MB, the biggest legitimate body — so a valid upload is not rejected at the
+ * door while an unbounded body cannot exhaust memory. A file somewhat over its
+ * limit still reaches the tool and is refused with a message naming the limit.
  */
-const MAX_REQUEST_BODY = "8mb";
+const MAX_REQUEST_BODY = "16mb";
 
 /**
  * Startup banners and security warnings go straight to stderr, not through
@@ -83,6 +89,50 @@ function bearerFromHeader(value: string | string[] | undefined): string | undefi
 	if (!raw) return undefined;
 	const match = /^\s*Bearer\s+(.+)$/i.exec(raw);
 	return (match ? match[1] : raw).trim() || undefined;
+}
+
+/**
+ * The cancel scope for one caller: a hash of the full credential, never its
+ * public key id, so only someone holding the credential can cancel its calls.
+ * Requests that carry an MCP session id are scoped to it too.
+ */
+function cancelScope(apiKey: string, oauthUserId: string | undefined, sessionId: string | undefined): string {
+	return createHash("sha256")
+		.update([apiKey, oauthUserId ?? "", sessionId ?? ""].join("\u0000"))
+		.digest("hex");
+}
+
+/** A `notifications/cancelled` message, as the MCP spec defines it. */
+const cancelNotification = z.object({
+	method: z.literal("notifications/cancelled"),
+	params: z.object({
+		requestId: z.union([z.string(), z.number()]),
+		reason: z.string().optional(),
+	}),
+});
+
+/** A request body: one JSON-RPC message or a batch of them. */
+const jsonRpcBody = z.union([z.array(z.unknown()), z.unknown().transform((message) => [message])]);
+
+/**
+ * Route `notifications/cancelled` to the call it names.
+ *
+ * Each HTTP request gets a fresh server, so the instance that receives a
+ * cancel is never the one running the call, and the MCP SDK on its own would
+ * drop it. The running call is found by (caller scope, request id) instead.
+ * The notification itself still goes to the fresh server afterwards, which
+ * acknowledges it as usual.
+ */
+function forwardCancels(messages: readonly z.infer<typeof cancelNotification>[], scope: string): void {
+	for (const { params } of messages) {
+		const stopped = cancelToolCall(
+			scope,
+			params.requestId,
+			new Error(params.reason || "cancelled by the caller"),
+		);
+
+		logger.info("cancel received", { requestId: String(params.requestId), stopped });
+	}
 }
 
 /** JSON-RPC error codes used for transport-level failures (spec: -32000 range). */
@@ -242,6 +292,7 @@ export function createHttpApp(config: HttpServerConfig): Express {
 		// key directly: the same resolver runs, and the tool layer never learns
 		// OAuth exists.
 		let identity: ResolvedIdentity | undefined;
+		let oauthUserId: string | undefined;
 		const bearer = bearerFromHeader(req.headers.authorization);
 		if (oauth && isAccessToken(bearer)) {
 			const result = await introspect(oauth, bearer);
@@ -269,6 +320,8 @@ export function createHttpApp(config: HttpServerConfig): Express {
 				return;
 			}
 			const t = result.token;
+			// A token without a subject is still an OAuth caller; keep it distinct from direct key use.
+			oauthUserId = t.userId || `key-${apiKeyId(t.apiKey)}`;
 			identity = {
 				apiKey: t.apiKey,
 				...(t.database != null ? { database: t.database } : {}),
@@ -309,7 +362,7 @@ export function createHttpApp(config: HttpServerConfig): Express {
 
 		const creds = resolution.credentials;
 		try {
-			const hydra = new HydraDB({
+			const hydraConfig: HydraConfig = {
 				token: creds.apiKey,
 				database: creds.database,
 				collection: creds.collection,
@@ -322,8 +375,26 @@ export function createHttpApp(config: HttpServerConfig): Express {
 					? { timeoutSeconds: creds.timeoutSeconds }
 					: {}),
 				...(creds.maxRetries != null ? { maxRetries: creds.maxRetries } : {}),
+			};
+
+			if (oauthUserId) hydraConfig.oauthUserId = oauthUserId;
+
+			const hydra = new HydraDB(hydraConfig);
+			const scope = cancelScope(creds.apiKey, oauthUserId, req.header("mcp-session-id"));
+
+			const cancels = jsonRpcBody
+				.parse(req.body)
+				.flatMap((message) => {
+					const parsed = cancelNotification.safeParse(message);
+
+					return parsed.success ? [parsed.data] : [];
+				});
+
+			forwardCancels(cancels, scope);
+
+			const server = createHydraDBServer(hydra, creds.graph, {
+				cancelScope: scope,
 			});
-			const server = createHydraDBServer(hydra, creds.graph, { oauthTools: identity != null });
 
 			// Stateless: this pair serves exactly this request and is discarded when
 			// the response closes. Tearing them down on `close` — which fires for a

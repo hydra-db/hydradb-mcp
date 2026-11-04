@@ -15,6 +15,13 @@ name: Build & Push MCP BYOC Image
 #
 # Every tag is prefixed `byoc-` so this can never clobber the prod/mcp tags
 # that deploy-prod.yaml manages for our own hosted server.
+#
+# PRO-2793: multi-arch (linux/amd64 + linux/arm64), same shape as
+# deploy-prod.yaml. Each arch builds natively and pushes a suffixed child
+# (byoc-<sha>-amd64 / byoc-<sha>-arm64); merge-manifest is the only writer of
+# the tags customers pin (byoc-<sha>, byoc-latest, byoc-<date>) and verifies
+# both arches before the run reports a tag. amd64-only customer clusters are
+# unaffected: they resolve the amd64 child from the list.
 
 on:
   workflow_dispatch:
@@ -39,12 +46,18 @@ env:
   IMAGE_TAG_PREFIX: byoc
 
 jobs:
-  build-and-push:
-    name: MCP — Build and Push BYOC Image
+  # PRO-2793: resolve `inputs.ref` to ONE commit (and one date stamp) up front,
+  # so both arch builds check out exactly the same code even if the ref is a
+  # branch that moves while the run is in flight.
+  resolve:
+    name: MCP — Resolve BYOC build commit
     runs-on: ubuntu-latest
     permissions:
-      id-token: write
       contents: read
+    outputs:
+      build_sha: ${{ steps.r.outputs.build_sha }}
+      build_sha_short: ${{ steps.r.outputs.build_sha_short }}
+      build_date: ${{ steps.r.outputs.build_date }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -57,9 +70,30 @@ jobs:
       # code with main's sha, silently overwriting whatever image a customer
       # pins under that tag.
       - name: Resolve the built commit
+        id: r
         run: |
-          echo "BUILD_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
-          echo "BUILD_SHA_SHORT=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_ENV"
+          {
+            echo "build_sha=$(git rev-parse HEAD)"
+            echo "build_sha_short=$(git rev-parse --short=7 HEAD)"
+            echo "build_date=$(date -u +%Y%m%d-%H%M%S)"
+          } >> "$GITHUB_OUTPUT"
+
+  build-and-push:
+    name: MCP — Build and Push BYOC Image
+    needs: resolve
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      BUILD_SHA: ${{ needs.resolve.outputs.build_sha }}
+      BUILD_SHA_SHORT: ${{ needs.resolve.outputs.build_sha_short }}
+      BUILD_DATE: ${{ needs.resolve.outputs.build_date }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.BUILD_SHA }}
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
@@ -71,7 +105,9 @@ jobs:
         id: ecr-login
         uses: aws-actions/amazon-ecr-login@d539f0932e70871a027e9d5a9d8fc38589180a64 # v2
 
-      - name: Docker meta (tags + labels)
+      # Used for LABELS only now (tags are set explicitly below); the tag list
+      # is kept identical so the generated OCI labels do not change.
+      - name: Docker meta (labels)
         id: meta
         uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
         with:
@@ -81,7 +117,7 @@ jobs:
           tags: |
             type=raw,value=${{ env.IMAGE_TAG_PREFIX }}-latest
             type=raw,value=${{ env.IMAGE_TAG_PREFIX }}-${{ env.BUILD_SHA_SHORT }}
-            type=raw,value=${{ env.IMAGE_TAG_PREFIX }}-{{date 'YYYYMMDD-HHmmss'}}
+            type=raw,value=${{ env.IMAGE_TAG_PREFIX }}-${{ env.BUILD_DATE }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
@@ -93,14 +129,131 @@ jobs:
           file: ./Dockerfile
           push: true
           platforms: linux/amd64
-          tags: ${{ steps.meta.outputs.tags }}
+          # PRO-2793: suffixed child tag only; merge-manifest writes the tags
+          # customers pin.
+          tags: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG_PREFIX }}-${{ env.BUILD_SHA_SHORT }}-amd64
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=byoc-mcp-linux-amd64
           cache-to: type=gha,scope=byoc-mcp-linux-amd64,mode=max
 
+  # PRO-2793: arm64 sibling on a native arm runner (not QEMU). Separate job and
+  # separate cache scope.
+  build-arm64:
+    name: MCP — Build and Push BYOC Image (arm64)
+    needs: resolve
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      BUILD_SHA: ${{ needs.resolve.outputs.build_sha }}
+      BUILD_SHA_SHORT: ${{ needs.resolve.outputs.build_sha_short }}
+      BUILD_DATE: ${{ needs.resolve.outputs.build_date }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.BUILD_SHA }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@d539f0932e70871a027e9d5a9d8fc38589180a64 # v2
+
+      - name: Docker meta (labels)
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}
+          labels: |
+            org.opencontainers.image.revision=${{ env.BUILD_SHA }}
+          tags: |
+            type=raw,value=${{ env.IMAGE_TAG_PREFIX }}-latest
+            type=raw,value=${{ env.IMAGE_TAG_PREFIX }}-${{ env.BUILD_SHA_SHORT }}
+            type=raw,value=${{ env.IMAGE_TAG_PREFIX }}-${{ env.BUILD_DATE }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
+
+      - name: Build and push arm64
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          platforms: linux/arm64
+          tags: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG_PREFIX }}-${{ env.BUILD_SHA_SHORT }}-arm64
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=byoc-mcp-linux-arm64
+          cache-to: type=gha,scope=byoc-mcp-linux-arm64,mode=max
+
+  # PRO-2793: the ONLY writer of the customer-facing tags. Runs only when BOTH
+  # arch builds succeeded; the "tag to pin" summary is reported only from here,
+  # so an arm64 failure never hands out a tag.
+  merge-manifest:
+    name: MCP — Merge BYOC multi-arch manifest
+    needs: [resolve, build-and-push, build-arm64]
+    if: |
+      !cancelled() &&
+      needs.build-and-push.result == 'success' &&
+      needs.build-arm64.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      BUILD_SHA_SHORT: ${{ needs.resolve.outputs.build_sha_short }}
+      BUILD_DATE: ${{ needs.resolve.outputs.build_date }}
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@d539f0932e70871a027e9d5a9d8fc38589180a64 # v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
+
+      - name: Create manifest list and push
+        run: |
+          set -euo pipefail
+          REPO="${ECR_REGISTRY}/${ECR_REPOSITORY}"
+          BASE="${IMAGE_TAG_PREFIX}-${BUILD_SHA_SHORT}"
+          for suffix in amd64 arm64; do
+            docker buildx imagetools inspect "${REPO}:${BASE}-${suffix}" >/dev/null \
+              || { echo "source tag :${BASE}-${suffix} not found" >&2; exit 1; }
+          done
+          docker buildx imagetools create \
+            -t "${REPO}:${IMAGE_TAG_PREFIX}-latest" \
+            -t "${REPO}:${BASE}" \
+            -t "${REPO}:${IMAGE_TAG_PREFIX}-${BUILD_DATE}" \
+            "${REPO}:${BASE}-amd64" \
+            "${REPO}:${BASE}-arm64"
+
+      - name: Verify both architectures are present
+        run: |
+          set -euo pipefail
+          REPO="${ECR_REGISTRY}/${ECR_REPOSITORY}"
+          # Parse with jq, don't grep: --raw is pretty-printed JSON.
+          RAW=$(docker buildx imagetools inspect "${REPO}:${IMAGE_TAG_PREFIX}-${BUILD_SHA_SHORT}" --raw)
+          for arch in amd64 arm64; do
+            jq -e --arg a "$arch" \
+              'any(.manifests[]; .platform.os == "linux" and .platform.architecture == $a)' \
+              <<< "$RAW" >/dev/null || { echo "$arch missing from manifest" >&2; echo "$RAW" >&2; exit 1; }
+          done
+          echo "manifest ${IMAGE_TAG_PREFIX}-${BUILD_SHA_SHORT} contains both amd64 and arm64"
+
       - name: Report the tag to pin
         run: |
-          echo "### MCP BYOC image pushed" >> "$GITHUB_STEP_SUMMARY"
+          echo "### MCP BYOC image pushed (linux/amd64 + linux/arm64)" >> "$GITHUB_STEP_SUMMARY"
           echo '' >> "$GITHUB_STEP_SUMMARY"
           echo 'Pin this in `gitops/<deployment-id>/values/hydradb-mcp-values.yaml` under `image.tag`:' >> "$GITHUB_STEP_SUMMARY"
           echo '' >> "$GITHUB_STEP_SUMMARY"

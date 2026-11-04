@@ -1,6 +1,6 @@
 {
   "name": "@hydradb/mcp",
-  "version": "1.4.4",
+  "version": "1.7.0",
   "description": "MCP server for Hydra DB: State-of-the-art agentic memory with recall, ingest, and knowledge graph context",
   "license": "Apache-2.0",
   "type": "module",
@@ -34,7 +34,7 @@
     "lint:anti-slop:all": "oxlint --config oxlint.config.ts"
   },
   "dependencies": {
-    "@hydradb/sdk": "2.1.4",
+    "@hydradb/sdk": "2.1.8",
     "@modelcontextprotocol/sdk": "^1.21.1",
     "cors": "^2.8.6",
     "express": "^5.2.1",

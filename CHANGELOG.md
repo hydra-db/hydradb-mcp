@@ -7,6 +7,227 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-11-03
+
+### Added — dashboard connector completion
+
+`hydradb_connector_connect` accepts only a provider and returns a safe dashboard
+completion link. `hydradb_connector_reconnect` authorizes the connector and returns
+its dashboard drawer link. Neither flow
+accepts or returns provider credentials, and both report `completed: false` until the
+dashboard finishes the credential-bearing request. `HYDRADB_OAUTH_ISSUER` selects the
+dashboard origin and defaults to `https://app.hydradb.com`.
+
+### Added — credential-free connector write tools
+
+Eight tools now update noncredential connector settings, start syncs, pause and
+resume connectors, add and manage resources, and delete connectors.
+Database- and collection-confined connections fail closed before any mutation and
+send no connector API request because connector endpoints cannot enforce those grants
+atomically. Destructive annotations cover connector settings, resource add, resource
+ACL/instruction changes, and deletions; resource add is non-idempotent. No write schema
+accepts provider credentials, including credential-like metadata and private-key fields.
+
+### Added — connector read tools
+
+Seven read-only tools now cover the provider list, one provider's metadata,
+connector lists, connector details, plain-language sync health, resource discovery,
+and added resources. The 17 connector tool names follow the connector section of
+`CONTRACT.md`. `HYDRADB_MCP_CONNECTOR_TOOLS=0` withholds the family; it
+is enabled by default.
+
+Database-confined OAuth connections filter connector lists, hide org-wide
+connectors with no database, authorize every by-ID read, and filter resources
+by their effective destination database. Provider credential schemas are
+metadata only. Defaults, examples, constants, and unknown schema extensions
+are removed before the schema enters model context.
+
+### Added — `hydradb_ingest` takes files
+
+`hydradb_ingest` has a new `file` argument for PDF, Word, PowerPoint,
+spreadsheets, OpenDocument, iWork, images and text files. They are uploaded as
+`documents` on POST /context/ingest and indexed as knowledge. The title is
+`title` when given (the upload is renamed to it), otherwise the filename.
+
+- `file.content_base64` carries the bytes in the tool call, up to 8 MB. This is
+  how files reach the hosted server, which cannot read the caller's disk.
+- `file.path` reads a local file, up to the API's 50 MB, on the stdio server
+  only; the hosted server refuses it.
+- Oversized files and unreadable formats are refused before upload, with the
+  limit or the accepted formats in the message. The limits are in the tool
+  description.
+- The hosted server's request body limit is now 16 MB (was 8 MB), so an 8 MB
+  file fits in one call.
+
+### Changed — retries, timeouts and cancellation
+
+- **One deadline per tool call.** `HYDRADB_TIMEOUT_SECONDS` now bounds the
+  whole call, every attempt and wait included, instead of each attempt. The
+  default is 45s (was 30s per attempt, up to ~90s with retries), so a call ends
+  before a 60s host timeout. The error names the deadline and lists every
+  attempt, not just the last one.
+- **No blind retry of writes.** Ingest, Cypher, feedback and database or
+  collection creation and deletion are retried only after a failure that shows
+  Hydra DB did not act on them (429, 408, connection refused). After a 5xx, a
+  dropped connection or the deadline they are not retried, and the error says
+  the outcome is unknown. Reads retry as before.
+- **`Retry-After` is honoured** in both forms (seconds and HTTP date) on every
+  call, within the deadline. A wait that would end past the deadline fails at
+  once with the server's answer.
+- **Cancellation stops retrying.** A cancel during the wait between attempts
+  ends the call with no new attempt.
+- **Cancel works on the hosted server.** Each HTTP request gets its own MCP
+  server instance, so a `notifications/cancelled` POST never reached the call
+  it named. Running calls are now registered by caller and request id, and a
+  cancel from the same credential stops the call and its upstream request.
+- **Tool annotations.** `hydradb_ingest` (and its legacy aliases) is marked
+  destructive, since it overwrites a document with the same source id, and
+  not idempotent. `hydradb_graph_query` is marked not idempotent.
+- The SDK's own retry loop is turned off (`maxRetries: 0`); one policy in
+  `src/hydra/retry.ts` now covers SDK and hand-rolled calls alike.
+
+### Added — MCP database management tools
+
+Added `hydradb_database_create`, `hydradb_database_delete`,
+`hydradb_database_readiness`, `hydradb_database_stats`,
+`hydradb_database_schema_inspect` and `hydradb_database_schema_update` (additive
+only). `hydradb_databases` and the new tools are available to API-key, stdio, and
+OAuth connections. OAuth database confinement now applies before create, delete,
+readiness, stats, and metadata-schema requests. Deleting the connection's own
+default database is refused, and write-permission failures explain how to use a
+writable credential. `HYDRADB_MCP_DATABASE_TOOLS=0` withholds the six new tools.
+
+## [1.6.0] - 2026-10-28
+
+### Fixed — `hydradb_query` title filter missed documents saved through `hydradb_ingest`
+
+Knowledge text is uploaded as `<title>.md` and the server takes the title from
+the filename, so "Q3 Roadmap" is stored as "Q3 Roadmap.md" and a title filter
+of "Q3 Roadmap" matched nothing (and "Plan.md" was stored as "Plan.md.md").
+Each title is now searched as given and with `.md` added.
+
+### Added — `hydradb_list` filters, field selection, threads and `kind: "all"`
+
+`hydradb_list` now takes the `/context/list` options it was missing:
+
+- `metadata` and `additional_metadata`: exact-match filters on stored metadata,
+  for memories and knowledge. `connector_id` is merged into
+  `additional_metadata`; two different connector ids are refused.
+- `include_fields`: return only the named fields per row, shown under each row
+  and in `structuredContent` as `fields`, bounded to 2,000 characters per
+  row and 20,000 per page with the JSON structure kept; a cut row carries
+  `fields_truncated: true`. Names the API does not project (such as
+  `content`) are refused before the call.
+- `group_threads`: comments and replies come back nested under their parent
+  row, in the text and in `structuredContent` as `comments`.
+- `kind: "all"`: memories and knowledge in one page, instead of two calls.
+
+`include_fields` and `group_threads` apply to source rows, so they are refused
+with `kind: "memory"` rather than ignored.
+
+A listing that uses any of these options still makes its own HTTP call rather
+than going through the SDK: SDK 2.1.8 renames row fields
+(`additional_metadata` comes back as `additionalMetadata`), while a projection
+is looked up by the names the caller asked for. Plain and source-field lists go
+through the SDK.
+
+### Added — `hydradb_relations`
+
+A new read-only tool over `GET /context/relations`: the knowledge-graph
+relations of one item, or of the whole collection when `id` is omitted, with
+the evidence passage for each. Pages with `cursor` (`next_cursor` from the
+previous call), takes `acl`, and asks for 50 relations by default (max 200)
+rather than the API's 5000.
+
+### Added — `hydradb_query` takes every documented query field
+
+`hydradb_query` now accepts the six `POST /query` fields it did not:
+`additional_context`, `alpha` (0 to 1, or `auto`), `query_by` (`hybrid` or
+`text`), `query_forceful_relations`, `temporal_reasoning` and `response_format`.
+
+- `alpha` is hybrid only. It is refused with `operator` or `query_by: "text"`,
+  and the 0.8 default is no longer sent on a `query_by: "text"` query.
+- `response_format: "markdown"` returns Hydra DB's own Markdown rendering as-is,
+  with the searched scope and the request id, under the same size cap. It has
+  no per-chunk source ids; use the default rendering when you need them.
+
+### Changed — `@hydradb/sdk` 2.1.8; no more hand-written API calls
+
+MCP now depends on `@hydradb/sdk` 2.1.8, which matches the public API spec.
+Title-filtered queries, filtered lists (`external_id`, `parent_external_id`,
+`url`, `provider`, `connector_id`) and deleting a collection used to bypass the
+SDK with their own HTTP calls, because 2.1.4 could not send those fields. They
+now go through the SDK like every other call. A title-filtered query still
+returns its request id.
+
+Along the way:
+
+- Graph relations render the same from 2.1.8's camelCase relation fields
+  (predicate, date and chunk matching), which 2.1.4 left as snake_case.
+- Dated facts render unless the response says the temporal filter was not
+  applied. 2.1.8 no longer carries that diagnostic, so requiring it would have
+  hidden every dated fact.
+- An error with no response (a cancelled or timed-out call) shows the SDK's
+  message instead of an empty one.
+
+### Security — tool errors no longer leak API key secrets or OAuth tokens
+
+Error text is scrubbed of credentials before the model sees it, but the scrub
+stopped at the `.` in a HydraDB key (`sk_<env>_<id>.<secret>`), so the secret
+half survived, and it did not know OAuth tokens (`hmat_` / `hmrt_`) at all. Now:
+
+- Full keys are removed, secret half included, however short the id.
+- OAuth access and refresh tokens, and credentials in a quoted query string, are removed.
+- The current connection's own key or token is removed from every tool error,
+  whatever its format, including the reason in a refused delete.
+- Network failures that quote the request are scrubbed too.
+- Server messages inside results that are not errors (a partly failed ingest,
+  a failed document's status) are scrubbed the same way.
+- The connection's credential is removed before an error body is cut to length,
+  so a credential crossing the cut leaves no fragment behind.
+
+## [1.5.1] - 2026-09-25
+
+### Added — `hydradb_query` shows a named ticket's links
+
+When a query names a ticket key, results now say how each linked item relates to
+it (`Relation:`) and list the named ticket's links (`Links (query a key to follow
+it):`), so an agent can follow a Jira trail (parent, linked issues, links of links)
+one query at a time. The tool description and README also state that
+`query_apps` is on by default: Hydra DB applies it when the argument is omitted.
+(#96)
+
+## [1.5.0] - 2026-09-23
+
+### Fixed — `hydradb_query` dropped the graph it was sent
+
+Measured against the SDK's `buildString` on the same live response, the query
+text announced "80 of 80 ranked facts" and showed none of them, and showed no
+per-chunk graph relations at all. The renderer now follows `buildString`'s graph
+layout while keeping its own ids, dedupe, budget and follow-up hints:
+
+- **Query paths render their triplets**, then the combined context as a
+  `Combined:` line. Previously a present `combined_context` replaced the
+  triplets, and the server now puts a summary label there.
+- **Per-chunk relations are no longer filtered at relevancy 0.4 by default.**
+  Live `chunk_relations` score 0.05–0.13, so the floor removed every one.
+- **Relations carry their date** — `[source] → predicate → [target] (as of
+  date): context` — so a superseded fact is distinguishable from a current one.
+- **Each chunk shows a `Metadata:` line** merging `additional_metadata` and
+  `metadata`, which were previously discarded.
+- **Dated facts** from a temporal query render when the server reports the
+  temporal filter applied.
+
+### Added — `structured` on `hydradb_query` (default `false`)
+
+`hydradb_query` returns text only unless called with `structured: true`, in
+either `detail` mode. The text already carries every fact `structuredContent`
+held — source id and collection per chunk, the resolved scope line, the
+request id, any scope warning — and hosts that surface both handed the model
+the same facts twice. `structured: true` adds `resolved_scope`, `request_id`
+and `sources[]` with ready-made `inspect_args` for programmatic callers. The
+tool declares no `outputSchema`, so this is within the MCP spec.
+
 ### Changed — the model resolves collection scope (PRO-1942)
 
 Wrong-partition retrieval fails silently: `POST /query` against an empty or

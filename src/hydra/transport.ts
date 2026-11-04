@@ -12,26 +12,71 @@
  * `fetchFn` is injectable for tests only; production never sets it.
  */
 
+import { createHash } from "node:crypto";
+
+import { SERVER_VERSION } from "../version.js";
 import { unwrap } from "./envelope.js";
 import { HydraWrapperError, responseError, translateError } from "./errors.js";
+import { type RetrySafety, withRetries } from "./retry.js";
 
 /** The SDK's own default, restated so this file does not depend on importing it. */
 export const DEFAULT_BASE_URL = "https://api.hydradb.com";
 
+export const SOURCE_HEADERS = { "X-HydraDB-Source": "mcp" } as const;
+
+export interface CallerIdentity {
+	token: string;
+	oauthUserId?: string;
+}
+
+// HydraDB keys are <prefix>_<env>_<id>.<secret>, and only that public id may leave the process.
+const HYDRADB_API_KEY_FORMAT = /^([A-Za-z0-9]+_[A-Za-z0-9]+_[A-Za-z0-9_-]+)\.[A-Za-z0-9_-]+$/;
+
+export function apiKeyId(token: string): string {
+	const id = HYDRADB_API_KEY_FORMAT.exec(token)?.[1];
+
+	if (id) return id;
+
+	// Anything else (legacy or foreign tokens) is identified by a hash, never by a fragment of it.
+	return `sha256-${createHash("sha256").update(token).digest("hex").slice(0, 16)}`;
+}
+
+export function mcpUser({ token, oauthUserId }: CallerIdentity): string {
+	if (oauthUserId) return `mcp:oauth:${oauthUserId}`;
+
+	return `mcp:apikey:${apiKeyId(token)}`;
+}
+
+export function mcpHeaders(identity: CallerIdentity) {
+	return {
+		...SOURCE_HEADERS,
+		"X-HydraDB-MCP-User": mcpUser(identity),
+		"X-HydraDB-MCP-Version": SERVER_VERSION,
+	};
+}
+
 export interface RawTransport {
 	token: string;
 	baseUrl: string;
+	/** Whole-call deadline: every attempt and every wait between them. */
 	timeoutMs: number;
 	maxRetries: number;
+	headers?: Record<string, string>;
 	fetchFn?: typeof fetch;
 }
 
 export interface RawRequestOptions {
 	signal?: AbortSignal;
+	/**
+	 * Whether the request may be sent twice. Defaults to `idempotent` for GET
+	 * and `unsafe` for everything else; see ./retry for what each allows.
+	 */
+	safety?: RetrySafety;
 }
 
 export function newRawTransport(config: {
 	token: string;
+	oauthUserId?: string;
 	baseUrl?: string;
 	timeoutSeconds?: number;
 	maxRetries?: number;
@@ -44,40 +89,27 @@ export function newRawTransport(config: {
 		baseUrl: (config.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, ""),
 		timeoutMs: (config.timeoutSeconds ?? defaults.timeoutSeconds) * 1000,
 		maxRetries: config.maxRetries ?? defaults.maxRetries,
+		headers: mcpHeaders(config),
 		...(config.fetchFn ? { fetchFn: config.fetchFn } : {}),
 	};
 }
 
-function isRetryable(status: number): boolean {
-	return status === 429 || (status >= 500 && status <= 599);
-}
-
-/** Send with bounded retries on 429/5xx; the caller's abort ends retrying. */
-export async function sendRaw<T>(
+/** Send under the shared retry policy (./retry): one deadline, safe retries only. */
+export function sendRaw<T>(
 	t: RawTransport,
 	path: string,
 	method: "GET" | "POST" | "DELETE",
 	body: unknown,
 	opts?: RawRequestOptions,
 ): Promise<T> {
-	let lastError: unknown;
-	for (let attempt = 0; attempt <= t.maxRetries; attempt++) {
-		try {
-			return await attemptRaw<T>(t, path, method, body, opts);
-		} catch (err) {
-			lastError = err;
-			const status = err instanceof HydraWrapperError ? err.status : undefined;
-			// A caller who cancelled is not waiting for a retry.
-			if (opts?.signal?.aborted) throw err;
-			if (attempt === t.maxRetries) break;
-			if (status != null && !isRetryable(status)) break;
-			// Exponential backoff. Bounded so a 429 on the last attempt does not
-			// hold the MCP host's tool timeout open for its own sake.
-			const delay = Math.min(250 * 2 ** attempt, 2_000);
-			await new Promise((resolve) => setTimeout(resolve, delay));
-		}
-	}
-	throw lastError;
+	return withRetries<T>({
+		path,
+		safety: opts?.safety ?? (method === "GET" ? "idempotent" : "unsafe"),
+		budget: { deadlineMs: t.timeoutMs, maxRetries: t.maxRetries },
+		signal: opts?.signal,
+		known: [t.token],
+		attempt: (signal) => attemptRaw<T>(t, path, method, body, signal),
+	});
 }
 
 async function attemptRaw<T>(
@@ -85,15 +117,8 @@ async function attemptRaw<T>(
 	path: string,
 	method: "GET" | "POST" | "DELETE",
 	body: unknown,
-	opts?: RawRequestOptions,
+	signal: AbortSignal,
 ): Promise<T> {
-	// The host's cancellation and our own deadline both have to be able to
-	// abort the request, and `AbortSignal.any` is not available on every Node
-	// 18 this package supports — so they are combined by hand.
-	const controller = new AbortController();
-	const timer = setTimeout(() => controller.abort(), t.timeoutMs);
-	const onAbort = () => controller.abort();
-	opts?.signal?.addEventListener("abort", onAbort, { once: true });
 	const doFetch = t.fetchFn ?? fetch;
 
 	try {
@@ -106,9 +131,10 @@ async function attemptRaw<T>(
 				// hand-rolled path that omitted it would silently get v1
 				// behaviour from the same endpoints.
 				"API-Version": "2",
+				...(t.headers ?? SOURCE_HEADERS),
 			},
 			...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-			signal: controller.signal,
+			signal,
 		});
 
 		const text = await response.text();
@@ -122,34 +148,16 @@ async function attemptRaw<T>(
 		if (!response.ok) {
 			// Hand the parsed envelope to the shared formatter so a raw-path
 			// failure reads exactly like an SDK one, error code and request id
-			// and all.
-			throw responseError(path, response.status, parsed);
+			// and all. The headers ride along for `Retry-After`.
+			throw responseError(path, response.status, parsed, [t.token], response.headers);
 		}
 
 		return unwrap<T>(parsed);
 	} catch (err) {
 		if (err instanceof HydraWrapperError) throw err;
 
-		// Distinguish our own deadline from the caller's cancellation: they
-		// need different actions, and "aborted" alone says neither.
-		if (err instanceof Error && err.name === "AbortError") {
-			if (opts?.signal?.aborted) {
-				throw new HydraWrapperError(
-					`Hydra DB ${path} → ERR: request cancelled by the caller`,
-					path,
-					{ cause: err },
-				);
-			}
-			throw new HydraWrapperError(
-				`Hydra DB ${path} → ERR: request timed out after ${t.timeoutMs / 1000}s`,
-				path,
-				{ cause: err },
-			);
-		}
-
-		throw translateError(path, err);
-	} finally {
-		clearTimeout(timer);
-		opts?.signal?.removeEventListener("abort", onAbort);
+		// Cancellation and the deadline are reported by the retry loop, which
+		// knows which of the two it was.
+		throw translateError(path, err, [t.token]);
 	}
 }

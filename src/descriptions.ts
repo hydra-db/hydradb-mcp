@@ -42,7 +42,10 @@ const PARAM = {
 		"The titles are resolved to source IDs first, then the normal semantic or keyword " +
 		"query runs inside those sources. Repeat values in the array for several titles; " +
 		"punctuation such as commas is part of the title. With source_ids, both filters " +
-		"must match. No title match returns an empty result rather than widening.",
+		"must match. No title match returns an empty result rather than widening. " +
+		"hydradb_ingest stores text under its title plus \".md\" (\"Plan\" becomes " +
+		"\"Plan.md\"), so each title is searched as given and with \".md\" added. " +
+		"Pass the title used when saving, or the exact title a listing shows.",
 	metadata_filters:
 		"Exact-match filters over stored metadata, as {key: value}. Exact match only — " +
 		"no ranges, no partial matches, no dates-since. Only useful for keys you know " +
@@ -60,17 +63,38 @@ const PARAM = {
 		"is the right one. This re-RANKS; it never excludes older sources, so " +
 		"check the dates in the results rather than assuming the top hit is current.",
 	query_apps:
-		"Search connector-ingested sources with app awareness (default: false). " +
-		"Turn it on for Slack, Jira, Confluence, Drive and similar: it matches " +
-		"exact IDs and actors, reconstructs threads, and pulls in parent/child " +
-		"pages that plain text matching misses — a Jira comment is unhelpful " +
-		"without its issue, and a Slack reply without its thread. Adds a little " +
-		"latency, so leave it off for corpora you uploaded directly.",
+		"Search connector-ingested sources with app awareness. ON unless you pass " +
+		"false: Hydra DB applies it whenever this is omitted. It matches exact IDs " +
+		"(a ticket key such as REV-2933) and actors, reconstructs threads, and pulls " +
+		"in linked, parent and child items that plain text matching misses — a Jira " +
+		"comment is unhelpful without its issue, and a Slack reply without its " +
+		"thread. Pass false only for corpora you uploaded directly, to save a little " +
+		"latency.",
 	collections:
 		"Search SEVERAL collections at once, as a list of names. Use it when the " +
 		"answer could live in more than one and you do not know which — otherwise " +
 		"prefer a single `collection`, which is both faster and more precise. " +
 		"Pass either this or `collection`, never both.",
+	additional_context:
+		"Background text prepended to the query to steer retrieval, such as the " +
+		"project or person the question is about. It is not searched for itself.",
+	alpha:
+		"Hybrid balance between keyword and vector search: 0 is keyword only, 1 is " +
+		"vector only, 'auto' lets Hydra DB choose (default: 0.8). Hybrid retrieval " +
+		"only; an error with operator or query_by 'text'.",
+	query_by:
+		"Retrieval method: 'hybrid' (default) searches keyword and vector together; " +
+		"'text' is keyword matching only. Setting operator implies 'text'.",
+	query_forceful_relations:
+		"In thinking mode, also follow the relations declared at ingest and return the " +
+		"chunks they point to alongside each match.",
+	temporal_reasoning:
+		"Resolve time-based questions ('when', 'how long', 'as of') using dated facts " +
+		"(default: true). Set false to skip it.",
+	response_format:
+		"'structured' (default rendering) shows each chunk with its source id for " +
+		"follow-up calls; 'markdown' returns Hydra DB's own Markdown rendering of the " +
+		"results as-is, without per-chunk ids.",
 	operator:
 		"Switches this query to KEYWORD retrieval (query_by=text) and says how to " +
 		"combine the terms: 'or' matches any, 'and' requires all, 'phrase' matches the " +
@@ -95,9 +119,10 @@ const PARAM = {
 		"and relative dates ('in March 2026', not 'last week').",
 	ingest_kind:
 		"What to write: 'memory' for a personal fact, preference or conversation " +
-		"(default), or 'knowledge' to store a document as a searchable source. " +
-		"Memory-only options (turns, source_id, infer, is_markdown, user_name) do not " +
-		"apply to knowledge and are rejected rather than ignored.",
+		"(default), or 'knowledge' to store a document as a searchable source. A `file` " +
+		"is always knowledge. Memory-only options (turns, infer, is_markdown, user_name, " +
+		"and source_id except with `file`) do not apply to knowledge and are rejected " +
+		"rather than ignored.",
 	title:
 		"A short, specific label — always set it. This is the ONLY label shown next to " +
 		"this entry in later hydradb_query results, so 'Deployment rollback policy' is " +
@@ -108,6 +133,15 @@ const PARAM = {
 		"REPLACES everything previously stored under it — it does not add to it. Use a fresh " +
 		"id (or leave it unset) for each new fact, and reuse an id only when you deliberately " +
 		"mean to overwrite, such as correcting a memory you saved earlier. Leave unset if unsure.",
+	file:
+		"A file to ingest as a knowledge document: PDF, Word (.doc/.docx), PowerPoint " +
+		"(.ppt/.pptx), Excel/CSV, OpenDocument, Pages/Numbers/Keynote, images (OCR) or " +
+		"text. Give `filename` with its real extension; the document's title is `title` if " +
+		"you set it, else the filename. Pass EITHER `content_base64`, the file's bytes as base64, AT MOST 8 MB per file, " +
+		"OR `path`, an absolute path to the file on this machine, AT MOST 50 MB, which " +
+		"works on the local (stdio) server only; the hosted server cannot read your disk. " +
+		"A larger file is refused before upload: split it. Use instead of `text` and " +
+		"`turns`; `source_id` sets the document's id and `overwrite` applies as usual.",
 	overwrite:
 		"Whether ingesting with an existing source_id may replace what is stored there " +
 		"(default: true). Set false to have the server reject the write instead of " +
@@ -140,9 +174,10 @@ const PARAM = {
 		"you know their actual name, so extracted facts read as being about a person " +
 		"rather than about an anonymous participant. Applies to `turns` only.",
 	kind:
-		"Which family to list: 'memory' (stored memories) or 'knowledge' (ingested " +
-		"sources). REQUIRED — these are separate corpora with different output, and no " +
-		"single listing covers both. Call this twice to see everything.",
+		"Which family to list: 'memory' (stored memories), 'knowledge' (ingested " +
+		"sources), or 'all' (both in one page, rendered as source rows). REQUIRED. " +
+		"Use 'all' for a complete inventory in one pass; use 'memory' when you want " +
+		"memory text in the listing.",
 	source_ids:
 		"Optional array of specific source IDs to filter by. If omitted, lists all sources.",
 	list_external_id:
@@ -173,6 +208,31 @@ const PARAM = {
 		"Restrict the listing to one connector provider (e.g. \"confluence\", \"jira\", " +
 		"\"google_drive\", \"github\"). Only valid with kind: knowledge. Most useful paired " +
 		"with `external_id`; provider alone does not identify a unique source or site.",
+	list_metadata:
+		"Exact-match filter on each item's `metadata`, as {key: value} — the keys set at " +
+		"ingest (e.g. {\"project\": \"hydradb\"}). Several keys must all match.",
+	list_additional_metadata:
+		"Exact-match filter on each item's `additional_metadata`, as {key: value} — the " +
+		"per-document metadata connectors and ingest callers attach. Several keys must all match.",
+	list_include_fields:
+		"Return only these fields for each row, plus its id: title, type, description, note, " +
+		"timestamp, relations, metadata, additional_metadata, context_category. Use it to see " +
+		"metadata in the listing, or to keep rows small. Knowledge and 'all' listings only; " +
+		"content is never listed, use hydradb_inspect for it.",
+	list_group_threads:
+		"Fold comment and reply rows under the item they belong to (a Jira issue's comments, " +
+		"a Slack thread's replies), newest first, instead of listing each as its own row " +
+		"(default false). Knowledge and 'all' listings only.",
+	relations_id:
+		"The item whose graph relations to read — the value shown as [id: …] in hydradb_query " +
+		"or in [brackets] in hydradb_list output. Omit it to read the relations of the whole collection.",
+	relations_kind:
+		"Which graph to read: 'knowledge' (default) or 'memory'. The two graphs are separate.",
+	relations_limit:
+		"How many relations to return (1-200, default 50). The result says when more exist " +
+		"and which `cursor` reads the next page.",
+	relations_cursor:
+		"Where to continue from: the `next_cursor` the previous call returned. Omit it for the first page.",
 	page:
 		"Which page of results to return, 1-indexed (default: 1). The response reports how " +
 		"many of the total it showed; pass the next page to continue rather than assuming " +
@@ -186,6 +246,11 @@ const PARAM = {
 		"enough to judge relevance and pick a source to inspect. 'full' returns every " +
 		"chunk whole; use it when the snippets are being cut off mid-answer. Either way " +
 		"the response is capped; hydradb_inspect reads a source in slices of at most 20000 characters.",
+	structured:
+		"Also return structured content alongside the text: resolved_scope, request_id and " +
+		"sources with ready-made inspect_args/list_args. Default false — the text already " +
+		"carries every source id, collection and the scope, so leave this off when reading " +
+		"the result; set it only when code consumes the fields.",
 	fetch_source_id: "The source ID to fetch content for",
 	subgraph_id:
 		"The id of the item to start from — the value shown as [id: …] in hydradb_query results " +
@@ -274,6 +339,8 @@ CALL THIS BEFORE ANSWERING whenever the answer could depend on the user's histor
 
 Searches both families by default. Every result carries \`[id: …]\` — pass it to hydradb_inspect for the full source, or to hydradb_delete to remove it.
 
+Tickets and other work items (Jira, Linear, GitHub): put the key in the query ("what happened with REV-2933"). The named item comes first; the items linked to it follow, each with a \`Relation:\` line saying how (e.g. "REV-3158 linked_to REV-2933"), and the named item's \`Links:\` line lists its links, parent and children. To trace a chain — an epic to its child, the child to a linked epic, that epic to the ticket that records the outcome — query each linked key in turn instead of stopping at the first document that summarises the plan. When the Metadata line carries an item's url, status or dates, cite the url and prefer the latest resolved item for "what was decided"; when it does not, open the item with hydradb_inspect before relying on them.
+
 Collections partition the database by use case. This connection's default (if it has one) is shown by hydradb_list_collections; when there is none, a search without \`collection\` covers every collection in the database (up to 10). Pass \`collection\`, or \`collections\` for several, to aim it where the answer should live.
 
 Examples:
@@ -286,7 +353,8 @@ const STORE_BODY = `Save information to Hydra DB so it outlives this session. Hy
 Provide EXACTLY ONE of:
   \`text\`  — a note, fact, decision, or document body
   \`turns\` — user/assistant pairs from a conversation
-Passing both is an error; passing neither is an error.
+  \`file\`  — a PDF, Word, PowerPoint, spreadsheet or image file, ingested as knowledge (base64 up to 8 MB, or a local path up to 50 MB on the stdio server)
+Passing more than one is an error; passing none is an error.
 
 Save proactively: when the user states a preference, makes a decision, corrects you, or reveals a durable fact about themselves or their work, store it without being asked. Store the distilled fact rather than the raw exchange, and always set \`title\` — it is the only label shown next to this entry in later search results. Before saving something you suspect is already stored, query for it first rather than adding a near-duplicate.
 
@@ -295,7 +363,8 @@ Never store secrets, credentials, or anything the user asked you not to keep.
 Examples:
   {"text": "Prefers tabs over spaces in every language; rejected two prettier configs that used spaces.", "title": "Indentation preference"}
   {"turns": [{"user": "let's go with Postgres", "assistant": "Agreed, I'll set up the schema."}], "title": "Datastore decision"}
-  {"text": "# Runbook\\n\\nRestart order: api, worker, scheduler.", "kind": "knowledge", "title": "Restart runbook"}`;
+  {"text": "# Runbook\\n\\nRestart order: api, worker, scheduler.", "kind": "knowledge", "title": "Restart runbook"}
+  {"file": {"filename": "q3-plan.pdf", "content_base64": "JVBERi0xLjQK..."}}`;
 
 const CONVERSATION_BODY =
 	"Ingest one or more user-assistant conversation turns into Hydra DB memory. " +
@@ -318,6 +387,14 @@ const SUBGRAPH_BODY = `Return the connected subgraph of ONE stored item: every i
 Each member carries its id, title, depth from the start item (0 is the item itself) and how it was reached: the mechanism (\`same_thread\`, \`parent\`, \`child\`, or a \`relates_to\` type such as \`reply_to\`) and the id of the member it was reached from, so the list is also a tree. Pass any member's id to hydradb_inspect for its full content. The response also lists the relations among the members and the structural graph around them — the entities, comments, attachments and people attached to each — but NOT the chunk-level entity relations hydradb_query returns; those are a different read.
 
 An id nothing links to returns just that item. An unknown id returns an empty result, not an error. \`is_truncated\` means \`max_sources\` clipped the traversal; \`max_depth_reached\` says how far it got.
+
+Read-only; never changes anything.`;
+
+const RELATIONS_BODY = `Read the knowledge-graph relations Hydra DB extracted from stored content: (entity) —predicate→ (entity) triplets such as (Alice) —works_at→ (Acme), each with the passage that evidences it. Pass \`id\` for the relations of one item, or omit it for the whole collection.
+
+Use it to see what the graph knows about a document or a collection as a whole. For "what do you know about X", use hydradb_query instead — it already attaches the relevant graph paths to its results. For the items connected to one item (its thread, replies, links), use hydradb_subgraph.
+
+Results are paged, newest first. When \`has_more\` is true, pass \`next_cursor\` back as \`cursor\` for the next page. An item with no extracted relations returns an empty list, not an error.
 
 Read-only; never changes anything.`;
 
@@ -384,6 +461,22 @@ There is no create-collection action: collections come into existence on their f
 
 const DATABASES_BODY = `List the databases this connection can address, with the default marked. Use it before passing \`database\` to another tool, when the user asks which databases exist, or when a call was refused for naming a database this connection is confined to. If the list has one entry, that is the only database this connection may use.`;
 
+/** The optional `database` of the database tools that default to the connection's own. */
+export const DATABASE_PARAM = `Database name. Omit it to use this connection's default database. Use ${TOOL_NAMES.DATABASES} to discover valid names.`;
+
+/** One metadata field, as both database_metadata_schema and add_fields take it. */
+export const METADATA_FIELD_PARAMS = {
+	name: "New metadata key. Required and immutable after creation. Use a stable snake_case name that callers can later use in exact-match metadata filters.",
+	data_type: "Stored field type: BOOL, INT8, INT16, INT32, INT64, FLOAT, DOUBLE, VARCHAR, or JSON. Choose VARCHAR for text and set max_length when a smaller limit is useful.",
+	max_length: "Maximum VARCHAR length in bytes. Use it only with data_type VARCHAR.",
+	enable_match: "Enable exact-match filtering on this field. Set true for keys an agent will use in metadata_filters.",
+	enable_dense_embedding: "Enable dense semantic search over this field. Use it only for natural-language text that should affect semantic retrieval.",
+	enable_sparse_embedding: "Enable BM25 sparse search over this field. Use it for text where exact terms should affect ranking.",
+};
+
+/** Every connector tool names its connector the same way. */
+export const CONNECTOR_ID_HELP = "Connector identifier from hydradb_connector_list.";
+
 export const TOOL_DESCRIPTIONS = {
 	// --- Canonical tools (CONTRACT §3) ---
 
@@ -391,6 +484,49 @@ export const TOOL_DESCRIPTIONS = {
 		title: "List Hydra DB Databases",
 		description: DATABASES_BODY,
 		params: {},
+	},
+
+	[TOOL_NAMES.DATABASE_CREATE]: {
+		title: "Create a Hydra DB Database",
+		description: `Create a database. Creation is asynchronous: after this accepts the request, poll ${TOOL_NAMES.DATABASE_READINESS} until ready_for_ingestion is true. An OAuth connection confined to named databases may create only a name already approved for that connection.`,
+		params: {
+			database: "New database name. Required. On a confined OAuth connection, this name must already be in hydradb_databases.",
+			embeddings_dimension: "Embedding vector dimension. Omit it to use Hydra DB's default. Set it only when the embedding model requires a specific dimension.",
+			database_metadata_schema: "Metadata fields to create with the database. Field names and types cannot later be removed, renamed, or changed.",
+		},
+	},
+
+	[TOOL_NAMES.DATABASE_DELETE]: {
+		title: "Delete a Hydra DB Database",
+		description: `Permanently delete a database and all data inside it. This cannot be undone. Confirm the exact name with ${TOOL_NAMES.DATABASES}. The connection's own default database is refused because deleting it would break the active connection.`,
+		params: { database: "Database to delete. Required. It cannot be this connection's default database." },
+	},
+
+	[TOOL_NAMES.DATABASE_READINESS]: {
+		title: "Check Database Readiness",
+		description: "Check database provisioning. Poll this after creating a database and wait for ready_for_ingestion before ingesting or querying.",
+		params: { database: DATABASE_PARAM },
+	},
+
+	[TOOL_NAMES.DATABASE_SCHEMA_INSPECT]: {
+		title: "Inspect Database Metadata Schema",
+		description: "Read the metadata keys declared for a database. Use this before building metadata filters or adding fields, so you know the valid key names and stored types.",
+		params: { database: DATABASE_PARAM },
+	},
+
+	[TOOL_NAMES.DATABASE_SCHEMA_UPDATE]: {
+		title: "Update Database Metadata Schema",
+		description: `Update a database metadata schema by adding fields. The update is additive only: existing fields cannot be deleted, renamed, or retyped. Read the current schema with ${TOOL_NAMES.DATABASE_SCHEMA_INSPECT} first and add only missing fields.`,
+		params: {
+			database: DATABASE_PARAM,
+			add_fields: "One or more new metadata fields. Required. Repeating an existing field can fail with a conflict.",
+		},
+	},
+
+	[TOOL_NAMES.DATABASE_STATS]: {
+		title: "Get Database Statistics",
+		description: "Get database-wide knowledge and memory row counts. Use it when the user asks how much data a database contains; unlike collection discovery, this tool fails if stats are unavailable.",
+		params: { database: DATABASE_PARAM },
 	},
 
 	[TOOL_NAMES.QUERY]: {
@@ -404,6 +540,7 @@ export const TOOL_DESCRIPTIONS = {
 			mode: PARAM.mode,
 			graph_context: PARAM.graph_context,
 			detail: PARAM.detail,
+			structured: PARAM.structured,
 			operator: PARAM.operator,
 			source_ids: PARAM.query_source_ids,
 			titles: PARAM.query_titles,
@@ -411,6 +548,12 @@ export const TOOL_DESCRIPTIONS = {
 			num_related_chunks: PARAM.num_related_chunks,
 			recency_bias: PARAM.recency_bias,
 			query_apps: PARAM.query_apps,
+			additional_context: PARAM.additional_context,
+			alpha: PARAM.alpha,
+			query_by: PARAM.query_by,
+			query_forceful_relations: PARAM.query_forceful_relations,
+			temporal_reasoning: PARAM.temporal_reasoning,
+			response_format: PARAM.response_format,
 			database: PARAM.database,
 			collection: PARAM.collection,
 			collections: PARAM.collections,
@@ -425,7 +568,7 @@ export const TOOL_DESCRIPTIONS = {
 		// and contradicts it.
 		description: STORE_BODY,
 		params: {
-			text: PARAM.text,
+			text: PARAM.text.replace("`text` or `turns` — passing both", "`text`, `turns` or `file` — passing more than one"),
 			kind: PARAM.ingest_kind,
 			title: PARAM.title,
 			source_id: PARAM.source_id,
@@ -436,10 +579,11 @@ export const TOOL_DESCRIPTIONS = {
 			observation_date: PARAM.observation_date,
 			turns:
 				"The conversation to ingest, oldest first, as [{user, assistant}, ...]. Provide " +
-				"EXACTLY ONE of `text` or `turns` — passing both is an error, and so is passing " +
-				"neither. Use this when the exchange itself is worth preserving; when only the " +
+				"EXACTLY ONE of `text`, `turns` or `file` — passing more than one is an error, and so " +
+				"is passing none. Use this when the exchange itself is worth preserving; when only the " +
 				"conclusion matters, prefer `text` with the distilled fact.",
 			user_name: PARAM.user_name,
+			file: PARAM.file,
 			database: PARAM.database,
 			collection: PARAM.collection,
 		},
@@ -447,7 +591,7 @@ export const TOOL_DESCRIPTIONS = {
 
 	[TOOL_NAMES.LIST]: {
 		title: "List Hydra DB Context",
-		description: `Enumerate what is stored in Hydra DB — every memory (kind: "memory") or every knowledge source (kind: "knowledge"). These are SEPARATE corpora and this tool returns one at a time: listing memories tells you nothing about which knowledge sources exist, and vice versa. Call it twice to see everything.
+		description: `Enumerate what is stored in Hydra DB — every memory (kind: "memory"), every knowledge source (kind: "knowledge"), or both in one page (kind: "all"). Memories and knowledge are SEPARATE corpora: listing one tells you nothing about the other, so use "all" (or call twice) to see everything.
 
 Use it for inventory questions ("what do you remember about me?", "which documents are indexed?") and to obtain ids. For "what do you know about X", use hydradb_query instead — listing everything and reading it is far more expensive and loses relevance ranking.
 
@@ -457,7 +601,9 @@ Results are paginated. The response says how many of the total it showed and how
 
 INDEXED DIRECT CHILDREN: pass \`parent_external_id\` (the provider parent ID, NOT its Hydra DB source ID), \`provider\` and \`connector_id\`, with kind: "knowledge". Resolve the parent first and copy its stored connector ID; provider alone does not namespace sites/accounts, and missing connector metadata cannot be guessed. Follow \`next_args\` while \`has_more\` is true, then use each returned child's \`children_args\` to enumerate descendants, tracking visited identities. This reads indexed parent metadata, not a live provider tree; missing/stale metadata or permissions can omit children. Existing external-ID/URL lookups without connector_id may return multiple candidates; never assume uniqueness. Preserve \`resolved_scope\` and caller ACL on every list/query/inspect call; there is no inherited last scope.
 
-Memory rows come back as [id] content. Knowledge rows as [id] — title (type), with no content — pass an id to hydradb_inspect for the text.`,
+FILTERS AND SHAPE: \`metadata\` and \`additional_metadata\` narrow the listing to items whose stored metadata matches exactly ({key: value}, all keys must match). \`include_fields\` returns only the named fields for each row (use it to SEE metadata in the listing). \`group_threads\` folds comments and replies under the item they belong to instead of listing them as separate rows.
+
+Memory rows come back as [id] content. Knowledge and "all" rows as [id] — title (type), with no content — pass an id to hydradb_inspect for the text.`,
 		params: {
 			acl: PARAM.acl,
 			kind: PARAM.kind,
@@ -469,6 +615,24 @@ Memory rows come back as [id] content. Knowledge rows as [id] — title (type), 
 			provider: PARAM.list_provider,
 			page: PARAM.page,
 			page_size: PARAM.page_size,
+			metadata: PARAM.list_metadata,
+			additional_metadata: PARAM.list_additional_metadata,
+			include_fields: PARAM.list_include_fields,
+			group_threads: PARAM.list_group_threads,
+			database: PARAM.database,
+			collection: PARAM.collection,
+		},
+	},
+
+	[TOOL_NAMES.RELATIONS]: {
+		title: "Hydra DB Graph Relations",
+		description: RELATIONS_BODY,
+		params: {
+			id: PARAM.relations_id,
+			kind: PARAM.relations_kind,
+			limit: PARAM.relations_limit,
+			cursor: PARAM.relations_cursor,
+			acl: PARAM.acl,
 			database: PARAM.database,
 			collection: PARAM.collection,
 		},
@@ -628,6 +792,169 @@ Confirm with the user before deleting a collection they did not name. Take the c
 		},
 	},
 
+	// --- Connector lifecycle and resources (ENG-3341) ---
+
+	[TOOL_NAMES.CONNECTOR_PROVIDER_LIST]: {
+		title: "List Connector Providers",
+		description:
+			"List the connector providers HydraDB supports, such as slack, github, linear, notion, or gmail. Use hydradb_connector_provider_inspect for one provider's setup details.",
+		params: {},
+	},
+
+	[TOOL_NAMES.CONNECTOR_PROVIDER_INSPECT]: {
+		title: "Inspect Connector Provider",
+		description:
+			"Read one provider's setup guide and credential field schema. The schema describes fields only. Never put credential values in MCP tool arguments or chat.",
+		params: {
+			provider: "Provider identifier from hydradb_connector_provider_list, such as slack or gmail.",
+		},
+	},
+
+	[TOOL_NAMES.CONNECTOR_LIST]: {
+		title: "List Connectors",
+		description:
+			"List connected data sources visible to this connection. Database-confined OAuth connections only see connectors assigned to an allowed database; org-wide connectors with no database stay hidden.",
+		params: {
+			provider: "Optional provider identifier used to narrow the list.",
+			include_health: "Set true to include current connector health and plan-limit information.",
+		},
+	},
+
+	[TOOL_NAMES.CONNECTOR_INSPECT]: {
+		title: "Inspect Connector",
+		description:
+			"Read one connector's configuration and lifecycle. Take connector_id from hydradb_connector_list; never invent it.",
+		params: {
+			connector_id: CONNECTOR_ID_HELP,
+		},
+	},
+
+	[TOOL_NAMES.CONNECTOR_HEALTH]: {
+		title: "Check Connector Health",
+		description:
+			"Explain connector and resource sync health in plain words. This separates current sync activity, the latest attempt, the last successful sync, retryability, required action, and permission warnings.",
+		params: {
+			connector_id: CONNECTOR_ID_HELP,
+		},
+	},
+
+	[TOOL_NAMES.CONNECTOR_CONNECT]: {
+		title: "Connect Provider",
+		description:
+			"Return the HydraDB dashboard link that securely connects one provider. This tool never accepts provider credentials and does not create the connector itself.",
+		params: {
+			provider: "Provider identifier from hydradb_connector_provider_list. The dashboard collects credentials outside model context.",
+		},
+	},
+
+	[TOOL_NAMES.CONNECTOR_RECONNECT]: {
+		title: "Reconnect Connector",
+		description:
+			"Return the HydraDB dashboard link for replacing one connector's provider credentials. Open it, then select Reconnect in the connector drawer. This tool never accepts or changes credentials.",
+		params: {
+			connector_id: CONNECTOR_ID_HELP,
+		},
+	},
+
+	[TOOL_NAMES.CONNECTOR_UPDATE]: {
+		title: "Update Connector Settings",
+		description:
+			"Update noncredential connector settings. Set custom_instructions, sync_interval_seconds, or both. To replace credentials, use hydradb_connector_reconnect.",
+		params: {
+			connector_id: CONNECTOR_ID_HELP,
+			custom_instructions: "Connector-level ingestion instructions. Send an empty string to clear them.",
+			sync_interval_seconds: "Scheduled sync interval in seconds. Send 0 to use the provider default.",
+		},
+	},
+
+	[TOOL_NAMES.CONNECTOR_DELETE]: {
+		title: "Delete Connector",
+		description: "Permanently delete one connector and its configured resources. This action is irreversible.",
+		params: { connector_id: CONNECTOR_ID_HELP },
+	},
+
+	[TOOL_NAMES.CONNECTOR_SYNC]: {
+		title: "Start Connector Sync",
+		description: "Start a connector sync. Use hydradb_connector_health to monitor the accepted run.",
+		params: { connector_id: CONNECTOR_ID_HELP },
+	},
+
+	[TOOL_NAMES.CONNECTOR_PAUSE]: {
+		title: "Pause Connector",
+		description: "Pause scheduled and manual syncing for one connector.",
+		params: { connector_id: CONNECTOR_ID_HELP },
+	},
+
+	[TOOL_NAMES.CONNECTOR_RESUME]: {
+		title: "Resume Connector",
+		description: "Resume syncing for one paused connector.",
+		params: { connector_id: CONNECTOR_ID_HELP },
+	},
+
+	[TOOL_NAMES.CONNECTOR_DISCOVER]: {
+		title: "Discover Connector Resources",
+		description:
+			"List resources available upstream in the connected provider account, whether or not they are added to HydraDB. Continue with next_cursor while has_more is true. Use hydradb_connector_resource_list for the resources already added.",
+		params: {
+			connector_id: CONNECTOR_ID_HELP,
+			cursor: "Opaque next_cursor returned by the previous discovery page.",
+			limit: "Maximum resources to request on this page, from 1 through 100.",
+		},
+	},
+
+	[TOOL_NAMES.CONNECTOR_RESOURCE_LIST]: {
+		title: "List Connector Resources",
+		description:
+			"List the resources already added to one connector. A database-confined OAuth connection only receives resources whose effective destination database is allowed. Use hydradb_connector_discover for what is available upstream.",
+		params: {
+			connector_id: CONNECTOR_ID_HELP,
+		},
+	},
+
+	[TOOL_NAMES.CONNECTOR_RESOURCE_ADD]: {
+		title: "Add Connector Resources",
+		description:
+			"Add one or more discovered resources to a connector and start syncing them. Resources not in the list stay unchanged. Sending a resource that is already added replaces its routing, access, metadata, and instructions with the values sent.",
+		params: {
+			connector_id: CONNECTOR_ID_HELP,
+			resources: "Resources from hydradb_connector_discover to add. Each destination must be allowed by this connection.",
+			resource_id: "Resource identifier from hydradb_connector_discover.",
+			resource_type: "Provider resource type from discovery.",
+			display_name: "Human-readable resource name.",
+			database_override: "Optional destination database override.",
+			collection_override: "Optional destination collection override.",
+			acl: "Principals allowed to read synced objects. An empty list allows nobody.",
+			custom_instructions: "Resource-specific ingestion instructions.",
+			metadata: "Safe metadata merged into every synced object.",
+			additional_metadata: "Safe additional metadata merged into every synced object.",
+			sync_mode: "Use rescan to read the resource again, or new_only to continue from new records.",
+			lookback_days: "Days of history for the first sync.",
+			full_visibility_roles: "HubSpot roles whose members can see all records.",
+			table_configs: "BigQuery table replication settings.",
+		},
+	},
+
+	[TOOL_NAMES.CONNECTOR_RESOURCE_UPDATE]: {
+		title: "Update Connector Resource",
+		description:
+			"Replace one resource's access rule or ingestion instructions. Access changes can change who reads indexed data.",
+		params: {
+			connector_id: CONNECTOR_ID_HELP,
+			resource_id: "Resource identifier from hydradb_connector_resource_list.",
+			acl: "Replacement access rule. An empty list allows nobody.",
+			custom_instructions: "Replacement resource instructions. An empty string inherits connector instructions.",
+		},
+	},
+
+	[TOOL_NAMES.CONNECTOR_RESOURCE_DELETE]: {
+		title: "Delete Connector Resource",
+		description: "Permanently remove one resource from a connector. This action is irreversible.",
+		params: {
+			connector_id: CONNECTOR_ID_HELP,
+			resource_id: "Resource identifier from hydradb_connector_resource_list.",
+		},
+	},
+
 	// --- Deprecated aliases ---
 
 	[TOOL_NAMES.SEARCH]: {
@@ -735,18 +1062,45 @@ WHEN TO USE IT
 THE TOOLS
 
 - ${TOOL_NAMES.QUERY} — semantic search across memory and knowledge, with knowledge-graph context. Your default read. Every result carries an id.
-- ${TOOL_NAMES.INGEST} — write. A note or document via 'text', or a conversation via 'turns' (exactly one of the two).
+- ${TOOL_NAMES.INGEST} — write. A note or document via 'text', a conversation via 'turns', or a PDF, Word, slide or other file via 'file' (exactly one of the three).
 - ${TOOL_NAMES.LIST} — the full inventory of ONE family. Use it for "what do you have?"; for "what do you know about X" use ${TOOL_NAMES.QUERY} instead.
 - ${TOOL_NAMES.INSPECT} — the complete original content of one source you already have an id for.
 - ${TOOL_NAMES.DELETE} — irreversible removal of one item by id.
 - ${TOOL_NAMES.STATUS} — whether an ingested source has finished indexing. Ingestion is asynchronous, so a query issued straight after a save can legitimately return nothing.
+- ${TOOL_NAMES.RELATIONS} — the knowledge-graph relations extracted from one item, or from a whole collection, page by page.
 - ${TOOL_NAMES.SUBGRAPH} — everything connected to one item you already have an id for: the rest of its thread, its replies, its parents and children, the items it links to. Reach for it when one result is not enough and you need what surrounds it.
 - ${TOOL_NAMES.DATABASES} — which databases this connection can address, with the default marked. Every tool takes an optional \`database\`; call this before naming one, or when a call was refused because the user confined this connection to a single database.
+- ${TOOL_NAMES.DATABASE_CREATE} — create a database with an optional metadata schema and embedding dimension, then poll ${TOOL_NAMES.DATABASE_READINESS}.
+- ${TOOL_NAMES.DATABASE_DELETE} — irreversibly delete a database. It refuses this connection's default database.
+- ${TOOL_NAMES.DATABASE_READINESS} — check whether database provisioning finished and ingestion can start.
+- ${TOOL_NAMES.DATABASE_SCHEMA_INSPECT} — read the metadata keys and types a database accepts.
+- ${TOOL_NAMES.DATABASE_SCHEMA_UPDATE} — add fields to a database's metadata schema. Fields cannot be removed or retyped.
+- ${TOOL_NAMES.DATABASE_STATS} — read database-wide knowledge and memory row counts.
 - ${TOOL_NAMES.LIST_COLLECTIONS} — the collections inside a database, with this connection's default marked. Call it before choosing a collection when the connection has no default.
 - ${TOOL_NAMES.FEEDBACK} — report whether a query's results were actually useful, using the request_id that query printed. Say what the right answer was (\`ground_truth_answer\`) or which sources held it (\`ground_truth_source_ids\`) when you know — that is machine-checkable and worth far more than prose. It records a signal; it never changes the query's result or the stored data.
 - ${TOOL_NAMES.DELETE_COLLECTION} — irreversible removal of one collection and everything in it. Confirm first. Take the name from ${TOOL_NAMES.LIST_COLLECTIONS}.
 
-Ids flow between these: ${TOOL_NAMES.QUERY}, ${TOOL_NAMES.LIST} and ${TOOL_NAMES.SUBGRAPH} emit them; ${TOOL_NAMES.INSPECT}, ${TOOL_NAMES.DELETE}, ${TOOL_NAMES.STATUS} and ${TOOL_NAMES.SUBGRAPH} accept them. Never invent one.
+CONNECTORS
+
+- ${TOOL_NAMES.CONNECTOR_PROVIDER_LIST} — the connector providers HydraDB supports.
+- ${TOOL_NAMES.CONNECTOR_PROVIDER_INSPECT} — one provider's setup guide and credential field schema. Never send credential values through MCP.
+- ${TOOL_NAMES.CONNECTOR_LIST} — connected data sources visible to this connection.
+- ${TOOL_NAMES.CONNECTOR_INSPECT} — one connector's configuration and lifecycle.
+- ${TOOL_NAMES.CONNECTOR_HEALTH} — plain-language connector and resource sync health.
+- ${TOOL_NAMES.CONNECTOR_CONNECT} — secure dashboard link for connecting a provider. Never paste credentials into a tool.
+- ${TOOL_NAMES.CONNECTOR_RECONNECT} — secure dashboard link for replacing a connector's credentials.
+- ${TOOL_NAMES.CONNECTOR_UPDATE} — noncredential connector settings. This tool never accepts provider credentials.
+- ${TOOL_NAMES.CONNECTOR_DELETE} — irreversible connector deletion. Confirm first.
+- ${TOOL_NAMES.CONNECTOR_SYNC} — start a connector sync, then monitor it with ${TOOL_NAMES.CONNECTOR_HEALTH}.
+- ${TOOL_NAMES.CONNECTOR_PAUSE} — pause connector syncing.
+- ${TOOL_NAMES.CONNECTOR_RESUME} — resume connector syncing.
+- ${TOOL_NAMES.CONNECTOR_DISCOVER} — resources available upstream in a connector's provider account.
+- ${TOOL_NAMES.CONNECTOR_RESOURCE_LIST} — resources already added to a connector.
+- ${TOOL_NAMES.CONNECTOR_RESOURCE_ADD} — add discovered resources with allowed destinations and start syncing them. Unlisted resources remain unchanged.
+- ${TOOL_NAMES.CONNECTOR_RESOURCE_UPDATE} — replace one resource's access rule or ingestion instructions.
+- ${TOOL_NAMES.CONNECTOR_RESOURCE_DELETE} — irreversible resource removal. Confirm first.
+
+Ids flow between these: ${TOOL_NAMES.QUERY}, ${TOOL_NAMES.LIST} and ${TOOL_NAMES.SUBGRAPH} emit them; ${TOOL_NAMES.INSPECT}, ${TOOL_NAMES.DELETE}, ${TOOL_NAMES.RELATIONS}, ${TOOL_NAMES.STATUS} and ${TOOL_NAMES.SUBGRAPH} accept them. Never invent one.
 
 COLLECTIONS — WHO DECIDES THE SCOPE
 
@@ -769,4 +1123,4 @@ Choose by the question, not the vocabulary: "what has the user told me about X" 
 
 Working against an unfamiliar collection, discover its structure by querying it — \`MATCH (n) UNWIND labels(n) AS l RETURN l, count(*) AS c ORDER BY l\` — rather than guessing labels, which yields empty results that look like missing data.
 
-All tools require HYDRADB_API_KEY and HYDRADB_DATABASE in the environment. The graph tools additionally read HYDRADB_GRAPH_DATABASE and HYDRADB_GRAPH_COLLECTION for their default scope, and can be disabled with HYDRADB_MCP_GRAPH_TOOLS=0.`;
+All tools require HYDRADB_API_KEY and HYDRADB_DATABASE in the environment. The graph tools additionally read HYDRADB_GRAPH_DATABASE and HYDRADB_GRAPH_COLLECTION for their default scope, and can be disabled with HYDRADB_MCP_GRAPH_TOOLS=0. The database management tools (create, delete, readiness, stats and the two metadata schema tools) can be disabled with HYDRADB_MCP_DATABASE_TOOLS=0; ${TOOL_NAMES.DATABASES} stays.`;

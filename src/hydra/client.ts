@@ -19,21 +19,22 @@ import { HydraDBClient, HydraDBEnvironment, HydraDBError, serialization } from "
 import type { HydraDB as SDK } from "@hydradb/sdk";
 import { z } from "zod";
 
+import { ConnectorsResource } from "./connectors.js";
 import { unwrap } from "./envelope.js";
-import { HydraWrapperError, translateError } from "./errors.js";
-import { GraphResource } from "./graph.js";
-import { type RawTransport, newRawTransport, sendRaw } from "./transport.js";
+import { HydraWrapperError, scrub, translateError } from "./errors.js";
+import { type GraphConfig, GraphResource } from "./graph.js";
+import {
+	type CallBudget,
+	DEFAULT_MAX_RETRIES,
+	DEFAULT_TIMEOUT_SECONDS,
+	type RetrySafety,
+	withRetries,
+} from "./retry.js";
+import { type RawTransport, mcpHeaders, newRawTransport, sendRaw } from "./transport.js";
 
 export type ContextKind = "memory" | "knowledge";
 
-/**
- * Sized to fit inside a typical MCP host's tool timeout rather than outlast it,
- * so a stalled call fails with a HydraDB diagnostic the caller can act on
- * instead of a generic host-side timeout carrying no information.
- */
-export const DEFAULT_TIMEOUT_SECONDS = 30;
-
-export const DEFAULT_MAX_RETRIES = 2;
+export { DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT_SECONDS };
 
 /**
  * Per-call transport controls, separate from the domain params.
@@ -90,9 +91,10 @@ const STDERR_LOGGER = {
 		console.error("[hydradb-sdk]", message, ...args),
 };
 
-/** Wrapper options → the SDK's per-request options, omitted when there is nothing to say. */
-function req(opts?: RequestOptions): { abortSignal?: AbortSignal } | undefined {
-	return opts?.signal ? { abortSignal: opts.signal } : undefined;
+/** What each SDK attempt receives: the call's signal, and no SDK-side retries. */
+interface SdkRequestOptions {
+	abortSignal: AbortSignal;
+	maxRetries: 0;
 }
 
 /** Generated deserialization is deliberately permissive; reject false empties. */
@@ -109,9 +111,60 @@ function validateQueryResponse(response: unknown): void {
 	}
 }
 
+/** What `sdk.context.list` resolves to: the response envelope. */
+type ListResponse = Awaited<ReturnType<HydraDBClient["context"]["list"]>>;
+
+const successfulList = z.object({ success: z.literal(true).optional() });
+
+/**
+ * A list row with a usable ID, by the list adapters' first-string precedence,
+ * so a blank `id` cannot hide behind a valid legacy `source_id`.
+ */
+function listRow(identityKeys: readonly string[]) {
+	return z.object({}).passthrough().refine((row) => {
+		const id = identityKeys.map((key) => row[key]).find((value) => z.string().safeParse(value).success);
+
+		return z.string().trim().min(1).safeParse(id).success;
+	});
+}
+
+/** The rows of one list kind, under the SDK's name or the wire's. */
+function listPayload(kind: ListParams["kind"]) {
+	if (kind === "memory") {
+		const rows = z.array(listRow(["memoryId", "memory_id", "id", "source_id"]));
+
+		return z.union([
+			successfulList.extend({ userMemories: rows }),
+			successfulList.extend({ user_memories: rows }),
+		]);
+	}
+
+	return successfulList.extend({ sources: z.array(listRow(["id", "source_id"])) });
+}
+
+/**
+ * Reject a successful list that is not a real list, bare or enveloped, also
+ * accepting the historical `inner` nesting the list adapters understand.
+ */
+function validateListResponse(response: ListResponse, kind: ListParams["kind"]): void {
+	const payload = listPayload(kind);
+	const accepted = payload.or(successfulList.extend({ inner: payload }));
+
+	if (!successfulList.safeParse(response).success || !accepted.safeParse(unwrap(response)).success) {
+		throw new Error(
+			`Invalid successful list response: expected a ${kind === "memory" ? "user_memories" : "sources"} ` +
+			"array with nonempty row IDs and no failure flag.",
+		);
+	}
+}
+
+const markdownQueryResponse = z.object({ success: z.literal(true).optional(), data: z.string() });
+
 export interface HydraConfig {
 	/** Bearer token (the HydraDB API key). */
 	token: string;
+	/** Set when the caller signed in through OAuth on the hosted server. */
+	oauthUserId?: string;
 	/** Database scope (canonical name for the tenant). */
 	database: string;
 	/** Collection scope (canonical name for the sub-tenant). */
@@ -127,14 +180,14 @@ export interface HydraConfig {
 	/** Optional base URL override; defaults to the SDK's environment. */
 	baseUrl?: string;
 	/**
-	 * Per-attempt deadline. The SDK's own default is 60s, which combined with its
-	 * 2 retries means a persistently failing endpoint can occupy a caller for
-	 * ~3 minutes with no output — far longer than any MCP host waits, so in
-	 * practice the host times out first and the caller gets a generic error with
-	 * no HydraDB diagnostic while this process keeps retrying.
+	 * Deadline for the whole call: every attempt and every wait between them.
+	 * The SDK's own 60s applied to each attempt, so with its 2 retries a failing
+	 * endpoint could occupy a caller for ~3 minutes — far longer than an MCP
+	 * host waits, which then timed out first with no HydraDB diagnostic while
+	 * this process kept retrying.
 	 */
 	timeoutSeconds?: number;
-	/** Retries per call. The SDK defaults to 2; set explicitly so it is a choice. */
+	/** Attempts after the first, inside that deadline. 0 disables retrying. */
 	maxRetries?: number;
 	/** Test seam for the hand-rolled HTTP path; production never sets it. */
 	fetchFn?: typeof fetch;
@@ -156,8 +209,23 @@ export interface QueryParams {
 	maxResults?: number;
 	mode?: "fast" | "thinking" | "auto";
 	graphContext?: boolean;
-	alpha?: number;
+	/**
+	 * Hybrid balance between keyword and vector retrieval: 0 to 1, or "auto".
+	 * Hybrid only, so it is refused alongside keyword retrieval; see `query`.
+	 */
+	alpha?: SDK.SearchQueryRequestAlpha;
 	recencyBias?: number;
+	/** Text prepended to the query to improve retrieval. */
+	additionalContext?: string;
+	/** In thinking mode, follow relations declared at ingest. */
+	queryForcefulRelations?: boolean;
+	/** Resolve time-based questions using dated facts. The API defaults it on. */
+	temporalReasoning?: boolean;
+	/**
+	 * `structured` asks the API to leave out its `llm_prompt` rendering. The
+	 * Markdown form is a different response shape; see `queryMarkdown`.
+	 */
+	responseFormat?: "structured";
 	/**
 	 * Restrict retrieval to these source ids. A hard pre-filter: the server
 	 * returns nothing rather than widening when none match.
@@ -240,13 +308,28 @@ export interface IngestParams {
 	observationDate?: string;
 	/** Filename to attach when ingesting knowledge text as a document. */
 	filename?: string;
+	/**
+	 * A file to upload as a knowledge document (PDF, DOCX, slides, ...), in
+	 * place of `text`. Its title is its filename; the API does not take one.
+	 */
+	file?: IngestDocument;
 	collection?: string;
 	/** Per-call database override. */
 	database?: string;
 }
 
+/** One uploaded document: its bytes, its name and type, and optionally its id. */
+export interface IngestDocument {
+	data: Buffer;
+	filename: string;
+	contentType: string;
+	/** The document's id (`document_metadata[].id`); the API assigns one when absent. */
+	id?: string;
+}
+
 export interface ListParams {
-	kind?: ContextKind;
+	/** `all` lists memories and knowledge together, in one page (POST /context/list `type=all`). */
+	kind?: QueryKind;
 	ids?: string[];
 	page?: number;
 	pageSize?: number;
@@ -277,6 +360,47 @@ export interface ListParams {
 	sourceFields?: Record<string, string>;
 	/** Exact originating connector instance, stored in additional_metadata. */
 	connectorId?: string;
+	/** Exact-match filter on each item's `metadata` (`filters.metadata`). */
+	metadata?: MetadataFilter;
+	/**
+	 * Exact-match filter on each item's `additional_metadata`
+	 * (`filters.additional_metadata`). `connectorId` is merged into it.
+	 */
+	additionalMetadata?: MetadataFilter;
+	/** Return only these fields (plus id, database, collection). Knowledge rows only. */
+	includeFields?: string[];
+	/** Fold comment and reply rows under their parent row as `comments`. */
+	groupThreads?: boolean;
+}
+
+/** A value an exact-match metadata filter compares a stored value against. */
+export type MetadataFilterValue = string | number | boolean | null;
+
+/** `{key: value}` pairs an item's stored metadata must all match exactly. */
+export type MetadataFilter = Record<string, MetadataFilterValue>;
+
+/** `filters` on POST /context/list, in wire spelling. */
+interface ListFilters {
+	source_fields?: Record<string, string>;
+	metadata?: MetadataFilter;
+	additional_metadata?: MetadataFilter;
+}
+
+/** The POST /context/list body the passthrough sends, in wire spelling. */
+interface ListRequestBody extends ScopeFields {
+	type?: QueryKind;
+	ids?: string[];
+	page?: number;
+	page_size?: number;
+	acl?: string[];
+	filters?: ListFilters;
+	include_fields?: string[];
+	group_threads: boolean;
+}
+
+/** Whether a filter names at least one key; an empty one is no filter at all. */
+export function hasEntries(filter: MetadataFilter | undefined): boolean {
+	return filter != null && Object.keys(filter).length > 0;
 }
 
 export interface InspectParams {
@@ -532,6 +656,11 @@ abstract class Resource {
 			: { database };
 	}
 
+	/** Collection allowlist carried by an OAuth grant, when the grant is collection-confined. */
+	protected collectionConfinement(): readonly string[] | undefined {
+		return this.allowedCollections;
+	}
+
 	/**
 	 * Scope for a query that names SEVERAL collections.
 	 *
@@ -573,23 +702,44 @@ abstract class Resource {
 		return { database, collections };
 	}
 
+	/** The whole-call budget, from the connection's transport settings. */
+	private budget(): CallBudget {
+		return {
+			deadlineMs: this.raw?.timeoutMs ?? DEFAULT_TIMEOUT_SECONDS * 1000,
+			maxRetries: this.raw?.maxRetries ?? DEFAULT_MAX_RETRIES,
+		};
+	}
+
+	/**
+	 * One SDK call under the shared retry policy (./retry). `fn` is one attempt
+	 * and must hand the options it is given to the SDK: they carry the call's
+	 * abort signal and turn the SDK's own retries off.
+	 */
 	protected async call<T, Response>(
 		path: string,
-		fn: () => Promise<Response>,
-		onMeta?: (meta: { requestId?: string }) => void,
+		safety: RetrySafety,
+		opts: RequestOptions | undefined,
+		fn: (sdkOptions: SdkRequestOptions) => Promise<Response>,
 	): Promise<T> {
-		try {
-			const raw = await fn();
+		// The SDK and the raw transport share one token; tests without a raw
+		// transport pass none, and an empty credential is never matched.
+		const known = [this.raw?.token ?? ""];
 
-			if (onMeta) onMeta({ requestId: readRequestId(raw) });
-
-			return unwrap<T>(raw);
-		} catch (err) {
+		const raw = await withRetries({
+			path,
+			safety,
+			budget: this.budget(),
+			signal: opts?.signal,
+			known,
 			// A refused database is a decision the user made, not a transport
 			// failure from `path`; it keeps its own type and message.
-			if (err instanceof ScopeNotAllowedError) throw err;
-			throw translateError(path, err);
-		}
+			rethrow: (err) => err instanceof ScopeNotAllowedError,
+			attempt: (signal) => fn({ abortSignal: signal, maxRetries: 0 }),
+		});
+
+		opts?.onMeta?.({ requestId: readRequestId(raw) });
+
+		return unwrap<T>(raw);
 	}
 }
 
@@ -609,15 +759,12 @@ export class ContextResource extends Resource {
 	}
 
 	/**
-	 * The single retrieval entry point (SDK `client.query`).
+	 * The `/query` request for `params`, refusing combinations the API rejects.
 	 *
-	 * `async` so the operator/retrieval validation below surfaces as a rejection,
-	 * for the same reason `ingest` is async.
+	 * Throws synchronously; both callers are `async`, so it surfaces as a
+	 * rejection, for the same reason `ingest` is async.
 	 */
-	async query(
-		params: QueryParams,
-		opts?: RequestOptions,
-	): Promise<SDK.SearchV2RetrievalResult> {
+	private queryRequest(params: QueryParams): SDK.SearchQueryRequest {
 		// `operator` is keyword syntax, and the API accepts it only when the
 		// request also asks for keyword retrieval. On hybrid it does not ignore
 		// the field, it refuses the whole call:
@@ -641,6 +788,17 @@ export class ContextResource extends Resource {
 		const queryBy =
 			params.queryBy ?? (params.operator != null ? "text" : undefined);
 
+		// alpha weighs the vector lane against the keyword lane, and keyword
+		// retrieval has only one. Sent there it is a hybrid-only knob on a request
+		// that is not hybrid, so it is refused like operator on hybrid.
+		if (params.alpha != null && queryBy === "text") {
+			throw new Error(
+				`alpha balances hybrid retrieval and does not apply to keyword ` +
+				`retrieval (queryBy "text", or any operator). Drop alpha, or drop ` +
+				`operator and queryBy "text" to search hybrid.`,
+			);
+		}
+
 		// One scope selector per request. The server rejects a multi-scope
 		// selector sent alongside the singular one it folds `collection` into, so
 		// a caller that sets both has stated two different scopes and only they
@@ -658,7 +816,7 @@ export class ContextResource extends Resource {
 				? this.multiScope(params.collections, params.database)
 				: this.scope(params.collection, params.database);
 
-		const request = {
+		return {
 			...scope,
 			query: params.query,
 			type: params.kind,
@@ -671,83 +829,62 @@ export class ContextResource extends Resource {
 			recencyBias: params.recencyBias,
 			queryApps: params.queryApps,
 			ids: params.ids,
+			// An empty list is no filter, not a filter that matches nothing.
+			titles: params.titles != null && params.titles.length > 0 ? params.titles : undefined,
 			metadataFilters: params.metadataFilters,
 			numRelatedChunks: params.numRelatedChunks,
 			acl: params.acl,
+			additionalContext: params.additionalContext,
+			queryForcefulRelations: params.queryForcefulRelations,
+			temporalReasoning: params.temporalReasoning,
+			responseFormat: params.responseFormat,
 		};
+	}
 
-		// @hydradb/sdk 2.1.4 predates the titles request field and its generated
-		// serializer drops unknown properties. Its authenticated passthrough still
-		// supplies the SDK's auth, retry, timeout and fetch configuration, including
-		// for a ContextResource constructed directly without our RawTransport. Once
-		// the generated request exposes titles this can collapse back into sdk.query.
-		if (params.titles != null && params.titles.length > 0) {
-			return this.call(
-				"/query",
-				async () => {
-				const response = await this.sdk.fetch(
-					"/query",
-					{
-						method: "POST",
-						headers: { "API-Version": "2", "Content-Type": "application/json" },
-						body: JSON.stringify({
-							...scope,
-							query: params.query,
-							type: params.kind,
-							operator: params.operator,
-							query_by: queryBy,
-							max_results: params.maxResults,
-							mode: params.mode,
-							graph_context: params.graphContext,
-							alpha: params.alpha,
-							recency_bias: params.recencyBias,
-							query_apps: params.queryApps,
-							ids: params.ids,
-							titles: params.titles,
-							metadata_filters: params.metadataFilters,
-							num_related_chunks: params.numRelatedChunks,
-							acl: params.acl,
-						}),
-					},
-					req(opts),
-				);
-				const text = await response.text();
-				let body: unknown = text;
-				try {
-					body = text === "" ? null : JSON.parse(text);
-				} catch {
-					// Preserve a non-JSON proxy response for the shared error formatter.
-				}
-				if (!response.ok) {
-					throw new HydraDBError({ statusCode: response.status, body });
-				}
-					validateQueryResponse(body);
-					// Use the SAME wire-to-SDK conversion as sdk.query, including nested
-					// graph context and metadata. Casting raw JSON loses their contents.
-					const envelope = unwrap<unknown>(body) === body ? { success: true, data: body } : body;
-					return serialization.HandlerEnvelopeSearchV2RetrievalResult.parseOrThrow(envelope, {
-						unrecognizedObjectKeys: "passthrough",
-						allowUnrecognizedUnionMembers: true,
-						allowUnrecognizedEnumValues: true,
-						skipValidation: true,
-						breadcrumbsPrefix: ["response"],
-					});
-				},
-				// The request id has to survive this path too. A query that used
-				// `titles` would otherwise print no id, and hydradb_feedback would
-				// have nothing to attach to for exactly the queries a title filter
-				// was used on. readRequestId reads both spellings, so the raw
-				// envelope's snake_case `meta.request_id` resolves here the same way
-				// the SDK's camelCase does.
-				opts?.onMeta,
-			);
-		}
+	/**
+	 * The single retrieval entry point (SDK `client.query`).
+	 *
+	 * `async` so the operator/retrieval validation surfaces as a rejection,
+	 * for the same reason `ingest` is async.
+	 */
+	async query(
+		params: QueryParams,
+		opts?: RequestOptions,
+	): Promise<SDK.SearchV2RetrievalResult> {
+		const request = this.queryRequest(params);
 
-		return this.call("/query", async () => {
-			const response = await this.sdk.query(request, req(opts));
+
+		return this.call("/query", "idempotent", opts, async (o) => {
+			const response = await this.sdk.query(request, o);
 			validateQueryResponse(response);
 			return response;
-		}, opts?.onMeta);
+		});
+	}
+
+	/**
+	 * The same retrieval with `response_format=markdown`: the API's own Markdown
+	 * rendering of the results, as one string, instead of the result object.
+	 */
+	async queryMarkdown(
+		params: Omit<QueryParams, "responseFormat">,
+		opts?: RequestOptions,
+	): Promise<string> {
+		const request: SDK.SearchQueryRequest = { ...this.queryRequest(params), responseFormat: "markdown" };
+
+		return this.call("/query", "idempotent", opts, async (o) => {
+			const response = await this.sdk.query(request, o);
+
+			// The SDK types `data` as the result object and passes the string
+			// through unparsed. Anything else is not a successful Markdown answer.
+			if (!markdownQueryResponse.safeParse(response).success) {
+				throw new HydraDBError({ statusCode: 200, body: { error: {
+					code: "INVALID_QUERY_RESPONSE",
+					message: "Invalid successful query response: expected a Markdown string with response_format=markdown.",
+				} } });
+			}
+
+			return response;
+		});
 	}
 
 	/**
@@ -834,21 +971,36 @@ export class ContextResource extends Resource {
 				);
 			}
 
+			if (params.file != null && params.text != null) {
+				throw new Error("Knowledge ingestion takes `text` or `file`, not both.");
+			}
+
+			if (params.file != null) {
+				const { data, filename, contentType, id } = params.file;
+
+				request.documents = [{ data, filename, contentType }];
+
+				// One entry per document, in order; only `id` is set here.
+				if (id != null) request.documentMetadata = JSON.stringify([{ id }]);
+			}
+
 			// Knowledge is multipart with the document as a file part — never the
 			// `app_knowledge` JSON field (guards the DX-G-002 class of bug).
 			if (params.text != null) {
-				request.documents = {
+				request.documents = [{
 					data: Buffer.from(params.text, "utf-8"),
 					// The title rides on the filename; the server's
 					// document_metadata does not accept a `title` key.
 					filename: params.filename ?? `${params.title ?? "document"}.md`,
 					contentType: "text/markdown",
-				};
+				}];
 			}
 		}
 
-		return this.call("/context/ingest", () =>
-			this.sdk.context.ingest(request, req(opts)),
+		// Not safe to send twice: without a source id a repeat stores a second
+		// copy, and memory inference can extract a second set of facts.
+		return this.call("/context/ingest", "unsafe", opts, (o) =>
+			this.sdk.context.ingest(request, o),
 		);
 	}
 
@@ -861,16 +1013,55 @@ export class ContextResource extends Resource {
 			params.sourceFields != null &&
 			Object.keys(params.sourceFields).length > 0;
 
-		// @hydradb/sdk 2.1.4 predates the list `filters` request field and its
-		// generated serializer drops unknown properties (same limitation the
-		// titles filter hit on /query). Its authenticated passthrough still
-		// supplies auth, retry, timeout and fetch config. Once the generated
-		// request exposes `filters` this can collapse back into sdk.context.list.
-		if (hasSourceFields || params.connectorId != null) {
-			const scope = this.scope(params.collection, params.database);
+		// Metadata filters, projected fields, nested threads and `all` keep the
+		// raw call: the SDK renames row fields (`additional_metadata` comes back
+		// as `additionalMetadata`), and a projection is looked up by the names
+		// the caller asked for. Plain and source-field lists go through the SDK.
+		const projected =
+			hasEntries(params.metadata) ||
+			hasEntries(params.additionalMetadata) ||
+			params.kind === "all" ||
+			(params.includeFields?.length ?? 0) > 0 ||
+			params.groupThreads === true;
+
+		if (projected) {
+			const filters: ListFilters = {};
+
+			if (params.sourceFields != null && hasSourceFields) {
+				filters.source_fields = params.sourceFields;
+			}
+
+			if (hasEntries(params.metadata)) filters.metadata = params.metadata;
+
+			const additionalMetadata = { ...params.additionalMetadata } satisfies MetadataFilter;
+
+			if (params.connectorId != null) additionalMetadata.connector_id = params.connectorId;
+
+			if (hasEntries(additionalMetadata)) filters.additional_metadata = additionalMetadata;
+
+			const filtered = Object.keys(filters).length > 0;
+
+			const request: ListRequestBody = {
+				...this.scope(params.collection, params.database),
+				type: params.kind,
+				ids: params.ids,
+				page: params.page,
+				page_size: params.pageSize,
+				acl: params.acl,
+				group_threads: params.groupThreads ?? false,
+			};
+
+			if (filtered) request.filters = filters;
+
+			if (params.includeFields != null && params.includeFields.length > 0) {
+				request.include_fields = params.includeFields;
+			}
+
 			return this.call<SDK.ListV2ListResponse, unknown>(
 				"/context/list",
-				async () => {
+				"idempotent",
+				opts,
+				async (o) => {
 					const response = await this.sdk.fetch(
 						"/context/list",
 						{
@@ -879,21 +1070,9 @@ export class ContextResource extends Resource {
 								"API-Version": "2",
 								"Content-Type": "application/json",
 							},
-							body: JSON.stringify({
-								...scope,
-								type: params.kind,
-								ids: params.ids,
-								page: params.page,
-								page_size: params.pageSize,
-								acl: params.acl,
-								filters: {
-									source_fields: params.sourceFields,
-									additional_metadata: params.connectorId != null ? { connector_id: params.connectorId } : undefined,
-								},
-								group_threads: false,
-							}),
+							body: JSON.stringify(request),
 						},
-						req(opts),
+						o,
 					);
 					const text = await response.text();
 					let body: unknown = text;
@@ -937,20 +1116,48 @@ export class ContextResource extends Resource {
 					}
 					return body;
 				},
-				opts?.onMeta,
 			);
 		}
 
-		return this.call("/context/list", () =>
-			this.sdk.context.list({
+		const filtered = hasSourceFields || params.connectorId != null;
+
+		return this.call<SDK.ListV2ListResponse, ListResponse>("/context/list", "idempotent", opts, async (o) => {
+			const request: SDK.ListV2ListContentRequest = {
 				...this.scope(params.collection, params.database),
-				type: params.kind,
+				// `all` took the passthrough above; this narrows the type for the SDK.
+				type: params.kind === "all" ? undefined : params.kind,
 				ids: params.ids,
 				page: params.page,
 				pageSize: params.pageSize,
 				acl: params.acl,
-			}, req(opts)),
-		);
+			};
+
+			if (filtered) {
+				const filters: SDK.ListContentFilter = {};
+
+				// The tools build these with their wire names; the serializer maps
+				// them to the SDK's, and rejects a key the API does not define.
+				if (hasSourceFields) {
+					filters.sourceFields = serialization.ListSourceFieldFilters.parseOrThrow(params.sourceFields);
+				}
+
+				if (params.connectorId != null) {
+					filters.additionalMetadata = { connector_id: params.connectorId };
+				}
+
+				request.filters = filters;
+				request.groupThreads = false;
+			}
+
+			const response = await this.sdk.context.list(request, o);
+
+			// A filtered list is a lookup: an empty answer reads as "that source
+			// does not exist", so a body that is not a real list (a proxy's login
+			// page, a failure flag) must be an error rather than no rows.
+			if (filtered) validateListResponse(response, params.kind);
+
+			return response;
+		});
 	}
 
 	/** Fetch a source's content (SDK `context.inspect`; was "fetch content"). */
@@ -958,14 +1165,14 @@ export class ContextResource extends Resource {
 		params: InspectParams,
 		opts?: RequestOptions,
 	): Promise<SDK.FetchV2SourceFetchResponse> {
-		return this.call("/context/inspect", () =>
+		return this.call("/context/inspect", "idempotent", opts, (o) =>
 			this.sdk.context.inspect({
 				...this.scope(params.collection, params.database),
 				id: params.id,
 				mode: params.mode,
 				expirySeconds: params.expirySeconds,
 				acl: params.acl,
-			}, req(opts)),
+			}, o),
 		);
 	}
 
@@ -974,11 +1181,11 @@ export class ContextResource extends Resource {
 		params: IngestionStatusParams,
 		opts?: RequestOptions,
 	): Promise<SDK.IngestionV2BatchProcessingStatus> {
-		return this.call("/context/status", () =>
+		return this.call("/context/status", "idempotent", opts, (o) =>
 			this.sdk.context.status({
 				...this.scope(params.collection, params.database),
 				ids: params.ids,
-			}, req(opts)),
+			}, o),
 		);
 	}
 
@@ -1035,8 +1242,9 @@ export class ContextResource extends Resource {
 	/** Knowledge-graph relations (SDK `context.relations`). */
 	relations(
 		params: RelationsParams = {},
+		opts?: RequestOptions,
 	): Promise<SDK.GraphGraphRelationsResponse> {
-		return this.call("/context/relations", () =>
+		return this.call("/context/relations", "idempotent", opts, (o) =>
 			this.sdk.context.relations({
 				...this.scope(params.collection, params.database),
 				id: params.id,
@@ -1044,7 +1252,7 @@ export class ContextResource extends Resource {
 				limit: params.limit,
 				cursor: params.cursor,
 				acl: params.acl,
-			}),
+			}, o),
 		);
 	}
 
@@ -1053,15 +1261,30 @@ export class ContextResource extends Resource {
 		params: DeleteParams,
 		opts?: RequestOptions,
 	): Promise<SDK.SourcesMemoryDeleteResponse> {
-		return this.call("/context", () =>
+		return this.call("/context", "idempotent", opts, (o) =>
 			this.sdk.context.delete({
 				...this.scope(params.collection, params.database),
 				ids: params.ids,
 				type: params.kind,
-			}, req(opts)),
+			}, o),
 		);
 	}
 }
+
+/**
+ * A database response with the fields the database tools report. The API
+ * always sets them; the generated types mark them optional only because swag
+ * never marks a response field required.
+ */
+type Reported<Response, Field extends keyof Response> = Response & Required<Pick<Response, Field>>;
+
+const reportsDatabase = z.object({ database: z.string().min(1) });
+
+const reportsStatus = reportsDatabase.extend({ status: z.string().min(1) });
+
+const reportsFields = reportsDatabase.extend({ fields: z.array(z.unknown()) });
+
+const reportsAddedFields = reportsDatabase.extend({ addedFields: z.array(z.string()) });
 
 export class DatabasesResource extends Resource {
 	// The base constructor is `protected`, so this one is what makes the class
@@ -1078,79 +1301,173 @@ export class DatabasesResource extends Resource {
 		super(sdk, database, collection, allowedDatabases, allowedCollections, raw);
 	}
 
-	create(
+	async create(
 		params: CreateDatabaseParams,
-	): Promise<SDK.TenantsTenantCreateAcceptedResponse> {
-		return this.call("/databases", () =>
+		opts?: RequestOptions,
+	): Promise<Reported<SDK.TenantsTenantCreateAcceptedResponse, "database" | "status">> {
+		const database = this.scope(undefined, params.database).database;
+		const allowedCollections = this.collectionConfinement();
+
+		if (allowedCollections) {
+			throw new Error(
+				`This connection is confined to collection ${allowedCollections
+					.map((collection) => `"${collection}"`)
+					.join(", ")}, and creating a database changes state outside those collections. ` +
+					"Nothing was created. Reconnect without collection confinement before creating a database.",
+			);
+		}
+
+		return this.reported("/databases", "unsafe", opts, reportsStatus, (o) =>
 			this.sdk.databases.create({
-				database: params.database,
+				database,
 				databaseMetadataSchema: params.databaseMetadataSchema,
 				embeddingsDimension: params.embeddingsDimension,
-			}),
+			}, o),
 		);
 	}
 
-	delete(database: string): Promise<SDK.TenantsTenantDeleteResponse> {
-		return this.call("/databases", () => this.sdk.databases.delete({ database }));
+	async delete(
+		database: string,
+		opts?: RequestOptions,
+	): Promise<Reported<SDK.TenantsTenantDeleteResponse, "database" | "status">> {
+		const scoped = this.scope(undefined, database).database;
+		const connectionDefault = this.scope().database;
+
+		if (scoped === connectionDefault) {
+			throw new Error(
+				`Refusing to delete database "${scoped}" because it is this connection's ` +
+					"default database. Connect through a different default database, then retry the deletion.",
+			);
+		}
+
+		const allowedCollections = this.collectionConfinement();
+
+		if (allowedCollections) {
+			throw new Error(
+				`This connection is confined to collection ${allowedCollections
+					.map((collection) => `"${collection}"`)
+					.join(", ")}, and deleting database "${scoped}" removes every collection in it, ` +
+					"including ones this connection was not granted. Nothing was deleted. " +
+					"Reconnect without collection confinement before deleting a whole database.",
+			);
+		}
+
+		return this.reported("/databases", "unsafe", opts, reportsStatus, (o) =>
+			this.sdk.databases.delete({ database: scoped }, o),
+		);
 	}
 
-	list(): Promise<SDK.TenantsTenantIdsResponse> {
-		return this.call("/databases", () => this.sdk.databases.list());
+	list(opts?: RequestOptions): Promise<SDK.TenantsTenantIdsResponse> {
+		return this.call("/databases", "idempotent", opts, (o) => this.sdk.databases.list(o));
 	}
 
 	collections(
 		database: string,
 		opts?: RequestOptions,
 	): Promise<SDK.TenantsSubTenantIdsResponse> {
-		return this.call("/databases/collections", () =>
-			this.sdk.databases.collections({ database }, req(opts)),
+		return this.call("/databases/collections", "idempotent", opts, (o) =>
+			this.sdk.databases.collections({ database }, o),
 		);
 	}
 
-	stats(database: string, opts?: RequestOptions): Promise<SDK.TenantsTenantStatsResponse> {
-		return this.call("/databases/stats", () =>
-			this.sdk.databases.stats({ database }, req(opts)),
+	async stats(
+		database: string,
+		opts?: RequestOptions,
+	): Promise<Reported<SDK.TenantsTenantStatsResponse, "database">> {
+		const scoped = this.scope(undefined, database).database;
+
+		return this.reported("/databases/stats", "idempotent", opts, reportsDatabase, (o) =>
+			this.sdk.databases.stats({ database: scoped }, o),
 		);
 	}
 
 	/** Infra provisioning readiness — renamed away from `status` (SDK `databases.status`). */
-	readiness(database: string): Promise<SDK.TenantsInfraStatusResponseV2> {
-		return this.call("/databases/status", () =>
-			this.sdk.databases.status({ database }),
+	async readiness(
+		database: string,
+		opts?: RequestOptions,
+	): Promise<Reported<SDK.TenantsInfraStatusResponseV2, "database">> {
+		const scoped = this.scope(undefined, database).database;
+
+		return this.reported("/databases/status", "idempotent", opts, reportsDatabase, (o) =>
+			this.sdk.databases.status({ database: scoped }, o),
+		);
+	}
+
+	/** The metadata fields a database declares (SDK `databases.getMetadataSchema`). */
+	async inspectMetadataSchema(
+		database: string,
+		opts?: RequestOptions,
+	): Promise<Reported<SDK.TenantsTenantMetadataSchemaResponse, "database" | "fields">> {
+		const scoped = this.scope(undefined, database).database;
+
+		return this.reported("/databases/metadata-schema", "idempotent", opts, reportsFields, (o) =>
+			this.sdk.databases.getMetadataSchema({ database: scoped }, o),
+		);
+	}
+
+	async updateMetadataSchema(
+		database: string,
+		addFields: SDK.TenantsCustomPropertyDefinition[],
+		opts?: RequestOptions,
+	): Promise<Reported<SDK.HandlerMetadataSchemaUpdateResponse, "database" | "addedFields">> {
+		const scoped = this.scope(undefined, database).database;
+		const allowedCollections = this.collectionConfinement();
+
+		if (allowedCollections) {
+			throw new Error(
+				`This connection is confined to collection ${allowedCollections
+					.map((collection) => `"${collection}"`)
+					.join(", ")}, and adding metadata fields changes the database-wide schema for ` +
+					`"${scoped}", including collections this connection was not granted. Nothing was changed. ` +
+					"Reconnect without collection confinement before changing a database metadata schema.",
+			);
+		}
+
+		return this.reported("/databases/metadata-schema", "unsafe", opts, reportsAddedFields, (o) =>
+			this.sdk.databases.updateMetadataSchema({ database: scoped, addFields }, o),
 		);
 	}
 
 	/**
+	 * `call`, refusing a successful response that lacks a field the database
+	 * tools report, so no caller has to guess it.
+	 */
+	private reported<T, Response>(
+		path: string,
+		safety: RetrySafety,
+		opts: RequestOptions | undefined,
+		expected: z.AnyZodObject,
+		fn: (sdkOptions: SdkRequestOptions) => Promise<Response>,
+	): Promise<T> {
+		return this.call(path, safety, opts, async (o) => {
+			const response = await fn(o);
+
+			if (!expected.safeParse(unwrap(response)).success) {
+				throw new HydraDBError({ statusCode: 200, body: { error: {
+					code: "INVALID_DATABASE_RESPONSE",
+					message: `Invalid successful database response: expected ${Object.keys(expected.shape).join(" and ")}.`,
+				} } });
+			}
+
+			return response;
+		});
+	}
+
+	/**
 	 * Permanently delete one collection and all of its data
-	 * (`DELETE /databases/collections`). Not yet on the pinned SDK, so this
-	 * is a hand-rolled path matching GraphResource.
+	 * (SDK `databases.deleteCollection`).
 	 */
 	async deleteCollection(
 		params: DeleteCollectionParams,
 		opts?: RequestOptions,
-	): Promise<{
-		database?: string;
-		collection?: string;
-		status?: string;
-		message?: string;
-	}> {
-		// Hand-rolled for the same reason `context.subgraph` is (CONTRACT §2
-		// rule 7): the pinned SDK has no `databases.delete_collection`. It goes
-		// through the same raw transport, so it shares the retry, envelope
-		// unwrap and error type of every other call here.
-		if (!this.raw) {
-			throw new HydraWrapperError(
-				"Hydra DB /databases/collections → ERR: no HTTP transport configured",
-				"/databases/collections",
-			);
-		}
-
+	): Promise<SDK.TenantsSubTenantDeleteResponse> {
 		// A caller who already cancelled is not waiting for the request to go
 		// out: reject a pre-aborted signal rather than send and then unwind.
 		if (opts?.signal?.aborted) {
 			throw translateError(
 				"/databases/collections",
 				opts.signal.reason ?? new Error("aborted"),
+				[this.raw?.token ?? ""],
 			);
 		}
 
@@ -1163,15 +1480,16 @@ export class DatabasesResource extends Resource {
 
 		// scope() resolves the default database, enforces any confinement, and
 		// returns the canonical `database`/`collection` names the API expects.
-		const query = new URLSearchParams(this.scope(params.collection, params.database));
-		const path = `/databases/collections?${query.toString()}`;
+		const { database, collection } = this.scope(params.collection, params.database);
 
-		return sendRaw<{
-			database?: string;
-			collection?: string;
-			status?: string;
-			message?: string;
-		}>(this.raw, path, "DELETE", undefined, opts);
+		// A repeat after the first succeeded answers "not found", which would
+		// report a deletion that happened as one that failed.
+		return this.call("/databases/collections", "unsafe", opts, (o) =>
+			this.sdk.databases.deleteCollection(
+				{ database, collection: collection ?? params.collection.trim() },
+				o,
+			),
+		);
 	}
 }
 
@@ -1384,6 +1702,8 @@ export class FeedbackResource extends Resource {
 
 export class HydraDB {
 	readonly context: ContextResource;
+	/** Public connector lifecycle and resource operations. */
+	readonly connectors: ConnectorsResource;
 	readonly databases: DatabasesResource;
 	/** Feedback about a query that already ran (POST /feedback). */
 	readonly feedback: FeedbackResource;
@@ -1400,27 +1720,31 @@ export class HydraDB {
 	 * but exposed here so callers reach every HydraDB surface through one object.
 	 */
 	readonly graph: GraphResource;
+	/** This connection's credential, kept only so `redact` can remove it. */
+	private readonly token: string;
+	/** Deadline for one whole tool call, every request and wait inside it. */
+	readonly deadlineMs: number;
 
 	constructor(config: HydraConfig, sdk?: HydraDBClient, rawOverride?: RawTransport) {
 		const client =
 			sdk ??
 			new HydraDBClient({
 				token: config.token,
-				// SDK 2.1.4's generated methods apply this default, but its fetch
-				// passthrough does not. Set it for both title and source lookups so
-				// their relative paths work without HYDRADB_BASE_URL as well.
 				baseUrl: config.baseUrl ?? HydraDBEnvironment.Default,
-				// Both are stated rather than inherited. The SDK's defaults (60s,
-				// 2 retries) were never chosen by this server, and their product is
-				// a ~3 minute worst case on the slowest tool it exposes.
-				timeoutInSeconds: config.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS,
-				maxRetries: config.maxRetries ?? DEFAULT_MAX_RETRIES,
+				// The retry loop in ./retry owns retries and the deadline, so the
+				// SDK makes exactly one attempt per call. Its own timer is set past
+				// the deadline so that the loop's abort, which says which deadline
+				// passed, always fires first.
+				timeoutInSeconds: (config.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS) + 5,
+				maxRetries: 0,
 				// Never inherit the SDK's console logger: it writes to stdout, which
 				// on stdio transport is the JSON-RPC channel. Only the sink is
 				// overridden — level and silencing keep the SDK's own defaults.
 				logging: { logger: STDERR_LOGGER },
+				headers: mcpHeaders(config),
 			});
 
+		this.token = config.token;
 		this.database = config.database;
 		this.collection = config.collection;
 		this.allowedDatabases = config.allowedDatabases;
@@ -1433,6 +1757,8 @@ export class HydraDB {
 				maxRetries: DEFAULT_MAX_RETRIES,
 			});
 
+		this.deadlineMs = raw.timeoutMs;
+
 		this.context = new ContextResource(
 			client,
 			config.database,
@@ -1441,6 +1767,7 @@ export class HydraDB {
 			config.allowedCollections,
 			raw,
 		);
+		this.connectors = new ConnectorsResource(client);
 		this.feedback = new FeedbackResource(
 			client,
 			config.database,
@@ -1457,11 +1784,24 @@ export class HydraDB {
 			config.allowedCollections,
 			raw,
 		);
-		this.graph = new GraphResource({
+
+		const graphConfig: GraphConfig = {
 			token: config.token,
 			...(config.baseUrl != null ? { baseUrl: config.baseUrl } : {}),
 			timeoutSeconds: config.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS,
 			maxRetries: config.maxRetries ?? DEFAULT_MAX_RETRIES,
-		});
+		};
+
+		if (config.oauthUserId) graphConfig.oauthUserId = config.oauthUserId;
+
+		this.graph = new GraphResource(graphConfig);
+	}
+
+	/**
+	 * Remove credentials, including this connection's own key or token in any
+	 * format, from text bound for the model.
+	 */
+	redact(text: string): string {
+		return scrub(text, [this.token]);
 	}
 }

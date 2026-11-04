@@ -19,11 +19,13 @@
  * insulated from yet.
  */
 
-import { HydraWrapperError } from "./errors.js";
+import { HydraWrapperError, scrub } from "./errors.js";
+import { DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT_SECONDS, type RetrySafety } from "./retry.js";
 import { newRawTransport, type RawTransport, sendRaw } from "./transport.js";
 
 export interface GraphConfig {
 	token: string;
+	oauthUserId?: string;
 	baseUrl?: string;
 	timeoutSeconds?: number;
 	maxRetries?: number;
@@ -49,14 +51,6 @@ export interface RequestOptions {
 }
 
 /**
- * Status codes worth retrying.
- *
- * 429 and 5xx are documented as transient. 4xx other than 429 are not: a
- * rejected construct, a Cypher error and a bad collection name all fail
- * identically on retry, so retrying them only delays the message.
- */
-
-/**
  * A 2xx whose body is not the shape this endpoint promises.
  *
  * Raised rather than coerced to an empty result. An empty array is a perfectly
@@ -66,13 +60,22 @@ export interface RequestOptions {
  * caller cannot debug. The `path` and a bounded preview of what actually
  * arrived are carried through so the failure is actionable.
  */
-function unexpectedShape(path: string, expected: string, got: unknown): HydraWrapperError {
+function unexpectedShape(
+	path: string,
+	expected: string,
+	got: unknown,
+	known: readonly string[],
+): HydraWrapperError {
 	let preview: string;
 	try {
 		preview = JSON.stringify(got) ?? String(got);
 	} catch {
 		preview = String(got);
 	}
+
+	// Before the cut, so a credential crossing it is still whole when matched.
+	preview = scrub(preview, known);
+
 	if (preview.length > 200) preview = `${preview.slice(0, 200)}…`;
 	return new HydraWrapperError(
 		`Hydra DB ${path} → ERR: expected ${expected}, got ${preview}. ` +
@@ -86,7 +89,10 @@ export class GraphResource {
 	private readonly transport: RawTransport;
 
 	constructor(config: GraphConfig) {
-		this.transport = newRawTransport(config, { timeoutSeconds: 30, maxRetries: 2 });
+		this.transport = newRawTransport(config, {
+			timeoutSeconds: DEFAULT_TIMEOUT_SECONDS,
+			maxRetries: DEFAULT_MAX_RETRIES,
+		});
 	}
 
 	/**
@@ -113,7 +119,7 @@ export class GraphResource {
 		// present that as a legitimate "no rows matched": the caller would read a
 		// broken integration as an empty graph and act on it. Fail loudly instead.
 		if (!Array.isArray(rows)) {
-			throw unexpectedShape("/byog/query", "an array of row objects", rows);
+			throw unexpectedShape("/byog/query", "an array of row objects", rows, [this.transport.token]);
 		}
 		// Element-wise, not just the container. `renderRows` calls `Object.keys`
 		// on each row, which throws a bare TypeError on `null` and on a string —
@@ -127,6 +133,7 @@ export class GraphResource {
 				"/byog/query",
 				`an array of row objects (row ${bad} is not one)`,
 				rows[bad],
+				[this.transport.token],
 			);
 		}
 		return rows as GraphRow[];
@@ -159,6 +166,7 @@ export class GraphResource {
 				"/byog/collections",
 				"an object with a `collections` array",
 				res,
+				[this.transport.token],
 			);
 		}
 		// A non-string element would be rendered as a collection name the caller
@@ -169,6 +177,7 @@ export class GraphResource {
 				"/byog/collections",
 				`an array of collection names (index ${notAName} is not a string)`,
 				res.collections[notAName],
+				[this.transport.token],
 			);
 		}
 		return res.collections as string[];
@@ -179,7 +188,9 @@ export class GraphResource {
 		params: { database: string; collection: string },
 		opts?: RequestOptions,
 	): Promise<Record<string, unknown>> {
-		return this.send("/byog/collections", "DELETE", params, opts);
+		// Dropping what is already gone changes nothing, so this one write may
+		// be retried after an unclear failure.
+		return this.send("/byog/collections", "DELETE", params, opts, "idempotent");
 	}
 
 	/**
@@ -203,7 +214,8 @@ export class GraphResource {
 		method: "GET" | "POST" | "DELETE",
 		body: unknown,
 		opts?: RequestOptions,
+		safety?: RetrySafety,
 	): Promise<T> {
-		return sendRaw<T>(this.transport, path, method, body, opts);
+		return sendRaw<T>(this.transport, path, method, body, { signal: opts?.signal, safety });
 	}
 }

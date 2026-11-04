@@ -150,6 +150,101 @@ export interface SourceListItem {
 	provider?: string;
 	parent_external_id?: string;
 	connector_id?: string;
+	/** The `include_fields` the caller asked for, as the server returned them. */
+	fields?: ListedFields;
+	/** `group_threads`: the comment and reply rows folded under this one. */
+	comments?: SourceListItem[];
+	/** The server capped `comments`; the thread has more than what is inline. */
+	comments_truncated?: boolean;
+}
+
+/** Any JSON value, as a projected list field can carry. */
+export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
+
+/** Projected fields by name: what `include_fields` returned for one row. */
+export type ListedFields = { [name: string]: JsonValue };
+
+export const jsonValue: z.ZodType<JsonValue> = z.lazy(() =>
+	z.union([z.string(), z.number(), z.boolean(), z.null(), z.array(jsonValue), z.record(jsonValue)]),
+);
+
+// A field of the wrong type reads as absent rather than failing the row,
+// matching `str`'s first-string-wins reading of the same records.
+const optionalText = z.string().optional().catch(undefined);
+
+// Read on its own: the row keeps `additional_metadata` whole, because
+// `include_fields: ["additional_metadata"]` projects every key of it.
+const connectorMetadata = z.object({ connector_id: optionalText });
+
+/**
+ * One listed source row. Passthrough keeps the projected fields, which are
+ * read by name and parsed as JSON; `comments` are rows of this same kind,
+ * parsed one level at a time by `toSourceRow`.
+ */
+const listedSourceRecord = z
+	.object({
+		id: optionalText,
+		source_id: optionalText,
+		title: optionalText,
+		type: optionalText,
+		source_type: optionalText,
+		app_external_id: optionalText,
+		appExternalId: optionalText,
+		app_provider: optionalText,
+		appProvider: optionalText,
+		app_parent_id: optionalText,
+		appParentId: optionalText,
+		comments: z.array(z.unknown()).optional().catch(undefined),
+		comments_truncated: z.boolean().optional().catch(undefined),
+	})
+	.passthrough();
+
+type ListedSourceRecord = z.infer<typeof listedSourceRecord>;
+
+function toSourceRow(record: ListedSourceRecord, fields: readonly string[]): SourceListItem {
+	const row: SourceListItem = {
+		id: record.id ?? record.source_id ?? "",
+		title: record.title,
+		type: record.type ?? record.source_type,
+	};
+
+	const externalId = record.app_external_id ?? record.appExternalId;
+
+	if (externalId != null) row.external_id = externalId;
+
+	const provider = record.app_provider ?? record.appProvider;
+
+	if (provider != null) row.provider = provider;
+
+	const parentExternalId = record.app_parent_id ?? record.appParentId;
+
+	if (parentExternalId != null) row.parent_external_id = parentExternalId;
+
+	const connectorId = connectorMetadata.safeParse(record.additional_metadata ?? record.additionalMetadata).data?.connector_id;
+
+	if (connectorId != null) row.connector_id = connectorId;
+
+	const picked: ListedFields = {};
+
+	for (const name of fields) {
+		const value = jsonValue.safeParse(record[name]);
+
+		if (record[name] !== undefined && value.success) picked[name] = value.data;
+	}
+
+	if (Object.keys(picked).length > 0) row.fields = picked;
+
+	if (record.comments != null) {
+		row.comments = record.comments.flatMap((comment) => {
+			const parsed = listedSourceRecord.safeParse(comment);
+
+			return parsed.success ? [toSourceRow(parsed.data, fields)] : [];
+		});
+	}
+
+	if (record.comments_truncated === true) row.comments_truncated = true;
+
+	return row;
 }
 
 export interface SourceList {
@@ -158,8 +253,11 @@ export interface SourceList {
 	page: PageInfo;
 }
 
-/** SDK list result → knowledge source rows + total. */
-export function toSourceList(data: SDK.ListV2ListResponse): SourceList {
+/**
+ * SDK list result → knowledge source rows + total. `fields` names the
+ * `include_fields` the caller asked for, carried through on each row.
+ */
+export function toSourceList(data: SDK.ListV2ListResponse, fields: readonly string[] = []): SourceList {
 	// Knowledge listings surface at top-level `sources`, not under `.inner`.
 	const d = data as unknown as Record<string, unknown>;
 	const container =
@@ -168,26 +266,128 @@ export function toSourceList(data: SDK.ListV2ListResponse): SourceList {
 		asRecords(d.sources) ??
 		asRecords((d.inner as Record<string, unknown> | undefined)?.sources) ??
 		[];
-	const sources = records.map((record) => {
-		const metadata = z.object({ connector_id: z.string().optional() }).safeParse(record.additional_metadata ?? record.additionalMetadata);
-		const externalId = str(record, "app_external_id", "appExternalId");
-		const provider = str(record, "app_provider", "appProvider");
-		const parentExternalId = str(record, "app_parent_id", "appParentId");
-		return {
-			id: str(record, "id", "source_id") ?? "",
-			title: str(record, "title"),
-			type: str(record, "type", "source_type"),
-			...(externalId != null ? { external_id: externalId } : {}),
-			...(provider != null ? { provider } : {}),
-			...(parentExternalId != null ? { parent_external_id: parentExternalId } : {}),
-			...(metadata.success && metadata.data.connector_id != null ? { connector_id: metadata.data.connector_id } : {}),
-		};
-	});
+
+	const sources = records.map((record) => toSourceRow(listedSourceRecord.safeParse(record).data ?? {}, fields));
 	const total =
 		d.total ?? (d.inner as Record<string, unknown> | undefined)?.total;
 	return {
 		sources,
 		total: typeof total === "number" ? total : sources.length,
 		page: toPageInfo(container, sources.length),
+	};
+}
+
+export interface RelationEnd {
+	name: string | null;
+	type: string | null;
+	entity_id: string | null;
+}
+
+export interface RelationItem {
+	source: RelationEnd;
+	target: RelationEnd;
+	/** canonical_predicate, else raw_predicate, of the first evidence entry. */
+	predicate: string | null;
+	/** The passage that evidences it, verbatim from the source. */
+	context: string | null;
+	chunk_id: string | null;
+	/** How many evidence entries back this triplet. */
+	evidence_count: number;
+}
+
+export interface RelationList {
+	relations: RelationItem[];
+	structural_count: number;
+	structural_truncated: boolean;
+	is_truncated: boolean;
+	next_cursor: number | null;
+}
+
+// Both spellings: the SDK hands back camelCase, the raw wire is snake_case.
+const relationEndRecord = z.object({
+	name: optionalText,
+	type: optionalText,
+	entity_id: optionalText,
+	entityId: optionalText,
+});
+
+const relationEvidenceRecord = z.object({
+	canonical_predicate: optionalText,
+	canonicalPredicate: optionalText,
+	raw_predicate: optionalText,
+	rawPredicate: optionalText,
+	context: optionalText,
+	chunk_id: optionalText,
+	chunkId: optionalText,
+});
+
+const relationTripletRecord = z.object({
+	source: relationEndRecord.optional(),
+	target: relationEndRecord.optional(),
+	chunk_id: optionalText,
+	chunkId: optionalText,
+	relations: z.array(relationEvidenceRecord).optional(),
+});
+
+// Every field is optional on its own, but the API always sends `relations`
+// and `is_truncated`: a body with neither (`{}`, an upstream error message)
+// is not a relations response and must not read as an empty graph.
+const relationsResponseRecord = z.object({
+	relations: z.array(relationTripletRecord).nullable().optional(),
+	auxiliary_relations: z.array(z.unknown()).optional(),
+	auxiliaryRelations: z.array(z.unknown()).optional(),
+	auxiliary_truncated: z.boolean().optional(),
+	auxiliaryTruncated: z.boolean().optional(),
+	is_truncated: z.boolean().optional(),
+	isTruncated: z.boolean().optional(),
+	next_cursor: z.number().nullable().optional(),
+	nextCursor: z.number().nullable().optional(),
+}).refine(
+	(body) => body.relations != null || body.is_truncated != null || body.isTruncated != null,
+	{ message: "expected a relations array or a truncation flag" },
+);
+
+function relationEnd(record: z.infer<typeof relationEndRecord> | undefined): RelationEnd {
+	return {
+		name: record?.name ?? null,
+		type: record?.type ?? null,
+		entity_id: record?.entity_id ?? record?.entityId ?? null,
+	};
+}
+
+/**
+ * SDK relations result → triplets. A body that is not a relations response
+ * throws: a proxy's error page must not read as "no relations".
+ */
+export function toRelationList(data: SDK.GraphGraphRelationsResponse): RelationList {
+	const parsed = relationsResponseRecord.safeParse(data);
+
+	if (!parsed.success) {
+		throw new Error(`Invalid relations response: ${parsed.error.issues[0]?.message ?? "unexpected body"}.`);
+	}
+
+	const d = parsed.data;
+
+	const relations = (d.relations ?? []).map((triplet) => {
+		const evidence = triplet.relations ?? [];
+		const first = evidence[0];
+
+		return {
+			source: relationEnd(triplet.source),
+			target: relationEnd(triplet.target),
+			predicate:
+				first?.canonical_predicate ?? first?.canonicalPredicate ?? first?.raw_predicate ?? first?.rawPredicate ?? null,
+			context: first?.context || null,
+			chunk_id: triplet.chunk_id || triplet.chunkId || first?.chunk_id || first?.chunkId || null,
+			evidence_count: evidence.length,
+		};
+	});
+
+	return {
+		relations,
+		structural_count: (d.auxiliary_relations ?? d.auxiliaryRelations ?? []).length,
+		structural_truncated: (d.auxiliary_truncated ?? d.auxiliaryTruncated) === true,
+		is_truncated: (d.is_truncated ?? d.isTruncated) === true,
+		next_cursor: d.next_cursor ?? d.nextCursor ?? null,
 	};
 }

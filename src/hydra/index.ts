@@ -13,6 +13,7 @@ export {
 	FeedbackResource,
 	DEFAULT_TIMEOUT_SECONDS,
 	DEFAULT_MAX_RETRIES,
+	hasEntries,
 } from "./client.js";
 
 export type {
@@ -23,7 +24,10 @@ export type {
 	ConversationTurn,
 	QueryParams,
 	IngestParams,
+	IngestDocument,
 	ListParams,
+	MetadataFilter,
+	MetadataFilterValue,
 	InspectParams,
 	IngestionStatusParams,
 	RelationsParams,
@@ -42,6 +46,33 @@ export type {
 
 export { GraphResource } from "./graph.js";
 
+export { ConnectorsResource } from "./connectors.js";
+
+export type {
+	ConnectorUpdateRequest,
+	ConnectorResourceAddRequest,
+	ConnectorResourceUpdateRequest,
+	ConnectorUpdateResponse,
+	ConnectorDeleteResponse,
+	ConnectorSyncResponse,
+	ConnectorPauseResponse,
+	ConnectorResumeResponse,
+	ConnectorResourceMapping,
+	ConnectorResourceAddResponse,
+	ConnectorResourceUpdateResponse,
+	ConnectorResourceDeleteResponse,
+	ConnectorDiscoverParams,
+	ConnectorListParams,
+	ConnectorList,
+	ConnectorProviderCatalog,
+	ConnectorProviderDetail,
+	ConnectorResource,
+	ConnectorResources,
+	ConnectorStatus,
+	ConnectorView,
+	DiscoveredConnectorResources,
+} from "./connectors.js";
+
 export type {
 	GraphConfig,
 	GraphQueryParams,
@@ -49,7 +80,7 @@ export type {
 	GraphRow,
 } from "./graph.js";
 
-export { HydraWrapperError, responseError, translateError } from "./errors.js";
+export { HydraWrapperError, responseError, scrub, translateError } from "./errors.js";
 
 export {
 	assertCollectionAllowed,
@@ -60,6 +91,10 @@ export {
 
 export { unwrap } from "./envelope.js";
 
-export { DEFAULT_BASE_URL, newRawTransport, sendRaw } from "./transport.js";
+export { DEFAULT_BASE_URL, apiKeyId, newRawTransport, sendRaw } from "./transport.js";
+
+export { DeadlineExceeded, markDeadline, parseRetryAfter, withRetries } from "./retry.js";
+
+export type { CallBudget, RetrySafety } from "./retry.js";
 
 export type { RawTransport } from "./transport.js";

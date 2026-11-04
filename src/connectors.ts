@@ -1,0 +1,663 @@
+/* oxlint-disable anti-slop/no-unsafe-dictionary-type, anti-slop/no-unknown-parameters, anti-slop/no-unknown-returns, anti-slop/no-runtime-typeof, anti-slop/require-safety-comment-for-type-assertion, anti-slop/no-known-value-widening, anti-slop/no-conditional-empty-object-spread -- Connector results and provider JSON Schema are dynamic JSON, parsed and projected at this boundary. */
+import type {
+	ConnectorDiscoverParams,
+	ConnectorListParams,
+	ConnectorProviderCatalog,
+	ConnectorProviderDetail,
+	ConnectorResource,
+	ConnectorResourceAddRequest,
+	ConnectorResourceUpdateRequest,
+	ConnectorStatus,
+	ConnectorUpdateRequest,
+	ConnectorView,
+	DiscoveredConnectorResources,
+	HydraDB,
+	RequestOptions,
+} from "./hydra/index.js";
+
+export interface ConnectorToolResponse {
+	text: string;
+	data: Record<string, unknown>;
+}
+
+export type ConnectorListInput = ConnectorListParams;
+
+export type ConnectorDiscoverInput = ConnectorDiscoverParams;
+
+export type ConnectorUpdateInput = ConnectorUpdateRequest;
+
+export type ConnectorResourceAddInput = ConnectorResourceAddRequest;
+
+export type ConnectorResourceUpdateInput = ConnectorResourceUpdateRequest;
+
+/** A connector ID exists, but this OAuth grant cannot prove access to it. */
+export class ConnectorScopeNotAllowedError extends Error {
+	constructor(message?: string) {
+		super(
+			message ?? ("This connection is confined to specific databases or collections " +
+				"and cannot access that connector because its destination is outside that scope or is not set. " +
+				"Reconnect with wider database access to use it."),
+		);
+		this.name = "ConnectorScopeNotAllowedError";
+	}
+}
+
+function cleanObject(value: Record<string, unknown>): Record<string, unknown> {
+	return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined));
+}
+
+function projectConnector(connector: ConnectorView): Record<string, unknown> {
+	return cleanObject({
+		connector_id: connector.connectorId,
+		name: connector.name,
+		provider: connector.provider,
+		database: connector.database,
+		collection: connector.collection,
+		auth_type: connector.authType,
+		provider_account_scope: connector.providerAccountScope,
+		lifecycle: connector.lifecycle,
+		sync_status: connector.syncStatus,
+		paused: connector.paused,
+		needs_reauth: connector.needsReauth,
+		sync_blocked: connector.syncBlocked,
+		active_resource_count: connector.activeResourceCount,
+		resources_pending_first_sync: connector.resourcesPendingFirstSync,
+		documents_dispatched: connector.documentsDispatched,
+		first_data_dispatched_at: connector.firstDataDispatchedAt,
+		last_attempted_sync_at: connector.lastAttemptedSyncAt,
+		last_successful_sync_at: connector.lastSuccessfulSyncAt,
+		next_sync_at: connector.nextSyncAt,
+		sync_interval_seconds: connector.syncIntervalSeconds,
+		custom_instructions: connector.customInstructions,
+	});
+}
+
+const JSON_SCHEMA_KEYS = new Set([
+	"$schema",
+	"type",
+	"title",
+	"description",
+	"properties",
+	"required",
+	"enum",
+	"oneOf",
+	"anyOf",
+	"allOf",
+	"items",
+	"format",
+	"pattern",
+	"minLength",
+	"maxLength",
+	"minimum",
+	"maximum",
+	"minItems",
+	"maxItems",
+	"uniqueItems",
+	"additionalProperties",
+]);
+
+/** Remove examples, defaults, constants, and provider extensions that can carry credential values. */
+export function sanitizeCredentialSchema(value: unknown): unknown {
+	if (Array.isArray(value)) return value.map(sanitizeCredentialSchema);
+
+	if (value == null || typeof value !== "object") return value;
+
+	const sanitized: Record<string, unknown> = {};
+
+	for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+		if (!JSON_SCHEMA_KEYS.has(key)) continue;
+
+		if (key === "properties" && entry != null && typeof entry === "object" && !Array.isArray(entry)) {
+			sanitized[key] = Object.fromEntries(
+				Object.entries(entry as Record<string, unknown>).map(([name, schema]) => [
+					name,
+					sanitizeCredentialSchema(schema),
+				]),
+			);
+			continue;
+		}
+
+		sanitized[key] = sanitizeCredentialSchema(entry);
+	}
+
+	return sanitized;
+}
+
+function projectProviderCatalog(catalog: ConnectorProviderCatalog): Record<string, unknown>[] {
+	return catalog.providers.map((provider) =>
+		cleanObject({
+			provider: provider.provider,
+			category: provider.category,
+			is_alpha: provider.isAlpha,
+			is_beta: provider.isBeta,
+			moveit_support: provider.moveitSupport,
+			rank: provider.rank,
+			supported: provider.supported,
+			webhook_support: provider.webhookSupport,
+			}),
+	);
+}
+
+function projectProviderDetail(provider: ConnectorProviderDetail): Record<string, unknown> {
+	return cleanObject({
+		provider: provider.provider,
+		connector_type: provider.connectorType,
+		credential_schema: provider.credentialSchema
+			? sanitizeCredentialSchema(provider.credentialSchema)
+			: undefined,
+		indexed_object_types: provider.indexedObjectTypes,
+		setup_guide: provider.setupGuide,
+		token_scopes: provider.tokenScopes,
+		token_scopes_note: provider.tokenScopesNote,
+	});
+}
+
+function projectDiscovered(result: DiscoveredConnectorResources): Record<string, unknown> {
+	return cleanObject({
+		provider: result.provider,
+			resources: result.resources.map((resource) =>
+				cleanObject({
+					id: resource.id,
+					name: resource.name,
+					resource_type: resource.resourceType,
+					metadata: resource.metadata,
+				}),
+			),
+		has_more: result.hasMore,
+		next_cursor: result.nextCursor,
+	});
+}
+
+function projectResource(resource: ConnectorResource): Record<string, unknown> {
+	return cleanObject({
+		connector_id: resource.connectorId,
+		resource_id: resource.resourceId,
+		resource_type: resource.resourceType,
+		display_name: resource.displayName,
+		status: resource.status,
+		database_override: resource.databaseOverride,
+		collection_override: resource.collectionOverride,
+		acl: resource.acl,
+		custom_instructions: resource.customInstructions,
+		filters: resource.filters,
+		metadata: resource.metadata,
+		additional_metadata: resource.additionalMetadata,
+		sync_blocked: resource.syncBlocked,
+		sync_blocked_at: resource.syncBlockedAt,
+		has_acl_warning: resource.aclWarning != null,
+		has_page_acl_warning: resource.pageAclWarning != null,
+	});
+}
+
+function resourceStatusAction(retryable: boolean | undefined): string {
+	if (retryable === true) return "HydraDB will retry this failure. Check the next sync result.";
+
+	if (retryable === false) return "User action is required. Review the connector configuration or reconnect it.";
+
+	return "Review the connector configuration and the next sync result.";
+}
+
+function resourceAction(resource: ConnectorStatus["resources"][number]): string | undefined {
+	if (resource.syncBlocked) {
+		return "Syncing stopped after repeated provider refusals. Review access to this resource.";
+	}
+
+	if (resource.httpStatus === 401 || resource.httpStatus === 403) {
+		return "The provider refused access. Reconnect the connector or grant access to this resource.";
+	}
+
+	if (resource.httpStatus === 404) {
+		return "The provider no longer exposes this resource. Remove it or restore it at the provider.";
+	}
+
+	if (resource.httpStatus === 429) {
+		return "The provider rate-limited this sync. HydraDB can retry it.";
+	}
+
+	if (resource.httpStatus != null && resource.httpStatus >= 500) {
+		return "The provider was unavailable. HydraDB can retry it.";
+	}
+
+	if (resource.status === "failed") return resourceStatusAction(resource.retryable);
+
+	return undefined;
+}
+
+type FailureKind = "credentials" | "destination" | "internal" | "transient" | "user_action" | "unknown";
+
+// The API names a connector failure in `code` and writes its fix in `action`. These fill in the
+// fix when it sends none: an internal failure has nothing for the user to do, and older servers omit it.
+const FAILURE_BY_CODE = new Map<string, { kind: FailureKind; action: string }>([
+	["credentials_rejected", { kind: "credentials", action: "The provider rejected the connector credentials. Reconnect the connector." }],
+	["database_missing", { kind: "destination", action: "The destination database is missing. Restore it, recreate it, or update the connector destination." }],
+	["sync_service_failed", { kind: "internal", action: "The HydraDB sync service failed. Contact HydraDB support; reconnecting will not fix this failure." }],
+]);
+
+function connectorFailureGuidance(error: NonNullable<ConnectorStatus["error"]>): { kind: FailureKind; action: string } {
+	const known = error.code === undefined ? undefined : FAILURE_BY_CODE.get(error.code);
+	const kind = known?.kind ?? (error.retryable === true ? "transient" : error.retryable === false ? "user_action" : "unknown");
+
+	return { kind, action: error.action || known?.action || resourceStatusAction(error.retryable) };
+}
+
+function projectStatus(status: ConnectorStatus): Record<string, unknown> {
+	const failure = status.error ? connectorFailureGuidance(status.error) : undefined;
+
+	return cleanObject({
+		connector_id: status.connectorId,
+		provider: status.provider,
+		status: status.status,
+		lifecycle: status.lifecycle,
+		sync_status: status.syncStatus,
+		last_attempted_sync_at: status.lastAttemptedSyncAt,
+		last_successful_sync_at: status.lastSuccessfulSyncAt,
+		next_sync_at: status.nextSyncAt,
+		plan_cap: status.planCap
+			? cleanObject({ meter: status.planCap.meter, plan: status.planCap.plan, message: status.planCap.message })
+			: undefined,
+		error: status.error
+			? cleanObject({
+				detected_at: status.error.detectedAt,
+				retryable: status.error.retryable,
+				kind: failure?.kind,
+				action: failure?.action,
+			})
+			: undefined,
+		resources: status.resources.map((resource) =>
+			cleanObject({
+				resource_id: resource.resourceId,
+				display_name: resource.displayName,
+				status: resource.status,
+				last_row_count: resource.lastRowCount,
+				retryable: resource.retryable,
+				http_status: resource.httpStatus,
+				checked_at: resource.checkedAt,
+				sync_blocked: resource.syncBlocked,
+					sync_blocked_at: resource.syncBlockedAt,
+					action: resourceAction(resource),
+					has_acl_warning: resource.aclWarning != null,
+					has_page_acl_warning: resource.pageAclWarning != null,
+				})),
+		});
+}
+
+/** `name (id)`, or the bare id when there is no name: the id is what the next call needs. */
+function labelled(name: string | undefined, id: string): string {
+	return name ? `${name} (${id})` : id;
+}
+
+/** A header and one line per item, so a client that reads only text still gets every id. */
+function bulleted(header: string, items: string[]): string {
+	return [header, ...items.map((item) => `- ${item}`)].join("\n");
+}
+
+function renderHealth(status: ConnectorStatus, withheld: number): string {
+	const lines = [
+		`Connector health is ${status.status ?? "unknown"}; lifecycle is ${status.lifecycle ?? "unknown"}; sync activity is ${status.syncStatus ?? "unknown"}.`,
+		status.lastSuccessfulSyncAt ? `Last successful sync: ${status.lastSuccessfulSyncAt}.` : "No successful sync has been recorded.",
+	];
+
+	if (status.lastAttemptedSyncAt) lines.push(`Latest attempted sync: ${status.lastAttemptedSyncAt}.`);
+
+	if (status.planCap) lines.push("A plan limit is stopping connector syncs.");
+
+	if (status.error) {
+		lines.push(`The connector has a failure. ${connectorFailureGuidance(status.error).action}`);
+
+		if (status.error.retryable === true) lines.push("The failure may recover automatically.");
+
+		if (status.error.retryable === false) lines.push("The failure will not recover without user action.");
+	}
+
+	for (const resource of status.resources) {
+		const label = resource.displayName ?? resource.resourceId ?? "unnamed resource";
+		const action = resourceAction(resource);
+		lines.push(`Resource ${label}: ${resource.status ?? "unknown"}.`);
+
+		if (action) lines.push(action);
+
+		if (resource.aclWarning != null || resource.pageAclWarning != null) {
+			lines.push(`Resource ${label} has a permission warning separate from sync health.`);
+		}
+	}
+
+	if (withheld > 0) {
+		lines.push(`${withheld} resource${withheld === 1 ? " is" : "s are"} outside this connection's databases or collections and not shown.`);
+	}
+
+	return lines.join("\n");
+}
+
+/** MCP-facing connector operations, including database confinement and safe projection. */
+export class ConnectorTools {
+	constructor(
+		private readonly hydra: HydraDB,
+		private readonly dashboardUrl: string,
+	) {}
+
+	private dashboardLink(parameter: "connect" | "open", value: string): string {
+		const url = new URL("/connectors", this.dashboardUrl);
+		url.searchParams.set(parameter, value);
+
+		return url.toString();
+	}
+
+	/** Whether an OAuth grant confines this connection to some databases or collections. */
+	private get scoped(): boolean {
+		return this.hydra.allowedDatabases !== undefined || this.hydra.allowedCollections !== undefined;
+	}
+
+	/** Whether the grant reaches a destination; an unconfined connection reaches every one. */
+	private allows(database: string | undefined, collection: string | undefined): boolean {
+		const { allowedDatabases, allowedCollections } = this.hydra;
+
+		return (allowedDatabases === undefined || (database !== undefined && allowedDatabases.includes(database)))
+			&& (allowedCollections === undefined || (collection !== undefined && allowedCollections.includes(collection)));
+	}
+
+	/** A resource writes to its own override, or else to its connector's destination. */
+	private allowsResource(resource: ConnectorResource, connector: ConnectorView): boolean {
+		return this.allows(resource.databaseOverride ?? connector.database, resource.collectionOverride ?? connector.collection);
+	}
+
+	private assertMutationAllowed(): void {
+		// Connector endpoints do not atomically enforce MCP database or collection grants.
+		// Refuse every scoped mutation so a concurrent destination change cannot cross the grant.
+		if (this.scoped) {
+			throw new ConnectorScopeNotAllowedError(
+				"Scoped OAuth connections cannot modify connectors. Use an organization-wide connection.",
+			);
+		}
+	}
+
+	private async authorizedConnector(id: string, opts?: RequestOptions): Promise<ConnectorView> {
+		const connector = await this.hydra.connectors.inspect(id, opts);
+
+		if (!this.allows(connector.database, connector.collection)) throw new ConnectorScopeNotAllowedError();
+
+		return connector;
+	}
+
+	async providerList(opts?: RequestOptions): Promise<ConnectorToolResponse> {
+		const catalog = await this.hydra.connectors.listProviders(opts);
+
+		return {
+			text: catalog.providers.length === 0
+				? "No connector providers are available."
+				: `Available connector providers: ${catalog.providers.map((entry) => entry.provider).join(", ")}.`,
+			data: { providers: projectProviderCatalog(catalog) },
+		};
+	}
+
+	async providerInspect(provider: string, opts?: RequestOptions): Promise<ConnectorToolResponse> {
+		const result = await this.hydra.connectors.inspectProvider(provider, opts);
+
+		const lines = [
+			`Provider ${result.provider} uses connector type ${result.connectorType}. Credential fields are schema metadata only; never put credential values in an MCP call.`,
+		];
+
+		if (result.indexedObjectTypes.length > 0) lines.push(`It syncs: ${result.indexedObjectTypes.join(", ")}.`);
+
+		if (result.setupGuide?.length) lines.push(bulleted("Setup:", result.setupGuide));
+
+		return { text: lines.join("\n"), data: projectProviderDetail(result) };
+	}
+
+	async list(input: ConnectorListInput, opts?: RequestOptions): Promise<ConnectorToolResponse> {
+		const result = await this.hydra.connectors.list(input, opts);
+
+		const visible = result.connectors.filter((connector) => this.allows(connector.database, connector.collection));
+
+		const connectors = visible.map(projectConnector);
+		const visibleIds = new Set(visible.map((connector) => connector.connectorId));
+
+		const health = result.health
+			? Object.fromEntries(Object.entries(result.health).filter(([id]) => visibleIds.has(id)))
+			: undefined;
+
+		const connectorLimit = result.connectorLimit
+			? cleanObject({
+				count: result.connectorLimit.count,
+				limit: result.connectorLimit.limit,
+				message: result.connectorLimit.message,
+				plan: result.connectorLimit.plan,
+			})
+			: undefined;
+
+		const planCap = result.planCap
+			? cleanObject({
+				meter: result.planCap.meter,
+				message: result.planCap.message,
+				plan: result.planCap.plan,
+			})
+			: undefined;
+
+		return {
+			text: visible.length === 0
+				? "No connectors are visible to this connection."
+				: bulleted(`Visible connectors (${visible.length}):`, visible.map((connector) => {
+					const state = [connector.lifecycle ?? "unknown lifecycle", health?.[connector.connectorId]].filter(Boolean).join(", ");
+
+					return `${labelled(connector.name, connector.connectorId)}: ${state}`;
+				})),
+			data: cleanObject({ connectors, health, connector_limit: connectorLimit, plan_cap: planCap }),
+		};
+	}
+
+	async inspect(id: string, opts?: RequestOptions): Promise<ConnectorToolResponse> {
+		const connector = await this.authorizedConnector(id, opts);
+
+		return {
+			text: `Connector ${connector.name ?? connector.connectorId} is ${connector.lifecycle ?? "in an unknown lifecycle state"}.`,
+			data: { connector: projectConnector(connector) },
+		};
+	}
+
+	async health(id: string, opts?: RequestOptions): Promise<ConnectorToolResponse> {
+		const connector = await this.authorizedConnector(id, opts);
+
+		// Only a confined grant needs the configured list, to find where each resource writes.
+		const [status, configured] = await Promise.all([
+			this.hydra.connectors.health(id, opts),
+			this.scoped ? this.hydra.connectors.listResources(id, opts) : undefined,
+		]);
+
+		const allowedIds = configured && new Set(
+			configured.resources.filter((resource) => this.allowsResource(resource, connector)).map((resource) => resource.resourceId),
+		);
+
+		const shown = allowedIds
+			? { ...status, resources: status.resources.filter((resource) => resource.resourceId !== undefined && allowedIds.has(resource.resourceId)) }
+			: status;
+
+		const withheld = status.resources.length - shown.resources.length;
+
+		return {
+			text: renderHealth(shown, withheld),
+			data: cleanObject({ ...projectStatus(shown), withheld_resource_count: withheld > 0 ? withheld : undefined }),
+		};
+	}
+
+	async discover(input: ConnectorDiscoverInput, opts?: RequestOptions): Promise<ConnectorToolResponse> {
+		await this.authorizedConnector(input.connectorId, opts);
+
+		const result = await this.hydra.connectors.discover(input, opts);
+		const count = result.resources.length;
+
+		const lines = [bulleted(
+			`Discovered ${count} resource${count === 1 ? "" : "s"}.`,
+			result.resources.map((resource) => `${labelled(resource.name, resource.id)}: ${resource.resourceType}`),
+		)];
+
+		if (result.hasMore && result.nextCursor) lines.push(`More are available: call again with cursor ${result.nextCursor}.`);
+
+		return { text: lines.join("\n"), data: projectDiscovered(result) };
+	}
+
+	async resourceList(id: string, opts?: RequestOptions): Promise<ConnectorToolResponse> {
+		const connector = await this.authorizedConnector(id, opts);
+		const result = await this.hydra.connectors.listResources(id, opts);
+
+		const visible = result.resources.filter((resource) => this.allowsResource(resource, connector));
+
+		return {
+			text: visible.length === 0
+				? "No configured resources are visible to this connection."
+				: bulleted(`Visible configured resources (${visible.length}):`, visible.map((resource) =>
+					`${labelled(resource.displayName, resource.resourceId)}: ${resource.status ?? "unknown status"}`)),
+			data: { resources: visible.map(projectResource) },
+		};
+	}
+
+	async connect(provider: string): Promise<ConnectorToolResponse> {
+		const dashboardUrl = this.dashboardLink("connect", provider);
+
+		return {
+			text:
+				`No connector was created by this call. Open ${dashboardUrl} to connect the provider securely. ` +
+				"Do not paste provider credentials into chat or any MCP tool.",
+			data: {
+				provider,
+				completed: false,
+				dashboard_url: dashboardUrl,
+			},
+		};
+	}
+
+	async reconnect(id: string, opts?: RequestOptions): Promise<ConnectorToolResponse> {
+		await this.authorizedConnector(id, opts);
+		const dashboardUrl = this.dashboardLink("open", id);
+
+		return {
+			text:
+				`No credentials were changed by this call. Open ${dashboardUrl} to open the connector drawer, ` +
+				"then select Reconnect. Do not paste provider credentials into chat or any MCP tool.",
+			data: {
+				connector_id: id,
+				completed: false,
+				dashboard_url: dashboardUrl,
+			},
+		};
+	}
+
+	async update(input: ConnectorUpdateInput, opts?: RequestOptions): Promise<ConnectorToolResponse> {
+		this.assertMutationAllowed();
+		const result = await this.hydra.connectors.update(input, opts);
+
+		return {
+			text: "Connector settings were updated. Credential settings were not accepted or changed by this tool.",
+			data: cleanObject({
+				connector_id: result.connectorId,
+				custom_instructions_updated: result.customInstructionsUpdated,
+				sync_interval_seconds: result.syncIntervalSeconds,
+				min_sync_interval_seconds: result.minSyncIntervalSeconds,
+				max_sync_interval_seconds: result.maxSyncIntervalSeconds,
+				next_sync_at: result.nextSyncAt,
+			}),
+		};
+	}
+
+	async delete(id: string, opts?: RequestOptions): Promise<ConnectorToolResponse> {
+		this.assertMutationAllowed();
+		const result = await this.hydra.connectors.delete(id, opts);
+
+		return {
+			text: result.deleted === true
+				? "The connector was deleted."
+				: "The connector delete request completed, but the response did not confirm deletion.",
+			data: cleanObject({ connector_id: result.connectorId, deleted: result.deleted }),
+		};
+	}
+
+	async sync(id: string, opts?: RequestOptions): Promise<ConnectorToolResponse> {
+		this.assertMutationAllowed();
+		const result = await this.hydra.connectors.sync(id, opts);
+
+		return {
+			text: result.runId
+				? "A connector sync was accepted. Use connector health to monitor it."
+				: "A connector sync request was accepted. An existing run may still be active.",
+			data: cleanObject({ connector_id: id, run_id: result.runId, workflow_id: result.workflowId }),
+		};
+	}
+
+	async pause(id: string, opts?: RequestOptions): Promise<ConnectorToolResponse> {
+		this.assertMutationAllowed();
+		const result = await this.hydra.connectors.pause(id, opts);
+
+		return {
+			text: result.paused === true
+				? "The connector is paused."
+				: "The pause request completed, but the response did not confirm a paused state.",
+			data: cleanObject({ connector_id: result.connectorId, paused: result.paused, paused_at: result.pausedAt }),
+		};
+	}
+
+	async resume(id: string, opts?: RequestOptions): Promise<ConnectorToolResponse> {
+		this.assertMutationAllowed();
+		const result = await this.hydra.connectors.resume(id, opts);
+
+		return {
+			text: result.paused === false
+				? "The connector resumed."
+				: "The resume request completed, but the response did not confirm an active state.",
+			data: cleanObject({ connector_id: result.connectorId, paused: result.paused }),
+		};
+	}
+
+	async resourceAdd(input: ConnectorResourceAddInput, opts?: RequestOptions): Promise<ConnectorToolResponse> {
+		this.assertMutationAllowed();
+		const result = await this.hydra.connectors.addResources(input, opts);
+		const needsReview = (result.warnings?.length ?? 0) > 0 || (result.unverified?.length ?? 0) > 0;
+
+		return {
+			text: needsReview
+				? "Connector resources were added, but provider verification needs review. Check connector health after the first sync."
+				: "Connector resources were added. Resources not in the list remain unchanged. A sync may have started.",
+			data: cleanObject({
+				connector_id: result.connectorId,
+				configured: result.configured,
+				backfill: result.backfill,
+				first_sync_at: result.firstSyncAt,
+				unverified_resource_ids: result.unverified,
+				warning_resource_ids: result.warnings,
+			}),
+		};
+	}
+
+	async resourceUpdate(input: ConnectorResourceUpdateInput, opts?: RequestOptions): Promise<ConnectorToolResponse> {
+		this.assertMutationAllowed();
+		const result = await this.hydra.connectors.updateResource(input, opts);
+
+		return {
+			text: "The connector resource access rule or instructions were updated.",
+			data: cleanObject({
+				connector_id: result.connectorId,
+				resource_id: result.resourceId,
+				acl: result.acl,
+				custom_instructions: result.customInstructions,
+				custom_instructions_updated: result.customInstructionsUpdated,
+			}),
+		};
+	}
+
+	async resourceDelete(
+		connectorId: string,
+		resourceId: string,
+		opts?: RequestOptions,
+	): Promise<ConnectorToolResponse> {
+		this.assertMutationAllowed();
+		const result = await this.hydra.connectors.deleteResource(connectorId, resourceId, opts);
+
+		return {
+			text: result.deleted === true
+				? "The connector resource was deleted."
+				: "The resource delete request completed, but the response did not confirm deletion.",
+			data: cleanObject({
+				connector_id: result.connectorId,
+				resource_id: result.resourceId,
+				deleted: result.deleted,
+			}),
+		};
+	}
+}
