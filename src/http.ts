@@ -393,7 +393,6 @@ export function createHttpApp(config: HttpServerConfig): Express {
 			forwardCancels(cancels, scope);
 
 			const server = createHydraDBServer(hydra, creds.graph, {
-				oauthTools: identity != null,
 				cancelScope: scope,
 			});
 

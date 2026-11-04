@@ -8,14 +8,16 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { z } from "zod";
 
 import { jsonValue } from "../src/adapters.js";
-import type { ListedFields } from "../src/adapters.js";
-import { HydraDB } from "../src/hydra/index.js";
+import type { JsonValue, ListedFields } from "../src/adapters.js";
+import { HydraDB, HydraWrapperError } from "../src/hydra/index.js";
 import {
 	__resetAliasWarnings,
 	__resetShutdown,
-	__setFanoutListTimeoutForTests, __setListCollectionsStatsTimeoutForTests, 
+	__setFanoutListTimeoutForTests,
+	__setListCollectionsStatsTimeoutForTests,
 	awaitInFlight,
-	beginShutdown,createHydraDBServer,
+	beginShutdown,
+	createHydraDBServer,
 	inFlightCount,
 	legacyToolsEnabled,
 	withStoredTitles,
@@ -23,6 +25,7 @@ import {
 import {
 	CANONICAL_TOOL_NAMES,
 	CONNECTOR_TOOL_NAMES,
+	DATABASE_TOOL_NAMES,
 	DEPRECATED_TOOL_NAMES,
 	GRAPH_TOOL_NAMES,
 } from "../src/tool-names.js";
@@ -32,7 +35,7 @@ type RecordedCall = { method: string; args: Record<string, unknown> };
 /** Per-method response overrides, for tests that care what the API returned. */
 type Responses = Partial<
 	Record<
-		"query" | "ingest" | "list" | "inspect" | "delete" | "relations" | "status" | "collections" | "stats" | "feedback",
+		"query" | "ingest" | "list" | "inspect" | "delete" | "relations" | "status" | "databases" | "databaseCreate" | "databaseDelete" | "readiness" | "schemaInspect" | "schemaUpdate" | "collections" | "stats" | "feedback",
 		unknown
 	>
 >;
@@ -78,8 +81,15 @@ function mockHydra(
 			status: record("status", {}),
 		},
 		databases: {
+			list: record("databases", { databases: ["db_test", "analytics"] }),
+			create: record("databaseCreate", { database: "invoices", status: "accepted" }),
+			delete: record("databaseDelete", { database: "archive", status: "deletion_scheduled" }),
+			status: record("readiness", { database: "db_test", infra: { readyForIngestion: true } }),
+			getMetadataSchema: record("schemaInspect", { database: "db_test", fields: [{ name: "vendor", dataType: "VARCHAR" }] }),
+			updateMetadataSchema: record("schemaUpdate", { database: "db_test", addedFields: ["amount"] }),
 			collections: record("collections", { collections: ["engineering", "sales"] }),
 			stats: record("stats", {
+				database: "db_test",
 				knowledgeCollection: { rowCount: 265 },
 				memoryCollection: { rowCount: 1 },
 			}),
@@ -183,6 +193,186 @@ async function connect(hydra: HydraDB) {
 
 	return client;
 }
+
+function toolText(result: Awaited<ReturnType<Client["callTool"]>>): string {
+	return z.object({
+		content: z.array(z.object({ type: z.literal("text"), text: z.string() })).min(1),
+	}).parse(result).content[0]!.text;
+}
+
+test("database tools expose the complete successful lifecycle", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	const invocations: [string, Record<string, JsonValue>, string][] = [
+		["hydradb_databases", {}, "analytics"],
+		["hydradb_database_create", { database: "invoices", embeddings_dimension: 1024, database_metadata_schema: [{ name: "vendor", data_type: "VARCHAR" }] }, "invoices"],
+		["hydradb_database_readiness", { database: "db_test" }, "ready"],
+		["hydradb_database_schema_inspect", { database: "db_test" }, "vendor"],
+		["hydradb_database_schema_update", { database: "db_test", add_fields: [{ name: "amount", data_type: "DOUBLE" }] }, "amount"],
+		["hydradb_database_stats", { database: "db_test" }, "row"],
+		["hydradb_database_delete", { database: "archive" }, "archive"],
+	];
+
+	for (const [name, args, expected] of invocations) {
+		const result = await client.callTool({ name, arguments: args });
+
+		assert.notEqual(result.isError, true, name);
+		assert.match(toolText(result), new RegExp(expected, "i"), name);
+	}
+
+	assert.ok(calls.some((call) => call.method === "databaseCreate"));
+	assert.ok(calls.some((call) => call.method === "databaseDelete"));
+	assert.ok(calls.some((call) => call.method === "readiness"));
+	assert.ok(calls.some((call) => call.method === "schemaInspect"));
+	assert.ok(calls.some((call) => call.method === "schemaUpdate"));
+	assert.deepEqual(
+		calls.find((call) => call.method === "databaseCreate")?.args.databaseMetadataSchema,
+		[{ name: "vendor", dataType: "VARCHAR" }],
+	);
+	await client.close();
+});
+
+test("database stats preserve missing counts as unknown", async () => {
+	const { hydra } = mockHydra({
+		stats: { database: "db_test", knowledgeCollection: { rowCount: 265 } },
+	});
+
+	const client = await connect(hydra);
+	const result = await client.callTool({ name: "hydradb_database_stats", arguments: {} });
+
+	assert.notEqual(result.isError, true);
+	assert.match(toolText(result), /265 knowledge row/);
+	assert.match(toolText(result), /memory row count is unknown/);
+	assert.deepEqual(result.structuredContent, {
+		database: "db_test",
+		knowledge_rows: 265,
+		memory_rows: null,
+	});
+	await client.close();
+});
+
+test("database tools report an incomplete API response as an error instead of filling it in", async () => {
+	const { hydra } = mockHydra({
+		databaseCreate: { status: "accepted" },
+		schemaUpdate: { database: "db_test" },
+	});
+
+	const client = await connect(hydra);
+
+	for (const [name, args, expected] of [
+		["hydradb_database_create", { database: "invoices" }, "database and status"],
+		["hydradb_database_schema_update", { add_fields: [{ name: "amount", data_type: "DOUBLE" }] }, "database and addedFields"],
+	] as const) {
+		const result = await client.callTool({ name, arguments: args });
+
+		assert.equal(result.isError, true, name);
+		assert.match(toolText(result), new RegExp(`expected ${expected}`), name);
+	}
+
+	await client.close();
+});
+
+test("database write tools validate required inputs before an API call", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	for (const [name, args] of [
+		["hydradb_database_create", {}],
+		["hydradb_database_delete", {}],
+		["hydradb_database_schema_update", { add_fields: [] }],
+	] as const) {
+		const result = await client.callTool({ name, arguments: args });
+
+		assert.equal(result.isError, true, name);
+	}
+
+	assert.equal(calls.filter((call) => ["databaseCreate", "databaseDelete", "schemaUpdate"].includes(call.method)).length, 0);
+	await client.close();
+});
+
+test("database read tools reject a blank database before an API call", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	for (const name of [
+		"hydradb_database_readiness",
+		"hydradb_database_schema_inspect",
+		"hydradb_database_stats",
+	]) {
+		const result = await client.callTool({ name, arguments: { database: "   " } });
+
+		assert.equal(result.isError, true, name);
+	}
+
+	assert.equal(calls.filter((call) => ["readiness", "schemaInspect", "stats"].includes(call.method)).length, 0);
+	await client.close();
+});
+
+test("database tools preserve 403s and qualify write-permission guidance", async () => {
+	const { hydra } = mockHydra();
+
+	const deniedRead = () => Promise.reject(new HydraDBError({
+		statusCode: 403,
+		body: { error: { code: "FORBIDDEN", message: "policy denied this request" } },
+	}));
+
+	const deniedWrite = () => Promise.reject(new HydraWrapperError(
+		"Hydra DB /databases → 403: policy denied this request",
+		"/databases",
+		{ status: 403 },
+	));
+
+	hydra.databases.create = deniedWrite;
+	hydra.databases.delete = deniedWrite;
+	hydra.databases.readiness = deniedRead;
+	hydra.databases.inspectMetadataSchema = deniedRead;
+	hydra.databases.updateMetadataSchema = deniedWrite;
+	hydra.databases.stats = deniedRead;
+	const client = await connect(hydra);
+	const writeTools = new Set(["hydradb_database_create", "hydradb_database_delete", "hydradb_database_schema_update"]);
+
+	for (const [name, args] of [
+		["hydradb_database_create", { database: "new" }],
+		["hydradb_database_delete", { database: "old" }],
+		["hydradb_database_readiness", {}],
+		["hydradb_database_schema_inspect", {}],
+		["hydradb_database_schema_update", { add_fields: [{ name: "region", data_type: "VARCHAR" }] }],
+		["hydradb_database_stats", {}],
+	] as const) {
+		const result = await client.callTool({ name, arguments: args });
+
+		assert.equal(result.isError, true, name);
+		const text = toolText(result);
+
+		assert.match(text, /403/, name);
+
+		if (writeTools.has(name)) {
+			assert.match(text, /requires database write permission/i, name);
+			assert.match(text, /read-only credentials cannot/i, name);
+			assert.doesNotMatch(text, /this credential does not have write access/i, name);
+		} else {
+			assert.doesNotMatch(text, /read-only credentials cannot/i, name);
+		}
+	}
+
+	await client.close();
+});
+
+test("hydradb_databases surfaces an API error on an unconfined connection", async () => {
+	const { hydra } = mockHydra();
+
+	hydra.databases.list = () => Promise.reject(new HydraDBError({
+		statusCode: 500,
+		body: { error: { code: "DATABASE_LIST_FAILED", message: "try again" } },
+	}));
+	const client = await connect(hydra);
+	const result = await client.callTool({ name: "hydradb_databases", arguments: {} });
+
+	assert.equal(result.isError, true);
+	assert.match(toolText(result), /500/);
+	await client.close();
+});
 
 test("hydradb_ingest accepts turns-only input (no text)", async () => {
 	const { hydra, calls } = mockHydra();
@@ -1756,10 +1946,10 @@ test("deprecated aliases are not registered by default", async () => {
 	}
 
 	// The graph family IS on by default — it is a product surface with no other
-	// client exposing it, not a legacy alias.
+	// client exposing it, not a legacy alias. So is database management.
 	assert.equal(
 		names.length,
-		CANONICAL_TOOL_NAMES.length + GRAPH_TOOL_NAMES.length + CONNECTOR_TOOL_NAMES.length,
+		CANONICAL_TOOL_NAMES.length + GRAPH_TOOL_NAMES.length + CONNECTOR_TOOL_NAMES.length + DATABASE_TOOL_NAMES.length,
 	);
 });
 
@@ -1775,7 +1965,53 @@ test("HYDRADB_MCP_LEGACY_TOOLS restores every alias", async () => {
 		CANONICAL_TOOL_NAMES.length +
 			GRAPH_TOOL_NAMES.length +
 			CONNECTOR_TOOL_NAMES.length +
+			DATABASE_TOOL_NAMES.length +
 			DEPRECATED_TOOL_NAMES.length,
+	);
+});
+
+/** Tool names advertised under the given HYDRADB_MCP_DATABASE_TOOLS value. */
+async function toolsWithDatabaseFlag(value: string | undefined): Promise<string[]> {
+	const previous = process.env.HYDRADB_MCP_DATABASE_TOOLS;
+
+	if (value == null) delete process.env.HYDRADB_MCP_DATABASE_TOOLS;
+	else process.env.HYDRADB_MCP_DATABASE_TOOLS = value;
+
+	try {
+		const client = await connect(mockHydra().hydra);
+		const { tools } = await client.listTools();
+		await client.close();
+
+		return tools.map((t) => t.name);
+	} finally {
+		if (previous == null) delete process.env.HYDRADB_MCP_DATABASE_TOOLS;
+		else process.env.HYDRADB_MCP_DATABASE_TOOLS = previous;
+	}
+}
+
+test("the database management tools are registered by default", async () => {
+	const names = await toolsWithDatabaseFlag(undefined);
+
+	for (const name of DATABASE_TOOL_NAMES) {
+		assert.ok(names.includes(name), `${name} should be registered by default`);
+	}
+});
+
+test("HYDRADB_MCP_DATABASE_TOOLS=0 withholds only the database management tools", async () => {
+	const names = await toolsWithDatabaseFlag("0");
+
+	for (const name of DATABASE_TOOL_NAMES) {
+		assert.ok(!names.includes(name), `${name} should be withheld`);
+	}
+
+	// hydradb_databases and the collection tools are not part of the family.
+	for (const name of CANONICAL_TOOL_NAMES) {
+		assert.ok(names.includes(name), `${name} must stay registered`);
+	}
+
+	assert.equal(
+		names.length,
+		CANONICAL_TOOL_NAMES.length + GRAPH_TOOL_NAMES.length + CONNECTOR_TOOL_NAMES.length,
 	);
 });
 
@@ -1813,10 +2049,11 @@ test("dropping the aliases materially shrinks the tool manifest", async () => {
 
 	const lean = await measure(undefined);
 	const withAliases = await measure("1");
+	const saved = withAliases - lean;
 
 	assert.ok(
-		lean < withAliases * 0.75,
-		`expected a substantial reduction, got ${lean} vs ${withAliases} chars`,
+		saved >= DEPRECATED_TOOL_NAMES.length * 1_000,
+		`expected at least 1,000 saved characters per alias, got ${saved} total`,
 	);
 });
 
@@ -1944,7 +2181,7 @@ test("every tool declares all four behaviour hints explicitly", async () => {
 	await client.close();
 });
 
-test("reads are read-only; ingest, Cypher and deletes are destructive", async () => {
+test("tool annotations distinguish reads, additive writes, and destructive writes", async () => {
 	process.env.HYDRADB_MCP_LEGACY_TOOLS = "1";
 	const client = await connect(mockHydra().hydra);
 	const { tools } = await client.listTools();
@@ -1958,9 +2195,19 @@ test("reads are read-only; ingest, Cypher and deletes are destructive", async ()
 		"hydradb_list",
 		"hydradb_inspect",
 		"hydradb_status",
+		"hydradb_databases",
+		"hydradb_database_readiness",
+		"hydradb_database_schema_inspect",
+		"hydradb_database_stats",
 	]) {
 		assert.equal(hint(name).readOnlyHint, true, `${name} should be read-only`);
 		assert.equal(hint(name).destructiveHint, false);
+	}
+
+	for (const name of ["hydradb_database_create", "hydradb_database_schema_update"]) {
+		assert.equal(hint(name).readOnlyHint, false, `${name} writes`);
+		assert.equal(hint(name).destructiveHint, false, `${name} is additive`);
+		assert.equal(hint(name).idempotentHint, false, `${name} is not safe to repeat`);
 	}
 
 	// Ingest overwrites an existing document with the same source id, and
@@ -1975,7 +2222,7 @@ test("reads are read-only; ingest, Cypher and deletes are destructive", async ()
 	assert.equal(hint("hydradb_graph_query").destructiveHint, true);
 	assert.equal(hint("hydradb_graph_query").idempotentHint, false, "Cypher is not safe to repeat");
 
-	for (const name of ["hydradb_delete", "hydra_db_delete_memory"]) {
+	for (const name of ["hydradb_delete", "hydra_db_delete_memory", "hydradb_database_delete"]) {
 		assert.equal(hint(name).destructiveHint, true, `${name} removes data irreversibly`);
 	}
 

@@ -793,6 +793,290 @@ test("an unconfined client passes any per-call database through", async () => {
 	assert.deepEqual(calls, ["query:work"]);
 });
 
+test("database management maps the SDK methods and metadata-schema responses", async () => {
+	type DatabaseCall = {
+		database?: string;
+		embeddingsDimension?: number;
+		databaseMetadataSchema?: { name?: string; dataType?: string }[];
+		addFields?: { name?: string; dataType?: string }[];
+	};
+
+	type DatabaseResponse = {
+		database?: string;
+		status?: string;
+		knowledgeCollection?: { rowCount?: number };
+		ready?: boolean;
+		fields?: { name?: string; dataType?: string }[];
+		addedFields?: string[];
+	};
+
+	type DatabaseRequestOptions = { abortSignal?: AbortSignal; maxRetries?: number };
+
+	const calls: {
+		method: string;
+		request: DatabaseCall;
+		abortSignal?: AbortSignal;
+		maxRetries?: number;
+	}[] = [];
+
+	const record = (method: string, data: DatabaseResponse) => (
+		request: DatabaseCall,
+		options?: DatabaseRequestOptions,
+	) => {
+		calls.push({
+			method,
+			request,
+			abortSignal: options?.abortSignal,
+			maxRetries: options?.maxRetries,
+		});
+
+		return Promise.resolve({ data, success: true });
+	};
+
+	const sdk = {
+		databases: {
+			create: record("create", { database: "invoices", status: "accepted" }),
+			delete: record("delete", { database: "archive", status: "deletion_scheduled" }),
+			stats: record("stats", { database: "invoices", knowledgeCollection: { rowCount: 3 } }),
+			status: record("status", { database: "invoices", ready: true }),
+			getMetadataSchema: record("getMetadataSchema", {
+				database: "invoices",
+				fields: [{ name: "vendor", dataType: "VARCHAR" }],
+			}),
+			updateMetadataSchema: record("updateMetadataSchema", {
+				database: "invoices",
+				addedFields: ["amount"],
+			}),
+		},
+	};
+	// SAFETY: Each exercised database method is present with its generated SDK call shape.
+
+	const hydra = new HydraDB({ token: "t", database: "primary" }, sdk as HydraDBClient);
+	const signal = new AbortController().signal;
+
+	await hydra.databases.create({
+		database: "invoices",
+		embeddingsDimension: 1024,
+		databaseMetadataSchema: [{ name: "vendor", dataType: "VARCHAR" }],
+	}, { signal });
+	await hydra.databases.delete("archive", { signal });
+	await hydra.databases.stats("invoices", { signal });
+	await hydra.databases.readiness("invoices", { signal });
+	const schema = await hydra.databases.inspectMetadataSchema("invoices", { signal });
+	const updated = await hydra.databases.updateMetadataSchema("invoices", [{ name: "amount", dataType: "DOUBLE" }], { signal });
+
+	assert.ok(calls.every((call) => call.abortSignal instanceof AbortSignal));
+	assert.ok(calls.every((call) => call.abortSignal?.aborted === false));
+	assert.ok(calls.every((call) => call.maxRetries === 0));
+	assert.deepEqual(calls.map(({ method, request }) => ({ method, request })), [
+		{ method: "create", request: { database: "invoices", embeddingsDimension: 1024, databaseMetadataSchema: [{ name: "vendor", dataType: "VARCHAR" }] } },
+		{ method: "delete", request: { database: "archive" } },
+		{ method: "stats", request: { database: "invoices" } },
+		{ method: "status", request: { database: "invoices" } },
+		{ method: "getMetadataSchema", request: { database: "invoices" } },
+		{ method: "updateMetadataSchema", request: { database: "invoices", addFields: [{ name: "amount", dataType: "DOUBLE" }] } },
+	]);
+	assert.deepEqual(schema, { database: "invoices", fields: [{ name: "vendor", dataType: "VARCHAR" }] });
+	assert.deepEqual(updated, { database: "invoices", addedFields: ["amount"] });
+});
+
+test("database management enforces OAuth confinement before every SDK call", async () => {
+	const calls: string[] = [];
+
+	const record = (method: string) => () => {
+		calls.push(method);
+
+		return Promise.resolve({ data: { database: "allowed", status: "ok", fields: [], addedFields: [] }, success: true });
+	};
+
+	const sdk = {
+		databases: {
+			create: record("create"),
+			delete: record("delete"),
+			stats: record("stats"),
+			status: record("status"),
+			getMetadataSchema: record("getMetadataSchema"),
+			updateMetadataSchema: record("updateMetadataSchema"),
+		},
+	};
+	// SAFETY: Each exercised database method is present; confinement rejects before response parsing.
+
+	const hydra = new HydraDB(
+		{ token: "t", database: "primary", allowedDatabases: ["primary", "allowed"] },
+		sdk as HydraDBClient,
+	);
+
+	await hydra.databases.create({ database: "allowed" });
+	await hydra.databases.delete("allowed");
+	await hydra.databases.stats("allowed");
+	await hydra.databases.readiness("allowed");
+	await hydra.databases.inspectMetadataSchema("allowed");
+	await hydra.databases.updateMetadataSchema("allowed", [{ name: "region" }]);
+
+	for (const [name, call] of [
+		["create", () => hydra.databases.create({ database: "refused" })],
+		["delete", () => hydra.databases.delete("refused")],
+		["stats", () => hydra.databases.stats("refused")],
+		["readiness", () => hydra.databases.readiness("refused")],
+		["schema inspect", () => hydra.databases.inspectMetadataSchema("refused")],
+		["schema update", () => hydra.databases.updateMetadataSchema("refused", [{ name: "region" }])],
+	] as const) {
+		await assert.rejects(call, /confined to database "primary", "allowed"/, name);
+	}
+
+	assert.deepEqual(calls, ["create", "delete", "stats", "status", "getMetadataSchema", "updateMetadataSchema"]);
+});
+
+test("a database response missing a field the tools report is refused, not guessed", async () => {
+	type DatabaseAnswer = { database?: string; tenantId?: string; status?: string };
+
+	const answer = (data: DatabaseAnswer) => () => Promise.resolve({ data, success: true });
+
+	const sdk = {
+		databases: {
+			create: answer({ database: "invoices" }),
+			delete: answer({ status: "deletion_scheduled" }),
+			stats: answer({ tenantId: "invoices" }),
+			status: answer({}),
+			getMetadataSchema: answer({ database: "invoices" }),
+			updateMetadataSchema: answer({ database: "invoices" }),
+		},
+	};
+	// SAFETY: Each exercised database method is present; every answer omits a reported field.
+
+	const hydra = new HydraDB({ token: "t", database: "primary" }, sdk as HydraDBClient);
+
+	for (const [call, expected] of [
+		[() => hydra.databases.create({ database: "invoices" }), "database and status"],
+		[() => hydra.databases.delete("invoices"), "database and status"],
+		[() => hydra.databases.stats("invoices"), "database"],
+		[() => hydra.databases.readiness("invoices"), "database"],
+		[() => hydra.databases.inspectMetadataSchema("invoices"), "database and fields"],
+		[() => hydra.databases.updateMetadataSchema("invoices", [{ name: "amount", dataType: "DOUBLE" }]), "database and addedFields"],
+	] as const) {
+		await assert.rejects(call, {
+			name: "HydraWrapperError",
+			message: new RegExp(`→ 200: .*expected ${expected}\\.`),
+		});
+	}
+});
+
+test("database deletion refuses the connection default before the SDK call", async () => {
+	let called = false;
+
+	const sdk = {
+		databases: {
+			delete: () => {
+				called = true;
+
+				return Promise.resolve({ data: {}, success: true });
+			},
+		},
+	};
+	// SAFETY: The delete method is the only SDK member this test can reach.
+
+	const hydra = new HydraDB({ token: "t", database: "primary" }, sdk as HydraDBClient);
+
+	await assert.rejects(
+		() => hydra.databases.delete("primary"),
+		/connect through a different default database/i,
+	);
+	assert.equal(called, false);
+});
+
+test("database deletion refuses collection confinement before the SDK call", async () => {
+	let called = false;
+
+	const sdk = {
+		databases: {
+			delete: () => {
+				called = true;
+
+				return Promise.resolve({ data: {}, success: true });
+			},
+		},
+	};
+	// SAFETY: The delete method is the only SDK member this test can reach.
+
+	const hydra = new HydraDB(
+		{
+			token: "t",
+			database: "primary",
+			allowedDatabases: ["primary", "archive"],
+			allowedCollections: ["own"],
+		},
+		sdk as HydraDBClient,
+	);
+
+	await assert.rejects(
+		() => hydra.databases.delete("archive"),
+		/confined to collection "own".*removes every collection.*nothing was deleted/i,
+	);
+	assert.equal(called, false);
+});
+
+test("database creation refuses collection confinement before the SDK call", async () => {
+	let called = false;
+
+	const sdk = {
+		databases: {
+			create: () => {
+				called = true;
+
+				return Promise.resolve({ data: {}, success: true });
+			},
+		},
+	};
+	// SAFETY: The create method is the only SDK member this test can reach.
+
+	const hydra = new HydraDB(
+		{
+			token: "t",
+			database: "primary",
+			allowedDatabases: ["primary", "archive"],
+			allowedCollections: ["own"],
+		},
+		sdk as HydraDBClient,
+	);
+
+	await assert.rejects(
+		() => hydra.databases.create({ database: "archive" }),
+		/confined to collection "own".*creating a database.*nothing was created/i,
+	);
+	assert.equal(called, false);
+});
+
+test("metadata schema updates refuse collection confinement before the SDK call", async () => {
+	let called = false;
+
+	const sdk = {
+		databases: {
+			updateMetadataSchema: () => {
+				called = true;
+
+				return Promise.resolve({ data: {}, success: true });
+			},
+		},
+	};
+	// SAFETY: The metadata update method is the only SDK member this test can reach.
+
+	const hydra = new HydraDB(
+		{
+			token: "t",
+			database: "primary",
+			allowedDatabases: ["primary"],
+			allowedCollections: ["own"],
+		},
+		sdk as HydraDBClient,
+	);
+
+	await assert.rejects(
+		() => hydra.databases.updateMetadataSchema("primary", [{ name: "region", dataType: "VARCHAR" }]),
+		/confined to collection "own".*database-wide schema.*nothing was changed/i,
+	);
+	assert.equal(called, false);
+});
+
 test("collections and collection cannot be sent together", async () => {
 	const calls: string[] = [];
 	const sdk = {
