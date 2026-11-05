@@ -108,8 +108,8 @@ Hydra DB also runs **property graphs you model and own end to end**, queried in 
  "params": {"rows": [{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}]}}
 
 // Edges between those nodes
-{"query": "UNWIND $edges AS e MERGE (a:Person {id: e.from})-[:KNOWS]->(b:Person {id: e.to})",
- "params": {"edges": [{"from": 1, "to": 2}]}}
+{"query": "UNWIND $edges AS e CREATE (a {id: e.src})-[:KNOWS]->(b {id: e.dst})",
+ "params": {"edges": [{"src": 1, "dst": 2}]}}
 ```
 
 **Supported Cypher.** HydraDB graph collections accept a narrow Cypher dialect. A query outside it fails with a 400 *before* execution, so a rejected query changes nothing and fails identically on retry.
@@ -119,19 +119,23 @@ Writes:
 - Every node you write has an **integer** `id` property. String ids are rejected.
 - One-hop edges: `CREATE (:Person {id: 1})-[:KNOWS]->(:Person {id: 2})` or `MERGE (a:Person {id: 1})-[:KNOWS]->(b:Person {id: 2})`.
 - Node upserts in a batch: `UNWIND $rows AS row MERGE (n {id: row.id}) SET n:Person, n.name = row.name`. Use exactly one label per node, and set it with `SET`.
+- Edges in a batch: `UNWIND $edges AS e CREATE (a {id: e.src})-[:KNOWS]->(b {id: e.dst})`. No labels or properties in the pattern. A re-run of the same batch does not add edges. A single `CREATE` of an edge adds a new edge each time it runs.
 - Property updates: `MATCH (n:Person {id: 1}) SET n.age = 31`.
-- Deletes: `MATCH (n:Person) DETACH DELETE n`, or `DELETE r` on a typed edge.
-- Rejected: a node without an edge (`CREATE (:Person {name: 'a'})`), `CREATE ... RETURN ...`, `MATCH (a),(b) CREATE (a)-[:R]->(b)`, `SET n = $map`, `SET n += row.props`, `FOREACH`, writes inside `CALL { ... }`, and `CREATE INDEX`. HydraDB manages indexes itself. There is no index DDL.
+- Deletes: `MATCH (n:Person) DETACH DELETE n`, `DELETE r` on a typed edge, or many nodes with `UNWIND $rows AS row MATCH (n {id: row.id}) DETACH DELETE n` and `{"rows": [{"id": 4}]}`.
+- An edge to an `id` that does not exist creates a node with that `id` and no label. Load nodes before their edges.
+- If you write an existing `id` with a second label, the node gets both labels.
+- Rejected: a node without an edge (`CREATE (:Person {name: 'a'})`), `CREATE ... RETURN ...`, `MATCH (a),(b) CREATE (a)-[:R]->(b)`, `SET n = $map`, `SET n += row.props`, `FOREACH`, writes inside `CALL { ... }`, `UNWIND $ids AS id MATCH (n {id: id}) ...` (send row maps instead), and `CREATE INDEX`.
 
 Reads:
 
-- Supported: `MATCH` with labels and properties, typed traversal (also bounded variable-length paths such as `-[:KNOWS*1..3]->`), `WHERE` (also `IN`), `OPTIONAL MATCH`, `UNWIND`, `ORDER BY`/`SKIP`/`LIMIT`, `count`/`sum`/`avg`/`collect`/`min`/`max`, `CASE`, `EXISTS { ... }`, string functions (`toUpper`, `toLower`, `STARTS WITH`, ...), parameters, map and list literals, and read-only `CALL { ... }` subqueries.
+- Supported: `MATCH` with labels and properties, typed traversal (also bounded variable-length paths such as `-[:KNOWS*1..3]->`), `WHERE` (also `IN`), `OPTIONAL MATCH`, `WITH`, `ORDER BY`/`SKIP`/`LIMIT`, `count`/`sum`/`avg`/`collect`/`min`/`max`, `CASE`, `EXISTS { ... }`, string functions (`toUpper`, `toLower`, `STARTS WITH`, ...), parameters, map and list literals, and read-only `CALL { ... }` subqueries.
 - Rejected: `type()`, `id()`, `labels()`, `keys()`, `properties()`, `nodes()`, `relationships()`, `startNode()`, `endNode()`, `elementId()`, `shortestPath`, and untyped relationships such as `(a)--(b)` or `()-[r]->()`.
+- A read that starts with `UNWIND` has one shape only: one `UNWIND` over a list of plain values (not maps), one `MATCH` and a final `RETURN`, such as `UNWIND $ids AS i MATCH (p:Person {id: i}) RETURN p.name AS name`. It cannot have `WHERE`, `WITH`, `OPTIONAL MATCH`, `ORDER BY`, `SKIP`, `LIMIT` or `UNION`. Use `MATCH (p:Person) WHERE p.id IN $ids ...` for those.
 - `RETURN n` returns the node's integer id, not a node object. Return properties instead: `RETURN n.name AS name`.
 
 Also rejected: procedure calls (`CALL db.*`, `CALL apoc.*`) and `LOAD CSV`. Pass data through `params`. There is no schema tool.
 
-Dropping a collection removes it from the API at once. Its storage is reclaimed later. Do not write to a collection while it is being dropped: a write that lands during the drop can survive it.
+A collection leaves the listing when its drop succeeds. A very large collection can need a retry: the call returns an error, and the next call resumes the drop. The storage is retained. Do not write to a collection while it is being dropped: a write that lands during the drop can survive it.
 
 Collections auto-create on first write, so there is no create-collection call. Requests are capped at 256 KiB (enforced locally, before upload) and large result sets are truncated server-side — paginate with `ORDER BY ... SKIP $offset LIMIT $limit`.
 

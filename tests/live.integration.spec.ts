@@ -528,19 +528,30 @@ test(
 
 		try {
 			// Collections auto-create on first write; there is no create call.
-			const created = await hydra.graph.query({
+			// Graph collections accept a narrow Cypher dialect (ENG-3448): every
+			// node has an integer `id`, the node batch sets one label with SET,
+			// and a write returns no rows.
+			const written = await hydra.graph.query({
 				...scope,
 				query:
-					"UNWIND $rows AS row MERGE (p:Person {ext_id: row.ext_id}) SET p += row " +
-					"RETURN count(p) AS created",
+					"UNWIND $rows AS row MERGE (p {id: row.id}) " +
+					"SET p:Person, p.ext_id = row.ext_id, p.name = row.name, p.role = row.role",
 				params: {
 					rows: [
-						{ ext_id: "a", name: "Alice", role: "admin" },
-						{ ext_id: "b", name: "Bob", role: "analyst" },
+						{ id: 1, ext_id: "a", name: "Alice", role: "admin" },
+						{ id: 2, ext_id: "b", name: "Bob", role: "analyst" },
 					],
 				},
 			});
-			assert.equal(created[0]?.created, 2, `unexpected write result: ${JSON.stringify(created)}`);
+
+			assert.deepEqual(written, [], `a write returns no rows: ${JSON.stringify(written)}`);
+
+			const created = await hydra.graph.query({
+				...scope,
+				query: "MATCH (p:Person) RETURN count(p) AS created",
+			});
+
+			assert.equal(created[0]?.created, 2, `unexpected node count: ${JSON.stringify(created)}`);
 
 			// The collection now exists and is listed.
 			const collections = await hydra.graph.listCollections({ database });
@@ -551,44 +562,42 @@ test(
 
 			await hydra.graph.query({
 				...scope,
-				query:
-					"MATCH (a:Person {ext_id:'a'}),(b:Person {ext_id:'b'}) " +
-					"MERGE (a)-[:KNOWS {since: 2020}]->(b) RETURN 1 AS ok",
+				query: "MERGE (a:Person {id: 1})-[:KNOWS {since: 2020}]->(b:Person {id: 2})",
 			});
 
-			// A node comes back flat: properties merged with the renderer-added
-			// `id` and `labels`. The renderer in src/cypher.ts depends on exactly
-			// this shape, so assert it rather than assuming it holds.
+			// `RETURN p` gives the node's integer id, not a node object. The
+			// renderer in src/cypher.ts shows it as a number.
 			const nodes = await hydra.graph.query({
 				...scope,
-				query: "MATCH (p:Person {ext_id:'a'}) RETURN p",
+				query: "MATCH (p:Person {ext_id: 'a'}) RETURN p",
 			});
-			const node = nodes[0]?.p as Record<string, unknown>;
-			assert.ok(node, `expected a node row, got ${JSON.stringify(nodes)}`);
-			assert.ok(Array.isArray(node.labels), "a node must carry `labels`");
-			assert.equal(node.name, "Alice");
 
-			// A path arrives assembled as {nodes, edges} in traversal order.
-			const paths = await hydra.graph.query({
-				...scope,
-				query:
-					"MATCH (a:Person {ext_id:'a'}),(b:Person {ext_id:'b'}) " +
-					"RETURN shortestPath((a)-[*..6]->(b)) AS p",
-			});
-			const path = paths[0]?.p as { nodes?: unknown[]; edges?: unknown[] };
-			assert.ok(Array.isArray(path?.nodes), "a path must carry `nodes`");
-			assert.ok(Array.isArray(path?.edges), "a path must carry `edges`");
+			assert.equal(nodes[0]?.p, 1, `expected the node id, got ${JSON.stringify(nodes)}`);
 
-			// Aggregating over labels is how a caller discovers a collection's
-			// structure without a schema procedure, so it must keep working.
-			const labels = await hydra.graph.query({
+			// A typed variable-length traversal and a relationship property.
+			const reach = await hydra.graph.query({
 				...scope,
-				query: "MATCH (n) UNWIND labels(n) AS label RETURN label, count(*) AS count",
+				query: "MATCH (a:Person {id: 1})-[:KNOWS*1..6]->(b:Person) RETURN DISTINCT b.name AS name",
 			});
-			assert.ok(
-				labels.some((row) => row.label === "Person"),
-				`expected a Person label, got ${JSON.stringify(labels)}`,
-			);
+
+			assert.deepEqual(reach, [{ name: "Bob" }]);
+
+			const since = await hydra.graph.query({
+				...scope,
+				query: "MATCH (:Person {id: 1})-[k:KNOWS]->(:Person {id: 2}) RETURN k.since AS since",
+			});
+
+			assert.deepEqual(since, [{ since: 2020 }]);
+
+			// labels() is rejected, so a caller checks a label it was told about
+			// with a count. This is the discovery query the server instructions
+			// recommend, so it must keep working.
+			const count = await hydra.graph.query({
+				...scope,
+				query: "MATCH (n:Person) RETURN count(n) AS count",
+			});
+
+			assert.equal(count[0]?.count, 2, `unexpected label count: ${JSON.stringify(count)}`);
 		} finally {
 			await hydra.graph.dropCollection({ database, collection });
 		}
