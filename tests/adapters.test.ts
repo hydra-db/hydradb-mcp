@@ -47,6 +47,7 @@ test("toAddMemoryResponse carries per-item failures instead of discarding them",
 	assert.deepEqual(res.results[1], {
 		source_id: "s-bad",
 		title: "notes.md",
+		stored_title: "notes.md",
 		status: "failed",
 		error: "content exceeds maximum size",
 		error_code: "TOO_LARGE",
