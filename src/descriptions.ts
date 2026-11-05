@@ -71,10 +71,12 @@ const PARAM = {
 		"thread. Pass false only for corpora you uploaded directly, to save a little " +
 		"latency.",
 	collections:
-		"Search SEVERAL collections at once, as a list of names. Use it when the " +
-		"answer could live in more than one and you do not know which — otherwise " +
-		"prefer a single `collection`, which is both faster and more precise. " +
-		"Pass either this or `collection`, never both.",
+		"Search SEVERAL collections at once, as a list of names, or as an object " +
+		"mapping each name to a weight (e.g. {\"policies\": 2, \"handbook\": 1}) to " +
+		"rank some collections above others (one decimal place at most). Use it " +
+		"when the answer could live in more than one and you do not know which — " +
+		"otherwise prefer a single `collection`, which is both faster and more " +
+		"precise. Pass either this or `collection`, never both.",
 	additional_context:
 		"Background text prepended to the query to steer retrieval, such as the " +
 		"project or person the question is about. It is not searched for itself.",
