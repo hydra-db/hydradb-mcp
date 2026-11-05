@@ -65,6 +65,13 @@ test("scalars render as themselves", () => {
 	assert.equal(renderValue(true), "true");
 });
 
+test("a node returned as its integer id renders as that number", () => {
+	// `RETURN n` gives the node's integer id, not a node object. The renderer
+	// passes it through instead of failing.
+	assert.equal(renderValue(7), "7");
+	assert.equal(renderRows([{ n: 7, name: "Alice" }]), "1. n: 7 | name: Alice");
+});
+
 test("an empty result says so rather than rendering nothing", () => {
 	assert.equal(renderRows([]), "(0 rows)");
 });
