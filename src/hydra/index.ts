@@ -29,6 +29,7 @@ export type {
 	IngestItem,
 	IngestParams,
 	IngestDocument,
+	UpdateContextParams,
 	ListParams,
 	MetadataFilter,
 	MetadataFilterValue,

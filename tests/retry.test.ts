@@ -13,9 +13,9 @@ const OK_QUERY = { status: 200, body: { success: true, data: { chunks: [] } } };
 
 /** Replace `fetch` with a scripted one; the last reply repeats. */
 function scriptFetch(t: { mock: { method: typeof import("node:test").mock.method } }, replies: Reply[]) {
-	const calls: { url: string; at: number }[] = [];
+	const calls: { url: string; at: number; method?: string; body?: BodyInit | null }[] = [];
 	t.mock.method(globalThis, "fetch", async (input: Request | string | URL, init?: RequestInit) => {
-		calls.push({ url: String(input), at: Date.now() });
+		calls.push({ url: String(input), at: Date.now(), method: init?.method, body: init?.body });
 		const reply = replies[Math.min(calls.length - 1, replies.length - 1)] ?? OK_QUERY;
 
 		if (reply instanceof Error) throw reply;
@@ -37,6 +37,11 @@ function scriptFetch(t: { mock: { method: typeof import("node:test").mock.method
 
 
 const OK_INGEST = { status: 200, body: { success: true, data: { success: 1, failed: 0, results: [] } } };
+
+const OK_UPDATE = {
+	status: 200,
+	body: { success: true, data: { updated: true, id: "doc-1", database: "db", collection: "notes" } },
+};
 
 const OK_FEEDBACK = { status: 200, body: { success: true, data: { recorded: true } } };
 
@@ -111,6 +116,41 @@ test("a read is retried after a 5xx", async (t) => {
 	const hydra = new HydraDB({ token: "t", database: "db" });
 	await hydra.context.query({ query: "q" });
 	assert.equal(calls.length, 2);
+});
+
+test("a metadata update retries the identical PATCH after a 503", async (t) => {
+	const calls = scriptFetch(t, [{ status: 503 }, OK_UPDATE]);
+	const hydra = new HydraDB({ token: "t", database: "db", collection: "notes" });
+
+	await hydra.context.update({
+		id: "doc-1",
+		databaseMetadata: { title: "Runbook" },
+		additionalMetadata: { owner: "platform" },
+		acl: ["group:google:eng@example.com"],
+	});
+
+	assert.equal(calls.length, 2);
+	assert.equal(calls[0]?.method, "PATCH");
+	assert.equal(calls[1]?.method, "PATCH");
+	assert.equal(calls[0]?.body, calls[1]?.body, "the retry sends the identical PATCH payload");
+});
+
+test("a cancelled metadata update sends no request after Retry-After", async (t) => {
+	const calls = scriptFetch(t, [{ status: 503, headers: { "retry-after": "1" } }, OK_UPDATE]);
+	const hydra = new HydraDB({ token: "t", database: "db", collection: "notes" });
+	const controller = new AbortController();
+
+	const call = hydra.context.update(
+		{ id: "doc-1", databaseMetadata: { title: "Runbook" } },
+		{ signal: controller.signal },
+	);
+
+	while (calls.length === 0) await new Promise((resolve) => setTimeout(resolve, 5));
+	controller.abort();
+
+	await assert.rejects(call, /request cancelled by the caller/);
+	await new Promise((resolve) => setTimeout(resolve, 1100));
+	assert.equal(calls.length, 1, "nothing was sent after the cancel");
 });
 
 test("Retry-After in seconds sets the wait, on the SDK and the hand-rolled path", async (t) => {

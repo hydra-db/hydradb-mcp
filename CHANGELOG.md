@@ -115,6 +115,15 @@ spreadsheets, OpenDocument, iWork, images and text files. They are uploaded as
 - The SDK's own retry loop is turned off (`maxRetries: 0`); one policy in
   `src/hydra/retry.ts` now covers SDK and hand-rolled calls alike.
 
+### Added — `hydradb_update`
+
+`hydradb_update` edits one existing context item without re-ingesting it. It
+merges `database_metadata` and `additional_metadata`, or replaces the complete
+ACL. An omitted ACL stays unchanged; `[]` or `null` makes the item private;
+`["__public__"]` makes it public to identified callers. The tool reports
+partial commits and search-index ACL synchronization failures as retryable,
+idempotent errors instead of claiming complete success.
+
 ### Added — MCP database management tools
 
 Added `hydradb_database_create`, `hydradb_database_delete`,
