@@ -170,22 +170,6 @@ function selectListPayload(response: ListResponse, kind: ListParams["kind"]): Se
 	return topLevelRows != null ? parsed.data : parsed.data.inner ?? parsed.data;
 }
 
-/** A documented degraded memory response is a failure, not an empty store. */
-function assertListAvailable(response: ListResponse, kind: ListParams["kind"]): void {
-	if (kind !== "memory") return;
-
-	const payload = selectListPayload(response, kind);
-	const parsed = z.object({ message: z.string().optional() }).safeParse(payload);
-
-	if (parsed.success && parsed.data.message === "Memories temporarily unavailable") {
-		throw invalidSuccessfulResponse(
-			"MEMORY_LIST_UNAVAILABLE",
-			"Hydra DB could not read the memory store. This is not an empty database. Retry the list.",
-			response,
-		);
-	}
-}
-
 /**
  * A list row with a usable ID, by the list adapters' first-string precedence,
  * so a blank `id` cannot hide behind a valid legacy `source_id`.
@@ -217,14 +201,26 @@ function listPayload(kind: ListParams["kind"]) {
  * accepting the historical `inner` nesting the list adapters understand.
  */
 function validateListResponse(response: ListResponse, kind: ListParams["kind"]): void {
-	assertListAvailable(response, kind);
 	const accepted = listPayload(kind);
 	const payload = unwrap(response);
+	const selected = selectListPayload(response, kind);
+
+	if (kind === "memory") {
+		const availability = z.object({ message: z.string().optional() }).safeParse(selected);
+
+		if (availability.success && availability.data.message === "Memories temporarily unavailable") {
+			throw invalidSuccessfulResponse(
+				"MEMORY_LIST_UNAVAILABLE",
+				"Hydra DB could not read the memory store. This is not an empty database. Retry the list.",
+				response,
+			);
+		}
+	}
 
 	if (
 		!successfulResponse.safeParse(response).success ||
 		!successfulResponse.safeParse(payload).success ||
-		!accepted.safeParse(selectListPayload(response, kind)).success
+		!accepted.safeParse(selected).success
 	) {
 		throw invalidSuccessfulResponse(
 			"INVALID_LIST_RESPONSE",
