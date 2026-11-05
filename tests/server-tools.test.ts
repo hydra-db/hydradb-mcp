@@ -1788,6 +1788,78 @@ test("hydradb_list reports direct and inner degraded memory stores as errors", a
 	}
 });
 
+test("hydradb_list validates memory list containers on plain and filtered paths", async () => {
+	for (const [scenario, list, expectedError] of [
+		["direct empty", { success: true, user_memories: [], total: 0 }, undefined],
+		["inner empty", { inner: { success: true, user_memories: [], total: 0 } }, undefined],
+		["direct failure", { success: false, user_memories: [], total: 0 }, "INVALID_LIST_RESPONSE"],
+		[
+			"outer container failure",
+			{ success: false, inner: { success: true, user_memories: [], total: 0 } },
+			"INVALID_LIST_RESPONSE",
+		],
+		[
+			"inner failure",
+			{ inner: { success: false, user_memories: [], total: 0 } },
+			"INVALID_LIST_RESPONSE",
+		],
+		[
+			"top-level precedence",
+			{
+				user_memories: [],
+				total: 0,
+				inner: {
+					success: true,
+					message: "Memories temporarily unavailable",
+					user_memories: [],
+					total: 0,
+				},
+			},
+			undefined,
+		],
+	] as const) {
+		for (const metadata of [undefined, { team: "infra" }]) {
+			const { hydra } = mockHydra({ list });
+			const client = await connect(hydra);
+			const path = metadata ? "filtered" : "plain";
+
+			try {
+				const result = await client.callTool({
+					name: "hydradb_list",
+					arguments: metadata ? { kind: "memory", metadata } : { kind: "memory" },
+				});
+
+				const text = JSON.stringify(result);
+
+				if (expectedError) {
+					assert.equal(result.isError, true, `${scenario} should fail on the ${path} path`);
+					assert.match(text, new RegExp(expectedError));
+					assert.match(text, /request_id: req-from-meta/);
+				} else {
+					assert.notEqual(result.isError, true, `${scenario} should succeed on the ${path} path`);
+					assert.doesNotMatch(text, /MEMORY_LIST_UNAVAILABLE/);
+					assert.match(
+						text,
+						metadata ? /No memories match the supplied metadata filters/ : /No memories stored yet/,
+					);
+					assert.deepEqual(
+						z.object({
+							items: z.array(z.object({}).passthrough()),
+							shown: z.literal(0),
+							total: z.literal(0),
+							page: z.literal(1),
+							has_more: z.literal(false),
+						}).parse(result.structuredContent),
+						{ items: [], shown: 0, total: 0, page: 1, has_more: false },
+					);
+				}
+			} finally {
+				await client.close();
+			}
+		}
+	}
+});
+
 test("hydradb_list renders nonempty memory rows decoded by SDK 2.1.8", async (t) => {
 	const fetchMock = t.mock.method(globalThis, "fetch", async () =>
 		new Response(
