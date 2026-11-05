@@ -103,18 +103,35 @@ Hydra DB also runs **property graphs you model and own end to end**, queried in 
 {"query": "MATCH (a:Person {name:$n})-[:KNOWS*1..4]->(r) RETURN DISTINCT r.name AS name",
  "params": {"n": "Alice"}}
 
-// Bulk load, re-runnable after a failure
-{"query": "UNWIND $rows AS row MERGE (p:Person {ext_id: row.ext_id}) SET p += row",
- "params": {"rows": [{"ext_id": "a", "name": "Alice"}]}}
+// Bulk node upsert, re-runnable after a failure (integer ids, one label set with SET)
+{"query": "UNWIND $rows AS row MERGE (n {id: row.id}) SET n:Person, n.name = row.name",
+ "params": {"rows": [{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}]}}
+
+// Edges between those nodes
+{"query": "UNWIND $edges AS e MERGE (a:Person {id: e.from})-[:KNOWS]->(b:Person {id: e.to})",
+ "params": {"edges": [{"from": 1, "to": 2}]}}
 ```
 
-**Differences from Neo4j** worth knowing before you write Cypher. Each is rejected *before* execution, so a rejected query changes nothing and fails identically on retry:
+**Supported Cypher.** HydraDB graph collections accept a narrow Cypher dialect. A query outside it fails with a 400 *before* execution, so a rejected query changes nothing and fails identically on retry.
 
-- Procedure calls (`CALL db.*`, `CALL apoc.*`) are rejected **by the server**, before it executes anything. `CALL { ... }` subqueries are fine. There is no schema tool and no `apoc.meta.schema()`; to learn a collection's structure, query it — `MATCH (n) UNWIND labels(n) AS l RETURN l, count(*) AS c ORDER BY l`.
-- `LOAD CSV` is rejected — pass data through `params` instead.
-- Existence checks are bare pattern predicates (`WHERE (p)-[:KNOWS]->()`); `EXISTS { ... }` and `exists()` are not accepted.
-- `shortestPath` belongs in `RETURN`/`WITH`, not `MATCH p = ...`, and must be directed.
-- `EXPLAIN`/`PROFILE` **execute** the query rather than planning it — do not use them to preview one.
+Writes:
+
+- Every node you write has an **integer** `id` property. String ids are rejected.
+- One-hop edges: `CREATE (:Person {id: 1})-[:KNOWS]->(:Person {id: 2})` or `MERGE (a:Person {id: 1})-[:KNOWS]->(b:Person {id: 2})`.
+- Node upserts in a batch: `UNWIND $rows AS row MERGE (n {id: row.id}) SET n:Person, n.name = row.name`. Use exactly one label per node, and set it with `SET`.
+- Property updates: `MATCH (n:Person {id: 1}) SET n.age = 31`.
+- Deletes: `MATCH (n:Person) DETACH DELETE n`, or `DELETE r` on a typed edge.
+- Rejected: a node without an edge (`CREATE (:Person {name: 'a'})`), `CREATE ... RETURN ...`, `MATCH (a),(b) CREATE (a)-[:R]->(b)`, `SET n = $map`, `SET n += row.props`, `FOREACH`, writes inside `CALL { ... }`, and `CREATE INDEX`. HydraDB manages indexes itself. There is no index DDL.
+
+Reads:
+
+- Supported: `MATCH` with labels and properties, typed traversal (also bounded variable-length paths such as `-[:KNOWS*1..3]->`), `WHERE` (also `IN`), `OPTIONAL MATCH`, `UNWIND`, `ORDER BY`/`SKIP`/`LIMIT`, `count`/`sum`/`avg`/`collect`/`min`/`max`, `CASE`, `EXISTS { ... }`, string functions (`toUpper`, `toLower`, `STARTS WITH`, ...), parameters, map and list literals, and read-only `CALL { ... }` subqueries.
+- Rejected: `type()`, `id()`, `labels()`, `keys()`, `properties()`, `nodes()`, `relationships()`, `startNode()`, `endNode()`, `elementId()`, `shortestPath`, and untyped relationships such as `(a)--(b)` or `()-[r]->()`.
+- `RETURN n` returns the node's integer id, not a node object. Return properties instead: `RETURN n.name AS name`.
+
+Also rejected: procedure calls (`CALL db.*`, `CALL apoc.*`) and `LOAD CSV`. Pass data through `params`. There is no schema tool.
+
+Dropping a collection removes it from the API at once. Its storage is reclaimed later. Do not write to a collection while it is being dropped: a write that lands during the drop can survive it.
 
 Collections auto-create on first write, so there is no create-collection call. Requests are capped at 256 KiB (enforced locally, before upload) and large result sets are truncated server-side — paginate with `ORDER BY ... SKIP $offset LIMIT $limit`.
 

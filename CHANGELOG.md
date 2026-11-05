@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — graph tools describe the supported Cypher dialect (ENG-3448)
+
+HydraDB graph collections now run on an engine with a narrow Cypher dialect.
+The `hydradb_graph_query` description and the README "Supported Cypher" section
+now list the exact rules. Written nodes need an integer `id`. Writes are one-hop
+edges, batched node upserts (`UNWIND ... MERGE (n {id: row.id}) SET n:Label`),
+`SET` on a matched node, `DETACH DELETE` and typed-edge `DELETE`. Reads reject
+`type()`, `id()`, `labels()`, `keys()`, `properties()`, `shortestPath` and
+untyped relationships. `RETURN n` gives the node's integer id; the renderer shows
+it as a number. The text no longer mentions index management or
+`SET n += row`. `drop_collection` notes that storage is reclaimed later and that
+a write during a drop can survive it.
+
 ## [1.7.0] - 2026-11-03
 
 ### Added — dashboard connector completion

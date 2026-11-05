@@ -159,10 +159,10 @@ current SDK method internally. Language casing: `snake_case` in Python, `camelCa
 | `context.relations(database, id?, …)` | `context.relations(…)` | — |
 | `context.subgraph(database, id, depth?, maxSources?)` | *(none — raw `GET /context/{id}/subgraph`)* | connected subgraph; **no SDK resource yet** |
 | `context.delete(database, ids, kind)` | `context.delete(…)` | one path for memory + knowledge |
-| `graph.query(database, collection, query, params?)` | *(none — raw `POST /byog/query`)* | BYOG Cypher; **no SDK resource at 2.1.2** |
+| `graph.query(database, collection, query, params?)` | *(none — raw `POST /byog/query`)* | BYOG Cypher in the narrow dialect (integer node ids, one-hop edge writes; see README "Supported Cypher"); **no SDK resource at 2.1.2** |
 | `graph.createDatabase(database)` | *(none — raw `POST /byog/databases`)* | — |
 | `graph.collections(database)` | *(none — raw `GET /byog/collections`)* | — |
-| `graph.dropCollection(database, collection)` | *(none — raw `DELETE /byog/collections`)* | idempotent |
+| `graph.dropCollection(database, collection)` | *(none — raw `DELETE /byog/collections`)* | idempotent; gone from the API at once, storage reclaimed later |
 | `graph.dropDatabase(database)` | *(none — raw `DELETE /byog/databases`)* | `deleted:false` ⇒ collections only |
 
 ### Connector wrapper methods
