@@ -135,6 +135,8 @@ Reads:
 
 Also rejected: procedure calls (`CALL db.*`, `CALL apoc.*`) and `LOAD CSV`. Pass data through `params`. There is no schema tool.
 
+Do not use `EXPLAIN`/`PROFILE` to preview a query: do not rely on them to plan a query without running it.
+
 A collection leaves the listing when its drop succeeds. A very large collection can need a retry: the call returns an error, and the next call resumes the drop. The storage is retained. Do not write to a collection while it is being dropped: a write that lands during the drop can survive it.
 
 Collections auto-create on first write, so there is no create-collection call. Requests are capped at 256 KiB (enforced locally, before upload) and large result sets are truncated server-side — paginate with `ORDER BY ... SKIP $offset LIMIT $limit`.

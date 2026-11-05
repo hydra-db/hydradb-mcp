@@ -598,6 +598,22 @@ test(
 			});
 
 			assert.equal(count[0]?.count, 2, `unexpected label count: ${JSON.stringify(count)}`);
+
+			// The documented edge batch is safe to retry: running it twice
+			// leaves one edge per row.
+			const edgeBatch = {
+				...scope,
+				query: "UNWIND $edges AS e CREATE (a {id: e.src})-[:FOLLOWS]->(b {id: e.dst})",
+				params: { edges: [{ src: 1, dst: 2 }] },
+			};
+			await hydra.graph.query(edgeBatch);
+			await hydra.graph.query(edgeBatch);
+			const follows = await hydra.graph.query({
+				...scope,
+				query: "MATCH (:Person)-[f:FOLLOWS]->(:Person) RETURN count(f) AS follows",
+			});
+
+			assert.equal(follows[0]?.follows, 1, `edge batch duplicated edges: ${JSON.stringify(follows)}`);
 		} finally {
 			await hydra.graph.dropCollection({ database, collection });
 		}

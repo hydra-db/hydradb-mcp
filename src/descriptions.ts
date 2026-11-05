@@ -433,7 +433,8 @@ READS — supported: MATCH with labels and properties, typed traversal (also bou
   A read that starts with UNWIND has one shape only: one UNWIND over a list of plain values (not maps), one MATCH and a final RETURN — \`UNWIND $ids AS i MATCH (p:Person {id: i}) RETURN p.name AS name\`. No WHERE, WITH, OPTIONAL MATCH, ORDER BY, SKIP, LIMIT or UNION in it; use \`WHERE p.id IN $ids\` for those.
   \`RETURN n\` returns the node's integer id, not the node. Return properties instead: \`RETURN n.name AS name\`.
 
-Also rejected: procedure calls (\`CALL db.*\`, \`CALL apoc.*\`) and \`LOAD CSV\` — pass data through \`params\`.`;
+Also rejected: procedure calls (\`CALL db.*\`, \`CALL apoc.*\`) and \`LOAD CSV\` — pass data through \`params\`.
+Do NOT use \`EXPLAIN\`/\`PROFILE\` to preview a query: do not rely on them to plan without running it.`;
 
 const GRAPH_SCOPE = `Queries run against exactly ONE collection — collections never see each other's data, so \`MATCH (n) RETURN count(n) AS c\` counts that collection's nodes and nothing else. \`database\` and \`collection\` default to the server's configured graph scope; pass them to target another.`;
 
