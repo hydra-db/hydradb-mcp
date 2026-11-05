@@ -103,7 +103,12 @@ function mockHydra(
 			const method = path.split("/").filter(Boolean).pop() ?? "fetch";
 			calls.push({ method: `${method}-fetch`, args: JSON.parse(String(init?.body ?? "{}")) });
 			const data = "list" in responses ? responses.list : { sources: [], total: 0 };
-			return new Response(JSON.stringify({ success: true, data }), {
+
+			return new Response(JSON.stringify({
+				success: true,
+				data,
+				meta: { request_id: "req-from-meta" },
+			}), {
 				status: 200,
 				headers: { "content-type": "application/json" },
 			});
@@ -1733,40 +1738,52 @@ test("hydradb_list distinguishes an empty page from an empty store", async () =>
 	assert.doesNotMatch(text, /No memories stored yet/);
 });
 
-test("hydradb_list reports a degraded memory store as an error", async () => {
-	for (const metadata of [undefined, { team: "infra" }]) {
-		const { hydra } = mockHydra({
-			list: {
+test("hydradb_list reports direct and inner degraded memory stores as errors", async () => {
+	for (const [container, list] of [
+		["direct", {
+			success: true,
+			message: "Memories temporarily unavailable",
+			user_memories: [],
+			total: 0,
+		}],
+		["inner", {
+			inner: {
 				success: true,
 				message: "Memories temporarily unavailable",
 				user_memories: [],
 				total: 0,
 			},
-		});
+		}],
+	] as const) {
+		for (const metadata of [undefined, { team: "infra" }]) {
+			const { hydra } = mockHydra({
+				list,
+			});
 
-		const arguments_ = metadata
-			? { kind: "memory" as const, metadata }
-			: { kind: "memory" as const };
+			const arguments_ = metadata
+				? { kind: "memory" as const, metadata }
+				: { kind: "memory" as const };
 
-		const client = await connect(hydra);
+			const client = await connect(hydra);
 
-		try {
-			const result = await client.callTool({
+			try {
+				const result = await client.callTool({
 					name: "hydradb_list",
 					arguments: arguments_,
 				});
 
-			const text = JSON.stringify(result);
+				const text = JSON.stringify(result);
 
-			assert.equal(result.isError, true);
-			assert.match(text, /MEMORY_LIST_UNAVAILABLE/);
-			assert.match(text, /not an empty database/i);
+				assert.equal(result.isError, true);
+				assert.match(text, /MEMORY_LIST_UNAVAILABLE/);
+				assert.match(text, /not an empty database/i);
 
-			if (!metadata) assert.match(text, /request_id: req-from-meta/);
+				assert.match(text, /request_id: req-from-meta/, `${container} response should retain its envelope request ID`);
 
-			assert.doesNotMatch(text, /No memories/);
-		} finally {
-			await client.close();
+				assert.doesNotMatch(text, /No memories/);
+			} finally {
+				await client.close();
+			}
 		}
 	}
 });

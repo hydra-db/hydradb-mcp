@@ -148,11 +148,33 @@ function invalidSuccessfulResponse(
 	});
 }
 
+const selectableListContainer = z.object({
+	inner: z.object({}).passthrough().nullish(),
+	userMemories: z.array(z.object({}).passthrough()).optional(),
+	user_memories: z.array(z.object({}).passthrough()).optional(),
+	sources: z.array(z.object({}).passthrough()).optional(),
+}).passthrough();
+
+type SelectableListContainer = z.infer<typeof selectableListContainer>;
+
+/** Select the list container with the same top-level-first precedence as the adapters. */
+function selectListPayload(response: ListResponse, kind: ListParams["kind"]): SelectableListContainer | undefined {
+	const parsed = selectableListContainer.safeParse(unwrap(response));
+
+	if (!parsed.success) return undefined;
+
+	const topLevelRows = kind === "memory"
+		? parsed.data.userMemories ?? parsed.data.user_memories
+		: parsed.data.sources;
+
+	return topLevelRows != null ? parsed.data : parsed.data.inner ?? parsed.data;
+}
+
 /** A documented degraded memory response is a failure, not an empty store. */
 function assertListAvailable(response: ListResponse, kind: ListParams["kind"]): void {
 	if (kind !== "memory") return;
 
-	const payload = unwrap(response);
+	const payload = selectListPayload(response, kind);
 	const parsed = z.object({ message: z.string().optional() }).safeParse(payload);
 
 	if (parsed.success && parsed.data.message === "Memories temporarily unavailable") {
@@ -196,10 +218,14 @@ function listPayload(kind: ListParams["kind"]) {
  */
 function validateListResponse(response: ListResponse, kind: ListParams["kind"]): void {
 	assertListAvailable(response, kind);
-	const payload = listPayload(kind);
-	const accepted = payload.or(successfulResponse.extend({ inner: payload }));
+	const accepted = listPayload(kind);
+	const payload = unwrap(response);
 
-	if (!successfulResponse.safeParse(response).success || !accepted.safeParse(unwrap(response)).success) {
+	if (
+		!successfulResponse.safeParse(response).success ||
+		!successfulResponse.safeParse(payload).success ||
+		!accepted.safeParse(selectListPayload(response, kind)).success
+	) {
 		throw invalidSuccessfulResponse(
 			"INVALID_LIST_RESPONSE",
 			`Invalid successful list response: expected a ${kind === "memory" ? "user_memories" : "sources"} ` +
