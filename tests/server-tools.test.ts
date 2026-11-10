@@ -1754,6 +1754,11 @@ test("hydradb_list reports direct and inner degraded memory stores as errors", a
 				total: 0,
 			},
 		}],
+		["outer over inner", {
+			success: true,
+			message: "Memories temporarily unavailable",
+			inner: { success: true, user_memories: [], total: 0 },
+		}],
 	] as const) {
 		for (const metadata of [undefined, { team: "infra" }]) {
 			const { hydra } = mockHydra({

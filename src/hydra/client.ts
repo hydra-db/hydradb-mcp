@@ -206,9 +206,14 @@ function validateListResponse(response: ListResponse, kind: ListParams["kind"]):
 	const selected = selectListPayload(response, kind);
 
 	if (kind === "memory") {
-		const availability = z.object({ message: z.string().optional() }).safeParse(selected);
+		// The outer payload counts too: its message is lost when `inner` is selected.
+		const unavailable = [selected, payload].some((container) => {
+			const availability = z.object({ message: z.string().optional() }).safeParse(container);
 
-		if (availability.success && availability.data.message === "Memories temporarily unavailable") {
+			return availability.success && availability.data.message === "Memories temporarily unavailable";
+		});
+
+		if (unavailable) {
 			throw invalidSuccessfulResponse(
 				"MEMORY_LIST_UNAVAILABLE",
 				"Hydra DB could not read the memory store. This is not an empty database. Retry the list.",
