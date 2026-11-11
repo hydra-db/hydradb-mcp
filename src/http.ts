@@ -87,7 +87,8 @@ function banner(message: string): void {
 function literalRoutes(paths: string[]): RegExp[] {
 	return paths.map((path) => {
 		const escaped = path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-		return new RegExp(path === "/" ? "^/$" : `^${escaped}/?$`, "i");
+		// Express's string routes are non-strict: "/" also answers "//".
+		return new RegExp(path === "/" ? "^//?$" : `^${escaped}/?$`, "i");
 	});
 }
 

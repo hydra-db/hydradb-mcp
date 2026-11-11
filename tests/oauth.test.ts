@@ -451,6 +451,15 @@ test("an anonymous request is a 401 that points at the metadata document", async
 		TOOLS_LIST,
 	);
 	assert.equal(capitalized.status, 401);
+	// A bare double slash reached the endpoint before the routes became literal
+	// patterns (Express's non-strict "/" route); it must keep doing so.
+	const doubleSlash = await request(
+		"POST",
+		"//",
+		{ host: `127.0.0.1:${port}`, ...JSON_HEADERS },
+		TOOLS_LIST,
+	);
+	assert.equal(doubleSlash.status, 401);
 });
 
 test("a valid access token is served exactly like the API key it stands for", async () => {
