@@ -35,7 +35,7 @@ type RecordedCall = { method: string; args: Record<string, unknown> };
 /** Per-method response overrides, for tests that care what the API returned. */
 type Responses = Partial<
 	Record<
-		"query" | "ingest" | "list" | "inspect" | "delete" | "relations" | "status" | "databases" | "databaseCreate" | "databaseDelete" | "readiness" | "schemaInspect" | "schemaUpdate" | "collections" | "stats" | "feedback",
+		"query" | "ingest" | "list" | "inspect" | "update" | "delete" | "relations" | "status" | "databases" | "databaseCreate" | "databaseDelete" | "readiness" | "schemaInspect" | "schemaUpdate" | "collections" | "stats" | "feedback",
 		unknown
 	>
 >;
@@ -76,6 +76,12 @@ function mockHydra(
 			ingest: record("ingest", { success: true, successCount: 1, failedCount: 0 }),
 			list: record("list", { inner: { sources: [], total: 0 } }),
 			inspect: record("inspect", { success: true, content: "hi" }),
+			updateSourceMetadata: record("update", {
+				updated: true,
+				id: "doc-1",
+				database: "db_test",
+				collection: "col_test",
+			}),
 			delete: record("delete", { success: true, userMemoryDeleted: 1 }),
 			relations: record("relations", { relations: [], isTruncated: false }),
 			status: record("status", {}),
@@ -2991,7 +2997,7 @@ test("every tool declares all four behaviour hints explicitly", async () => {
 	await client.close();
 });
 
-test("tool annotations distinguish reads, additive writes, and destructive writes", async () => {
+test("tool annotations distinguish reads, additive writes, idempotent updates, and destructive writes", async () => {
 	process.env.HYDRADB_MCP_LEGACY_TOOLS = "1";
 	const client = await connect(mockHydra().hydra);
 	const { tools } = await client.listTools();
@@ -3028,6 +3034,10 @@ test("tool annotations distinguish reads, additive writes, and destructive write
 		assert.equal(hint(name).idempotentHint, false, `${name} is not safe to repeat`);
 	}
 
+	// Update can replace ACL values, but repeating the same request has no extra effect.
+	assert.equal(hint("hydradb_update").destructiveHint, true);
+	assert.equal(hint("hydradb_update").idempotentHint, true, "update is safe to repeat");
+
 	// Cypher can write, and a repeated CREATE duplicates nodes.
 	assert.equal(hint("hydradb_graph_query").destructiveHint, true);
 	assert.equal(hint("hydradb_graph_query").idempotentHint, false, "Cypher is not safe to repeat");
@@ -3036,6 +3046,212 @@ test("tool annotations distinguish reads, additive writes, and destructive write
 		assert.equal(hint(name).destructiveHint, true, `${name} removes data irreversibly`);
 	}
 
+	await client.close();
+});
+
+test("hydradb_update merges both metadata maps and replaces a named ACL", async () => {
+	const { hydra, calls } = mockHydra({
+		update: {
+			updated: true,
+			id: "doc-1",
+			database: "db_test",
+			collection: "col_test",
+			databaseMetadataKeys: ["department"],
+			additionalMetadataKeys: ["author", "reviewed"],
+			aclUpdated: true,
+			vectorAclSynced: true,
+		},
+	});
+
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_update",
+		arguments: {
+			id: "doc-1",
+			database_metadata: { department: "finance" },
+			additional_metadata: { author: "ada", reviewed: true },
+			acl: ["user_email:ada@example.test"],
+		},
+	});
+
+	const call = calls.find((entry) => entry.method === "update");
+
+	assert.deepEqual(call?.args, {
+		id: "doc-1",
+		database: "db_test",
+		collection: "col_test",
+		databaseMetadata: { department: "finance" },
+		additionalMetadata: { author: "ada", reviewed: true },
+		acl: ["user_email:ada@example.test"],
+	});
+	assert.notEqual(result.isError, true);
+
+	const first = result.content[0];
+
+	assert.equal(first?.type, "text");
+
+	if (first?.type !== "text") assert.fail("Expected text tool content");
+	assert.match(first.text, /Updated doc-1/);
+	assert.equal(result.structuredContent?.acl_updated, true);
+	await client.close();
+});
+
+for (const [label, acl, expected] of [
+	["empty", [], []],
+	["null", null, []],
+	["public", ["__public__"], ["__public__"]],
+] as const) {
+	test(`hydradb_update maps ${label} ACL to the documented replacement`, async () => {
+		const { hydra, calls } = mockHydra({
+			update: {
+				updated: true,
+				aclUpdated: true,
+				vectorAclSynced: true,
+			},
+		});
+
+		const client = await connect(hydra);
+
+		const result = await client.callTool({
+			name: "hydradb_update",
+			arguments: { id: "doc-1", acl },
+		});
+
+		assert.deepEqual(calls.find((entry) => entry.method === "update")?.args.acl, expected);
+		assert.notEqual(result.isError, true);
+		await client.close();
+	});
+}
+
+test("hydradb_update omits ACL when it was not supplied", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	await client.callTool({
+		name: "hydradb_update",
+		arguments: { id: "doc-1", additional_metadata: { reviewed: true } },
+	});
+
+	const args = calls.find((entry) => entry.method === "update")?.args ?? {};
+	assert.equal("acl" in args, false);
+	await client.close();
+});
+
+test("hydradb_update preserves whitespace in a nonblank source ID", async () => {
+	const { hydra, calls } = mockHydra({ update: { updated: true } });
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_update",
+		arguments: { id: " doc-1 ", additional_metadata: { reviewed: true } },
+	});
+
+	assert.notEqual(result.isError, true);
+	assert.equal(calls.find((entry) => entry.method === "update")?.args.id, " doc-1 ");
+	await client.close();
+});
+
+test("hydradb_update rejects a whitespace-only source ID", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_update",
+		arguments: { id: "   ", additional_metadata: { reviewed: true } },
+	});
+
+	assert.equal(result.isError, true);
+	assert.equal(calls.some((entry) => entry.method === "update"), false);
+	await client.close();
+});
+
+test("hydradb_update rejects an empty edit without calling HydraDB", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	const result = await client.callTool({ name: "hydradb_update", arguments: { id: "doc-1" } });
+
+	assert.equal(result.isError, true);
+	assert.equal(calls.some((entry) => entry.method === "update"), false);
+	await client.close();
+});
+
+test("hydradb_update reports partial persistence and vector sync failures as errors", async () => {
+	for (const update of [
+		{ updated: true, partialCommit: "Mongo updated; chunk rows failed" },
+		{ updated: true, aclUpdated: true, vectorSyncError: "Milvus unavailable" },
+		{ updated: true, aclUpdated: true, vectorSyncRequired: false },
+		{ updated: true, aclUpdated: true, vectorAclSynced: false },
+		{ updated: true, vectorSyncRequired: true, vectorSynced: false },
+	]) {
+		const { hydra } = mockHydra({ update });
+		const client = await connect(hydra);
+
+		const result = await client.callTool({
+			name: "hydradb_update",
+			arguments: { id: "doc-1", acl: ["__public__"] },
+		});
+
+		assert.equal(result.isError, true);
+
+		const first = result.content[0];
+
+			assert.equal(first?.type, "text");
+
+			if (first?.type !== "text") assert.fail("Expected text tool content");
+		assert.match(first.text, /retry/i);
+		await client.close();
+	}
+});
+
+test("hydradb_update preserves successful metadata vector synchronization", async () => {
+	const { hydra } = mockHydra({
+		update: {
+			updated: true,
+			vectorSyncRequired: true,
+			vectorSynced: true,
+				vectorRowsSynced: 3,
+			},
+		});
+
+		const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_update",
+		arguments: { id: "doc-1", database_metadata: { department: "finance" } },
+	});
+
+	assert.notEqual(result.isError, true);
+	assert.equal(result.structuredContent?.vector_sync_required, true);
+	assert.equal(result.structuredContent?.vector_synced, true);
+	assert.equal(result.structuredContent?.vector_rows_synced, 3);
+	await client.close();
+});
+
+test("hydradb_update redacts structured partial-failure details", async () => {
+	const credential = "sk-live-abcdef1234567890";
+
+	const { hydra } = mockHydra({
+		update: {
+			updated: true,
+			partialCommit: `Authorization: Bearer ${credential}`,
+			vectorSyncError: `mongodb://admin:${credential}@localhost`,
+		},
+	});
+
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_update",
+		arguments: { id: "doc-1", additional_metadata: { reviewed: true } },
+	});
+
+	const serialized = JSON.stringify(result);
+
+	assert.equal(result.isError, true);
+	assert.equal(serialized.includes(credential), false);
+	assert.equal(serialized.includes("sk-live"), false);
 	await client.close();
 });
 
