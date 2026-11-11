@@ -35,7 +35,7 @@ type RecordedCall = { method: string; args: Record<string, unknown> };
 /** Per-method response overrides, for tests that care what the API returned. */
 type Responses = Partial<
 	Record<
-		"query" | "ingest" | "list" | "inspect" | "update" | "delete" | "relations" | "databases" | "databaseCreate" | "databaseDelete" | "readiness" | "schemaInspect" | "schemaUpdate" | "collections" | "stats" | "feedback",
+		"query" | "ingest" | "list" | "inspect" | "update" | "delete" | "relations" | "status" | "databases" | "databaseCreate" | "databaseDelete" | "readiness" | "schemaInspect" | "schemaUpdate" | "collections" | "stats" | "feedback",
 		unknown
 	>
 >;
@@ -109,7 +109,12 @@ function mockHydra(
 			const method = path.split("/").filter(Boolean).pop() ?? "fetch";
 			calls.push({ method: `${method}-fetch`, args: JSON.parse(String(init?.body ?? "{}")) });
 			const data = "list" in responses ? responses.list : { sources: [], total: 0 };
-			return new Response(JSON.stringify({ success: true, data }), {
+
+			return new Response(JSON.stringify({
+				success: true,
+				data,
+				meta: { request_id: "req-from-meta" },
+			}), {
 				status: 200,
 				headers: { "content-type": "application/json" },
 			});
@@ -1737,6 +1742,179 @@ test("hydradb_list distinguishes an empty page from an empty store", async () =>
 
 	assert.match(text, /No memories on page 99/);
 	assert.doesNotMatch(text, /No memories stored yet/);
+});
+
+test("hydradb_list reports direct and inner degraded memory stores as errors", async () => {
+	for (const [container, list] of [
+		["direct", {
+			success: true,
+			message: "Memories temporarily unavailable",
+			user_memories: [],
+			total: 0,
+		}],
+		["inner", {
+			inner: {
+				success: true,
+				message: "Memories temporarily unavailable",
+				user_memories: [],
+				total: 0,
+			},
+		}],
+		["outer over inner", {
+			success: true,
+			message: "Memories temporarily unavailable",
+			inner: { success: true, user_memories: [], total: 0 },
+		}],
+	] as const) {
+		for (const metadata of [undefined, { team: "infra" }]) {
+			const { hydra } = mockHydra({
+				list,
+			});
+
+			const arguments_ = metadata
+				? { kind: "memory" as const, metadata }
+				: { kind: "memory" as const };
+
+			const client = await connect(hydra);
+
+			try {
+				const result = await client.callTool({
+					name: "hydradb_list",
+					arguments: arguments_,
+				});
+
+				const text = JSON.stringify(result);
+
+				assert.equal(result.isError, true);
+				assert.match(text, /MEMORY_LIST_UNAVAILABLE/);
+				assert.match(text, /not an empty database/i);
+
+				assert.match(text, /request_id: req-from-meta/, `${container} response should retain its envelope request ID`);
+
+				assert.doesNotMatch(text, /No memories/);
+			} finally {
+				await client.close();
+			}
+		}
+	}
+});
+
+test("hydradb_list validates memory list containers on plain and filtered paths", async () => {
+	for (const [scenario, list, expectedError] of [
+		["direct empty", { success: true, user_memories: [], total: 0 }, undefined],
+		["inner empty", { inner: { success: true, user_memories: [], total: 0 } }, undefined],
+		["direct failure", { success: false, user_memories: [], total: 0 }, "INVALID_LIST_RESPONSE"],
+		[
+			"outer container failure",
+			{ success: false, inner: { success: true, user_memories: [], total: 0 } },
+			"INVALID_LIST_RESPONSE",
+		],
+		[
+			"inner failure",
+			{ inner: { success: false, user_memories: [], total: 0 } },
+			"INVALID_LIST_RESPONSE",
+		],
+		[
+			"top-level precedence",
+			{
+				user_memories: [],
+				total: 0,
+				inner: {
+					success: true,
+					message: "Memories temporarily unavailable",
+					user_memories: [],
+					total: 0,
+				},
+			},
+			undefined,
+		],
+	] as const) {
+		for (const metadata of [undefined, { team: "infra" }]) {
+			const { hydra } = mockHydra({ list });
+			const client = await connect(hydra);
+			const path = metadata ? "filtered" : "plain";
+
+			try {
+				const result = await client.callTool({
+					name: "hydradb_list",
+					arguments: metadata ? { kind: "memory", metadata } : { kind: "memory" },
+				});
+
+				const text = JSON.stringify(result);
+
+				if (expectedError) {
+					assert.equal(result.isError, true, `${scenario} should fail on the ${path} path`);
+					assert.match(text, new RegExp(expectedError));
+					assert.match(text, /request_id: req-from-meta/);
+				} else {
+					assert.notEqual(result.isError, true, `${scenario} should succeed on the ${path} path`);
+					assert.doesNotMatch(text, /MEMORY_LIST_UNAVAILABLE/);
+					assert.match(
+						text,
+						metadata ? /No memories match the supplied metadata filters/ : /No memories stored yet/,
+					);
+					assert.deepEqual(
+						z.object({
+							items: z.array(z.object({}).passthrough()),
+							shown: z.literal(0),
+							total: z.literal(0),
+							page: z.literal(1),
+							has_more: z.literal(false),
+						}).parse(result.structuredContent),
+						{ items: [], shown: 0, total: 0, page: 1, has_more: false },
+					);
+				}
+			} finally {
+				await client.close();
+			}
+		}
+	}
+});
+
+test("hydradb_list renders nonempty memory rows decoded by SDK 2.1.8", async (t) => {
+	const fetchMock = t.mock.method(globalThis, "fetch", async () =>
+		new Response(
+			JSON.stringify({
+				success: true,
+				data: {
+					user_memories: [
+						{ memory_id: "memory-1", memory_content: "prefers dark mode" },
+					],
+					total: 1,
+				},
+			}),
+			{ status: 200 },
+		),
+	);
+
+	const hydra = new HydraDB({
+		token: "t",
+		database: "db_test",
+		collection: "col_test",
+		maxRetries: 0,
+	});
+
+	const client = await connect(hydra);
+
+	try {
+		const result = await client.callTool({
+			name: "hydradb_list",
+			arguments: { kind: "memory" },
+		});
+
+		const text = z.array(z.object({ text: z.string() })).parse(result.content)[0]!.text;
+
+		const items = z.object({
+			items: z.array(z.object({ id: z.string(), content: z.string() })),
+		}).parse(result.structuredContent).items;
+
+		assert.notEqual(result.isError, true);
+		assert.match(text, /\[memory-1\] prefers dark mode/);
+		assert.deepEqual(items, [{ id: "memory-1", content: "prefers dark mode" }]);
+		assert.equal(fetchMock.mock.callCount(), 1);
+	} finally {
+		await client.close();
+	}
 });
 
 // The header printed the corpus-wide `total` above a single page of rows:
@@ -5134,6 +5312,58 @@ test("query: prints the request id so feedback has something to attach to", asyn
 	// reaches the agent and the feedback tool is unusable.
 	assert.match(text, /request_id: req-from-meta/);
 	assert.match(text, /hydradb_feedback/);
+});
+
+test("query: an empty result still prints its request id", async () => {
+	for (const structured of [false, true]) {
+		const { hydra } = mockHydra({ query: { chunks: [] } });
+		const client = await connect(hydra);
+
+		try {
+			const result = await client.callTool({
+					name: "hydradb_query",
+					arguments: { query: "nothing matches", structured },
+				});
+
+				const text = JSON.stringify(result);
+
+			assert.match(text, /request_id: req-from-meta/);
+
+			if (structured) {
+				const content = z.object({ request_id: z.string().optional() }).parse(result.structuredContent);
+
+				assert.equal(
+					content.request_id,
+					"req-from-meta",
+				);
+			}
+		} finally {
+			await client.close();
+		}
+	}
+});
+
+test("status rejects an invalid successful body", async () => {
+	const { hydra } = mockHydra({
+		status: { ok: false, error: { reason: "non-json" } },
+	});
+
+	const client = await connect(hydra);
+
+	try {
+		const result = await client.callTool({
+			name: "hydradb_status",
+			arguments: { ids: ["source-1"] },
+		});
+
+		assert.equal(result.isError, true);
+		assert.match(
+			JSON.stringify(result),
+			/INVALID_STATUS_RESPONSE/,
+		);
+	} finally {
+		await client.close();
+	}
 });
 
 test("feedback: over-long prose is refused locally, not after a round trip", async () => {
