@@ -124,6 +124,18 @@ ACL. An omitted ACL stays unchanged; `[]` or `null` makes the item private;
 partial commits and search-index ACL synchronization failures as retryable,
 idempotent errors instead of claiming complete success.
 
+### Fixed — list failures stay failures and empty queries keep their request id
+
+- `hydradb_list` now reports the documented degraded memory-store response as
+  an error instead of saying that no memories exist. Every list path also
+  rejects malformed successful responses, including proxy login pages.
+- `hydradb_status` and `hydradb_databases` reject malformed successful
+  responses instead of presenting missing arrays as valid empty results.
+- Memory lists now read the camelCase fields returned by SDK 2.1.8, so valid
+  rows do not disappear.
+- Empty `hydradb_query` results now print their request id in text and
+  structured modes, so callers can submit retrieval feedback.
+
 ### Added — MCP database management tools
 
 Added `hydradb_database_create`, `hydradb_database_delete`,
