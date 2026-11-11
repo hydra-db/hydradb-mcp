@@ -4,17 +4,18 @@ import { createHash, randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
+import { ingestAclSchema } from "./acl.js";
 import { jsonValue, toAddMemoryResponse, toMemoryList, toRelationList, toSourceList } from "./adapters.js";
 import type { JsonValue, ListedFields, PageInfo, SourceListItem } from "./adapters.js";
-import { resolveConfig, resolveConnectorConfig, resolveGraphConfig } from "./config.js";
-import type { ConnectorConfig, GraphConfig } from "./config.js";
+import { resolveConfig, resolveConnectorConfig, resolveDatabaseToolsConfig, resolveGraphConfig } from "./config.js";
+import type { ConnectorConfig, DatabaseToolsConfig, GraphConfig } from "./config.js";
 import { type ConnectorToolResponse, ConnectorTools } from "./connectors.js";
 import { renderRecalledContext } from "./context.js";
 import { COLLECTION_PATTERN, MAX_BODY_BYTES, renderRows } from "./cypher.js";
 import { extname } from "node:path";
 
 import { decodeInline, type IngestFile, readLocal } from "./files.js";
-import { CONNECTOR_ID_HELP, SERVER_INSTRUCTIONS, TOOL_DESCRIPTIONS } from "./descriptions.js";
+import { CONNECTOR_ID_HELP, DATABASE_PARAM, METADATA_FIELD_PARAMS, SERVER_INSTRUCTIONS, TOOL_DESCRIPTIONS } from "./descriptions.js";
 import {
 	DeadlineExceeded,
 	HydraDB,
@@ -24,10 +25,21 @@ import {
 	assertDatabaseAllowed,
 	hasEntries,
 } from "./hydra/index.js";
-import type { ContextKind, MetadataFilter, QueryKind, QueryParams } from "./hydra/index.js";
+import type {
+	ContextKind,
+	AppKnowledgeItem,
+	CreateDatabaseParams,
+	IngestGraph,
+	IngestItem,
+	IngestParams,
+	MetadataFilter,
+	QueryKind,
+	QueryParams,
+	UpdateContextParams,
+} from "./hydra/index.js";
 import { logger } from "./logger.js";
-import { ALIAS_REPLACEMENTS, CONNECTOR_TOOL_NAMES, DEPRECATED_TOOL_NAMES, TOOL_NAMES } from "./tool-names.js";
-import type { MemoryResultItem } from "./types.js";
+import { ALIAS_REPLACEMENTS, CONNECTOR_TOOL_NAMES, type DATABASE_TOOL_NAMES, DEPRECATED_TOOL_NAMES, TOOL_NAMES } from "./tool-names.js";
+import type { IngestItemOutcome, IngestOutcome, IngestRejectedItem, MemoryResultItem } from "./types.js";
 import { SERVER_VERSION } from "./version.js";
 
 // Host-owned default: silently attached to ingest so Hydra DB extracts the kind
@@ -89,8 +101,8 @@ function defaultTitle(text: string): string {
  * The timestamp prefix is kept because it sorts and reads well; the suffix is
  * what makes it unique.
  */
-function generatedSourceId(): string {
-	return `mcp-conversation-${Date.now()}-${randomUUID().slice(0, 8)}`;
+function generatedSourceId(kind: "item" | "conversation" = "item"): string {
+	return `mcp-${kind}-${Date.now()}-${randomUUID().slice(0, 8)}`;
 }
 
 function textResult(text: string): ToolResult {
@@ -114,14 +126,6 @@ function structuredResult(
 ): ToolResult {
 	return { content: [{ type: "text" as const, text }], structuredContent };
 }
-
-/** The structured result of an ingest: what `ingestOutputSchema` declares. */
-type IngestOutput = {
-	id?: string;
-	success_count: number;
-	failed_count: number;
-	indexing_pending: boolean;
-};
 
 /**
  * A failure the caller should treat as a failure, not a result.
@@ -188,6 +192,12 @@ const MAX_TEXT_CHARS = 1_000_000;
 const MAX_TURNS = 500;
 
 const MAX_TURN_CHARS = 100_000;
+
+const MAX_INGEST_ITEMS = 100;
+
+const MAX_INGEST_BYTES = 8 * 1024 * 1024;
+
+const MAX_CUSTOM_INSTRUCTIONS_CHARS = 4_000;
 
 const turnSchema = z.object({
 	user: z
@@ -339,12 +349,6 @@ export function __resetAliasWarnings() {
 }
 
 export interface ServerOptions {
-	/**
-	 * Register the OAuth-connection tools (currently `hydradb_databases`).
-	 * Set by the HTTP transport when the request authenticated with an OAuth
-	 * token; never for API keys, so their tool list is unchanged.
-	 */
-	oauthTools?: boolean;
 	/**
 	 * Who is calling, for cancellation that arrives on another server instance.
 	 *
@@ -634,11 +638,13 @@ export function createHydraDBServer(
 	let hydra: HydraDB;
 	let graphConfig: GraphConfig;
 	let connectorConfig: ConnectorConfig;
+	let databaseTools: DatabaseToolsConfig;
 
 	if (hydraOverride) {
 		hydra = hydraOverride;
 		graphConfig = { ...resolveGraphConfig(), ...graphOverride };
 		connectorConfig = resolveConnectorConfig();
+		databaseTools = resolveDatabaseToolsConfig();
 	} else {
 		const config = resolveConfig();
 		hydra = new HydraDB({
@@ -653,6 +659,7 @@ export function createHydraDBServer(
 		});
 		graphConfig = { ...config.graph, ...graphOverride };
 		connectorConfig = config.connectors;
+		databaseTools = config.databaseTools;
 		logger.info(
 			`Hydra DB connected (database=${config.database}, collection=${config.collection})`,
 		);
@@ -920,6 +927,10 @@ export function createHydraDBServer(
 
 		const raw = await send();
 
+		const feedbackLine = requestId
+			? `\nWas this useful? Report it with ${TOOL_NAMES.FEEDBACK} using request_id: ${requestId}`
+			: "";
+
 		// The renderer reads the SDK payload directly; there is no longer a
 		// snake_case mirror to convert into.
 		const res = raw;
@@ -942,7 +953,7 @@ export function createHydraDBServer(
 				return queryResult(
 					`No relevant ${resultNoun(kind)} found in any of the ${widened.length} collections of database ` +
 						`"${database}" (${widened.join(", ")}). Try rephrasing the question, or pass \`collection\` ` +
-						`to search one collection with its full result budget.`,
+						`to search one collection with its full result budget.${feedbackLine}`,
 				);
 			}
 
@@ -962,14 +973,15 @@ export function createHydraDBServer(
 					: "";
 
 			return queryResult(
-				scope != null
+				(scope != null
 					? `No relevant ${resultNoun(kind)} found in collection "${scope}" of database "${database}". ` +
 						`The data may live in another collection — call ${TOOL_NAMES.LIST_COLLECTIONS} to list them, ` +
 						`then pass \`collection\` (or \`collections\` to search several at once).`
 					: `No relevant ${resultNoun(kind)} found in database "${database}" — with no collection ` +
 						`named, the search ran in this connection's workspace default. If the data could live ` +
 						`elsewhere, call ${TOOL_NAMES.LIST_COLLECTIONS} and pass \`collection\` (or \`collections\` ` +
-						`to search several at once).${tooMany}`,
+						`to search several at once).${tooMany}`) +
+					feedbackLine,
 			);
 		}
 
@@ -991,10 +1003,6 @@ export function createHydraDBServer(
 		// cannot be reconstructed later — if it is not printed here, the feedback
 		// tool has nothing to attach a submission to. Rendered on its own line so
 		// a model copies it verbatim rather than reformatting it.
-		const feedbackLine = requestId
-			? `\nWas this useful? Report it with ${TOOL_NAMES.FEEDBACK} using request_id: ${requestId}`
-			: "";
-
 		const legend =
 			`\n\n---\nEach [id: …] is a source id: pass one to ${TOOL_NAMES.INSPECT} for that ` +
 			`source's content, or to ${TOOL_NAMES.DELETE} to remove it. Keep the resolved database, the source's collection, and your ACL on follow-up calls. ` +
@@ -1048,22 +1056,6 @@ export function createHydraDBServer(
 			`Found ${shown} ${resultNoun(kind, shown)}:\n${scopeLine}\n\n${contextStr}${legend}`,
 			{ sources: [...sourceRefs.values()] },
 		);
-	}
-
-	/**
-	 * The id the server assigned to the item it just stored.
-	 *
-	 * On the memory path the caller may supply `source_id`, but when it does not
-	 * the server assigns one — and that value appeared nowhere in the tool result,
-	 * so the caller could not later inspect, correct or delete what it had
-	 * written. Reads the first successful item; ingest here is always one item.
-	 */
-	function createdId(res: { results: MemoryResultItem[] }): string | undefined {
-		for (const item of res.results) {
-			if (item.source_id && !item.error) return item.source_id;
-		}
-
-		return undefined;
 	}
 
 	/**
@@ -1124,8 +1116,7 @@ export function createHydraDBServer(
 		for (const item of res.results) {
 			const label = item.source_id || item.title || "(unnamed item)";
 
-			const failure =
-				item.error ?? (item.status === "failed" ? "ingestion failed" : null);
+			const failure = item.error ?? (item.status === "failed" ? "ingestion failed" : null);
 
 			if (failure) {
 				const code = item.error_code ? ` [${item.error_code}]` : "";
@@ -1139,6 +1130,54 @@ export function createHydraDBServer(
 		}
 
 		return lines.length > 0 ? `\n\nIssues:\n${lines.join("\n")}` : "";
+	}
+
+	function ingestOutcome(
+		res: ReturnType<typeof toAddMemoryResponse>,
+		fallbackId?: string,
+	): IngestOutcome {
+		const accepted = res.results.filter(
+			(item) => item.status !== "failed" && !item.error,
+		);
+
+		const acceptedIds = accepted.map((item) => item.source_id).filter(Boolean);
+
+		if (acceptedIds.length === 0 && res.success_count > 0 && fallbackId) {
+			acceptedIds.push(fallbackId);
+		}
+
+		const rejectedItems = res.results.flatMap((item) => {
+			const error = item.error ?? (item.status === "failed" ? "ingestion failed" : null);
+
+			if (!error) return [];
+
+			const rejected: IngestRejectedItem = {
+				id: item.source_id || "(unnamed item)",
+				error: hydra.redact(error),
+			};
+
+			if (item.stored_title) rejected.stored_title = item.stored_title;
+
+			if (item.error_code) rejected.error_code = item.error_code;
+
+			return [rejected];
+		});
+
+		const firstAccepted = accepted[0];
+
+		const outcome: IngestOutcome = {
+			accepted_ids: acceptedIds,
+			rejected_items: rejectedItems,
+			success_count: res.success_count,
+			failed_count: res.failed_count,
+			indexing_pending: acceptedIds.length > 0 || res.success_count > 0,
+		};
+
+		if (acceptedIds[0]) outcome.id = acceptedIds[0];
+
+		if (firstAccepted?.stored_title) outcome.stored_title = firstAccepted.stored_title;
+
+		return outcome;
 	}
 
 	/** The `file` argument of hydradb_ingest, as the schema accepts it. */
@@ -1177,6 +1216,12 @@ export function createHydraDBServer(
 				["is_markdown", args.is_markdown],
 				["user_name", args.user_name],
 				["metadata", args.metadata],
+				["additional_metadata", args.additional_metadata],
+				["custom_instructions", args.custom_instructions],
+				["graph", args.graph],
+				["relations", args.relations],
+				["evidence_kind", args.evidence_kind],
+				["evidence_subject", args.evidence_subject],
 				["observation_date", args.observation_date],
 			] as const
 		).flatMap(([name, value]) => (value != null ? [name] : []));
@@ -1231,23 +1276,23 @@ export function createHydraDBServer(
 		}, { signal });
 
 		const res = toAddMemoryResponse(raw);
-		const id = createdId(res) ?? args.source_id;
+		const outcome = ingestOutcome(res, args.source_id);
+		const id = outcome.id;
+		const allFailed = res.success_count === 0 && res.failed_count > 0;
 
-		const structured: IngestOutput = {
-			success_count: res.success_count,
-			failed_count: res.failed_count,
-			indexing_pending: true,
-		};
+		const summary = allFailed
+			? `Hydra DB rejected every ingest item (${res.failed_count} failed).`
+			: `Saved ${upload.filename} to Hydra DB as knowledge${id ? ` (id: ${id})` : ""} ` +
+				`(${res.success_count} success, ${res.failed_count} failed).`;
 
-		if (id != null) structured.id = id;
-
-		return structuredResult(
-			`Saved ${upload.filename} to Hydra DB as knowledge${id ? ` (id: ${id})` : ""} ` +
-			`(${res.success_count} success, ${res.failed_count} failed).` +
-			indexingNote(res) +
+		const result = structuredResult(
+			summary +
+			(outcome.indexing_pending ? indexingNote(res) : "") +
 			ingestIssues(res),
-			structured,
+			outcome,
 		);
+
+		return allFailed ? { ...result, isError: true } : result;
 	}
 
 	async function runStore(args: {
@@ -1258,12 +1303,23 @@ export function createHydraDBServer(
 		infer?: boolean;
 		is_markdown?: boolean;
 		overwrite?: boolean;
-		metadata?: Record<string, unknown>;
+		metadata?: IngestParams["metadata"];
+		additional_metadata?: IngestParams["additionalMetadata"];
+		custom_instructions?: string;
+		graph?: IngestGraph;
+		relations?: IngestParams["relations"];
+		evidence_kind?: IngestParams["evidenceKind"];
+		evidence_subject?: string;
 		observation_date?: string;
 		database?: string;
 		collection?: string;
 	}, signal?: AbortSignal): Promise<ToolResult> {
 		const kind = args.kind ?? "memory";
+		const sourceId = args.source_id ?? (args.graph == null ? undefined : generatedSourceId());
+
+		const customInstructions = args.custom_instructions ??
+			(args.infer === false ? undefined : INGEST_INSTRUCTIONS);
+
 		logger.debug(`${TOOL_NAMES.INGEST}: "${args.text.slice(0, 50)}..." (kind=${kind})`);
 
 		// The memory item shape has no counterpart on the knowledge path, which
@@ -1271,23 +1327,34 @@ export function createHydraDBServer(
 		// where they mean something. The wrapper rejects them on the knowledge
 		// branch rather than dropping them, and passing them here unconditionally
 		// would make every knowledge write fail.
-		const memoryOnly =
+		const kindSpecific =
 			kind === "memory"
 				? {
-						sourceId: args.source_id,
+						sourceId,
 						infer: args.infer ?? true,
 						isMarkdown: args.is_markdown ?? false,
-						customInstructions: INGEST_INSTRUCTIONS,
+						customInstructions,
 						metadata: args.metadata,
+						additionalMetadata: args.additional_metadata,
 						observationDate: args.observation_date,
+						graph: args.graph,
 					}
-				: {};
+				: {
+						sourceId,
+						infer: args.infer,
+						metadata: args.metadata,
+						additionalMetadata: args.additional_metadata,
+						relations: args.relations,
+						evidenceKind: args.evidence_kind,
+						evidenceSubject: args.evidence_subject,
+						graph: args.graph,
+					};
 
 		const raw = await hydra.context.ingest({
 			kind,
 			text: args.text,
 			title: args.title ?? defaultTitle(args.text),
-			...memoryOnly,
+			...kindSpecific,
 			database: args.database,
 			collection: args.collection,
 			// Default stays true. An ingest is no longer retried after an unclear
@@ -1302,19 +1369,135 @@ export function createHydraDBServer(
 		// information back to them. The id is the thing they do not have and
 		// cannot derive, and it is what makes correcting this memory later
 		// possible at all.
-		const id = createdId(res) ?? args.source_id;
+		const outcome = ingestOutcome(res, sourceId);
+		const allFailed = res.success_count === 0 && res.failed_count > 0;
+
+		const summary = allFailed
+			? `Hydra DB rejected every ingest item (${res.failed_count} failed).`
+			: res.failed_count > 0
+				? `Stored ${res.success_count} item(s); rejected ${res.failed_count}.`
+				: `Saved to Hydra DB${outcome.id ? ` (id: ${outcome.id})` : ""} ` +
+					`(${res.success_count} success, ${res.failed_count} failed).`;
+
+		const result = structuredResult(
+			summary +
+			(outcome.indexing_pending ? indexingNote(res) : "") +
+			ingestIssues(res),
+			outcome,
+		);
+
+		return allFailed ? { ...result, isError: true } : result;
+	}
+
+	async function runUpdate(args: {
+		id: string;
+		database_metadata?: UpdateContextParams["databaseMetadata"];
+		additional_metadata?: UpdateContextParams["additionalMetadata"];
+		acl?: string[] | null;
+		database?: string;
+		collection?: string;
+	}, signal?: AbortSignal): Promise<ToolResult> {
+		const databaseMetadataPresent =
+			args.database_metadata != null && Object.keys(args.database_metadata).length > 0;
+
+		const additionalMetadataPresent =
+			args.additional_metadata != null && Object.keys(args.additional_metadata).length > 0;
+
+		if (!databaseMetadataPresent && !additionalMetadataPresent && args.acl === undefined) {
+			return errorResult(
+				`${TOOL_NAMES.UPDATE} requires database_metadata, additional_metadata, or acl. ` +
+				"No request was sent.",
+			);
+		}
+
+		const update: UpdateContextParams = {
+			id: args.id,
+			database: args.database,
+			collection: args.collection,
+		};
+
+		if (databaseMetadataPresent) update.databaseMetadata = args.database_metadata;
+
+		if (additionalMetadataPresent) update.additionalMetadata = args.additional_metadata;
+
+		// The API treats null and [] identically. The generated SDK serializer
+		// accepts arrays only, so normalize null without collapsing omission.
+		if (args.acl !== undefined) update.acl = args.acl ?? [];
+
+		const res = await hydra.context.update(update, { signal });
+
+		const id = res.id ?? args.id;
+		const database = res.database ?? args.database;
+		const collection = res.collection ?? args.collection;
+
+		const structured: NonNullable<ToolResult["structuredContent"]> = {
+			id,
+			updated: res.updated ?? false,
+			database_metadata_keys: res.databaseMetadataKeys ?? [],
+			additional_metadata_keys: res.additionalMetadataKeys ?? [],
+			acl_updated: res.aclUpdated ?? false,
+		};
+
+		if (database != null) structured.database = database;
+
+		if (collection != null) structured.collection = collection;
+
+		if (res.vectorSyncRequired != null) {
+			structured.vector_sync_required = res.vectorSyncRequired;
+		}
+
+		if (res.vectorSynced != null) structured.vector_synced = res.vectorSynced;
+
+		if (res.vectorAclSynced != null) structured.vector_acl_synced = res.vectorAclSynced;
+
+		if (res.vectorRowsSynced != null) structured.vector_rows_synced = res.vectorRowsSynced;
+
+		if (res.partialCommit != null) structured.partial_commit = res.partialCommit;
+
+		if (res.vectorSyncError != null) structured.vector_sync_error = res.vectorSyncError;
+
+		const convergenceIssue =
+			res.partialCommit ??
+			res.vectorSyncError ??
+			(res.aclUpdated === true && res.vectorAclSynced !== true
+				? "The ACL update was saved, but search-index ACL synchronization was not confirmed."
+				: res.vectorSyncRequired === true && res.vectorSynced !== true
+					? "The metadata update was saved, but vector synchronization was not confirmed."
+					: undefined);
+
+		if (res.updated !== true) {
+			return {
+				...structuredResult(`Hydra DB did not confirm an update for ${id}.`, structured),
+				isError: true,
+			};
+		}
+
+		if (convergenceIssue != null) {
+			return {
+				...structuredResult(
+					`Updated ${id}, but the edit is not fully converged: ${convergenceIssue} ` +
+					"Retry the identical hydradb_update request; it is idempotent.",
+					structured,
+				),
+				isError: true,
+			};
+		}
+
+		const changes: string[] = [];
+
+		if ((res.databaseMetadataKeys?.length ?? 0) > 0) {
+			changes.push(`database metadata: ${res.databaseMetadataKeys!.join(", ")}`);
+		}
+
+		if ((res.additionalMetadataKeys?.length ?? 0) > 0) {
+			changes.push(`additional metadata: ${res.additionalMetadataKeys!.join(", ")}`);
+		}
+
+		if (res.aclUpdated === true) changes.push("ACL replaced and synchronized");
 
 		return structuredResult(
-			`Saved to Hydra DB${id ? ` (id: ${id})` : ""} ` +
-			`(${res.success_count} success, ${res.failed_count} failed).` +
-			indexingNote(res) +
-			ingestIssues(res),
-			{
-				...(id != null ? { id } : {}),
-				success_count: res.success_count,
-				failed_count: res.failed_count,
-				indexing_pending: true,
-			},
+			`Updated ${id}${changes.length > 0 ? ` (${changes.join("; ")})` : ""}.`,
+			structured,
 		);
 	}
 
@@ -1327,6 +1510,11 @@ export function createHydraDBServer(
 			title?: string;
 			isMarkdown?: boolean;
 			overwrite?: boolean;
+			metadata?: IngestParams["metadata"];
+			additionalMetadata?: IngestParams["additionalMetadata"];
+			customInstructions?: string;
+			graph?: IngestGraph;
+			observationDate?: string;
 			database?: string;
 			collection?: string;
 		},
@@ -1336,6 +1524,9 @@ export function createHydraDBServer(
 			`${TOOL_NAMES.INGEST}: ${turns.length} turns -> ${sourceId}`,
 		);
 
+		const customInstructions = opts?.customInstructions ??
+			(opts?.infer === false ? undefined : INGEST_INSTRUCTIONS);
+
 		const raw = await hydra.context.ingest({
 			kind: "memory",
 			pairs: turns,
@@ -1344,7 +1535,11 @@ export function createHydraDBServer(
 			infer: opts?.infer ?? true,
 			title: opts?.title,
 			isMarkdown: opts?.isMarkdown,
-			customInstructions: INGEST_INSTRUCTIONS,
+			customInstructions,
+			metadata: opts?.metadata,
+			additionalMetadata: opts?.additionalMetadata,
+			observationDate: opts?.observationDate,
+			graph: opts?.graph,
 			upsert: opts?.overwrite ?? true,
 			database: opts?.database,
 			collection: opts?.collection,
@@ -1352,20 +1547,263 @@ export function createHydraDBServer(
 
 		const res = toAddMemoryResponse(raw);
 
-		const conversationId = createdId(res) ?? sourceId;
+		const outcome = ingestOutcome(res, sourceId);
+		const conversationId = outcome.id ?? sourceId;
+		const allFailed = res.success_count === 0 && res.failed_count > 0;
 
-		return structuredResult(
-			`Ingested ${turns.length} conversation turn(s) into Hydra DB ` +
-			`(id: ${conversationId}, success: ${res.success_count}, failed: ${res.failed_count})` +
-			indexingNote(res) +
+		const summary = allFailed
+			? `Hydra DB rejected every ingest item (${res.failed_count} failed).`
+			: `Ingested ${turns.length} conversation turn(s) into Hydra DB ` +
+				`(id: ${conversationId}, success: ${res.success_count}, failed: ${res.failed_count})`;
+
+		const result = structuredResult(
+			summary +
+			(outcome.indexing_pending ? indexingNote(res) : "") +
 			ingestIssues(res),
-			{
-				id: conversationId,
-				success_count: res.success_count,
-				failed_count: res.failed_count,
-				indexing_pending: true,
-			},
+			outcome,
 		);
+
+		return allFailed ? { ...result, isError: true } : result;
+	}
+
+	function assertIngestPayloadSize(value: IngestToolArguments): void {
+		const totalBytes = Buffer.byteLength(JSON.stringify(value), "utf8");
+
+		if (totalBytes > MAX_INGEST_BYTES) {
+			throw new Error(
+				`hydradb_ingest payload contains ${totalBytes} UTF-8 bytes; the maximum is ` +
+				`${MAX_INGEST_BYTES}. Split the call.`,
+			);
+		}
+	}
+
+	function toIngestItemOutcome(
+		index: number,
+		id: string,
+		result?: MemoryResultItem,
+	): IngestItemOutcome {
+		const accepted = result == null
+			? null
+			: result.status !== "failed" && !result.error;
+
+		const outcome: IngestItemOutcome = {
+			index,
+			id,
+			status: result?.status ?? "unknown",
+			accepted,
+		};
+
+		if (result?.error) outcome.error = hydra.redact(result.error);
+
+		if (result?.error_code) outcome.error_code = result.error_code;
+
+		if (result?.relations_error) outcome.relations_error = hydra.redact(result.relations_error);
+
+		return outcome;
+	}
+
+	function batchItemOutcome(
+		items: IngestItem[],
+		results: MemoryResultItem[],
+	): IngestItemOutcome[] {
+		const byId = new Map(
+			results.flatMap((result) =>
+				result.source_id.length > 0 ? [[result.source_id, result] as const] : []
+			),
+		);
+
+		return items.map((item, index) => {
+			const id = item.sourceId ?? "";
+			const result = byId.get(id);
+
+			return toIngestItemOutcome(index, id, result);
+		});
+	}
+
+	async function runIngestBatch(args: {
+		kind?: ContextKind;
+		items: IngestToolItem[];
+		custom_instructions?: string;
+		overwrite?: boolean;
+		database?: string;
+		collection?: string;
+	}, signal?: AbortSignal): Promise<ToolResult> {
+		const kind = args.kind ?? "memory";
+
+		const items: IngestItem[] = args.items.map((item, index) => {
+			const hasText = item.text != null;
+			const hasTurns = item.turns != null && item.turns.length > 0;
+
+			if (hasText === hasTurns) {
+				throw new Error(`items[${index}] requires exactly one of text or turns.`);
+			}
+
+			if (kind === "knowledge" && hasTurns) {
+				throw new Error(`items[${index}] cannot use turns with kind "knowledge".`);
+			}
+
+			const callerInstructions = item.custom_instructions ?? args.custom_instructions;
+
+			if (kind === "knowledge" && callerInstructions != null) {
+				throw new Error("custom_instructions applies to memory ingestion only.");
+			}
+
+			if (item.infer === false && callerInstructions != null) {
+				throw new Error(`items[${index}] cannot use custom_instructions when infer is false.`);
+			}
+
+			const sourceId = item.source_id || generatedSourceId();
+
+			const customInstructions = kind === "knowledge"
+				? undefined
+				: callerInstructions ?? (item.infer === false ? undefined : INGEST_INSTRUCTIONS);
+
+			const normalized: IngestItem = {
+				text: item.text,
+				pairs: item.turns,
+				title: item.title ?? (item.text == null ? undefined : defaultTitle(item.text)),
+				sourceId,
+				userName: item.user_name,
+				infer: item.infer,
+				isMarkdown: item.is_markdown,
+				customInstructions,
+				metadata: item.metadata,
+				additionalMetadata: item.additional_metadata,
+				relations: item.relations,
+				evidenceKind: item.evidence_kind,
+				evidenceSubject: item.evidence_subject,
+				observationDate: item.observation_date,
+				graph: item.graph,
+			};
+
+			return normalized;
+		});
+
+		const ids = items.map((item) => item.sourceId ?? "");
+
+		if (new Set(ids).size !== ids.length) {
+			throw new Error("hydradb_ingest item ids must be unique within one batch.");
+		}
+
+		const raw = await hydra.context.ingest({
+			kind,
+			items,
+			upsert: args.overwrite ?? true,
+			database: args.database,
+			collection: args.collection,
+		}, { signal });
+
+		const res = toAddMemoryResponse(raw);
+		const outcome = ingestOutcome(res);
+
+		outcome.items = batchItemOutcome(items, res.results);
+
+		const allFailed = res.success_count === 0 && res.failed_count > 0;
+
+		const summary = allFailed
+			? `Hydra DB rejected every ingest item (${res.failed_count} failed).`
+			: `Stored ${res.success_count} item(s); rejected ${res.failed_count}.`;
+
+		const result = structuredResult(
+			summary +
+			(outcome.indexing_pending ? indexingNote(res) : "") +
+			ingestIssues(res),
+			outcome,
+		);
+
+		return allFailed ? { ...result, isError: true } : result;
+	}
+
+	function appKnowledgeNotes(items: AppKnowledgeItem[], outcomes: IngestItemOutcome[]): string {
+		const notes: string[] = [];
+
+		for (const [index, item] of items.entries()) {
+			const accepted = outcomes[index]?.accepted;
+
+			if (item.id && item.acl == null && accepted === true) {
+				notes.push(
+					`Item ${item.id} was stored without an access list. Every caller of this collection ` +
+					"can read it. If this id had an access list before, that list is now removed.",
+				);
+			}
+
+			if (item.id && item.acl == null && accepted == null) {
+				notes.push(
+					`Item ${item.id} was sent without an access list. If Hydra DB accepted it, every caller ` +
+					"of this collection can read it and any previous access list is removed.",
+				);
+			}
+
+			if (accepted !== false && item.acl?.includes("__public__") && item.acl.length > 1) {
+				notes.push(
+					`Item ${item.id || "(server-assigned id)"}: __public__ makes the item readable by ` +
+					"every caller; the other principals are dropped.",
+				);
+			}
+		}
+
+		return notes.length === 0 ? "" : `\n\n${notes.join("\n")}`;
+	}
+
+	async function runIngestAppKnowledge(args: {
+		items: AppKnowledgeItem[];
+		overwrite?: boolean;
+		database?: string;
+		collection?: string;
+	}, signal?: AbortSignal): Promise<ToolResult> {
+		const explicitIds = args.items.flatMap((item) => item.id ? [item.id] : []);
+
+		if (new Set(explicitIds).size !== explicitIds.length) {
+			throw new Error("hydradb_ingest app_knowledge ids must be unique within one batch.");
+		}
+
+		let raw: Awaited<ReturnType<typeof hydra.context.ingest>>;
+
+		try {
+			raw = await hydra.context.ingest({
+				kind: "knowledge",
+				appKnowledge: args.items,
+				upsert: args.overwrite ?? true,
+				database: args.database,
+				collection: args.collection,
+			}, { signal });
+		} catch (error) {
+			if (error instanceof Error && /CORPUS_TYPE_UNSUPPORTED/.test(error.message)) {
+				throw new Error(
+					`${error.message} app_knowledge works only on split databases. This database is unified.`,
+				);
+			}
+
+			throw error;
+		}
+
+		const res = toAddMemoryResponse(raw);
+		const outcome = ingestOutcome(res);
+
+		const resultsById = new Map(
+			res.results.flatMap((result) =>
+				result.source_id.length > 0 ? [[result.source_id, result] as const] : []
+			),
+		);
+
+		outcome.items = args.items.map((item, index) => {
+			const result = item.id ? resultsById.get(item.id) : res.results[index];
+
+			return toIngestItemOutcome(index, result?.source_id ?? item.id ?? "", result);
+		});
+
+		const allFailed = res.success_count === 0 && res.failed_count > 0;
+
+		const result = structuredResult(
+			`Ingested ${args.items.length} app item(s) ` +
+			`(${res.success_count} success, ${res.failed_count} failed).` +
+			(outcome.indexing_pending ? indexingNote(res) : "") +
+			ingestIssues(res) +
+			appKnowledgeNotes(args.items, outcome.items),
+			outcome,
+		);
+
+		return allFailed ? { ...result, isError: true } : result;
 	}
 
 	/**
@@ -2430,6 +2868,58 @@ export function createHydraDBServer(
 		);
 	}
 
+	type MetadataFieldInput = z.infer<typeof metadataFieldSchema>;
+
+	type SDKMetadataField = NonNullable<CreateDatabaseParams["databaseMetadataSchema"]>[number];
+
+	function metadataField(field: MetadataFieldInput): SDKMetadataField {
+		const mapped: SDKMetadataField = {
+			name: field.name,
+			dataType: field.data_type,
+		};
+
+		if (field.max_length != null) mapped.maxLength = field.max_length;
+
+		if (field.enable_match != null) mapped.enableMatch = field.enable_match;
+
+		if (field.enable_dense_embedding != null) {
+			mapped.enableDenseEmbedding = field.enable_dense_embedding;
+		}
+
+		if (field.enable_sparse_embedding != null) {
+			mapped.enableSparseEmbedding = field.enable_sparse_embedding;
+		}
+
+		return mapped;
+	}
+
+	function renderMetadataField(field: SDKMetadataField) {
+		return {
+			name: field.name,
+			data_type: field.dataType,
+			max_length: field.maxLength,
+			enable_match: field.enableMatch,
+			enable_dense_embedding: field.enableDenseEmbedding,
+			enable_sparse_embedding: field.enableSparseEmbedding,
+		};
+	}
+
+	async function databaseWrite<T>(run: () => Promise<T>): Promise<T> {
+		try {
+			return await run();
+		} catch (error) {
+			if (error instanceof HydraWrapperError && error.status === 403) {
+				throw new Error(
+					`${error.message}. This operation requires database write permission. ` +
+					"Read-only credentials cannot perform it; verify this credential's permissions " +
+					"or reconnect with write permission.",
+				);
+			}
+
+			throw error;
+		}
+	}
+
 	async function runListCollections(
 		args: { database?: string },
 		signal?: AbortSignal,
@@ -3036,10 +3526,52 @@ export function createHydraDBServer(
 
 		if (!result.isError) return result;
 
-		return {
+		const redactStructured = (
+			structured: NonNullable<ToolResult["structuredContent"]>,
+		): ListedFields => {
+			const redactValue = (value: JsonValue): JsonValue => {
+				const text = z.string().safeParse(value);
+
+				if (text.success) return hydra.redact(text.data);
+
+				if (Array.isArray(value)) return value.map(redactValue);
+
+				const record = z.record(z.custom<JsonValue>()).safeParse(value);
+
+				if (!record.success) return value;
+
+				const redacted: ListedFields = {};
+
+				for (const [key, nested] of Object.entries(record.data)) {
+					redacted[key] = redactValue(nested);
+				}
+
+				return redacted;
+			};
+
+			const redacted: ListedFields = {};
+
+			for (const [key, value] of Object.entries(structured)) {
+				const parsed = jsonValue.safeParse(value);
+
+				redacted[key] = parsed.success
+					? redactValue(parsed.data)
+					: "[unavailable non-JSON error detail]";
+			}
+
+			return redacted;
+		};
+
+		const redacted: ToolResult = {
 			...result,
 			content: result.content.map((part) => ({ ...part, text: hydra.redact(part.text) })),
 		};
+
+		if (result.structuredContent != null) {
+			redacted.structuredContent = redactStructured(result.structuredContent);
+		}
+
+		return redacted;
 	}
 
 	async function hideConnectorFailure(run: () => Promise<ToolResult>, signal: AbortSignal): Promise<ToolResult> {
@@ -3208,6 +3740,17 @@ export function createHydraDBServer(
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.collection),
 	};
 
+	const metadataFieldSchema = z.object({
+		name: z.string().trim().min(1).describe(METADATA_FIELD_PARAMS.name),
+		data_type: z
+			.enum(["BOOL", "INT8", "INT16", "INT32", "INT64", "FLOAT", "DOUBLE", "VARCHAR", "JSON"])
+			.describe(METADATA_FIELD_PARAMS.data_type),
+		max_length: z.number().int().min(1).optional().describe(METADATA_FIELD_PARAMS.max_length),
+		enable_match: z.boolean().optional().describe(METADATA_FIELD_PARAMS.enable_match),
+		enable_dense_embedding: z.boolean().optional().describe(METADATA_FIELD_PARAMS.enable_dense_embedding),
+		enable_sparse_embedding: z.boolean().optional().describe(METADATA_FIELD_PARAMS.enable_sparse_embedding),
+	});
+
 	const querySchema = {
 		query: z.string().describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.query),
 		kind: z
@@ -3308,6 +3851,43 @@ export function createHydraDBServer(
 		...scopeSchema,
 	};
 
+	const updateSchema = {
+		id: z
+			.string()
+			.refine((id) => id.trim().length > 0, "id must not be blank")
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.UPDATE].params.id),
+		database_metadata: z
+			.record(z.unknown())
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.UPDATE].params.database_metadata),
+		additional_metadata: z
+			.record(z.unknown())
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.UPDATE].params.additional_metadata),
+		acl: z
+			.array(z.string().min(1))
+			.nullable()
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.UPDATE].params.acl),
+		...scopeSchema,
+	};
+
+	const updateOutputSchema = {
+		id: z.string(),
+		database: z.string().optional(),
+		collection: z.string().optional(),
+		updated: z.boolean(),
+		database_metadata_keys: z.array(z.string()),
+		additional_metadata_keys: z.array(z.string()),
+		acl_updated: z.boolean(),
+		vector_sync_required: z.boolean().optional(),
+		vector_synced: z.boolean().optional(),
+		vector_acl_synced: z.boolean().optional(),
+		vector_rows_synced: z.number().optional(),
+		partial_commit: z.string().optional(),
+		vector_sync_error: z.string().optional(),
+	};
+
 	const storeSchema = {
 		text: z
 			.string()
@@ -3338,11 +3918,31 @@ export function createHydraDBServer(
 		...scopeSchema,
 	};
 
+	const forcefulRelationsSchema = z.object({
+		ids: z.array(z.string()),
+		properties: z.record(jsonValue).optional(),
+	});
+
 	const ingestMetadataSchema = {
 		metadata: z
-			.record(z.unknown())
+			.record(jsonValue)
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.metadata),
+		additional_metadata: z
+			.record(jsonValue)
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.additional_metadata),
+		relations: forcefulRelationsSchema
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.relations),
+		evidence_kind: z
+			.enum(["assertion", "record", "said", "done", "third_party", "inferred"])
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.evidence_kind),
+		evidence_subject: z
+			.string()
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.evidence_subject),
 		observation_date: z
 			.string()
 			.regex(OBSERVATION_DATE_PATTERN, {
@@ -3354,6 +3954,86 @@ export function createHydraDBServer(
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.observation_date),
 	};
+
+	const customInstructionsSchema = z
+		.string()
+		.max(MAX_CUSTOM_INSTRUCTIONS_CHARS, {
+			message: `custom_instructions must be at most ${MAX_CUSTOM_INSTRUCTIONS_CHARS} characters`,
+		})
+		.optional()
+		.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.custom_instructions);
+
+	const graphSchema = z.object({
+		entities: z
+			.record(z.object({
+				name: z.string(),
+				type: z.string(),
+				namespace: z.string().optional(),
+				identifier: z.string().optional(),
+			}))
+			.refine((entities) => Object.keys(entities).length > 0, {
+				message: "graph.entities must contain at least one entity",
+			}),
+		relations: z.array(z.object({
+			source: z.string(),
+			target: z.string(),
+			predicate: z.string(),
+			context: z.string().optional(),
+			temporal_details: jsonValue.optional(),
+		})),
+	});
+
+	const ingestItemSchema = z.object({
+		text: z
+			.string()
+			.max(MAX_TEXT_CHARS, {
+				message: `text must be at most ${MAX_TEXT_CHARS} characters`,
+			})
+			.optional(),
+		turns: z
+			.array(turnSchema)
+			.min(1)
+			.max(MAX_TURNS, { message: `at most ${MAX_TURNS} turns per ingest` })
+			.optional(),
+		title: storeSchema.title,
+		source_id: storeSchema.source_id,
+		infer: storeSchema.infer,
+		is_markdown: storeSchema.is_markdown,
+		user_name: z.string().optional(),
+		custom_instructions: customInstructionsSchema,
+		graph: graphSchema.optional(),
+		...ingestMetadataSchema,
+	});
+
+	const appKnowledgeKindSchema = z.enum([
+		"email",
+		"message",
+		"ticket",
+		"knowledge_base",
+		"comment",
+		"meeting",
+		"custom",
+	]);
+
+	const appKnowledgeItemSchema = z.object({
+		id: z.string().optional(),
+		title: z.string().optional(),
+		description: z.string().optional(),
+		url: z.string().optional(),
+		timestamp: z.string().optional(),
+		kind: appKnowledgeKindSchema,
+		provider: z.string().optional(),
+		external_id: z.string().optional(),
+		fields: z.record(jsonValue),
+		metadata: z.record(jsonValue).optional(),
+		additional_metadata: z.record(jsonValue).optional(),
+		attachments: z.array(z.record(jsonValue)).optional(),
+		relations: z.union([
+			forcefulRelationsSchema,
+			z.array(z.record(jsonValue)),
+		]).optional(),
+		acl: ingestAclSchema.optional().describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.app_acl),
+	}).strict();
 
 	const ingestSchema = {
 		...storeSchema,
@@ -3386,6 +4066,26 @@ export function createHydraDBServer(
 			.string()
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.user_name),
+		custom_instructions: customInstructionsSchema,
+		graph: graphSchema
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.graph),
+		items: z
+			.array(ingestItemSchema)
+			.min(1)
+			.max(MAX_INGEST_ITEMS, {
+				message: `items must contain at most ${MAX_INGEST_ITEMS} entries`,
+			})
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.items),
+		app_knowledge: z
+			.array(appKnowledgeItemSchema)
+			.min(1)
+			.max(MAX_INGEST_ITEMS, {
+				message: `app_knowledge must contain at most ${MAX_INGEST_ITEMS} entries`,
+			})
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.app_knowledge),
 		// `path` is in the schema on every transport so the tool looks the same
 		// everywhere; the hosted server refuses it with a message saying why.
 		file: z
@@ -3396,6 +4096,33 @@ export function createHydraDBServer(
 			})
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.file),
+	};
+
+	type IngestToolItem = z.infer<typeof ingestItemSchema>;
+
+	type IngestToolArguments = {
+		text?: string;
+		kind?: ContextKind;
+		title?: string;
+		source_id?: string;
+		infer?: boolean;
+		is_markdown?: boolean;
+		overwrite?: boolean;
+		metadata?: IngestParams["metadata"];
+		additional_metadata?: IngestParams["additionalMetadata"];
+		custom_instructions?: string;
+		graph?: IngestGraph;
+		items?: IngestToolItem[];
+		app_knowledge?: AppKnowledgeItem[];
+		file?: FileArg;
+		relations?: IngestParams["relations"];
+		evidence_kind?: IngestParams["evidenceKind"];
+		evidence_subject?: string;
+		observation_date?: string;
+		turns?: ConversationTurn[];
+		user_name?: string;
+		database?: string;
+		collection?: string;
 	};
 
 	const conversationSchema = {
@@ -3687,9 +4414,26 @@ export function createHydraDBServer(
 
 	const ingestOutputSchema = {
 		id: z.string().optional(),
+		stored_title: z.string().optional(),
+		accepted_ids: z.array(z.string()),
+		rejected_items: z.array(z.object({
+			id: z.string(),
+			stored_title: z.string().optional(),
+			error: z.string(),
+			error_code: z.string().optional(),
+		})),
 		success_count: z.number(),
 		failed_count: z.number(),
 		indexing_pending: z.boolean(),
+		items: z.array(z.object({
+			index: z.number(),
+			id: z.string(),
+			status: z.string(),
+			accepted: z.boolean().nullable(),
+			error: z.string().optional(),
+			error_code: z.string().optional(),
+			relations_error: z.string().optional(),
+		})).optional(),
 	};
 
 	const deleteOutputSchema = {
@@ -3821,6 +4565,12 @@ export function createHydraDBServer(
 		openWorldHint: true,
 	};
 
+	/** Changes or removes existing values; retrying an identical request has no extra effect. */
+	const destructiveIdempotentWrite = {
+		...idempotentWrite,
+		destructiveHint: true,
+	};
+
 	/**
 	 * Writes that can replace what is stored, and are not safe to repeat:
 	 * ingest overwrites an existing document with the same source id (and
@@ -3863,26 +4613,101 @@ export function createHydraDBServer(
 		TOOL_NAMES.INGEST,
 		ingestSchema,
 		async (args, extra) => {
-		const a = args as {
-			text?: string;
-			kind?: ContextKind;
-			title?: string;
-			source_id?: string;
-			infer?: boolean;
-			is_markdown?: boolean;
-			overwrite?: boolean;
-			metadata?: Record<string, unknown>;
-			observation_date?: string;
-			turns?: ConversationTurn[];
-			user_name?: string;
-			file?: FileArg;
-			database?: string;
-			collection?: string;
-		};
+			// SAFETY: register validates args against ingestSchema before this handler runs.
+			const a = args as IngestToolArguments;
 
-		if (a.file != null) return runIngestFile(a, a.file, extra?.signal);
+			if (a.file == null) {
+				assertIngestPayloadSize(a);
+			} else {
+				const combinedModes = [a.text, a.turns, a.items, a.app_knowledge]
+					.filter((value) => value != null).length;
+
+				if (combinedModes > 0) {
+					throw new Error(
+						`${TOOL_NAMES.INGEST} takes exactly one of \`text\`, \`turns\`, \`items\`, ` +
+						"`app_knowledge`, or `file`, not several.",
+					);
+				}
+
+				return runIngestFile(a, a.file, extra?.signal);
+			}
 
 		const hasTurns = a.turns != null && a.turns.length > 0;
+		const hasFlatItem = a.text != null || hasTurns;
+
+		const otherFlatFields = [
+			a.title,
+			a.source_id,
+			a.infer,
+			a.is_markdown,
+			a.metadata,
+			a.additional_metadata,
+			a.relations,
+			a.evidence_kind,
+			a.evidence_subject,
+			a.observation_date,
+			a.user_name,
+			a.graph,
+		];
+
+		const hasOtherFlatFields = otherFlatFields.some((value) => value != null);
+
+		if (a.app_knowledge != null) {
+			if (a.kind === "memory") {
+				throw new Error("app_knowledge requires kind knowledge; omit kind or set it to knowledge.");
+			}
+
+			if (a.items != null || hasFlatItem || hasOtherFlatFields || a.custom_instructions != null) {
+				throw new Error(
+					`${TOOL_NAMES.INGEST} accepts app_knowledge or memory/document item fields, not both.`,
+				);
+			}
+
+			return runIngestAppKnowledge(
+				{
+					items: a.app_knowledge,
+					overwrite: a.overwrite,
+					database: a.database,
+					collection: a.collection,
+				},
+				extra?.signal,
+			);
+		}
+
+		const memoryOnlyKnowledgeFields = (
+			[
+				["relations", a.relations],
+				["evidence_kind", a.evidence_kind],
+				["evidence_subject", a.evidence_subject],
+			] as const
+		).flatMap(([name, value]) => value == null ? [] : [name]);
+
+		if ((a.kind ?? "memory") === "memory" && memoryOnlyKnowledgeFields.length > 0) {
+			throw new Error(
+				`${TOOL_NAMES.INGEST} does not support ${memoryOnlyKnowledgeFields.join(", ")} for ` +
+				"memory ingestion — those apply to knowledge ingestion only.",
+			);
+		}
+
+		if (a.items != null && (hasFlatItem || hasOtherFlatFields)) {
+			throw new Error(
+				`${TOOL_NAMES.INGEST} accepts either \`items\` or the single-item fields, not both.`,
+			);
+		}
+
+		if (a.items != null) {
+			return runIngestBatch(
+				{
+					kind: a.kind,
+					items: a.items,
+					custom_instructions: a.custom_instructions,
+					overwrite: a.overwrite,
+					database: a.database,
+					collection: a.collection,
+				},
+				extra?.signal,
+			);
+		}
 
 		// A conversation is a memory by definition; there is no knowledge document
 		// made of user/assistant pairs. Reject rather than quietly ingesting it as
@@ -3901,12 +4726,10 @@ export function createHydraDBServer(
 		if (a.kind === "knowledge") {
 			const memoryOnlyGiven = (
 				[
-					["source_id", a.source_id],
-					["infer", a.infer],
 					["is_markdown", a.is_markdown],
 					["user_name", a.user_name],
-					["metadata", a.metadata],
 					["observation_date", a.observation_date],
+					["custom_instructions", a.custom_instructions],
 				] as const
 			)
 				.filter(([, value]) => value != null)
@@ -3921,6 +4744,10 @@ export function createHydraDBServer(
 			}
 		}
 
+		if (a.infer === false && a.custom_instructions != null) {
+			throw new Error("custom_instructions cannot be used when infer is false.");
+		}
+
 		// `text` and `turns` are mutually exclusive — reject rather than silently
 		// dropping one (the documented "exactly one" contract).
 		if (hasTurns && a.text != null) {
@@ -3930,7 +4757,7 @@ export function createHydraDBServer(
 		}
 
 		if (a.turns != null && a.turns.length > 0) {
-			const sourceId = a.source_id ?? generatedSourceId();
+			const sourceId = a.source_id ?? generatedSourceId("conversation");
 
 			// Forward every option the canonical schema accepts so none is
 			// silently dropped on the conversation path.
@@ -3943,6 +4770,11 @@ export function createHydraDBServer(
 					title: a.title,
 					isMarkdown: a.is_markdown,
 					overwrite: a.overwrite,
+					metadata: a.metadata,
+					additionalMetadata: a.additional_metadata,
+					customInstructions: a.custom_instructions,
+					graph: a.graph,
+					observationDate: a.observation_date,
 					database: a.database,
 					collection: a.collection,
 				},
@@ -3961,6 +4793,12 @@ export function createHydraDBServer(
 					is_markdown: a.is_markdown,
 					overwrite: a.overwrite,
 					metadata: a.metadata,
+					additional_metadata: a.additional_metadata,
+					custom_instructions: a.custom_instructions,
+					graph: a.graph,
+					relations: a.relations,
+					evidence_kind: a.evidence_kind,
+					evidence_subject: a.evidence_subject,
 					observation_date: a.observation_date,
 					database: a.database,
 					collection: a.collection,
@@ -3970,11 +4808,24 @@ export function createHydraDBServer(
 		}
 
 			throw new Error(
-				`${TOOL_NAMES.INGEST} requires one of \`text\` (a note), \`turns\` (a conversation) or \`file\` (a document).`,
+				`${TOOL_NAMES.INGEST} requires one of \`text\`, \`turns\`, \`items\`, ` +
+				"`app_knowledge`, or `file`.",
 			);
 		},
 		overwritingWrite,
 		ingestOutputSchema,
+	);
+
+	register(
+		TOOL_NAMES.UPDATE,
+		updateSchema,
+		(args, extra) => {
+			// SAFETY: the MCP SDK validated args against updateSchema, which
+			// declares exactly the fields and types accepted by runUpdate.
+			return runUpdate(args as Parameters<typeof runUpdate>[0], extra?.signal);
+		},
+		destructiveIdempotentWrite,
+		updateOutputSchema,
 	);
 
 	register(
@@ -4229,11 +5080,135 @@ export function createHydraDBServer(
 		readOnly,
 	);
 
-	// Only an OAuth connection carries a user's database decision, and only
-	// there does an agent need a way to see it. Registering this for API-key
-	// connections too would change their tool list, which must stay identical.
-	if (options.oauthTools) {
-		register(TOOL_NAMES.DATABASES, {}, (_args, extra) => runDatabases(extra?.signal), readOnly);
+	register(TOOL_NAMES.DATABASES, {}, (_args, extra) => runDatabases(extra?.signal), readOnly);
+
+	// --- Database tools (ENG-3340) ---
+	//
+	// One call per tool: name, annotations, input fields, and what it runs.
+	// HYDRADB_MCP_DATABASE_TOOLS=0 withholds these six; hydradb_databases and the
+	// collection tools are not part of the family.
+	if (databaseTools.enabled) {
+		const databaseTool = <Fields extends ToolInputFields>(
+			name: (typeof DATABASE_TOOL_NAMES)[number],
+			annotations: typeof readOnly,
+			fields: Fields,
+			run: (input: z.output<z.ZodObject<Fields>>, signal?: AbortSignal) => Promise<ToolResult>,
+		) =>
+			register(
+				name,
+				fields,
+				// SAFETY: the MCP SDK parsed args against exactly these fields before calling this.
+				(args, extra) => run(args as z.output<z.ZodObject<Fields>>, extra?.signal),
+				annotations,
+			);
+
+		const byDatabase = { database: z.string().trim().min(1).optional().describe(DATABASE_PARAM) };
+		const create = TOOL_DESCRIPTIONS[TOOL_NAMES.DATABASE_CREATE].params;
+
+		databaseTool(
+			TOOL_NAMES.DATABASE_CREATE,
+			additiveWrite,
+			{
+				database: z.string().trim().min(1).describe(create.database),
+				embeddings_dimension: z.number().int().min(1).optional().describe(create.embeddings_dimension),
+				database_metadata_schema: z.array(metadataFieldSchema).optional().describe(create.database_metadata_schema),
+			},
+			async (input, signal) => {
+				const result = await databaseWrite(() => hydra.databases.create({
+					database: input.database,
+					embeddingsDimension: input.embeddings_dimension,
+					databaseMetadataSchema: input.database_metadata_schema?.map(metadataField),
+				}, { signal }));
+
+				return structuredResult(
+					`Database "${result.database}" creation was ${result.status}. Provisioning is asynchronous; ` +
+						`poll ${TOOL_NAMES.DATABASE_READINESS} until it is ready for ingestion.`,
+					{ database: result.database, status: result.status, message: result.message ?? null },
+				);
+			},
+		);
+
+		databaseTool(
+			TOOL_NAMES.DATABASE_DELETE,
+			destructive,
+			{ database: z.string().trim().min(1).describe(TOOL_DESCRIPTIONS[TOOL_NAMES.DATABASE_DELETE].params.database) },
+			async (input, signal) => {
+				const result = await databaseWrite(() => hydra.databases.delete(input.database, { signal }));
+
+				return structuredResult(
+					`Database "${result.database}" deletion was ${result.status}.`,
+					{ database: result.database, status: result.status, message: result.message ?? null },
+				);
+			},
+		);
+
+		databaseTool(TOOL_NAMES.DATABASE_READINESS, readOnly, byDatabase, async (input, signal) => {
+			const result = await hydra.databases.readiness(input.database ?? hydra.database, { signal });
+			const ready = result.infra?.readyForIngestion === true;
+
+			return structuredResult(
+				ready
+					? `Database "${result.database}" is ready for ingestion.`
+					: `Database "${result.database}" is not ready for ingestion yet. Poll this tool again.`,
+				{
+					database: result.database,
+					ready_for_ingestion: ready,
+					scheduler_ready: result.infra?.schedulerStatus ?? null,
+					graph_ready: result.infra?.graphStatus ?? null,
+					vectorstore: result.infra?.vectorstoreStatus ?? null,
+					message: result.message ?? null,
+				},
+			);
+		});
+
+		databaseTool(TOOL_NAMES.DATABASE_STATS, readOnly, byDatabase, async (input, signal) => {
+			const result = await hydra.databases.stats(input.database ?? hydra.database, { signal });
+			const knowledgeRows = result.knowledgeCollection?.rowCount ?? null;
+			const memoryRows = result.memoryCollection?.rowCount ?? null;
+			const knowledgeText = knowledgeRows == null ? "knowledge row count is unknown" : `${knowledgeRows} knowledge row(s)`;
+			const memoryText = memoryRows == null ? "memory row count is unknown" : `${memoryRows} memory row(s)`;
+
+			return structuredResult(
+				`Database "${result.database}" reports ${knowledgeText}; ${memoryText}.`,
+				{ database: result.database, knowledge_rows: knowledgeRows, memory_rows: memoryRows },
+			);
+		});
+
+		databaseTool(TOOL_NAMES.DATABASE_SCHEMA_INSPECT, readOnly, byDatabase, async (input, signal) => {
+			const result = await hydra.databases.inspectMetadataSchema(input.database ?? hydra.database, { signal });
+			const fields = result.fields.map(renderMetadataField);
+
+			return structuredResult(
+				fields.length === 0
+					? `Database "${result.database}" has no custom metadata fields.`
+					: `Database "${result.database}" metadata fields:\n${fields.map((field) => `- ${field.name}: ${field.data_type}`).join("\n")}`,
+				{ database: result.database, fields },
+			);
+		});
+
+		databaseTool(
+			TOOL_NAMES.DATABASE_SCHEMA_UPDATE,
+			additiveWrite,
+			{
+				...byDatabase,
+				add_fields: z
+					.array(metadataFieldSchema)
+					.min(1)
+					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.DATABASE_SCHEMA_UPDATE].params.add_fields),
+			},
+			async (input, signal) => {
+				const result = await databaseWrite(() => hydra.databases.updateMetadataSchema(
+					input.database ?? hydra.database,
+					input.add_fields.map(metadataField),
+					{ signal },
+				));
+
+				return structuredResult(
+					`Added metadata field(s) to database "${result.database}": ${result.addedFields.join(", ")}.`,
+					{ database: result.database, added_fields: result.addedFields },
+				);
+			},
+		);
 	}
 
 	register(

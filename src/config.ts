@@ -23,6 +23,12 @@ export interface HydraDBConfig {
 	maxRetries?: number;
 	graph: GraphConfig;
 	connectors: ConnectorConfig;
+	databaseTools: DatabaseToolsConfig;
+}
+
+export interface DatabaseToolsConfig {
+	/** Whether the database management tools are registered at all. */
+	enabled: boolean;
 }
 
 export interface ConnectorConfig {
@@ -186,7 +192,15 @@ export function resolveConfig(
 		...(maxRetries != null ? { maxRetries } : {}),
 		graph: resolveGraphConfig(env, database),
 		connectors: resolveConnectorConfig(env, warn),
+		databaseTools: resolveDatabaseToolsConfig(env),
 	};
+}
+
+/** Resolve the database-management gate without requiring an API key. */
+export function resolveDatabaseToolsConfig(
+	env: EnvSource = process.env,
+): DatabaseToolsConfig {
+	return { enabled: flag(env.HYDRADB_MCP_DATABASE_TOOLS, true) };
 }
 
 /**

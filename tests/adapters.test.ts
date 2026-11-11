@@ -47,6 +47,7 @@ test("toAddMemoryResponse carries per-item failures instead of discarding them",
 	assert.deepEqual(res.results[1], {
 		source_id: "s-bad",
 		title: "notes.md",
+		stored_title: "notes.md",
 		status: "failed",
 		error: "content exceeds maximum size",
 		error_code: "TOO_LARGE",
@@ -90,6 +91,22 @@ test("toMemoryList reads memory rows defensively", () => {
 			{ id: "m2", content: "likes tea" },
 		],
 	});
+	assert.deepEqual(memories, [
+		{ memory_id: "m1", memory_content: "prefers dark mode" },
+		{ memory_id: "m2", memory_content: "likes tea" },
+	]);
+});
+
+test("toMemoryList reads the camelCase rows returned by SDK 2.1.8", () => {
+	// SAFETY: this fixture intentionally uses the SDK's runtime camelCase shape,
+	// which the generated ListV2ListResponse type does not declare accurately.
+	const { memories } = toMemoryList({
+		userMemories: [
+			{ memoryId: "m1", memoryContent: "prefers dark mode" },
+			{ id: "m2", content: "likes tea" },
+		],
+	} as never);
+
 	assert.deepEqual(memories, [
 		{ memory_id: "m1", memory_content: "prefers dark mode" },
 		{ memory_id: "m2", memory_content: "likes tea" },

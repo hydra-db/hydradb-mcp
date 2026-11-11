@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — OAuth discovery behind an MCP path prefix
+
+Path-prefixed MCP deployments now serve protected-resource metadata through
+both prefix-preserving and prefix-stripping proxies, including the RFC 9728
+path-inserted alias. Unsupported `HYDRADB_MCP_PUBLIC_URL` layouts now fail at
+startup with a clear error instead of silently disabling OAuth.
+
+## [1.8.0] - 2026-11-11
+
+### Added — `hydradb_update`
+
+`hydradb_update` edits one existing context item without re-ingesting it. It
+merges `database_metadata` and `additional_metadata`, or replaces the complete
+ACL. An omitted ACL stays unchanged; `[]` or `null` makes the item private;
+`["__public__"]` makes it public to identified callers. The tool reports
+partial commits and search-index ACL synchronization failures as retryable,
+idempotent errors instead of claiming complete success.
+
+### Fixed — list failures stay failures and empty queries keep their request id
+
+- `hydradb_list` now reports the documented degraded memory-store response as
+  an error instead of saying that no memories exist. Every list path also
+  rejects malformed successful responses, including proxy login pages.
+- `hydradb_status` and `hydradb_databases` reject malformed successful
+  responses instead of presenting missing arrays as valid empty results.
+- Memory lists now read the camelCase fields returned by SDK 2.1.8, so valid
+  rows do not disappear.
+- Empty `hydradb_query` results now print their request id in text and
+  structured modes, so callers can submit retrieval feedback.
+
+## [1.7.0] - 2026-11-03
+
 ### Added — dashboard connector completion
 
 `hydradb_connector_connect` accepts only a provider and returns a safe dashboard
@@ -39,6 +71,35 @@ connectors with no database, authorize every by-ID read, and filter resources
 by their effective destination database. Provider credential schemas are
 metadata only. Defaults, examples, constants, and unknown schema extensions
 are removed before the schema enters model context.
+
+### Added — structured app knowledge with access lists
+
+`hydradb_ingest` now accepts structured email, message, ticket, knowledge-base,
+comment, meeting, and custom records through `app_knowledge` on split databases.
+Each record preserves its provider fields, attachments, relations, metadata, and
+access list. The tool documents private, public, unrestricted, and re-ingest ACL
+semantics and reports ambiguous public access.
+
+### Added — batch ingest and caller-controlled extraction
+
+`hydradb_ingest` now accepts up to 100 same-kind items in one API request.
+Memory items accept caller extraction instructions and additional metadata.
+Memory and knowledge items accept a caller-supplied graph keyed by the item id.
+The tool generates missing batch ids and reports each item's status.
+
+### Added — complete knowledge document metadata
+
+`hydradb_ingest` knowledge writes now preserve caller ids, metadata, additional
+metadata, explicit relations, inference control, evidence kind, and evidence
+subject in the API's per-document metadata.
+
+### Fixed — ingest outcomes and supported fields are preserved
+
+`hydradb_ingest` now reports accepted ids, rejected items, and stored titles.
+An all-failed ingest is an MCP error, while partial success keeps the stored
+items available to the caller. Conversation ingest now forwards `metadata` and
+`observation_date`. Knowledge titles that already end in `.md` no longer get a
+second extension; queries still search the historical doubled form.
 
 ### Added — `hydradb_ingest` takes files
 
@@ -84,12 +145,17 @@ spreadsheets, OpenDocument, iWork, images and text files. They are uploaded as
 - The SDK's own retry loop is turned off (`maxRetries: 0`); one policy in
   `src/hydra/retry.ts` now covers SDK and hand-rolled calls alike.
 
-### Fixed — OAuth discovery behind an MCP path prefix
 
-Path-prefixed MCP deployments now serve protected-resource metadata through
-both prefix-preserving and prefix-stripping proxies, including the RFC 9728
-path-inserted alias. Unsupported `HYDRADB_MCP_PUBLIC_URL` layouts now fail at
-startup with a clear error instead of silently disabling OAuth.
+### Added — MCP database management tools
+
+Added `hydradb_database_create`, `hydradb_database_delete`,
+`hydradb_database_readiness`, `hydradb_database_stats`,
+`hydradb_database_schema_inspect` and `hydradb_database_schema_update` (additive
+only). `hydradb_databases` and the new tools are available to API-key, stdio, and
+OAuth connections. OAuth database confinement now applies before create, delete,
+readiness, stats, and metadata-schema requests. Deleting the connection's own
+default database is refused, and write-permission failures explain how to use a
+writable credential. `HYDRADB_MCP_DATABASE_TOOLS=0` withholds the six new tools.
 
 ## [1.6.0] - 2026-10-28
 

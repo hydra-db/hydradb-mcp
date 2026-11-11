@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { type HydraDB as Sdk, type HydraDBClient, HydraDBError } from "@hydradb/sdk";
+import { z } from "zod";
 
 import {
 	DEFAULT_MAX_RETRIES,
@@ -11,6 +12,7 @@ import {
 	translateError,
 	unwrap,
 } from "../src/hydra/index.js";
+import type { IngestGraph } from "../src/hydra/index.js";
 import { mcpUser } from "../src/hydra/transport.js";
 import { SERVER_VERSION } from "../src/version.js";
 
@@ -103,8 +105,6 @@ function ingestSdk(): { sdk: HydraDBClient; calls: unknown[] } {
 test("knowledge ingest rejects memory-only params instead of dropping them", async () => {
 	for (const [name, extra] of [
 		["pairs", { pairs: [{ user: "hi", assistant: "hello" }] }],
-		["sourceId", { sourceId: "s1" }],
-		["infer", { infer: true }],
 		["isMarkdown", { isMarkdown: true }],
 		["customInstructions", { customInstructions: "focus on X" }],
 		["userName", { userName: "Ada" }],
@@ -136,6 +136,209 @@ test("knowledge ingest still accepts the params it can carry", async () => {
 	});
 
 	assert.equal(calls.length, 1, "knowledge ingest should still reach the SDK");
+});
+
+test("knowledge ingest serializes every supported per-document field", async () => {
+	const { sdk, calls } = ingestSdk();
+	const hydra = new HydraDB({ token: "t", database: "db_test" }, sdk);
+
+	await hydra.context.ingest({
+		kind: "knowledge",
+		text: "quarterly report body",
+		title: "Q3",
+		sourceId: "report-q3",
+		metadata: { department: "finance" },
+		additionalMetadata: { author: "Ada" },
+		relations: { ids: ["budget-2026"], properties: { type: "supports" } },
+		infer: false,
+		evidenceKind: "record",
+		evidenceSubject: "team:finance",
+	});
+
+	const request = z.object({ documentMetadata: z.string() }).parse(calls[0]);
+
+	assert.deepEqual(JSON.parse(request.documentMetadata), [{
+		id: "report-q3",
+		title: "Q3",
+		metadata: { department: "finance" },
+		additional_metadata: { author: "Ada" },
+		relations: { ids: ["budget-2026"], properties: { type: "supports" } },
+		infer: false,
+		evidence_kind: "record",
+		evidence_subject: "team:finance",
+	}]);
+});
+
+test("memory ingest sends caller instructions, additional metadata, and graph", async () => {
+	const { sdk, calls } = ingestSdk();
+	const hydra = new HydraDB({ token: "t", database: "db_test" }, sdk);
+
+	await hydra.context.ingest({
+		kind: "memory",
+		text: "Deploy on Friday",
+		sourceId: "memory-1",
+		customInstructions: "Extract only deadline dates",
+		additionalMetadata: { team: "infra" },
+		graph: {
+			entities: { alice: { name: "Alice", type: "Person" } },
+			relations: [],
+		},
+	});
+
+	const request = z.object({ memories: z.string(), graphPayload: z.string() }).parse(calls[0]);
+	const memories = JSON.parse(request.memories);
+
+	assert.deepEqual(memories, [{
+		text: "Deploy on Friday",
+		source_id: "memory-1",
+		infer: true,
+		is_markdown: false,
+		custom_instructions: "Extract only deadline dates",
+		additional_metadata: { team: "infra" },
+	}]);
+	assert.deepEqual(JSON.parse(request.graphPayload), {
+		"memory-1": {
+			entities: { alice: { name: "Alice", type: "Person" } },
+			relations: [],
+		},
+	});
+});
+
+test("memory ingest preserves a graph keyed by the __proto__ source id", async () => {
+	const { sdk, calls } = ingestSdk();
+	const hydra = new HydraDB({ token: "t", database: "db_test" }, sdk);
+
+	await hydra.context.ingest({
+		kind: "memory",
+		text: "special id",
+		sourceId: "__proto__",
+		graph: {
+			entities: { thing: { name: "Thing", type: "Object" } },
+			relations: [],
+		},
+	});
+
+	const request = z.object({ graphPayload: z.string() }).parse(calls[0]);
+	// SAFETY: graphPayload is JSON encoded by ContextResource from IngestGraph values.
+	const graphPayload = JSON.parse(request.graphPayload) as { "__proto__"?: IngestGraph };
+
+	assert.deepEqual(Object.keys(graphPayload), ["__proto__"]);
+});
+
+test("memory ingest rejects knowledge-only provenance fields", async () => {
+	for (const item of [
+		{ text: "claim", relations: { ids: ["source-1"] } },
+		{ pairs: [{ user: "claim", assistant: "noted" }], evidenceKind: "third_party" },
+		{ text: "claim", evidenceSubject: "invoice-1" },
+	] as const) {
+		const { sdk, calls } = ingestSdk();
+		const hydra = new HydraDB({ token: "t", database: "db_test" }, sdk);
+
+		await assert.rejects(
+			hydra.context.ingest({ kind: "memory", ...item }),
+			/Memory ingestion does not support/,
+		);
+		assert.equal(calls.length, 0);
+	}
+});
+
+test("memory ingest batches items into one SDK request", async () => {
+	const { sdk, calls } = ingestSdk();
+	const hydra = new HydraDB({ token: "t", database: "db_test" }, sdk);
+
+	await hydra.context.ingest({
+		kind: "memory",
+		items: [
+			{ text: "one", sourceId: "m1" },
+			{ pairs: [{ user: "two", assistant: "reply" }], sourceId: "m2" },
+			{ text: "three", sourceId: "m3" },
+		],
+	});
+
+	assert.equal(calls.length, 1);
+	const request = z.object({ memories: z.string() }).parse(calls[0]);
+	const memories = z.array(z.object({ source_id: z.string() })).parse(JSON.parse(request.memories));
+
+	assert.deepEqual(memories.map((item) => item.source_id), ["m1", "m2", "m3"]);
+});
+
+test("caller instructions with infer false are rejected", async () => {
+	const { sdk, calls } = ingestSdk();
+	const hydra = new HydraDB({ token: "t", database: "db_test" }, sdk);
+
+	await assert.rejects(
+		() => hydra.context.ingest({
+			kind: "memory",
+			text: "note",
+			infer: false,
+			customInstructions: "Extract dates",
+		}),
+		/customInstructions.*infer is false/i,
+	);
+	assert.equal(calls.length, 0);
+});
+
+test("app knowledge reaches the SDK with its ACL and normalized fields", async () => {
+	const { sdk, calls } = ingestSdk();
+	const hydra = new HydraDB({ token: "t", database: "db_test" }, sdk);
+
+	await hydra.context.ingest({
+		kind: "knowledge",
+		appKnowledge: [{
+			id: "slack-C1-1",
+			title: "Comp bands",
+			kind: "message",
+			provider: "slack",
+			external_id: "1.1",
+			fields: { body: "Q3 bands" },
+			acl: ["grace@acme.com", "group:slack:C1"],
+		}],
+	});
+
+	const request = z.object({
+		type: z.literal("knowledge"),
+		appKnowledge: z.string(),
+		documents: z.undefined().optional(),
+	}).parse(calls[0]);
+
+	const items = z.array(z.object({
+		id: z.string(),
+		kind: z.literal("message"),
+		fields: z.object({ kind: z.literal("message"), body: z.string() }),
+		acl: z.array(z.string()),
+	})).parse(JSON.parse(request.appKnowledge));
+
+	assert.deepEqual(items[0]?.acl, ["grace@acme.com", "group:slack:C1"]);
+	assert.equal(items[0]?.fields.kind, "message");
+});
+
+test("app knowledge rejects a fields.kind mismatch before the SDK call", async () => {
+	const { sdk, calls } = ingestSdk();
+	const hydra = new HydraDB({ token: "t", database: "db_test" }, sdk);
+
+	await assert.rejects(
+		() => hydra.context.ingest({
+			kind: "knowledge",
+			appKnowledge: [{ kind: "ticket", fields: { kind: "message", title: "AUTH-1" } }],
+		}),
+		/fields\.kind.*ticket/i,
+	);
+	assert.equal(calls.length, 0);
+});
+
+test("app knowledge sends an empty id when the caller omits it", async () => {
+	const { sdk, calls } = ingestSdk();
+	const hydra = new HydraDB({ token: "t", database: "db_test" }, sdk);
+
+	await hydra.context.ingest({
+		kind: "knowledge",
+		appKnowledge: [{ kind: "ticket", fields: { title: "AUTH-1" } }],
+	});
+
+	const request = z.object({ appKnowledge: z.string() }).parse(calls[0]);
+	const items = z.array(z.object({ id: z.string() })).parse(JSON.parse(request.appKnowledge));
+
+	assert.equal(items[0]?.id, "");
 });
 
 test("memory ingest is unaffected by the knowledge guard", async () => {
@@ -544,7 +747,7 @@ test("source lookup rejects invalid successful bodies instead of reporting an em
 			() => hydra.context.list({ kind: "knowledge", sourceFields: { app_external_id: "1" } }),
 			// The SDK refuses a body that is not an object ("", null, []); the
 			// wrapper refuses an object that is not a real list.
-			/\/context\/list → ERR: (Invalid successful list response: expected a sources array|response: Expected object)/,
+			/\/context\/list → (200: INVALID_LIST_RESPONSE: Invalid successful list response: expected a sources array|ERR: response: Expected object)/,
 			body,
 		);
 		fetchMock.mock.restore();
@@ -617,6 +820,131 @@ test("a list with no source fields stays on the SDK list path", async () => {
 	assert.equal(fetched, false, "a list goes through the generated method, not a raw fetch");
 });
 
+test("plain lists reject a successful HTML body instead of reporting no rows", async (t) => {
+	const fetchMock = t.mock.method(globalThis, "fetch", async () =>
+		new Response("<html><title>Login required</title></html>", { status: 200 }),
+	);
+
+	const hydra = new HydraDB({ token: "t", database: "db_test", maxRetries: 0 });
+
+	for (const kind of ["knowledge", "memory"] as const) {
+		await assert.rejects(
+			() => hydra.context.list({ kind }),
+			/Invalid successful list response/,
+		);
+	}
+
+	assert.equal(fetchMock.mock.callCount(), 2);
+});
+
+test("plain lists still accept real empty responses", async (t) => {
+	let kind: "knowledge" | "memory" = "knowledge";
+
+	const fetchMock = t.mock.method(globalThis, "fetch", async () => {
+		const data = kind === "memory" ? { user_memories: [], total: 0 } : { sources: [], total: 0 };
+
+		return new Response(JSON.stringify({ success: true, data }), { status: 200 });
+	});
+
+	const hydra = new HydraDB({ token: "t", database: "db_test", maxRetries: 0 });
+
+	assert.deepEqual(await hydra.context.list({ kind }), { sources: [], total: 0 });
+	kind = "memory";
+
+	assert.deepEqual(await hydra.context.list({ kind }), { userMemories: [], total: 0 });
+	assert.equal(fetchMock.mock.callCount(), 2);
+});
+
+test("status and database listing reject successful non-JSON bodies", async (t) => {
+	const fetchMock = t.mock.method(globalThis, "fetch", async () =>
+		new Response("<html><title>Login required</title></html>", { status: 200 }),
+	);
+
+	const hydra = new HydraDB({ token: "t", database: "db_test", maxRetries: 0 });
+
+	await assert.rejects(
+		() => hydra.context.ingestionStatus({ ids: ["source-1"] }),
+		/INVALID_STATUS_RESPONSE/,
+	);
+
+	await assert.rejects(
+		() => hydra.databases.list(),
+		/INVALID_DATABASES_RESPONSE/,
+	);
+	assert.equal(fetchMock.mock.callCount(), 2);
+});
+
+test("status rejects rows that are not objects with an id", async (t) => {
+	const bodies = [
+		{ statuses: [null] },
+		{ statuses: ["source-1"] },
+		{ statuses: [{ indexing_status: "completed" }] },
+		{ statuses: [{ id: "", indexing_status: "completed" }] },
+	];
+
+	const fetchMock = t.mock.method(globalThis, "fetch", async () =>
+		new Response(JSON.stringify({ success: true, data: bodies.shift() }), { status: 200 }),
+	);
+
+	const hydra = new HydraDB({ token: "t", database: "db_test", maxRetries: 0 });
+
+	for (let i = 0; i < 4; i++) {
+		await assert.rejects(
+			() => hydra.context.ingestionStatus({ ids: ["source-1"] }),
+			/INVALID_STATUS_RESPONSE/,
+		);
+	}
+
+	assert.equal(fetchMock.mock.callCount(), 4);
+});
+
+test("status and database listing accept valid SDK-decoded arrays", async (t) => {
+	const bodies = [
+		{ statuses: [] },
+		{ statuses: [{ id: "source-1", indexing_status: "completed", success: true }] },
+		{ tenant_ids: [] },
+		{ tenant_ids: ["db_one", "db_two"] },
+	];
+
+	const fetchMock = t.mock.method(globalThis, "fetch", async () =>
+		new Response(JSON.stringify({ success: true, data: bodies.shift() }), { status: 200 }),
+	);
+
+	const hydra = new HydraDB({ token: "t", database: "db_test", maxRetries: 0 });
+
+	assert.deepEqual(await hydra.context.ingestionStatus({ ids: ["source-1"] }), { statuses: [] });
+	assert.deepEqual(await hydra.context.ingestionStatus({ ids: ["source-1"] }), {
+		statuses: [{ id: "source-1", indexingStatus: "completed", success: true }],
+	});
+	assert.deepEqual(await hydra.databases.list(), { tenantIds: [] });
+	assert.deepEqual(await hydra.databases.list(), { tenantIds: ["db_one", "db_two"] });
+	assert.equal(fetchMock.mock.callCount(), 4);
+});
+
+test("synthetic validation errors preserve the SDK-decoded request id", async (t) => {
+	const fetchMock = t.mock.method(globalThis, "fetch", async () =>
+		new Response(
+			JSON.stringify({
+				success: true,
+				data: {},
+				meta: { request_id: "req-invalid-shape" },
+			}),
+			{ status: 200 },
+		),
+	);
+
+	const hydra = new HydraDB({ token: "t", database: "db_test", maxRetries: 0 });
+
+	for (const invoke of [
+		() => hydra.context.ingestionStatus({ ids: ["source-1"] }),
+		() => hydra.databases.list(),
+	]) {
+		await assert.rejects(invoke, /request_id: req-invalid-shape/);
+	}
+
+	assert.equal(fetchMock.mock.callCount(), 2);
+});
+
 // --- Database confinement ---
 
 import { assertDatabaseAllowed, ScopeNotAllowedError } from "../src/hydra/index.js";
@@ -666,6 +994,290 @@ test("an unconfined client passes any per-call database through", async () => {
 	const hydra = new HydraDB({ token: "t", database: "personal" }, sdk);
 	await hydra.context.query({ query: "hi", database: "work" });
 	assert.deepEqual(calls, ["query:work"]);
+});
+
+test("database management maps the SDK methods and metadata-schema responses", async () => {
+	type DatabaseCall = {
+		database?: string;
+		embeddingsDimension?: number;
+		databaseMetadataSchema?: { name?: string; dataType?: string }[];
+		addFields?: { name?: string; dataType?: string }[];
+	};
+
+	type DatabaseResponse = {
+		database?: string;
+		status?: string;
+		knowledgeCollection?: { rowCount?: number };
+		ready?: boolean;
+		fields?: { name?: string; dataType?: string }[];
+		addedFields?: string[];
+	};
+
+	type DatabaseRequestOptions = { abortSignal?: AbortSignal; maxRetries?: number };
+
+	const calls: {
+		method: string;
+		request: DatabaseCall;
+		abortSignal?: AbortSignal;
+		maxRetries?: number;
+	}[] = [];
+
+	const record = (method: string, data: DatabaseResponse) => (
+		request: DatabaseCall,
+		options?: DatabaseRequestOptions,
+	) => {
+		calls.push({
+			method,
+			request,
+			abortSignal: options?.abortSignal,
+			maxRetries: options?.maxRetries,
+		});
+
+		return Promise.resolve({ data, success: true });
+	};
+
+	const sdk = {
+		databases: {
+			create: record("create", { database: "invoices", status: "accepted" }),
+			delete: record("delete", { database: "archive", status: "deletion_scheduled" }),
+			stats: record("stats", { database: "invoices", knowledgeCollection: { rowCount: 3 } }),
+			status: record("status", { database: "invoices", ready: true }),
+			getMetadataSchema: record("getMetadataSchema", {
+				database: "invoices",
+				fields: [{ name: "vendor", dataType: "VARCHAR" }],
+			}),
+			updateMetadataSchema: record("updateMetadataSchema", {
+				database: "invoices",
+				addedFields: ["amount"],
+			}),
+		},
+	};
+	// SAFETY: Each exercised database method is present with its generated SDK call shape.
+
+	const hydra = new HydraDB({ token: "t", database: "primary" }, sdk as HydraDBClient);
+	const signal = new AbortController().signal;
+
+	await hydra.databases.create({
+		database: "invoices",
+		embeddingsDimension: 1024,
+		databaseMetadataSchema: [{ name: "vendor", dataType: "VARCHAR" }],
+	}, { signal });
+	await hydra.databases.delete("archive", { signal });
+	await hydra.databases.stats("invoices", { signal });
+	await hydra.databases.readiness("invoices", { signal });
+	const schema = await hydra.databases.inspectMetadataSchema("invoices", { signal });
+	const updated = await hydra.databases.updateMetadataSchema("invoices", [{ name: "amount", dataType: "DOUBLE" }], { signal });
+
+	assert.ok(calls.every((call) => call.abortSignal instanceof AbortSignal));
+	assert.ok(calls.every((call) => call.abortSignal?.aborted === false));
+	assert.ok(calls.every((call) => call.maxRetries === 0));
+	assert.deepEqual(calls.map(({ method, request }) => ({ method, request })), [
+		{ method: "create", request: { database: "invoices", embeddingsDimension: 1024, databaseMetadataSchema: [{ name: "vendor", dataType: "VARCHAR" }] } },
+		{ method: "delete", request: { database: "archive" } },
+		{ method: "stats", request: { database: "invoices" } },
+		{ method: "status", request: { database: "invoices" } },
+		{ method: "getMetadataSchema", request: { database: "invoices" } },
+		{ method: "updateMetadataSchema", request: { database: "invoices", addFields: [{ name: "amount", dataType: "DOUBLE" }] } },
+	]);
+	assert.deepEqual(schema, { database: "invoices", fields: [{ name: "vendor", dataType: "VARCHAR" }] });
+	assert.deepEqual(updated, { database: "invoices", addedFields: ["amount"] });
+});
+
+test("database management enforces OAuth confinement before every SDK call", async () => {
+	const calls: string[] = [];
+
+	const record = (method: string) => () => {
+		calls.push(method);
+
+		return Promise.resolve({ data: { database: "allowed", status: "ok", fields: [], addedFields: [] }, success: true });
+	};
+
+	const sdk = {
+		databases: {
+			create: record("create"),
+			delete: record("delete"),
+			stats: record("stats"),
+			status: record("status"),
+			getMetadataSchema: record("getMetadataSchema"),
+			updateMetadataSchema: record("updateMetadataSchema"),
+		},
+	};
+	// SAFETY: Each exercised database method is present; confinement rejects before response parsing.
+
+	const hydra = new HydraDB(
+		{ token: "t", database: "primary", allowedDatabases: ["primary", "allowed"] },
+		sdk as HydraDBClient,
+	);
+
+	await hydra.databases.create({ database: "allowed" });
+	await hydra.databases.delete("allowed");
+	await hydra.databases.stats("allowed");
+	await hydra.databases.readiness("allowed");
+	await hydra.databases.inspectMetadataSchema("allowed");
+	await hydra.databases.updateMetadataSchema("allowed", [{ name: "region" }]);
+
+	for (const [name, call] of [
+		["create", () => hydra.databases.create({ database: "refused" })],
+		["delete", () => hydra.databases.delete("refused")],
+		["stats", () => hydra.databases.stats("refused")],
+		["readiness", () => hydra.databases.readiness("refused")],
+		["schema inspect", () => hydra.databases.inspectMetadataSchema("refused")],
+		["schema update", () => hydra.databases.updateMetadataSchema("refused", [{ name: "region" }])],
+	] as const) {
+		await assert.rejects(call, /confined to database "primary", "allowed"/, name);
+	}
+
+	assert.deepEqual(calls, ["create", "delete", "stats", "status", "getMetadataSchema", "updateMetadataSchema"]);
+});
+
+test("a database response missing a field the tools report is refused, not guessed", async () => {
+	type DatabaseAnswer = { database?: string; tenantId?: string; status?: string };
+
+	const answer = (data: DatabaseAnswer) => () => Promise.resolve({ data, success: true });
+
+	const sdk = {
+		databases: {
+			create: answer({ database: "invoices" }),
+			delete: answer({ status: "deletion_scheduled" }),
+			stats: answer({ tenantId: "invoices" }),
+			status: answer({}),
+			getMetadataSchema: answer({ database: "invoices" }),
+			updateMetadataSchema: answer({ database: "invoices" }),
+		},
+	};
+	// SAFETY: Each exercised database method is present; every answer omits a reported field.
+
+	const hydra = new HydraDB({ token: "t", database: "primary" }, sdk as HydraDBClient);
+
+	for (const [call, expected] of [
+		[() => hydra.databases.create({ database: "invoices" }), "database and status"],
+		[() => hydra.databases.delete("invoices"), "database and status"],
+		[() => hydra.databases.stats("invoices"), "database"],
+		[() => hydra.databases.readiness("invoices"), "database"],
+		[() => hydra.databases.inspectMetadataSchema("invoices"), "database and fields"],
+		[() => hydra.databases.updateMetadataSchema("invoices", [{ name: "amount", dataType: "DOUBLE" }]), "database and addedFields"],
+	] as const) {
+		await assert.rejects(call, {
+			name: "HydraWrapperError",
+			message: new RegExp(`→ 200: .*expected ${expected}\\.`),
+		});
+	}
+});
+
+test("database deletion refuses the connection default before the SDK call", async () => {
+	let called = false;
+
+	const sdk = {
+		databases: {
+			delete: () => {
+				called = true;
+
+				return Promise.resolve({ data: {}, success: true });
+			},
+		},
+	};
+	// SAFETY: The delete method is the only SDK member this test can reach.
+
+	const hydra = new HydraDB({ token: "t", database: "primary" }, sdk as HydraDBClient);
+
+	await assert.rejects(
+		() => hydra.databases.delete("primary"),
+		/connect through a different default database/i,
+	);
+	assert.equal(called, false);
+});
+
+test("database deletion refuses collection confinement before the SDK call", async () => {
+	let called = false;
+
+	const sdk = {
+		databases: {
+			delete: () => {
+				called = true;
+
+				return Promise.resolve({ data: {}, success: true });
+			},
+		},
+	};
+	// SAFETY: The delete method is the only SDK member this test can reach.
+
+	const hydra = new HydraDB(
+		{
+			token: "t",
+			database: "primary",
+			allowedDatabases: ["primary", "archive"],
+			allowedCollections: ["own"],
+		},
+		sdk as HydraDBClient,
+	);
+
+	await assert.rejects(
+		() => hydra.databases.delete("archive"),
+		/confined to collection "own".*removes every collection.*nothing was deleted/i,
+	);
+	assert.equal(called, false);
+});
+
+test("database creation refuses collection confinement before the SDK call", async () => {
+	let called = false;
+
+	const sdk = {
+		databases: {
+			create: () => {
+				called = true;
+
+				return Promise.resolve({ data: {}, success: true });
+			},
+		},
+	};
+	// SAFETY: The create method is the only SDK member this test can reach.
+
+	const hydra = new HydraDB(
+		{
+			token: "t",
+			database: "primary",
+			allowedDatabases: ["primary", "archive"],
+			allowedCollections: ["own"],
+		},
+		sdk as HydraDBClient,
+	);
+
+	await assert.rejects(
+		() => hydra.databases.create({ database: "archive" }),
+		/confined to collection "own".*creating a database.*nothing was created/i,
+	);
+	assert.equal(called, false);
+});
+
+test("metadata schema updates refuse collection confinement before the SDK call", async () => {
+	let called = false;
+
+	const sdk = {
+		databases: {
+			updateMetadataSchema: () => {
+				called = true;
+
+				return Promise.resolve({ data: {}, success: true });
+			},
+		},
+	};
+	// SAFETY: The metadata update method is the only SDK member this test can reach.
+
+	const hydra = new HydraDB(
+		{
+			token: "t",
+			database: "primary",
+			allowedDatabases: ["primary"],
+			allowedCollections: ["own"],
+		},
+		sdk as HydraDBClient,
+	);
+
+	await assert.rejects(
+		() => hydra.databases.updateMetadataSchema("primary", [{ name: "region", dataType: "VARCHAR" }]),
+		/confined to collection "own".*database-wide schema.*nothing was changed/i,
+	);
+	assert.equal(called, false);
 });
 
 test("collections and collection cannot be sent together", async () => {
@@ -889,7 +1501,9 @@ test("context.subgraph carries acl principals to the wire", async () => {
 function captureSdk(seen: Record<string, unknown>) {
 	const grab = (key: string) => (req: unknown) => {
 		seen[key] = req;
-		return Promise.resolve(key === "query" ? { success: true, data: { chunks: [] } } : {});
+		const data = key === "query" ? { chunks: [] } : key === "list" ? { sources: [] } : {};
+
+		return Promise.resolve({ success: true, data });
 	};
 	return {
 		query: grab("query"),
@@ -897,6 +1511,7 @@ function captureSdk(seen: Record<string, unknown>) {
 			list: grab("list"),
 			inspect: grab("inspect"),
 			relations: grab("relations"),
+			updateSourceMetadata: grab("update"),
 		},
 	} as unknown as HydraDBClient;
 }
@@ -938,6 +1553,56 @@ test("an omitted acl stays undefined rather than becoming an empty list", async 
 	await hydra.context.list({});
 	assert.equal(seen.query.acl, undefined);
 	assert.equal(seen.list.acl, undefined);
+});
+
+test("context.update sends metadata and the full replacement ACL through the SDK", async () => {
+	const seen: Parameters<typeof captureSdk>[0] = {};
+	const hydra = wrapperFor(seen);
+
+	await hydra.context.update({
+		id: "doc-1",
+		databaseMetadata: { department: "finance" },
+		additionalMetadata: { author: "ada", reviewed: true },
+		acl: ["user_email:ada@example.test"],
+	});
+
+	assert.deepEqual(seen.update, {
+		id: "doc-1",
+		database: "db_test",
+		collection: "col_test",
+		databaseMetadata: { department: "finance" },
+		additionalMetadata: { author: "ada", reviewed: true },
+		acl: ["user_email:ada@example.test"],
+	});
+});
+
+test("context.update omits acl when the caller leaves it unchanged", async () => {
+	const seen: Parameters<typeof captureSdk>[0] = {};
+	const hydra = wrapperFor(seen);
+
+	await hydra.context.update({ id: "doc-1", additionalMetadata: { reviewed: true } });
+
+	assert.equal("acl" in seen.update, false);
+});
+
+test("context.update requires a collection and rejects empty edits before the network", async () => {
+	const seen: Parameters<typeof captureSdk>[0] = {};
+
+	const unscoped = new HydraDB(
+		{ token: "t", database: "db_test" },
+		captureSdk(seen),
+	);
+
+	await assert.rejects(
+		() => unscoped.context.update({ id: "doc-1", additionalMetadata: { reviewed: true } }),
+		/collection.*required/i,
+	);
+	await assert.rejects(
+		() => wrapperFor(seen).context.update({ id: "doc-1" }),
+		/metadata.*acl|nothing to update/i,
+	);
+
+	assert.equal(seen.update, undefined);
 });
 
 test("every call path sends X-HydraDB-Source: mcp", async (t) => {

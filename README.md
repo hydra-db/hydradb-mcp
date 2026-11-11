@@ -13,6 +13,7 @@ Run it two ways, same tools either way:
 |---|---|
 | `hydradb_query` | Search memories and knowledge together, with knowledge-graph context |
 | `hydradb_ingest` | Save a note, a document, or a conversation |
+| `hydradb_update` | Merge metadata or replace the access list of one existing item |
 | `hydradb_list` | Enumerate what is stored — memories, knowledge sources, or both in one page |
 | `hydradb_inspect` | Fetch one source's full content by id |
 | `hydradb_delete` | Remove one or more items by id, irreversibly |
@@ -20,9 +21,18 @@ Run it two ways, same tools either way:
 | `hydradb_subgraph` | Everything connected to one item — its thread, replies, parents, children, links |
 | `hydradb_relations` | The knowledge-graph relations of one item or a whole collection, page by page |
 | `hydradb_feedback` | Report whether a query's results were useful, by its `request_id` |
+| `hydradb_databases` | List databases this connection can address |
+| `hydradb_database_create` | Create a database with an optional metadata schema and embedding dimension |
+| `hydradb_database_delete` | Delete a database irreversibly |
+| `hydradb_database_readiness` | Check whether database provisioning finished |
+| `hydradb_database_stats` | Read database-wide knowledge and memory row counts |
+| `hydradb_database_schema_inspect` | Read the metadata fields declared for a database |
+| `hydradb_database_schema_update` | Add fields to a database metadata schema (additive only) |
+| `hydradb_list_collections` | List collections inside a database |
+| `hydradb_delete_collection` | Delete one collection irreversibly |
 
 Ids flow between these: `hydradb_query`, `hydradb_list` and `hydradb_subgraph` emit them;
-`hydradb_inspect`, `hydradb_delete`, `hydradb_status`, `hydradb_subgraph` and `hydradb_relations` accept them.
+`hydradb_inspect`, `hydradb_update`, `hydradb_delete`, `hydradb_status`, `hydradb_subgraph` and `hydradb_relations` accept them.
 
 ### Connector tools
 
@@ -132,6 +142,44 @@ HYDRADB_MCP_LEGACY_TOOLS=1
 | `hydra_db_fetch_content` | `hydradb_inspect` |
 | `hydra_db_delete_memory` | `hydradb_delete` |
 
+### Database tools
+
+Database tools are available over stdio, API-key HTTP, and OAuth HTTP connections.
+`hydradb_databases` marks the connection default. On a confined OAuth connection,
+it returns only approved databases, and every database tool refuses other names
+before sending an API request. A connection limited to specific collections cannot
+create or delete a whole database or change its database-wide metadata schema.
+
+| Tool | Required input | Notes |
+|---|---|---|
+| `hydradb_databases` | None | Lists accessible databases and marks the default |
+| `hydradb_database_create` | `database` | Optional `embeddings_dimension` and `database_metadata_schema`; creation is asynchronous |
+| `hydradb_database_delete` | `database` | Destructive. Refuses the connection default |
+| `hydradb_database_readiness` | None | Optional `database`; poll until `ready_for_ingestion` is true |
+| `hydradb_database_stats` | None | Optional `database`; returns knowledge and memory row counts |
+| `hydradb_database_schema_inspect` | None | Optional `database`; returns declared field names and types |
+| `hydradb_database_schema_update` | `add_fields` | Optional `database`; additive only, with no delete, rename, or retype |
+
+Metadata fields use `name` and `data_type`. Supported types are `BOOL`, `INT8`,
+`INT16`, `INT32`, `INT64`, `FLOAT`, `DOUBLE`, `VARCHAR`, and `JSON`. Optional
+settings are `max_length`, `enable_match`, `enable_dense_embedding`, and
+`enable_sparse_embedding`.
+
+After `hydradb_database_create` accepts a request, call
+`hydradb_database_readiness` until the database is ready. A 403 from a write
+tool can indicate missing write permission. Read-only credentials cannot perform
+database writes; verify the credential's permissions or reconnect with write
+permission.
+
+To turn the database management tools off entirely:
+
+```
+HYDRADB_MCP_DATABASE_TOOLS=0   # withhold the six database management tools
+```
+
+`hydradb_databases`, `hydradb_list_collections` and `hydradb_delete_collection`
+stay registered.
+
 ### **hydradb_query**
 
 Searches **both** memories and ingested knowledge sources. Returns matching
@@ -172,12 +220,15 @@ resolve the collection before inspecting. Explicit scope is never widened.
 ### **hydradb_ingest**
 
 Saves information so it outlives the session. Provide **exactly one** of `text`,
-`turns` or `file`.
+`turns`, `items`, `app_knowledge`, or `file`. A batch contains 1 to 100 same-kind
+items and sends one API request. Batch text has an 8 MiB total UTF-8 limit.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `text` | string | No\* | A note, fact, decision, or document body |
 | `turns` | array | No\* | Conversation turns, each with `user` and `assistant` |
+| `items` | array | No\* | Batch of 1 to 100 items; each item has exactly one of `text` or `turns` |
+| `app_knowledge` | array | No\* | Batch of 1 to 100 structured app records with `kind`, `fields`, and optional ACL data; split databases only |
 | `file` | object | No\* | A PDF, Word, PowerPoint, spreadsheet, image or text file, ingested as knowledge. See below |
 | `kind` | string | No | `memory` (default) or `knowledge` for a document |
 | `title` | string | No | Label shown in later search results — always set it |
@@ -186,10 +237,26 @@ Saves information so it outlives the session. Provide **exactly one** of `text`,
 | `infer` | boolean | No | Extract insights and graph entities (default: true) |
 | `is_markdown` | boolean | No | Chunk on markdown structure (default: false) |
 | `metadata` | object | No | Key/value metadata, matchable later via `metadata_filters` |
+| `additional_metadata` | object | No | Free-form fields stored with the item; supported on memory and knowledge |
+| `custom_instructions` | string | No | Memory extraction guidance, up to 4000 characters; replaces the MCP default and requires inference |
+| `graph` | object | No | Caller-supplied `entities` and `relations`; MCP keys it by the item id |
 | `observation_date` | string | No | When the fact was true, as `YYYY-MM-DD` (e.g. `2026-07-04`), vs when it was stored |
 | `user_name` | string | No | What to call the user, used with `turns` (default: `User`) |
 
-\* Passing more than one is an error; passing none is an error.
+\* Combining any input modes is an error. Each single item or `items` entry requires
+exactly one of `text` or `turns`. Knowledge items require `text`.
+
+Use plain `text` with `kind: "knowledge"` for an unstructured document. Use
+`app_knowledge` for structured `email`, `message`, `ticket`, `knowledge_base`,
+`comment`, `meeting`, or `custom` records. Each app record supports `id`, `title`,
+`description`, `url`, `timestamp`, `provider`, `external_id`, `fields`, `metadata`,
+`additional_metadata`, `attachments`, `relations`, and `acl`.
+
+An omitted app-record `acl` makes the item unrestricted. Send `["__private__"]`
+for private ingest or `["__public__"]` for public ingest. An empty list is refused.
+Re-ingesting an existing `id` without `acl` removes its previous access list. If
+`__public__` appears with other principals, the item is public and HydraDB drops the
+other principals.
 
 **Files.** `file` takes `filename` (with its real extension) and one of the two
 below. The document's title is `title` when set, otherwise the filename.
@@ -207,6 +274,24 @@ do not apply to files.
 
 Ingestion is **asynchronous** — content is not searchable the instant it is
 saved. Use `hydradb_status` to confirm.
+
+### **hydradb_update**
+
+Edits one existing item without re-ingesting it. Copy `id` from
+`hydradb_query`, `hydradb_list`, or `hydradb_inspect`; never guess an id.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `id` | string | Yes | Existing context id to edit |
+| `database_metadata` | object | No\* | Keys to merge into schema-controlled database metadata |
+| `additional_metadata` | object | No\* | Free-form keys to merge into additional metadata |
+| `acl` | array or null | No\* | Complete replacement ACL. `[]` or `null` makes the item private; `["__public__"]` makes it public to identified callers; omission leaves access unchanged |
+
+\* Provide at least one of `database_metadata`, `additional_metadata`, or `acl`.
+Metadata maps merge only the supplied keys. ACL updates replace the complete
+list, so include every principal that must retain access. The edit is
+idempotent. Retry the identical request if Hydra DB reports a partial commit or
+search-index synchronization failure.
 
 ### **hydradb_list**
 
@@ -411,6 +496,7 @@ Checks whether ingested sources have finished indexing.
 | `HYDRADB_MCP_GRAPH_TOOLS` | Register the graph tools (`0` withholds them) | *on* |
 | `HYDRADB_MCP_CONNECTOR_TOOLS` | Register the connector tools (`0` withholds them) | *on* |
 | `HYDRADB_OAUTH_ISSUER` | Authorization server and connector-completion dashboard origin | `https://app.hydradb.com` for connector links |
+| `HYDRADB_MCP_DATABASE_TOOLS` | Register the database management tools (`0` withholds them) | *on* |
 
 #### Timeouts, retries and cancellation
 
@@ -693,7 +779,7 @@ owns scope injection, envelope unwrapping and error translation; the tools call
 it and render the results.
 
 - **hydradb_query** retrieves relevant memories and returns graph-enriched context (entity paths, chunk relations, extra context). Supports `fast` and `thinking` recall modes.
-- **hydradb_ingest** stores a note (`text`), a conversation (`turns`) or a file such as a PDF or DOCX (`file`), with configurable `infer`, `is_markdown`, `title`, and `source_id`. Hydra DB extracts insights and builds a knowledge graph automatically.
+- **hydradb_ingest** stores a note (`text`), conversation (`turns`), file such as a PDF or DOCX (`file`), structured app records (`app_knowledge`), or a batch of up to 100 items. It supports caller extraction instructions, additional metadata, and a caller-supplied graph.
 - **hydradb_list** browses stored memories (`kind: memory`) or ingested knowledge sources (`kind: knowledge`, with an optional `source_ids` filter).
 - **hydradb_inspect** retrieves the original ingested content of a source, with mode options (`content`, `url`, or `both`).
 - **hydradb_delete** removes a memory or knowledge source by ID.

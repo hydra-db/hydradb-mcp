@@ -57,6 +57,7 @@ recorded as such, not treated as drift for the other group to catch up on.
 |---|---|---|
 | **database** | isolated tenancy container | tenant, namespace, workspace (as a scope), knowledge base |
 | **collection** | partition within a database | sub-tenant, sub_tenant_id |
+| **metadata schema** | the metadata fields a database declares, each with a name and a stored type | custom properties, tenant metadata schema |
 | **context** | the stored-unit family (memory + knowledge) | — |
 | **memory** | a context item of kind `memory` | user memory, preference |
 | **knowledge** | a context item of kind `knowledge` | document, file, source-as-kind |
@@ -148,6 +149,8 @@ current SDK method internally. Language casing: `snake_case` in Python, `camelCa
 | `databases.deleteCollection(database, collection)` | *(none — raw `DELETE /databases/collections`)* | not on the pinned SDK yet |
 | `databases.stats(database)` | `databases.stats(database=…)` | row counts |
 | `databases.readiness(database)` | `databases.status(database=…)` | **renamed away from `status`** |
+| `databases.inspectMetadataSchema(database)` | `databases.getMetadataSchema(database=…)` | **renamed away from `get`** |
+| `databases.updateMetadataSchema(database, addFields)` | `databases.updateMetadataSchema(database=…, add_fields=…)` | additive only |
 | `context.ingest(database, kind, …)` | `context.ingest(…)` | multipart; `kind` ∈ {memory, knowledge} |
 | `context.query(database, query, kind?, …)` | `client.query(…)` | the single retrieval entry point |
 | `context.list(database, kind?, …)` | `context.list(…)` | — |
@@ -220,6 +223,7 @@ skill files and persisted to `state.json`; the CLI's `--output json` is a docume
 |---|---|
 | `hydradb_query` | `hydra_db_search` |
 | `hydradb_ingest` | `hydra_db_store`, `hydra_db_ingest_conversation` |
+| `hydradb_update` | — (new in ENG-3339; no prior spelling) |
 | `hydradb_list` | `hydra_db_list_memories`, `hydra_db_list_sources` |
 | `hydradb_inspect` | `hydra_db_fetch_content` |
 | `hydradb_delete` | `hydra_db_delete_memory` |
@@ -256,6 +260,41 @@ skill files and persisted to `state.json`; the CLI's `--output json` is a docume
 | `/hydradb:query` | `/hydradb:search`, `/hydradb:recall` (already deprecated) |
 | `/hydradb:ingest` | `/hydradb:remember`, `/hydradb:save-session`, `/hydradb:sync-workspace`, `reindex` |
 | `/hydradb:doctor` | `/hydradb:status` |
+
+### Databases
+
+Database management on MCP is named noun first and verb last: `hydradb_database_<verb>`, and
+`hydradb_database_schema_<verb>` for the metadata schema.
+
+| Action | MCP tool |
+|---|---|
+| list databases | `hydradb_databases` |
+| create a database | `hydradb_database_create` |
+| delete a database | `hydradb_database_delete` |
+| provisioning readiness | `hydradb_database_readiness` |
+| row counts | `hydradb_database_stats` |
+| inspect the metadata schema | `hydradb_database_schema_inspect` |
+| update the metadata schema | `hydradb_database_schema_update` |
+| list collections | `hydradb_list_collections` |
+| delete a collection | `hydradb_delete_collection` |
+
+Rules:
+
+- **Shipped names stay.** `hydradb_databases`, `hydradb_list_collections` and
+  `hydradb_delete_collection` shipped before this naming and keep their names. The other tools
+  never shipped under another name, so they have no aliases.
+- **Schema update is additive only.** It adds fields and never removes, renames or retypes one.
+  The verb is `update`, not `add`.
+- **Default exposure.** Every database action is on by default, including the irreversible
+  `hydradb_database_delete`. It carries the surface's destructive marker (MCP
+  `destructiveHint: true`), so the host asks before running it, and it refuses the connection's
+  own default database. `HYDRADB_MCP_DATABASE_TOOLS=0` withholds create, delete, readiness, stats,
+  schema inspect and schema update. `hydradb_databases` and the collection tools stay.
+- **Other clients.** The CLI's `hydradb database …` commands keep their names. A client that adds
+  metadata schema commands names them `schema inspect` and `schema update`.
+- **Conformance.** The `database-metadata-schema-*` vectors list every client that does not ship
+  those wrapper methods yet in `optional_for`. A client removes itself from that list in the
+  change that ships them.
 
 ---
 

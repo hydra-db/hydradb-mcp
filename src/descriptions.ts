@@ -150,6 +150,35 @@ const PARAM = {
 		"Key/value metadata to store with this entry, as {key: value}. These are the " +
 		"keys hydradb_query's metadata_filters can match on later, so set them when you " +
 		"expect to narrow by them — e.g. {\"project\": \"hydradb\", \"kind\": \"decision\"}.",
+	additional_metadata:
+		"Document metadata for knowledge ingestion, as {key: value}. Use it for descriptive " +
+		"fields that should travel with the document but are not scalar query filters.",
+	relations:
+		"Explicit forceful relationships for a knowledge document, as {ids: [source_id], " +
+		"properties?: {...}} in the Hydra DB ingest API format.",
+	evidence_kind:
+		"Provenance class for a knowledge document: assertion, record, said, done, " +
+		"third_party, or inferred.",
+	evidence_subject:
+		"Stable handle for the entity that a knowledge document describes, such as " +
+		"user:kiran@acme.com or team:finance.",
+	custom_instructions:
+		"Memory extraction instructions. Caller text replaces the MCP default. Do not " +
+		"send this with infer false or with kind knowledge. Maximum 4000 characters.",
+	graph:
+		"Caller-supplied graph for this item, as {entities, relations}. MCP keys the API " +
+		"graph payload by the item's source_id and generates an id when needed.",
+	items:
+		"Batch of 1 to 100 same-kind items. Each item requires exactly one of text or " +
+		"turns. Do not combine items with top-level text or turns.",
+	app_knowledge:
+		"Structured app items such as email, messages, tickets, pages, comments, or meetings. " +
+		"Use text with kind knowledge for a plain document. App knowledge works only in split " +
+		"databases. Each item can include its app fields and an access list.",
+	app_acl:
+		"Principals that can read this item. Omit acl for unrestricted access. Send " +
+		'["__private__"] for private storage; an empty list is refused. Re-ingest replaces the ' +
+		"old access list. A normal API-key read with no acl filter still sees the item.",
 	// The format is stated as the server's own, YYYY-MM-DD. This said "RFC3339",
 	// which is a date-TIME format: a caller that followed it sent
 	// "2026-08-17T00:00:00Z" and got 400 INVALID_INPUT back from /context/ingest.
@@ -353,18 +382,33 @@ const STORE_BODY = `Save information to Hydra DB so it outlives this session. Hy
 Provide EXACTLY ONE of:
   \`text\`  — a note, fact, decision, or document body
   \`turns\` — user/assistant pairs from a conversation
+  \`items\` — 1 to 100 same-kind memory or document items in one API request
+  \`app_knowledge\` — 1 to 100 structured app items with optional access lists
   \`file\`  — a PDF, Word, PowerPoint, spreadsheet or image file, ingested as knowledge (base64 up to 8 MB, or a local path up to 50 MB on the stdio server)
-Passing more than one is an error; passing none is an error.
+Combining these choices is an error. Each \`items\` entry requires exactly one of \`text\` or \`turns\`.
 
 Save proactively: when the user states a preference, makes a decision, corrects you, or reveals a durable fact about themselves or their work, store it without being asked. Store the distilled fact rather than the raw exchange, and always set \`title\` — it is the only label shown next to this entry in later search results. Before saving something you suspect is already stored, query for it first rather than adding a near-duplicate.
+
+Use \`app_knowledge\` for structured email, message, ticket, knowledge-base, comment, meeting, or custom records. This mode works only on split databases. Use plain \`text\` with \`kind: "knowledge"\` for unstructured documents.
+Omit an app item's \`acl\` for unrestricted access. Use \`["__private__"]\` for private ingest or \`["__public__"]\` for public ingest. Re-ingesting an existing id without \`acl\` removes its previous access list; \`acl: []\` is refused.
 
 Never store secrets, credentials, or anything the user asked you not to keep.
 
 Examples:
   {"text": "Prefers tabs over spaces in every language; rejected two prettier configs that used spaces.", "title": "Indentation preference"}
   {"turns": [{"user": "let's go with Postgres", "assistant": "Agreed, I'll set up the schema."}], "title": "Datastore decision"}
+  {"items": [{"text": "Deploy on Friday", "title": "Deadline"}, {"text": "Infra owns deploys", "additional_metadata": {"team": "infra"}}]}
   {"text": "# Runbook\\n\\nRestart order: api, worker, scheduler.", "kind": "knowledge", "title": "Restart runbook"}
+  {"app_knowledge": [{"id": "slack-C1-1", "kind": "message", "fields": {"body": "Deploy is Friday"}, "acl": ["eng@acme.com"]}]}
   {"file": {"filename": "q3-plan.pdf", "content_base64": "JVBERi0xLjQK..."}}`;
+
+const UPDATE_BODY = `Edit one existing context item without re-ingesting it. Take the item id from hydradb_query, hydradb_list, or hydradb_inspect; never guess an id.
+
+\`database_metadata\` and \`additional_metadata\` MERGE the supplied keys into their existing maps. Database metadata keys must satisfy the collection's schema when it has one. Additional metadata is free-form.
+
+\`acl\` REPLACES the complete access list rather than merging it. Send every principal that should retain access. Pass \`[]\` or \`null\` to make the item private. Pass [\"__public__\"] to make it available to every identified caller. Omit \`acl\` to leave access unchanged.
+
+This write is idempotent. If the response reports a partial commit or search-index synchronization failure, retry the identical request to converge it.`;
 
 const CONVERSATION_BODY =
 	"Ingest one or more user-assistant conversation turns into Hydra DB memory. " +
@@ -461,6 +505,19 @@ There is no create-collection action: collections come into existence on their f
 
 const DATABASES_BODY = `List the databases this connection can address, with the default marked. Use it before passing \`database\` to another tool, when the user asks which databases exist, or when a call was refused for naming a database this connection is confined to. If the list has one entry, that is the only database this connection may use.`;
 
+/** The optional `database` of the database tools that default to the connection's own. */
+export const DATABASE_PARAM = `Database name. Omit it to use this connection's default database. Use ${TOOL_NAMES.DATABASES} to discover valid names.`;
+
+/** One metadata field, as both database_metadata_schema and add_fields take it. */
+export const METADATA_FIELD_PARAMS = {
+	name: "New metadata key. Required and immutable after creation. Use a stable snake_case name that callers can later use in exact-match metadata filters.",
+	data_type: "Stored field type: BOOL, INT8, INT16, INT32, INT64, FLOAT, DOUBLE, VARCHAR, or JSON. Choose VARCHAR for text and set max_length when a smaller limit is useful.",
+	max_length: "Maximum VARCHAR length in bytes. Use it only with data_type VARCHAR.",
+	enable_match: "Enable exact-match filtering on this field. Set true for keys an agent will use in metadata_filters.",
+	enable_dense_embedding: "Enable dense semantic search over this field. Use it only for natural-language text that should affect semantic retrieval.",
+	enable_sparse_embedding: "Enable BM25 sparse search over this field. Use it for text where exact terms should affect ranking.",
+};
+
 /** Every connector tool names its connector the same way. */
 export const CONNECTOR_ID_HELP = "Connector identifier from hydradb_connector_list.";
 
@@ -471,6 +528,49 @@ export const TOOL_DESCRIPTIONS = {
 		title: "List Hydra DB Databases",
 		description: DATABASES_BODY,
 		params: {},
+	},
+
+	[TOOL_NAMES.DATABASE_CREATE]: {
+		title: "Create a Hydra DB Database",
+		description: `Create a database. Creation is asynchronous: after this accepts the request, poll ${TOOL_NAMES.DATABASE_READINESS} until ready_for_ingestion is true. An OAuth connection confined to named databases may create only a name already approved for that connection.`,
+		params: {
+			database: "New database name. Required. On a confined OAuth connection, this name must already be in hydradb_databases.",
+			embeddings_dimension: "Embedding vector dimension. Omit it to use Hydra DB's default. Set it only when the embedding model requires a specific dimension.",
+			database_metadata_schema: "Metadata fields to create with the database. Field names and types cannot later be removed, renamed, or changed.",
+		},
+	},
+
+	[TOOL_NAMES.DATABASE_DELETE]: {
+		title: "Delete a Hydra DB Database",
+		description: `Permanently delete a database and all data inside it. This cannot be undone. Confirm the exact name with ${TOOL_NAMES.DATABASES}. The connection's own default database is refused because deleting it would break the active connection.`,
+		params: { database: "Database to delete. Required. It cannot be this connection's default database." },
+	},
+
+	[TOOL_NAMES.DATABASE_READINESS]: {
+		title: "Check Database Readiness",
+		description: "Check database provisioning. Poll this after creating a database and wait for ready_for_ingestion before ingesting or querying.",
+		params: { database: DATABASE_PARAM },
+	},
+
+	[TOOL_NAMES.DATABASE_SCHEMA_INSPECT]: {
+		title: "Inspect Database Metadata Schema",
+		description: "Read the metadata keys declared for a database. Use this before building metadata filters or adding fields, so you know the valid key names and stored types.",
+		params: { database: DATABASE_PARAM },
+	},
+
+	[TOOL_NAMES.DATABASE_SCHEMA_UPDATE]: {
+		title: "Update Database Metadata Schema",
+		description: `Update a database metadata schema by adding fields. The update is additive only: existing fields cannot be deleted, renamed, or retyped. Read the current schema with ${TOOL_NAMES.DATABASE_SCHEMA_INSPECT} first and add only missing fields.`,
+		params: {
+			database: DATABASE_PARAM,
+			add_fields: "One or more new metadata fields. Required. Repeating an existing field can fail with a conflict.",
+		},
+	},
+
+	[TOOL_NAMES.DATABASE_STATS]: {
+		title: "Get Database Statistics",
+		description: "Get database-wide knowledge and memory row counts. Use it when the user asks how much data a database contains; unlike collection discovery, this tool fails if stats are unavailable.",
+		params: { database: DATABASE_PARAM },
 	},
 
 	[TOOL_NAMES.QUERY]: {
@@ -520,6 +620,15 @@ export const TOOL_DESCRIPTIONS = {
 			is_markdown: PARAM.is_markdown,
 			overwrite: PARAM.overwrite,
 			metadata: PARAM.metadata,
+			additional_metadata: PARAM.additional_metadata,
+			relations: PARAM.relations,
+			evidence_kind: PARAM.evidence_kind,
+			evidence_subject: PARAM.evidence_subject,
+			custom_instructions: PARAM.custom_instructions,
+			graph: PARAM.graph,
+			items: PARAM.items,
+			app_knowledge: PARAM.app_knowledge,
+			app_acl: PARAM.app_acl,
 			observation_date: PARAM.observation_date,
 			turns:
 				"The conversation to ingest, oldest first, as [{user, assistant}, ...]. Provide " +
@@ -528,6 +637,23 @@ export const TOOL_DESCRIPTIONS = {
 				"conclusion matters, prefer `text` with the distilled fact.",
 			user_name: PARAM.user_name,
 			file: PARAM.file,
+			database: PARAM.database,
+			collection: PARAM.collection,
+		},
+	},
+
+	[TOOL_NAMES.UPDATE]: {
+		title: "Update Hydra DB Context",
+		description: UPDATE_BODY,
+		params: {
+			id:
+				"The existing context id to edit. Copy it from hydradb_query, hydradb_list, or hydradb_inspect; never construct one.",
+			database_metadata:
+				"Keys to merge into database_metadata. Existing keys not named here stay unchanged. Keys must satisfy the collection schema when one exists.",
+			additional_metadata:
+				"Free-form keys to merge into additional_metadata. Existing keys not named here stay unchanged.",
+			acl:
+				"The complete replacement ACL. Pass all principals that should retain access. [] or null makes the item private; [\"__public__\"] makes it public to identified callers; omit acl to leave access unchanged.",
 			database: PARAM.database,
 			collection: PARAM.collection,
 		},
@@ -1006,7 +1132,8 @@ WHEN TO USE IT
 THE TOOLS
 
 - ${TOOL_NAMES.QUERY} — semantic search across memory and knowledge, with knowledge-graph context. Your default read. Every result carries an id.
-- ${TOOL_NAMES.INGEST} — write. A note or document via 'text', a conversation via 'turns', or a PDF, Word, slide or other file via 'file' (exactly one of the three).
+- ${TOOL_NAMES.INGEST} — write. Send one note, document, conversation, file, structured app batch, or up to 100 same-kind entries through 'items'.
+- ${TOOL_NAMES.UPDATE} — idempotent write. Merge metadata or replace the complete ACL of one existing item by id.
 - ${TOOL_NAMES.LIST} — the full inventory of ONE family. Use it for "what do you have?"; for "what do you know about X" use ${TOOL_NAMES.QUERY} instead.
 - ${TOOL_NAMES.INSPECT} — the complete original content of one source you already have an id for.
 - ${TOOL_NAMES.DELETE} — irreversible removal of one item by id.
@@ -1014,6 +1141,12 @@ THE TOOLS
 - ${TOOL_NAMES.RELATIONS} — the knowledge-graph relations extracted from one item, or from a whole collection, page by page.
 - ${TOOL_NAMES.SUBGRAPH} — everything connected to one item you already have an id for: the rest of its thread, its replies, its parents and children, the items it links to. Reach for it when one result is not enough and you need what surrounds it.
 - ${TOOL_NAMES.DATABASES} — which databases this connection can address, with the default marked. Every tool takes an optional \`database\`; call this before naming one, or when a call was refused because the user confined this connection to a single database.
+- ${TOOL_NAMES.DATABASE_CREATE} — create a database with an optional metadata schema and embedding dimension, then poll ${TOOL_NAMES.DATABASE_READINESS}.
+- ${TOOL_NAMES.DATABASE_DELETE} — irreversibly delete a database. It refuses this connection's default database.
+- ${TOOL_NAMES.DATABASE_READINESS} — check whether database provisioning finished and ingestion can start.
+- ${TOOL_NAMES.DATABASE_SCHEMA_INSPECT} — read the metadata keys and types a database accepts.
+- ${TOOL_NAMES.DATABASE_SCHEMA_UPDATE} — add fields to a database's metadata schema. Fields cannot be removed or retyped.
+- ${TOOL_NAMES.DATABASE_STATS} — read database-wide knowledge and memory row counts.
 - ${TOOL_NAMES.LIST_COLLECTIONS} — the collections inside a database, with this connection's default marked. Call it before choosing a collection when the connection has no default.
 - ${TOOL_NAMES.FEEDBACK} — report whether a query's results were actually useful, using the request_id that query printed. Say what the right answer was (\`ground_truth_answer\`) or which sources held it (\`ground_truth_source_ids\`) when you know — that is machine-checkable and worth far more than prose. It records a signal; it never changes the query's result or the stored data.
 - ${TOOL_NAMES.DELETE_COLLECTION} — irreversible removal of one collection and everything in it. Confirm first. Take the name from ${TOOL_NAMES.LIST_COLLECTIONS}.
@@ -1038,7 +1171,7 @@ CONNECTORS
 - ${TOOL_NAMES.CONNECTOR_RESOURCE_UPDATE} — replace one resource's access rule or ingestion instructions.
 - ${TOOL_NAMES.CONNECTOR_RESOURCE_DELETE} — irreversible resource removal. Confirm first.
 
-Ids flow between these: ${TOOL_NAMES.QUERY}, ${TOOL_NAMES.LIST} and ${TOOL_NAMES.SUBGRAPH} emit them; ${TOOL_NAMES.INSPECT}, ${TOOL_NAMES.DELETE}, ${TOOL_NAMES.RELATIONS}, ${TOOL_NAMES.STATUS} and ${TOOL_NAMES.SUBGRAPH} accept them. Never invent one.
+Ids flow between these: ${TOOL_NAMES.QUERY}, ${TOOL_NAMES.LIST} and ${TOOL_NAMES.SUBGRAPH} emit them; ${TOOL_NAMES.INSPECT}, ${TOOL_NAMES.UPDATE}, ${TOOL_NAMES.DELETE}, ${TOOL_NAMES.RELATIONS}, ${TOOL_NAMES.STATUS} and ${TOOL_NAMES.SUBGRAPH} accept them. Never invent one.
 
 COLLECTIONS — WHO DECIDES THE SCOPE
 
@@ -1061,4 +1194,4 @@ Choose by the question, not the vocabulary: "what has the user told me about X" 
 
 Working against an unfamiliar collection, discover its structure by querying it — \`MATCH (n) UNWIND labels(n) AS l RETURN l, count(*) AS c ORDER BY l\` — rather than guessing labels, which yields empty results that look like missing data.
 
-All tools require HYDRADB_API_KEY and HYDRADB_DATABASE in the environment. The graph tools additionally read HYDRADB_GRAPH_DATABASE and HYDRADB_GRAPH_COLLECTION for their default scope, and can be disabled with HYDRADB_MCP_GRAPH_TOOLS=0.`;
+All tools require HYDRADB_API_KEY and HYDRADB_DATABASE in the environment. The graph tools additionally read HYDRADB_GRAPH_DATABASE and HYDRADB_GRAPH_COLLECTION for their default scope, and can be disabled with HYDRADB_MCP_GRAPH_TOOLS=0. The database management tools (create, delete, readiness, stats and the two metadata schema tools) can be disabled with HYDRADB_MCP_DATABASE_TOOLS=0; ${TOOL_NAMES.DATABASES} stays.`;

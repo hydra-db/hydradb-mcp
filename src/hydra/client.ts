@@ -19,6 +19,7 @@ import { HydraDBClient, HydraDBEnvironment, HydraDBError, serialization } from "
 import type { HydraDB as SDK } from "@hydradb/sdk";
 import { z } from "zod";
 
+import type { JsonValue } from "../adapters.js";
 import { ConnectorsResource } from "./connectors.js";
 import { unwrap } from "./envelope.js";
 import { HydraWrapperError, scrub, translateError } from "./errors.js";
@@ -114,7 +115,60 @@ function validateQueryResponse(response: unknown): void {
 /** What `sdk.context.list` resolves to: the response envelope. */
 type ListResponse = Awaited<ReturnType<HydraDBClient["context"]["list"]>>;
 
-const successfulList = z.object({ success: z.literal(true).optional() });
+type StatusResponse = Awaited<ReturnType<HydraDBClient["context"]["status"]>>;
+
+type DatabasesResponse = Awaited<ReturnType<HydraDBClient["databases"]["list"]>>;
+
+type ValidatableResponse = ListResponse | StatusResponse | DatabasesResponse;
+
+interface InvalidResponseBody {
+	error: { code: string; message: string };
+	meta?: { request_id: string };
+}
+
+const successfulResponse = z.object({
+	success: z.literal(true).optional(),
+	error: z.null().optional(),
+});
+
+function invalidSuccessfulResponse(
+	code: string,
+	message: string,
+	response: ValidatableResponse,
+): HydraDBError {
+	const requestId = readRequestId(response);
+
+	const body: InvalidResponseBody = { error: { code, message } };
+
+	if (requestId) body.meta = { request_id: requestId };
+
+	return new HydraDBError({
+		statusCode: 200,
+		body,
+	});
+}
+
+const selectableListContainer = z.object({
+	inner: z.object({}).passthrough().nullish(),
+	userMemories: z.array(z.object({}).passthrough()).optional(),
+	user_memories: z.array(z.object({}).passthrough()).optional(),
+	sources: z.array(z.object({}).passthrough()).optional(),
+}).passthrough();
+
+type SelectableListContainer = z.infer<typeof selectableListContainer>;
+
+/** Select the list container with the same top-level-first precedence as the adapters. */
+function selectListPayload(response: ListResponse, kind: ListParams["kind"]): SelectableListContainer | undefined {
+	const parsed = selectableListContainer.safeParse(unwrap(response));
+
+	if (!parsed.success) return undefined;
+
+	const topLevelRows = kind === "memory"
+		? parsed.data.userMemories ?? parsed.data.user_memories
+		: parsed.data.sources;
+
+	return topLevelRows != null ? parsed.data : parsed.data.inner ?? parsed.data;
+}
 
 /**
  * A list row with a usable ID, by the list adapters' first-string precedence,
@@ -134,12 +188,12 @@ function listPayload(kind: ListParams["kind"]) {
 		const rows = z.array(listRow(["memoryId", "memory_id", "id", "source_id"]));
 
 		return z.union([
-			successfulList.extend({ userMemories: rows }),
-			successfulList.extend({ user_memories: rows }),
+			successfulResponse.extend({ userMemories: rows }),
+			successfulResponse.extend({ user_memories: rows }),
 		]);
 	}
 
-	return successfulList.extend({ sources: z.array(listRow(["id", "source_id"])) });
+	return successfulResponse.extend({ sources: z.array(listRow(["id", "source_id"])) });
 }
 
 /**
@@ -147,13 +201,70 @@ function listPayload(kind: ListParams["kind"]) {
  * accepting the historical `inner` nesting the list adapters understand.
  */
 function validateListResponse(response: ListResponse, kind: ListParams["kind"]): void {
-	const payload = listPayload(kind);
-	const accepted = payload.or(successfulList.extend({ inner: payload }));
+	const accepted = listPayload(kind);
+	const payload = unwrap(response);
+	const selected = selectListPayload(response, kind);
 
-	if (!successfulList.safeParse(response).success || !accepted.safeParse(unwrap(response)).success) {
-		throw new Error(
+	if (kind === "memory") {
+		// The outer payload counts too: its message is lost when `inner` is selected.
+		const unavailable = [selected, payload].some((container) => {
+			const availability = z.object({ message: z.string().optional() }).safeParse(container);
+
+			return availability.success && availability.data.message === "Memories temporarily unavailable";
+		});
+
+		if (unavailable) {
+			throw invalidSuccessfulResponse(
+				"MEMORY_LIST_UNAVAILABLE",
+				"Hydra DB could not read the memory store. This is not an empty database. Retry the list.",
+				response,
+			);
+		}
+	}
+
+	if (
+		!successfulResponse.safeParse(response).success ||
+		!successfulResponse.safeParse(payload).success ||
+		!accepted.safeParse(selected).success
+	) {
+		throw invalidSuccessfulResponse(
+			"INVALID_LIST_RESPONSE",
 			`Invalid successful list response: expected a ${kind === "memory" ? "user_memories" : "sources"} ` +
-			"array with nonempty row IDs and no failure flag.",
+				"array with nonempty row IDs and no failure flag.",
+			response,
+		);
+	}
+}
+
+function validateStatusResponse(response: StatusResponse): void {
+	// The status tool prints each row by its id, so a row that is not an object
+	// with an id is a malformed body, not a status to show as "(unknown id)".
+	const row = z.object({ id: z.string().trim().min(1) }).passthrough();
+	const accepted = successfulResponse.extend({ statuses: z.array(row) });
+
+	if (!successfulResponse.safeParse(response).success || !accepted.safeParse(unwrap(response)).success) {
+		throw invalidSuccessfulResponse(
+			"INVALID_STATUS_RESPONSE",
+			"Invalid successful status response: expected a statuses array of rows with an id and no failure flag.",
+			response,
+		);
+	}
+}
+
+function validateDatabasesResponse(response: DatabasesResponse): void {
+	const names = z.array(z.string().trim().min(1));
+
+	const accepted = z.union([
+		successfulResponse.extend({ databases: names }),
+		successfulResponse.extend({ tenantIds: names }),
+		successfulResponse.extend({ tenant_ids: names }),
+	]);
+
+	if (!successfulResponse.safeParse(response).success || !accepted.safeParse(unwrap(response)).success) {
+		throw invalidSuccessfulResponse(
+			"INVALID_DATABASES_RESPONSE",
+			"Invalid successful databases response: expected a string array and no failure flag.",
+			response,
 		);
 	}
 }
@@ -279,8 +390,53 @@ export interface ConversationTurn {
 	assistant: string;
 }
 
-export interface IngestParams {
-	kind: ContextKind;
+export interface IngestGraphEntity {
+	name: string;
+	type: string;
+	namespace?: string;
+	identifier?: string;
+}
+
+export interface IngestGraphRelation {
+	source: string;
+	target: string;
+	predicate: string;
+	context?: string;
+	temporal_details?: JsonValue;
+}
+
+export interface IngestGraph {
+	entities: Record<string, IngestGraphEntity>;
+	relations: IngestGraphRelation[];
+}
+
+export type AppKnowledgeKind =
+	| "email"
+	| "message"
+	| "ticket"
+	| "knowledge_base"
+	| "comment"
+	| "meeting"
+	| "custom";
+
+export interface AppKnowledgeItem {
+	id?: string;
+	title?: string;
+	description?: string;
+	url?: string;
+	timestamp?: string;
+	kind: AppKnowledgeKind;
+	provider?: string;
+	external_id?: string;
+	fields: Record<string, JsonValue>;
+	metadata?: Record<string, JsonValue>;
+	additional_metadata?: Record<string, JsonValue>;
+	attachments?: Array<Record<string, JsonValue>>;
+	relations?: { ids: string[]; properties?: Record<string, JsonValue> } | Array<Record<string, JsonValue>>;
+	acl?: string[];
+}
+
+export interface IngestItem {
 	/** Free text to ingest (memory note or knowledge document body). */
 	text?: string;
 	/** Conversation turns to ingest as a memory. */
@@ -301,21 +457,52 @@ export interface IngestParams {
 	 * generated SDK request type, which is why the wrapper carries it explicitly
 	 * inside the memory item rather than as a typed field.
 	 */
-	metadata?: Record<string, unknown>;
+	metadata?: Record<string, JsonValue>;
 	/** Document-level metadata, matchable via `additional_metadata`. */
-	additionalMetadata?: Record<string, unknown>;
+	additionalMetadata?: Record<string, JsonValue>;
+	/** Explicit forceful relationships attached to this document. */
+	relations?: { ids: string[]; properties?: Record<string, JsonValue> };
+	/** Caller-declared provenance class for this document. */
+	evidenceKind?: "assertion" | "record" | "said" | "done" | "third_party" | "inferred";
+	/** Caller-stable handle for the entity this document describes. */
+	evidenceSubject?: string;
 	/** When the fact was true, as opposed to when it was stored (RFC3339 date). */
 	observationDate?: string;
 	/** Filename to attach when ingesting knowledge text as a document. */
 	filename?: string;
+	/** Caller-supplied entities and relations for this item. */
+	graph?: IngestGraph;
+}
+
+export interface IngestParams extends IngestItem {
+	kind: ContextKind;
+	/** Several same-kind items to send in one API request. */
+	items?: IngestItem[];
+	/** Structured app records such as messages, email, tickets, and meetings. */
+	appKnowledge?: AppKnowledgeItem[];
 	/**
 	 * A file to upload as a knowledge document (PDF, DOCX, slides, ...), in
-	 * place of `text`. Its title is its filename; the API does not take one.
+	 * place of all other ingest modes. Its title is its filename.
 	 */
 	file?: IngestDocument;
+	upsert?: boolean;
 	collection?: string;
 	/** Per-call database override. */
 	database?: string;
+}
+
+interface MemoryWireItem {
+	user_assistant_pairs?: ConversationTurn[];
+	text?: string;
+	infer: boolean;
+	is_markdown: boolean;
+	custom_instructions?: string;
+	source_id?: string;
+	title?: string;
+	user_name?: string;
+	metadata?: Record<string, JsonValue>;
+	additional_metadata?: Record<string, JsonValue>;
+	observation_date?: string;
 }
 
 /** One uploaded document: its bytes, its name and type, and optionally its id. */
@@ -325,6 +512,20 @@ export interface IngestDocument {
 	contentType: string;
 	/** The document's id (`document_metadata[].id`); the API assigns one when absent. */
 	id?: string;
+}
+
+/** Fields accepted by PATCH /context/{id}/metadata. */
+export interface UpdateContextParams {
+	id: string;
+	/** Values merged into the source's schema-controlled database metadata. */
+	databaseMetadata?: SDK.HandlerContextMetadataUpdateRequest["databaseMetadata"];
+	/** Free-form values merged into the source's additional metadata. */
+	additionalMetadata?: SDK.HandlerContextMetadataUpdateRequest["additionalMetadata"];
+	/** Full replacement ACL. Omit this property to leave the ACL unchanged. */
+	acl?: string[];
+	collection?: string;
+	/** Per-call database override. */
+	database?: string;
 }
 
 export interface ListParams {
@@ -656,6 +857,11 @@ abstract class Resource {
 			: { database };
 	}
 
+	/** Collection allowlist carried by an OAuth grant, when the grant is collection-confined. */
+	protected collectionConfinement(): readonly string[] | undefined {
+		return this.allowedCollections;
+	}
+
 	/**
 	 * Scope for a query that names SEVERAL collections.
 	 *
@@ -902,100 +1108,261 @@ export class ContextResource extends Resource {
 			request.upsert = String(params.upsert);
 		}
 
+		const flatItemFields = [
+			params.text,
+			params.pairs,
+			params.title,
+			params.sourceId,
+			params.userName,
+			params.infer,
+			params.isMarkdown,
+			params.customInstructions,
+			params.metadata,
+			params.additionalMetadata,
+			params.relations,
+			params.evidenceKind,
+			params.evidenceSubject,
+			params.observationDate,
+			params.filename,
+			params.graph,
+		];
+
+		const hasFlatItemFields = flatItemFields.some((value) => value != null);
+
+		if (params.appKnowledge != null) {
+			if (params.kind !== "knowledge") {
+				throw new Error("appKnowledge requires kind knowledge.");
+			}
+
+			if (params.appKnowledge.length === 0) {
+				throw new Error("appKnowledge requires at least one item.");
+			}
+
+			if (params.items != null || params.file != null || hasFlatItemFields) {
+				throw new Error("appKnowledge cannot be combined with documents, memories, or items.");
+			}
+
+			const appItems = params.appKnowledge.map((item) => {
+				const fieldKind = item.fields.kind;
+
+				if (fieldKind != null && fieldKind !== item.kind) {
+					throw new Error(
+						`appKnowledge fields.kind must equal kind ${item.kind}; received ${String(fieldKind)}.`,
+					);
+				}
+
+				return {
+					...item,
+					id: item.id ?? "",
+					fields: { ...item.fields, kind: item.kind },
+				};
+			});
+
+			request.appKnowledge = JSON.stringify(appItems);
+
+			return this.call("/context/ingest", "unsafe", opts, (o) =>
+				this.sdk.context.ingest(request, o),
+			);
+		}
+
+		if (params.file != null) {
+			if (params.kind !== "knowledge") {
+				throw new Error("File ingestion requires kind knowledge.");
+			}
+
+			if (params.items != null || hasFlatItemFields) {
+				throw new Error("File ingestion cannot be combined with text, turns, items, or other item fields.");
+			}
+
+			const { data, filename, contentType, id } = params.file;
+			request.documents = [{ data, filename, contentType }];
+
+			if (id != null) request.documentMetadata = JSON.stringify([{ id }]);
+
+			return this.call("/context/ingest", "unsafe", opts, (o) =>
+				this.sdk.context.ingest(request, o),
+			);
+		}
+
+		if (params.items != null && hasFlatItemFields) {
+			throw new Error("Ingestion accepts items or flat item fields, not both.");
+		}
+
+		const items: IngestItem[] = params.items ?? [params];
+
+		if (items.length === 0) throw new Error("Ingestion requires at least one item.");
+
+		const graphPayload: Record<string, IngestGraph> = Object.create(null);
+
 		if (params.kind === "memory") {
-			const infer = params.infer ?? true;
-			const item: Record<string, unknown> = {};
+			const memories = items.map((input): MemoryWireItem => {
+				const unsupported = (
+					[
+						["relations", input.relations],
+						["evidenceKind", input.evidenceKind],
+						["evidenceSubject", input.evidenceSubject],
+					] as const
+				).flatMap(([name, value]) => value == null ? [] : [name]);
 
-			if (params.pairs != null) item.user_assistant_pairs = params.pairs;
+				if (unsupported.length > 0) {
+					throw new Error(
+						`Memory ingestion does not support ${unsupported.join(", ")} — ` +
+						"those apply to knowledge ingestion only. Pass kind \"knowledge\" instead, " +
+						"or drop them.",
+					);
+				}
 
-			if (params.text != null) item.text = params.text;
-			item.infer = infer;
-			item.is_markdown = params.isMarkdown ?? false;
+				const infer = input.infer ?? true;
 
-			// Preserve the v1 omission behaviour: custom_instructions is only
-			// attached when inference is enabled.
-			if (infer && params.customInstructions != null) {
-				item.custom_instructions = params.customInstructions;
-			}
+				if (!infer && input.customInstructions != null) {
+					throw new Error("customInstructions cannot be used when infer is false.");
+				}
 
-			if (params.sourceId != null) item.source_id = params.sourceId;
+				const item: MemoryWireItem = {
+					infer,
+					is_markdown: input.isMarkdown ?? false,
+				};
 
-			if (params.title != null) item.title = params.title;
+				if (input.pairs != null) item.user_assistant_pairs = input.pairs;
 
-			if (params.userName != null) item.user_name = params.userName;
+				if (input.text != null) item.text = input.text;
 
-			if (params.metadata != null) item.metadata = params.metadata;
+				if (input.customInstructions != null) item.custom_instructions = input.customInstructions;
 
-			if (params.additionalMetadata != null) {
-				item.additional_metadata = params.additionalMetadata;
-			}
+				if (input.sourceId != null) item.source_id = input.sourceId;
 
-			if (params.observationDate != null) {
-				item.observation_date = params.observationDate;
-			}
+				if (input.title != null) item.title = input.title;
 
-			request.memories = JSON.stringify([item]);
+				if (input.userName != null) item.user_name = input.userName;
+
+				if (input.metadata != null) item.metadata = input.metadata;
+
+				if (input.additionalMetadata != null) item.additional_metadata = input.additionalMetadata;
+
+				if (input.observationDate != null) item.observation_date = input.observationDate;
+
+				if (input.graph != null) {
+					if (input.sourceId == null) throw new Error("A memory graph requires sourceId.");
+
+					graphPayload[input.sourceId] = input.graph;
+				}
+
+				return item;
+			});
+
+			request.memories = JSON.stringify(memories);
 		} else {
-			// The knowledge path can only carry the document itself and its
-			// filename. Everything below belongs to the memory item shape and has
-			// nowhere to go here — so reject rather than accept and discard. A
-			// caller that sets `infer: true` on a knowledge write and is answered
-			// "success: 1, failed: 0" has been told its instruction was honoured
-			// when it was dropped on the floor.
-			const unsupported = (
-				[
-					["pairs", params.pairs],
-					["sourceId", params.sourceId],
-					["infer", params.infer],
-					["isMarkdown", params.isMarkdown],
-					["customInstructions", params.customInstructions],
-					["userName", params.userName],
-					["metadata", params.metadata],
-					["additionalMetadata", params.additionalMetadata],
-					["observationDate", params.observationDate],
-				] as const
-			)
-				.filter(([, value]) => value != null)
-				.map(([name]) => name);
+			const documentMetadataItems: Array<Record<string, JsonValue>> = [];
 
-			if (unsupported.length > 0) {
-				throw new Error(
-					`Knowledge ingestion does not support ${unsupported.join(", ")} — ` +
-					`those apply to memory ingestion only. Pass kind "memory" instead, ` +
-					`or drop them.`,
-				);
-			}
+			request.documents = items.map((input) => {
+				const unsupported = (
+					[
+						["pairs", input.pairs],
+						["isMarkdown", input.isMarkdown],
+						["customInstructions", input.customInstructions],
+						["userName", input.userName],
+						["observationDate", input.observationDate],
+					] as const
+				).flatMap(([name, value]) => value == null ? [] : [name]);
 
-			if (params.file != null && params.text != null) {
-				throw new Error("Knowledge ingestion takes `text` or `file`, not both.");
-			}
+				if (unsupported.length > 0) {
+					throw new Error(
+						`Knowledge ingestion does not support ${unsupported.join(", ")} — ` +
+						`those apply to memory ingestion only. Pass kind "memory" instead, ` +
+						`or drop them.`,
+					);
+				}
 
-			if (params.file != null) {
-				const { data, filename, contentType, id } = params.file;
+				if (input.text == null) throw new Error("A knowledge item requires text.");
 
-				request.documents = [{ data, filename, contentType }];
+				const title = input.title ?? "document";
+				const filename = input.filename ?? (/\.md$/i.test(title) ? title : `${title}.md`);
+				const metadataItem: Record<string, JsonValue> = {};
 
-				// One entry per document, in order; only `id` is set here.
-				if (id != null) request.documentMetadata = JSON.stringify([{ id }]);
-			}
+				if (input.sourceId != null) metadataItem.id = input.sourceId;
 
-			// Knowledge is multipart with the document as a file part — never the
-			// `app_knowledge` JSON field (guards the DX-G-002 class of bug).
-			if (params.text != null) {
-				request.documents = [{
-					data: Buffer.from(params.text, "utf-8"),
-					// The title rides on the filename; the server's
-					// document_metadata does not accept a `title` key.
-					filename: params.filename ?? `${params.title ?? "document"}.md`,
+				if (input.title != null) metadataItem.title = input.title;
+
+				if (input.metadata != null) metadataItem.metadata = input.metadata;
+
+				if (input.additionalMetadata != null) {
+					metadataItem.additional_metadata = input.additionalMetadata;
+				}
+
+				if (input.relations != null) metadataItem.relations = input.relations;
+
+				if (input.infer != null) metadataItem.infer = input.infer;
+
+				if (input.evidenceKind != null) metadataItem.evidence_kind = input.evidenceKind;
+
+				if (input.evidenceSubject != null) metadataItem.evidence_subject = input.evidenceSubject;
+
+				documentMetadataItems.push(metadataItem);
+
+				if (input.graph != null) {
+					if (input.sourceId == null) throw new Error("A knowledge graph requires sourceId.");
+
+					graphPayload[input.sourceId] = input.graph;
+				}
+
+				return {
+					data: Buffer.from(input.text, "utf-8"),
+					filename,
 					contentType: "text/markdown",
-				}];
-			}
+				};
+			});
+			request.documentMetadata = JSON.stringify(documentMetadataItems);
+		}
+
+		if (Object.keys(graphPayload).length > 0) {
+			request.graphPayload = JSON.stringify(graphPayload);
 		}
 
 		// Not safe to send twice: without a source id a repeat stores a second
 		// copy, and memory inference can extract a second set of facts.
 		return this.call("/context/ingest", "unsafe", opts, (o) =>
 			this.sdk.context.ingest(request, o),
+		);
+	}
+
+	/** Merge metadata or replace the ACL of one existing context item. */
+	async update(
+		params: UpdateContextParams,
+		opts?: RequestOptions,
+	): Promise<SDK.GithubComHydradbHydradbApplicationInternalServiceMetadataEditResult> {
+		const databaseMetadataPresent =
+			params.databaseMetadata != null && Object.keys(params.databaseMetadata).length > 0;
+
+		const additionalMetadataPresent =
+			params.additionalMetadata != null && Object.keys(params.additionalMetadata).length > 0;
+
+		if (!databaseMetadataPresent && !additionalMetadataPresent && params.acl === undefined) {
+			throw new Error(
+				"Nothing to update: pass database metadata, additional metadata, or a replacement ACL.",
+			);
+		}
+
+		const scope = this.scope(params.collection, params.database);
+
+		if (scope.collection == null) {
+			throw new Error(
+				"A collection is required to update context metadata. List collections, then pass one explicitly.",
+			);
+		}
+
+		const request: SDK.HandlerContextMetadataUpdateRequest = {
+			...scope,
+			id: params.id,
+		};
+
+		if (databaseMetadataPresent) request.databaseMetadata = params.databaseMetadata;
+
+		if (additionalMetadataPresent) request.additionalMetadata = params.additionalMetadata;
+
+		if (params.acl !== undefined) request.acl = params.acl;
+
+		return this.call("/context/{id}/metadata", "idempotent", opts, (o) =>
+			this.sdk.context.updateSourceMetadata(request, o),
 		);
 	}
 
@@ -1080,35 +1447,12 @@ export class ContextResource extends Resource {
 						throw new HydraDBError({ statusCode: response.status, body });
 					}
 					// Unlike the generated method, passthrough does not validate JSON.
-					// A proxy's HTML login page must be an error, not "no sources".
-					// Accept both the wire payload and the historical `inner` shape
-					// understood by the list adapters, including a valid empty array.
-					const rowsKey = params.kind === "memory" ? "user_memories" : "sources";
-					const identityKeys = params.kind === "memory"
-						? ["memory_id", "id", "source_id"]
-						: ["id", "source_id"];
-					const listRow = z.record(z.unknown()).refine((row) => {
-						// Use the adapters' first-string precedence: a blank `id`
-						// must not hide behind a valid legacy `source_id`.
-						const id = identityKeys.map((key) => row[key]).find((value) => typeof value === "string");
-						return typeof id === "string" && id.trim() !== "";
-					});
-					const successfulObject = z.object({ success: z.literal(true).optional() });
-					const listPayload = successfulObject.extend({
-						[rowsKey]: z.array(listRow),
-					});
-					const payload = unwrap<unknown>(body);
-					if (
-						!successfulObject.safeParse(body).success ||
-						!z.union([
-							listPayload,
-							successfulObject.extend({ inner: listPayload }),
-						]).safeParse(payload).success
-					) {
-						throw new Error(
-							`Invalid successful list response: expected a ${rowsKey} array with nonempty row IDs and no failure flag.`,
-						);
-					}
+					// Validate every list through the same contract so a proxy page or
+					// documented degraded-memory response cannot become an empty list.
+					// SAFETY: validateListResponse parses this raw HTTP body before use.
+
+					validateListResponse(body as ListResponse, params.kind);
+
 					return body;
 				},
 			);
@@ -1146,10 +1490,8 @@ export class ContextResource extends Resource {
 
 			const response = await this.sdk.context.list(request, o);
 
-			// A filtered list is a lookup: an empty answer reads as "that source
-			// does not exist", so a body that is not a real list (a proxy's login
-			// page, a failure flag) must be an error rather than no rows.
-			if (filtered) validateListResponse(response, params.kind);
+			// A false empty is wrong on every list path, not only lookups.
+			validateListResponse(response, params.kind);
 
 			return response;
 		});
@@ -1176,12 +1518,16 @@ export class ContextResource extends Resource {
 		params: IngestionStatusParams,
 		opts?: RequestOptions,
 	): Promise<SDK.IngestionV2BatchProcessingStatus> {
-		return this.call("/context/status", "idempotent", opts, (o) =>
-			this.sdk.context.status({
+		return this.call("/context/status", "idempotent", opts, async (o) => {
+			const response = await this.sdk.context.status({
 				...this.scope(params.collection, params.database),
 				ids: params.ids,
-			}, o),
-		);
+			}, o);
+
+			validateStatusResponse(response);
+
+			return response;
+		});
 	}
 
 	/**
@@ -1266,6 +1612,21 @@ export class ContextResource extends Resource {
 	}
 }
 
+/**
+ * A database response with the fields the database tools report. The API
+ * always sets them; the generated types mark them optional only because swag
+ * never marks a response field required.
+ */
+type Reported<Response, Field extends keyof Response> = Response & Required<Pick<Response, Field>>;
+
+const reportsDatabase = z.object({ database: z.string().min(1) });
+
+const reportsStatus = reportsDatabase.extend({ status: z.string().min(1) });
+
+const reportsFields = reportsDatabase.extend({ fields: z.array(z.unknown()) });
+
+const reportsAddedFields = reportsDatabase.extend({ addedFields: z.array(z.string()) });
+
 export class DatabasesResource extends Resource {
 	// The base constructor is `protected`, so this one is what makes the class
 	// instantiable from outside the file. Removing it fails with TS2674.
@@ -1281,26 +1642,70 @@ export class DatabasesResource extends Resource {
 		super(sdk, database, collection, allowedDatabases, allowedCollections, raw);
 	}
 
-	create(
+	async create(
 		params: CreateDatabaseParams,
-	): Promise<SDK.TenantsTenantCreateAcceptedResponse> {
-		return this.call("/databases", "unsafe", undefined, (o) =>
+		opts?: RequestOptions,
+	): Promise<Reported<SDK.TenantsTenantCreateAcceptedResponse, "database" | "status">> {
+		const database = this.scope(undefined, params.database).database;
+		const allowedCollections = this.collectionConfinement();
+
+		if (allowedCollections) {
+			throw new Error(
+				`This connection is confined to collection ${allowedCollections
+					.map((collection) => `"${collection}"`)
+					.join(", ")}, and creating a database changes state outside those collections. ` +
+					"Nothing was created. Reconnect without collection confinement before creating a database.",
+			);
+		}
+
+		return this.reported("/databases", "unsafe", opts, reportsStatus, (o) =>
 			this.sdk.databases.create({
-				database: params.database,
+				database,
 				databaseMetadataSchema: params.databaseMetadataSchema,
 				embeddingsDimension: params.embeddingsDimension,
 			}, o),
 		);
 	}
 
-	delete(database: string): Promise<SDK.TenantsTenantDeleteResponse> {
-		return this.call("/databases", "unsafe", undefined, (o) =>
-			this.sdk.databases.delete({ database }, o),
+	async delete(
+		database: string,
+		opts?: RequestOptions,
+	): Promise<Reported<SDK.TenantsTenantDeleteResponse, "database" | "status">> {
+		const scoped = this.scope(undefined, database).database;
+		const connectionDefault = this.scope().database;
+
+		if (scoped === connectionDefault) {
+			throw new Error(
+				`Refusing to delete database "${scoped}" because it is this connection's ` +
+					"default database. Connect through a different default database, then retry the deletion.",
+			);
+		}
+
+		const allowedCollections = this.collectionConfinement();
+
+		if (allowedCollections) {
+			throw new Error(
+				`This connection is confined to collection ${allowedCollections
+					.map((collection) => `"${collection}"`)
+					.join(", ")}, and deleting database "${scoped}" removes every collection in it, ` +
+					"including ones this connection was not granted. Nothing was deleted. " +
+					"Reconnect without collection confinement before deleting a whole database.",
+			);
+		}
+
+		return this.reported("/databases", "unsafe", opts, reportsStatus, (o) =>
+			this.sdk.databases.delete({ database: scoped }, o),
 		);
 	}
 
 	list(opts?: RequestOptions): Promise<SDK.TenantsTenantIdsResponse> {
-		return this.call("/databases", "idempotent", opts, (o) => this.sdk.databases.list(o));
+		return this.call("/databases", "idempotent", opts, async (o) => {
+			const response = await this.sdk.databases.list(o);
+
+			validateDatabasesResponse(response);
+
+			return response;
+		});
 	}
 
 	collections(
@@ -1312,17 +1717,87 @@ export class DatabasesResource extends Resource {
 		);
 	}
 
-	stats(database: string, opts?: RequestOptions): Promise<SDK.TenantsTenantStatsResponse> {
-		return this.call("/databases/stats", "idempotent", opts, (o) =>
-			this.sdk.databases.stats({ database }, o),
+	async stats(
+		database: string,
+		opts?: RequestOptions,
+	): Promise<Reported<SDK.TenantsTenantStatsResponse, "database">> {
+		const scoped = this.scope(undefined, database).database;
+
+		return this.reported("/databases/stats", "idempotent", opts, reportsDatabase, (o) =>
+			this.sdk.databases.stats({ database: scoped }, o),
 		);
 	}
 
 	/** Infra provisioning readiness — renamed away from `status` (SDK `databases.status`). */
-	readiness(database: string): Promise<SDK.TenantsInfraStatusResponseV2> {
-		return this.call("/databases/status", "idempotent", undefined, (o) =>
-			this.sdk.databases.status({ database }, o),
+	async readiness(
+		database: string,
+		opts?: RequestOptions,
+	): Promise<Reported<SDK.TenantsInfraStatusResponseV2, "database">> {
+		const scoped = this.scope(undefined, database).database;
+
+		return this.reported("/databases/status", "idempotent", opts, reportsDatabase, (o) =>
+			this.sdk.databases.status({ database: scoped }, o),
 		);
+	}
+
+	/** The metadata fields a database declares (SDK `databases.getMetadataSchema`). */
+	async inspectMetadataSchema(
+		database: string,
+		opts?: RequestOptions,
+	): Promise<Reported<SDK.TenantsTenantMetadataSchemaResponse, "database" | "fields">> {
+		const scoped = this.scope(undefined, database).database;
+
+		return this.reported("/databases/metadata-schema", "idempotent", opts, reportsFields, (o) =>
+			this.sdk.databases.getMetadataSchema({ database: scoped }, o),
+		);
+	}
+
+	async updateMetadataSchema(
+		database: string,
+		addFields: SDK.TenantsCustomPropertyDefinition[],
+		opts?: RequestOptions,
+	): Promise<Reported<SDK.HandlerMetadataSchemaUpdateResponse, "database" | "addedFields">> {
+		const scoped = this.scope(undefined, database).database;
+		const allowedCollections = this.collectionConfinement();
+
+		if (allowedCollections) {
+			throw new Error(
+				`This connection is confined to collection ${allowedCollections
+					.map((collection) => `"${collection}"`)
+					.join(", ")}, and adding metadata fields changes the database-wide schema for ` +
+					`"${scoped}", including collections this connection was not granted. Nothing was changed. ` +
+					"Reconnect without collection confinement before changing a database metadata schema.",
+			);
+		}
+
+		return this.reported("/databases/metadata-schema", "unsafe", opts, reportsAddedFields, (o) =>
+			this.sdk.databases.updateMetadataSchema({ database: scoped, addFields }, o),
+		);
+	}
+
+	/**
+	 * `call`, refusing a successful response that lacks a field the database
+	 * tools report, so no caller has to guess it.
+	 */
+	private reported<T, Response>(
+		path: string,
+		safety: RetrySafety,
+		opts: RequestOptions | undefined,
+		expected: z.AnyZodObject,
+		fn: (sdkOptions: SdkRequestOptions) => Promise<Response>,
+	): Promise<T> {
+		return this.call(path, safety, opts, async (o) => {
+			const response = await fn(o);
+
+			if (!expected.safeParse(unwrap(response)).success) {
+				throw new HydraDBError({ statusCode: 200, body: { error: {
+					code: "INVALID_DATABASE_RESPONSE",
+					message: `Invalid successful database response: expected ${Object.keys(expected.shape).join(" and ")}.`,
+				} } });
+			}
+
+			return response;
+		});
 	}
 
 	/**
