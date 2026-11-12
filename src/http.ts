@@ -45,6 +45,7 @@ import {
 	introspect,
 	isAccessToken,
 	metadataUrl,
+	oauthRoutes,
 	type OAuthConfig,
 	protectedResourceMetadata,
 	wwwAuthenticate,
@@ -81,6 +82,14 @@ const MAX_REQUEST_BODY = "16mb";
  */
 function banner(message: string): void {
 	console.error(`[hydradb-mcp] ${message}`);
+}
+
+function literalRoutes(paths: string[]): RegExp[] {
+	return paths.map((path) => {
+		const escaped = path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+		// Express's string routes are non-strict: "/" also answers "//".
+		return new RegExp(path === "/" ? "^//?$" : `^${escaped}/?$`, "i");
+	});
 }
 
 /** The bearer value from an `Authorization` header, scheme-insensitive. */
@@ -155,6 +164,7 @@ export function createHttpApp(config: HttpServerConfig): Express {
 	// resolved once. `null` means every OAuth surface below is absent and this
 	// server is byte-for-byte the pre-OAuth one.
 	const oauth: OAuthConfig | null = config.oauth ?? null;
+	const oauthPaths = oauth ? oauthRoutes(oauth) : null;
 
 	const app = express();
 	// Off by default so a direct client cannot spoof `X-Forwarded-*`; a
@@ -264,18 +274,18 @@ export function createHttpApp(config: HttpServerConfig): Express {
 	app.use(express.json({ limit: MAX_REQUEST_BODY }));
 
 	// --- The MCP endpoint ---
-	// Serves MCP at both the root `/` (e.g. https://mcp.hydradb.com) and `/mcp`
-	// so clients pointing at either URL connect seamlessly.
+	// Serves MCP at root, `/mcp`, and the configured public pathname. The leaf
+	// alias also supports proxies that strip only the leading public prefix.
 	// --- OAuth Protected Resource Metadata (RFC 9728) ---
 	//
 	// The one document a client needs to get from "401" to "open the browser at
-	// the right place". Served at the root form and the `/mcp` path form, since
-	// a client tries the path-inserted URL first when the endpoint has a path.
+	// the right place". Configured-path aliases keep discovery behind the same
+	// proxy route as MCP; path-inserted aliases support RFC 9728 clients.
 	// Registered only when OAuth is configured, so an unconfigured server has
 	// no new routes at all.
-	if (oauth) {
+	if (oauth && oauthPaths) {
 		app.get(
-			["/.well-known/oauth-protected-resource", "/.well-known/oauth-protected-resource/mcp"],
+			literalRoutes(oauthPaths.metadata),
 			(_req, res) => {
 				res.setHeader("Cache-Control", "public, max-age=300");
 				res.setHeader("Access-Control-Allow-Origin", "*");
@@ -284,7 +294,7 @@ export function createHttpApp(config: HttpServerConfig): Express {
 		);
 	}
 
-	app.all(["/", "/mcp"], async (req, res) => {
+	app.all(literalRoutes(oauthPaths?.mcp ?? ["/", "/mcp"]), async (req, res) => {
 		// An OAuth access token arrives in the same `Authorization: Bearer` slot
 		// an API key does. It is told apart by prefix and exchanged, via the
 		// issuer, for the API key and scope the user approved on the consent
@@ -598,7 +608,12 @@ const invokedAsScript =
 	process.argv[1]?.endsWith("/http.ts");
 
 if (invokedAsScript) {
-	main();
+	try {
+		main();
+	} catch (error) {
+		banner(error instanceof Error ? error.message : String(error));
+		process.exitCode = 1;
+	}
 }
 
 // Re-exported so callers importing the HTTP entry point get the config helpers

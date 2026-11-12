@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — OAuth discovery behind an MCP path prefix
+
+Path-prefixed MCP deployments now serve protected-resource metadata through
+both prefix-preserving and prefix-stripping proxies, including the RFC 9728
+path-inserted alias. Unsupported `HYDRADB_MCP_PUBLIC_URL` layouts now fail at
+startup with a clear error instead of silently disabling OAuth.
+
 ## [1.8.0] - 2026-11-11
 
 ### Added — `hydradb_update`
