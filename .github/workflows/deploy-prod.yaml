@@ -181,5 +181,14 @@ jobs:
       - name: Sync ArgoCD
         env:
           ARGOCD_AUTH_TOKEN: ${{ secrets.ARGOCD_AUTH_TOKEN }}
+          # Cloudflare Access service token. The secrets do not exist until
+          # argocd.hydradb.com goes behind Access (ENG-3891); until then the
+          # request is sent without them, as before.
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
         run: |
-          curl -s "${ARGOCD_SERVER}/api/v1/applications/${ARGOCD_APP_NAME}?refresh=hard" -H "Authorization: Bearer $ARGOCD_AUTH_TOKEN" | jq -r '.status.sync.status'
+          access_headers=()
+          if [ -n "${CF_ACCESS_CLIENT_ID}" ] && [ -n "${CF_ACCESS_CLIENT_SECRET}" ]; then
+            access_headers=(-H "CF-Access-Client-Id: ${CF_ACCESS_CLIENT_ID}" -H "CF-Access-Client-Secret: ${CF_ACCESS_CLIENT_SECRET}")
+          fi
+          curl -s "${ARGOCD_SERVER}/api/v1/applications/${ARGOCD_APP_NAME}?refresh=hard" -H "Authorization: Bearer $ARGOCD_AUTH_TOKEN" "${access_headers[@]}" | jq -r '.status.sync.status'
