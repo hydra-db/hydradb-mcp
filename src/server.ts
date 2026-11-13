@@ -2612,8 +2612,8 @@ export function createHydraDBServer(
 			pending.length > 0
 				? `\n\n${pending.length} still indexing — not yet searchable. Check again in a few seconds.`
 				: errored.length > 0
-					? `\n\nAll sources have reached a terminal state; ${errored.length} errored and will not become searchable. ` +
-						`Re-ingest ${errored.length === 1 ? "it" : "them"} after fixing the cause.`
+					? `\n\nAll sources have reached a terminal state; ${errored.length} reported errored. ` +
+						"Read each error above before acting: it may be an indexing failure or a failed status lookup."
 					: `\n\nAll sources have reached a terminal state.`;
 
 		return textResult(`Indexing status:\n${lines.join("\n")}${note}`);

@@ -2351,7 +2351,44 @@ test("hydradb_status treats errored as final and says so", async () => {
 
 	assert.doesNotMatch(out, /still indexing/);
 	assert.match(out, /s2: errored .* graph write failed \[E6003\]/);
-	assert.match(out, /All sources have reached a terminal state; 1 errored and will not become searchable/);
+	assert.match(out, /All sources have reached a terminal state; 1 reported errored/);
+	assert.doesNotMatch(out, /will not become searchable|Re-ingest/i);
+
+	await client.close();
+});
+
+// The API also answers `errored` with E9001 when its own status read fails,
+// even for a source that indexed fine. The summary must report the error, not
+// claim the source failed for good or tell the agent to re-ingest it.
+test("hydradb_status does not call a failed status read a failed source", async () => {
+	const sdk = {
+		context: {
+			status: () =>
+				Promise.resolve({
+					data: {
+						statuses: [
+							{
+								id: "s1",
+								indexingStatus: "errored",
+								errorCode: "E9001",
+								errorMessage:
+									"An unexpected error occurred while processing your file. Please try again. If the issue persists, contact support@hydradb.com.",
+							},
+						],
+					},
+					success: true,
+				}),
+		},
+	} as unknown as HydraDBClient;
+
+	const client = await connect(new HydraDB({ token: "t", database: "db_test" }, sdk));
+	const result = await client.callTool({ name: "hydradb_status", arguments: { ids: ["s1"] } });
+	const out = (result.content as { text: string }[])[0]!.text;
+
+	assert.doesNotMatch(out, /still indexing/);
+	assert.match(out, /s1: errored .*\[E9001\]/);
+	assert.match(out, /1 reported errored/);
+	assert.doesNotMatch(out, /will not become searchable|Re-ingest/i);
 
 	await client.close();
 });
