@@ -2600,18 +2600,21 @@ export function createHydraDBServer(
 			return `  - ${s.id ?? "(unknown id)"}: ${state}${reason}`;
 		});
 
-		// `completed` and `failed` are terminal; everything else means keep
-		// waiting. Deliberately not switched over the SDK's status enum
-		// (queued/processing/completed/failed) — a live run returned
-		// `graph_creation`, which that enum does not declare.
-		const pending = statuses.filter(
-			(s) => !["completed", "failed"].includes(String(s.indexingStatus).toLowerCase()),
-		);
+		// `completed` and `errored` are the API's final indexing statuses; a
+		// failure is always `errored` (ENG-3906). Everything else, including
+		// `graph_creation`, means keep waiting. Compared as strings: the SDK
+		// types the field as a plain string.
+		const statusOf = (s: { indexingStatus?: string | null }) => String(s.indexingStatus).toLowerCase();
+		const errored = statuses.filter((s) => statusOf(s) === "errored");
+		const pending = statuses.filter((s) => !["completed", "errored"].includes(statusOf(s)));
 
 		const note =
 			pending.length > 0
 				? `\n\n${pending.length} still indexing — not yet searchable. Check again in a few seconds.`
-				: `\n\nAll sources have reached a terminal state.`;
+				: errored.length > 0
+					? `\n\nAll sources have reached a terminal state; ${errored.length} reported errored. ` +
+						"Read each error above before acting: it may be an indexing failure or a failed status lookup."
+					: `\n\nAll sources have reached a terminal state.`;
 
 		return textResult(`Indexing status:\n${lines.join("\n")}${note}`);
 	}
