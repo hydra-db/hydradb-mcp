@@ -4680,6 +4680,46 @@ test("query forwards a multi-collection scope instead of the singular one", asyn
 	await client.close();
 });
 
+test("query forwards a weighted collections object instead of the singular one", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_query",
+		arguments: { query: "q", collections: { policies: 2, handbook: 1 } },
+	});
+
+	assert.notEqual(result.isError, true);
+	const args = calls.find((c) => c.method === "query")?.args;
+	assert.deepEqual(args?.collections, { policies: 2, handbook: 1 });
+	// Same rule as the list form: the configured default must not ride along.
+	assert.equal(args?.collection, undefined);
+
+	await client.close();
+});
+
+test("query refuses an empty or negative-weight collections selector before the wire", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	for (const collections of [{}, [], { policies: -1 }]) {
+		const result = await client.callTool({
+			name: "hydradb_query",
+			arguments: { query: "q", collections },
+		});
+
+		assert.equal(result.isError, true, `${JSON.stringify(collections)} must be refused`);
+	}
+
+	assert.equal(
+		calls.filter((c) => c.method === "query").length,
+		0,
+		"a rejected selector must not reach the API",
+	);
+
+	await client.close();
+});
+
 // ── hydradb_subgraph (PRO-1848) ─────────────────────────────────────────
 
 async function subgraphText(

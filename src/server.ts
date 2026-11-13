@@ -723,7 +723,7 @@ export function createHydraDBServer(
 		};
 	}
 
-	function scopeText(scope: { database: string; collection?: string | null; collections?: string[] }): string {
+	function scopeText(scope: { database: string; collection?: string | null; collections?: QueryParams["collections"] }): string {
 		return `Resolved scope: database ${JSON.stringify(scope.database)}, ` +
 			(scope.collections ? `collections ${JSON.stringify(scope.collections)}` :
 				scope.collection == null ? "workspace default" : `collection ${JSON.stringify(scope.collection)}`) + ".";
@@ -747,7 +747,7 @@ export function createHydraDBServer(
 		acl?: string[];
 		database?: string;
 		collection?: string;
-		collections?: string[];
+		collections?: QueryParams["collections"];
 		additional_context?: string;
 		alpha?: number | "auto";
 		query_by?: "hybrid" | "text";
@@ -3815,8 +3815,14 @@ export function createHydraDBServer(
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.query_apps),
 		collections: z
-			.array(z.string().min(1))
-			.min(1)
+			.union([
+				z.array(z.string().min(1)).min(1),
+				z
+					.record(z.string().min(1), z.number().finite().nonnegative())
+					.refine((o) => Object.keys(o).length > 0, {
+						message: "collections must name at least one collection",
+					}),
+			])
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.collections),
 		acl: z
