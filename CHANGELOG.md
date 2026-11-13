@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — `hydradb_status` stops waiting on errored sources
+
+`hydradb_status` treated only `completed` and `failed` as final, but the API
+reports a failure as `errored` and never returns `failed`. A source that
+errored was reported as "still indexing", so an agent kept polling it. It now
+counts `errored` as final and says how many sources errored and need
+re-ingesting (ENG-3906).
+
 ### Fixed — OAuth discovery behind an MCP path prefix
 
 Path-prefixed MCP deployments now serve protected-resource metadata through

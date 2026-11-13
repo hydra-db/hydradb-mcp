@@ -2294,7 +2294,7 @@ test("hydradb_status reports per-source indexing state", async () => {
 							{ id: "s2", indexingStatus: "graph_creation" },
 							{
 								id: "s3",
-								indexingStatus: "failed",
+								indexingStatus: "errored",
 								errorMessage: "extraction timed out",
 								errorCode: "TIMEOUT",
 							},
@@ -2318,12 +2318,42 @@ test("hydradb_status reports per-source indexing state", async () => {
 
 	assert.match(out, /s1: completed/);
 	assert.match(out, /s2: graph_creation/);
-	assert.match(out, /s3: failed .* extraction timed out \[TIMEOUT\]/);
-	// graph_creation is not in the SDK's status enum but is a real live value,
-	// so it must count as still-in-progress rather than be treated as terminal.
+	assert.match(out, /s3: errored .* extraction timed out \[TIMEOUT\]/);
+	// graph_creation is a real live value that is not final, so it counts as
+	// still in progress; errored is final, so it does not (ENG-3906).
 	assert.match(out, /1 still indexing/);
 
 	await client2.close();
+});
+
+// ENG-3906: `errored` is the API's only failure status. A source that errored
+// is final: it must not be reported as still indexing, or an agent polls it
+// for ever.
+test("hydradb_status treats errored as final and says so", async () => {
+	const sdk = {
+		context: {
+			status: () =>
+				Promise.resolve({
+					data: {
+						statuses: [
+							{ id: "s1", indexingStatus: "completed" },
+							{ id: "s2", indexingStatus: "errored", errorMessage: "graph write failed", errorCode: "E6003" },
+						],
+					},
+					success: true,
+				}),
+		},
+	} as unknown as HydraDBClient;
+
+	const client = await connect(new HydraDB({ token: "t", database: "db_test" }, sdk));
+	const result = await client.callTool({ name: "hydradb_status", arguments: { ids: ["s1", "s2"] } });
+	const out = (result.content as { text: string }[])[0]!.text;
+
+	assert.doesNotMatch(out, /still indexing/);
+	assert.match(out, /s2: errored .* graph write failed \[E6003\]/);
+	assert.match(out, /All sources have reached a terminal state; 1 errored and will not become searchable/);
+
+	await client.close();
 });
 
 test("hydradb_status says when everything is settled", async () => {
