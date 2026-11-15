@@ -174,7 +174,7 @@ export type RequestHeaders = Record<string, string | string[] | undefined>;
  */
 export interface RequestCredentials {
 	apiKey: string;
-	database: string;
+	database?: string;
 	/**
 	 * Collection scope. ABSENT means the request omits it and the API answers
 	 * from the caller's own workspace default, which is what a user added to a
@@ -196,7 +196,7 @@ export interface RequestCredentials {
  *
  * The status and message are carried out rather than thrown so the caller can
  * answer with a JSON-RPC error body at the right code — 401 when nothing
- * authenticated the request, 400 when it authenticated but named no database —
+ * authenticated the request —
  * instead of a generic 500 that tells the client nothing about what to fix.
  */
 export type CredentialResolution =
@@ -304,15 +304,6 @@ export function resolveRequestCredentials(
 	const database = callerAuthenticated
 		? headerDatabase
 		: (headerDatabase ?? readEnv(env, "HYDRADB_DATABASE", "HYDRA_DB_TENANT_ID", noopWarn));
-	if (!database) {
-		return {
-			ok: false,
-			status: 400,
-			message:
-				"Missing Hydra DB database. Send the `X-HydraDB-Database` header naming " +
-				"the database (tenant) this request should run against.",
-		};
-	}
 
 	// Collection is a partition WITHIN the resolved database, not a
 	// cross-tenant boundary. An OAuth grant's collection wins, then an
@@ -347,7 +338,7 @@ export function resolveRequestCredentials(
 				// derives from the approved database, never from a header.
 				identity ? {} : headers,
 				env,
-				database,
+				database ?? "",
 				callerAuthenticated,
 				identity,
 			),

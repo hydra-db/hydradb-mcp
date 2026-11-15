@@ -34,7 +34,7 @@
     "lint:anti-slop:all": "oxlint --config oxlint.config.ts"
   },
   "dependencies": {
-    "@hydradb/sdk": "2.1.4",
+    "@hydradb/sdk": "2.1.8",
     "@modelcontextprotocol/sdk": "^1.21.1",
     "cors": "^2.8.6",
     "express": "^5.2.1",

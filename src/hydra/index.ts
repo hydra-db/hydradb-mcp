@@ -74,6 +74,7 @@ export {
 } from "./client.js";
 
 export { unwrap } from "./envelope.js";
+export type { ResponseMeta, ResponseWarning } from "./envelope.js";
 
 export { DEFAULT_BASE_URL, newRawTransport, sendRaw } from "./transport.js";
 

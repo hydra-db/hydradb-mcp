@@ -54,10 +54,10 @@ const PARAM = {
 		"arriving mid-sentence; prefer hydradb_inspect when you want a whole source.",
 	recency_bias:
 		"How much to favour recently-updated sources when ranking, 0 to 1 " +
-		"(default: 0, no recency preference). Raise it for 'where does this stand " +
+		"(default: 0.6). Raise it for 'where does this stand " +
 		"now' questions, where an older source can answer the words of the query " +
 		"perfectly and still be superseded — 0.8-0.9 puts the current version on " +
-		"top. Leave it at 0 when the age of a source says nothing about whether it " +
+		"top. Set it to 0 when the age of a source says nothing about whether it " +
 		"is the right one. This re-RANKS; it never excludes older sources, so " +
 		"check the dates in the results rather than assuming the top hit is current.",
 	query_apps:
@@ -90,11 +90,10 @@ const PARAM = {
 		"often carry the answer the matching text alone does not. Set false only when you " +
 		"want the raw matching text and nothing else.",
 	follow_forceful_relations:
-		"Also return chunks whose sources were declared related at ingest (see " +
+		"Deprecated alias for query_explicit_relations. Also return chunks whose sources were declared related at ingest (see " +
 		"hydradb_ingest's forceful_relations), listed under FORCEFUL RELATIONS with " +
-		"[R1]-style labels (default: true). Set false to get only what matched the query. UNIFIED " +
-		"databases only: on a split database the request is refused rather than the " +
-		"option silently ignored.",
+		"[R1]-style labels (default: true). Set false to get only what matched the query. " +
+		"query_explicit_relations takes precedence, including explicit false.",
 	text:
 		"The information to store. Provide EXACTLY ONE of `text` or `turns` — passing " +
 		"both is an error, and so is passing neither. Write it standalone: it must still " +
@@ -443,6 +442,15 @@ export const TOOL_DESCRIPTIONS = {
 		title: "List Hydra DB Databases",
 		description: DATABASES_BODY,
 		params: {},
+	},
+	[TOOL_NAMES.DATABASE_CREATE]: {
+		title: "Create a Hydra DB Database",
+		description: "Create a database. Creation is asynchronous. An OAuth connection confined to named databases may create only a name already approved for that connection.",
+		params: {
+			database: "New database name. Required. On a confined OAuth connection, this name must already be in hydradb_databases.",
+			embeddings_dimension: "Embedding vector dimension. Omit it to use Hydra DB's default.",
+			database_metadata_schema: "Metadata fields to create with the database. Field names and types cannot later be removed, renamed, or changed.",
+		},
 	},
 
 	[TOOL_NAMES.QUERY]: {
@@ -805,6 +813,7 @@ THE TOOLS
 - ${TOOL_NAMES.STATUS} — whether an ingested source has finished indexing. Ingestion is asynchronous, so a query issued straight after a save can legitimately return nothing.
 - ${TOOL_NAMES.SUBGRAPH} — everything connected to one item you already have an id for: the rest of its thread, its replies, its parents and children, the items it links to. Reach for it when one result is not enough and you need what surrounds it.
 - ${TOOL_NAMES.DATABASES} — which databases this connection can address, with the default marked. Every tool takes an optional \`database\`; call this before naming one, or when a call was refused because the user confined this connection to a single database.
+- ${TOOL_NAMES.DATABASE_CREATE} — create a database using the authenticated key; no default database is required. Creation is asynchronous.
 - ${TOOL_NAMES.LIST_COLLECTIONS} — the collections inside a database, with this connection's default marked. Call it before choosing a collection when the connection has no default.
 - ${TOOL_NAMES.FEEDBACK} — report whether a query's results were actually useful, using the request_id that query printed. Say what the right answer was (\`ground_truth_answer\`) or which sources held it (\`ground_truth_source_ids\`) when you know — that is machine-checkable and worth far more than prose. It records a signal; it never changes the query's result or the stored data.
 - ${TOOL_NAMES.DELETE_COLLECTION} — irreversible removal of one collection and everything in it. Confirm first. Take the name from ${TOOL_NAMES.LIST_COLLECTIONS}.
@@ -832,4 +841,4 @@ Choose by the question, not the vocabulary: "what has the user told me about X" 
 
 Working against an unfamiliar collection, discover its structure by querying it — \`MATCH (n) UNWIND labels(n) AS l RETURN l, count(*) AS c ORDER BY l\` — rather than guessing labels, which yields empty results that look like missing data.
 
-All tools require HYDRADB_API_KEY and HYDRADB_DATABASE in the environment. The graph tools additionally read HYDRADB_GRAPH_DATABASE and HYDRADB_GRAPH_COLLECTION for their default scope, and can be disabled with HYDRADB_MCP_GRAPH_TOOLS=0.`;
+HYDRADB_API_KEY is required; HYDRADB_DATABASE is an optional connection default. Without one, list or create databases, then pass database per scoped call. The graph tools additionally read HYDRADB_GRAPH_DATABASE and HYDRADB_GRAPH_COLLECTION for their default scope, and can be disabled with HYDRADB_MCP_GRAPH_TOOLS=0.`;

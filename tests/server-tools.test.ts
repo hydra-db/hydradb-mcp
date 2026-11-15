@@ -490,7 +490,7 @@ test("hydradb_delete reports a successful removal unchanged", async () => {
 		{ id: "mem-1" },
 	);
 
-	assert.equal(text, "Deleted memory: mem-1");
+	assert.equal(text.split("\n\nScope notice:")[0], "Deleted memory: mem-1");
 });
 
 /** Call hydradb_ingest against a given API response and return the rendered text. */
@@ -3109,15 +3109,15 @@ test("empty scope overrides are rejected or fall back to default", async () => {
 	await client.close();
 });
 
-test("query forwards recency_bias, and still defaults it to 0", async () => {
+test("query forwards recency_bias, and defaults it to 0.6", async () => {
 	const { hydra, calls } = mockHydra();
 	const client = await connect(hydra);
 
 	await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
 	assert.equal(
 		calls.find((c) => c.method === "query")?.args.recencyBias,
-		0,
-		"the host default must not change for callers that do not set it",
+		0.6,
+		"the host default applies when callers do not set it",
 	);
 
 	calls.length = 0;
@@ -4378,7 +4378,7 @@ test("hydradb_query on a unified database sends no type, renders llm_prompt verb
 	assert.ok(sent, "the query must go over the raw transport");
 	const body = sent.body as Record<string, unknown>;
 	assert.equal("type" in body, false, "never send type on a unified database");
-	assert.equal(body.follow_forceful_relations, true, "the option travels under the contract's name");
+	assert.equal(body.query_explicit_relations, true, "the legacy option travels under the canonical contract name");
 	assert.equal("query_forceful_relations" in body, false);
 	assert.equal(body.query, "refund policy");
 
@@ -4491,7 +4491,7 @@ test("hydradb_query on a unified database reports an empty four-key answer as no
 	const { hydra } = unifiedHydra({ "/query": { chunks: [], graph: [], forceful_relations: [], llm_prompt: "" } });
 	const client = await connect(hydra);
 	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "nothing" } });
-	assert.equal((result.content as { text: string }[])[0]!.text, "No relevant context items found in Hydra DB.");
+	assert.equal((result.content as { text: string }[])[0]!.text.split("\n\nScope notice:")[0], "No relevant context items found in Hydra DB.");
 	await client.close();
 });
 
@@ -4733,15 +4733,15 @@ test("hydradb_ingest refuses a contradiction between a field and its older name"
 	await client.close();
 });
 
-test("hydradb_query refuses follow_forceful_relations on a split database rather than dropping it", async () => {
+test("hydradb_query carries follow_forceful_relations on a split database rather than dropping it", async () => {
 	const { hydra, calls } = mockHydra();
 	const client = await connect(hydra);
 	const result = await client.callTool({
 		name: "hydradb_query",
 		arguments: { query: "q", follow_forceful_relations: false },
 	});
-	assert.equal(result.isError, true);
-	assert.match((result.content as { text: string }[])[0]!.text, /applies to a unified database only/);
+	assert.equal(result.isError, undefined);
+	assert.equal(calls.find((c) => c.method === "query-fetch")?.args.query_explicit_relations, false);
 	assert.equal(calls.filter((c) => c.method === "query").length, 0);
 	await client.close();
 });

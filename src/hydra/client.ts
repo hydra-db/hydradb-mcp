@@ -19,7 +19,7 @@ import { HydraDBClient, HydraDBEnvironment, HydraDBError, serialization } from "
 import type { HydraDB as SDK } from "@hydradb/sdk";
 import { z } from "zod";
 
-import { readRequestId, unwrap } from "./envelope.js";
+import { readRequestId, readResponseMeta, unwrap, type ResponseMeta } from "./envelope.js";
 import { HydraWrapperError, translateError } from "./errors.js";
 import { GraphResource } from "./graph.js";
 import { type RawTransport, newRawTransport, sendRaw } from "./transport.js";
@@ -60,6 +60,8 @@ export const DEFAULT_TIMEOUT_SECONDS = 30;
 
 export const DEFAULT_MAX_RETRIES = 2;
 
+const MISSING_DATABASE_MESSAGE = "Missing database: pass `database` per call, or set HYDRADB_DATABASE (stdio) / X-HydraDB-Database (HTTP). Use hydradb_databases to list accessible databases.";
+
 /**
  * Per-call transport controls, separate from the domain params.
  *
@@ -82,7 +84,7 @@ export interface RequestOptions {
 	 * be in flight at once, and a `lastRequestId` would hand one of them the
 	 * other's id. Opt-in, so no existing caller changes.
 	 */
-	onMeta?: (meta: { requestId?: string }) => void;
+	onMeta?: (meta: ResponseMeta) => void;
 }
 
 /**
@@ -195,7 +197,10 @@ export interface UnifiedQueryResult {
 }
 
 /** What `context.query` resolves to: the v2 shape on a split database, the four-key shape on a unified one. */
-export type QueryResult = SDK.SearchV2RetrievalResult | UnifiedQueryResult;
+export type SplitQueryResult = SDK.SearchV2RetrievalResult & {
+	additionalGraphContext?: SDK.SearchV2RetrievalResult["additionalContext"];
+};
+export type QueryResult = SplitQueryResult | UnifiedQueryResult;
 
 /**
  * Whether a `/query` wire body is the unified shape.
@@ -274,12 +279,7 @@ function malformedUnifiedResponse(wire: unknown): HydraWrapperError {
  * A `/query` answer that came back in the unified shape on a route that asked
  * for `all`, `memory` or `knowledge`.
  *
- * The server picks the body shape from the DATABASE, not from the `type` it
- * was sent: a unified database accepts `all` (it means the whole corpus) and
- * still answers with the four-key body. So an explicit `kind: "all"`, or a
- * defaulted one sent while the layout probe could not answer, reaches this
- * route with a unified body — which the v2 check below would refuse as an
- * invalid response. The SDK's parse passes every unified key through
+ * The SDK's parse passes every unified key through
  * untouched (none of them are v2-declared), so the body is read here by its
  * shape instead. The envelope is kept around it so `call` still reads the
  * request id. `undefined` means the answer is v2 and the v2 checks apply.
@@ -367,7 +367,7 @@ export interface HydraConfig {
 	/** Bearer token (the HydraDB API key). */
 	token: string;
 	/** Database scope (canonical name for the tenant). */
-	database: string;
+	database?: string;
 	/** Collection scope (canonical name for the sub-tenant). */
 	collection?: string;
 	/**
@@ -450,12 +450,14 @@ export interface QueryParams {
 	queryApps?: boolean;
 	/**
 	 * Whether chunks declared related at ingest (`forceful_relations`) are
-	 * pulled into the result (PRO-1618; server default true). A unified-database
-	 * option: the split path goes through the pinned SDK, which knows only the
-	 * deprecated `query_forceful_relations` name, so it is refused there rather
-	 * than sent under the wrong key or dropped.
+	 * pulled into the result (server default true).
 	 */
 	followForcefulRelations?: boolean;
+	queryExplicitRelations?: boolean;
+	queryForcefulRelations?: boolean;
+	additionalGraphContext?: string;
+	additionalContext?: string;
+	context?: string;
 	/** Per-call collection override. */
 	collection?: string;
 	/**
@@ -763,6 +765,18 @@ function compact(record: Record<string, unknown>): Record<string, unknown> {
 	return out;
 }
 
+function normalizeQueryResult(result: QueryResult): QueryResult {
+	if (isUnifiedQueryResult(result)) return result;
+	const record = result as Record<string, unknown>;
+	const bucket = record.additional_graph_context ?? (record.additionalGraphContext == null ? record.additional_context : undefined);
+	const additionalContext = record.additional_graph_context == null && result.additionalGraphContext != null
+		? result.additionalGraphContext
+		: bucket != null && typeof bucket === "object" && !Array.isArray(bucket)
+		? serialization.SearchV2RetrievalResult.parseOrThrow({ chunks: [], additional_context: bucket }, SDK_PARSE_OPTS).additionalContext ?? {}
+		: result.additionalContext ?? {};
+	return { ...result, additionalContext, additionalGraphContext: additionalContext };
+}
+
 /**
  * The unified ingest 202 (PRO-1618), read by hand into the SDK's camelCase
  * result so the tool layer reports it exactly as it reports a split one.
@@ -892,11 +906,12 @@ abstract class Resource {
 		body: unknown,
 		parse: (raw: unknown, opts?: SdkParseOptions) => T,
 		signal?: AbortSignal,
+		onMeta?: (meta: ResponseMeta) => void,
 	): Promise<T> {
 		if (!this.raw) {
 			throw new Error(`${what} needs the v2 transport, which this HydraDB instance was built without`);
 		}
-		const wire = await sendRaw<unknown>(this.raw, path, method, body, signal ? { signal } : undefined);
+		const wire = await sendRaw<unknown>(this.raw, path, method, body, { signal, onMeta });
 		return parse(wire, SDK_PARSE_OPTS);
 	}
 
@@ -911,7 +926,7 @@ abstract class Resource {
 		path: string,
 		body: unknown,
 		signal?: AbortSignal,
-		onMeta?: (meta: { requestId?: string }) => void,
+		onMeta?: (meta: ResponseMeta) => void,
 	): Promise<unknown> {
 		if (!this.raw) {
 			throw new Error(`${what} needs the v2 transport, which this HydraDB instance was built without`);
@@ -930,7 +945,7 @@ abstract class Resource {
 
 	protected constructor(
 		protected readonly sdk: HydraDBClient,
-		private readonly database: string,
+		private readonly database: string | undefined,
 		private readonly collection?: string,
 		private readonly allowedDatabases?: readonly string[],
 		private readonly allowedCollections?: readonly string[],
@@ -944,6 +959,7 @@ abstract class Resource {
 
 	protected scope(override?: string, dbOverride?: string): ScopeFields {
 		const database = dbOverride?.trim() || this.database;
+		if (!database) throw new Error(MISSING_DATABASE_MESSAGE);
 
 		// Enforced HERE, on the one path every per-call scope takes, so no tool
 		// can forget to check. The configured defaults are always allowed.
@@ -977,6 +993,7 @@ abstract class Resource {
 		dbOverride?: string,
 	): MultiScopeFields {
 		const database = dbOverride?.trim() || this.database;
+		if (!database) throw new Error(MISSING_DATABASE_MESSAGE);
 
 		if (database !== this.database) assertDatabaseAllowed(database, this.allowedDatabases);
 
@@ -1003,14 +1020,14 @@ abstract class Resource {
 	protected async call<T, Response>(
 		path: string,
 		fn: () => Promise<Response>,
-		onMeta?: (meta: { requestId?: string }) => void,
+		onMeta?: (meta: ResponseMeta) => void,
 	): Promise<T> {
 		try {
 			const raw = await fn();
 
-			if (onMeta) onMeta({ requestId: readRequestId(raw) });
+			if (onMeta) onMeta(readResponseMeta(raw));
 
-			return unwrap<T>(raw);
+			return path === "/query" ? normalizeQueryResult(unwrap<QueryResult>(raw)) as T : unwrap<T>(raw);
 		} catch (err) {
 			// A refused database is a decision the user made, not a transport
 			// failure from `path`; it keeps its own type and message. So does an
@@ -1028,7 +1045,7 @@ export class ContextResource extends Resource {
 	// biome-ignore lint/complexity/noUselessConstructor: widens visibility
 	constructor(
 		sdk: HydraDBClient,
-		database: string,
+		database: string | undefined,
 		collection?: string,
 		allowedDatabases?: readonly string[],
 		allowedCollections?: readonly string[],
@@ -1047,16 +1064,8 @@ export class ContextResource extends Resource {
 		params: QueryParams,
 		opts?: RequestOptions,
 	): Promise<QueryResult> {
-		// A unified-only option on a split request is refused, not dropped and
-		// not sent under the SDK's deprecated `query_forceful_relations` name:
-		// the caller asked for a specific behaviour, and silence either way
-		// would tell them it was honoured.
-		if (params.followForcefulRelations != null && params.kind !== "unified") {
-			throw new Error(
-				`followForcefulRelations applies to a unified database only (kind "unified"); ` +
-				`this request names kind "${params.kind ?? "all"}". Drop it, or pass kind "unified".`,
-			);
-		}
+		const queryExplicitRelations = params.queryExplicitRelations ?? params.followForcefulRelations ?? params.queryForcefulRelations;
+		const additionalGraphContext = params.additionalGraphContext ?? params.additionalContext ?? params.context;
 		// `operator` is keyword syntax, and the API accepts it only when the
 		// request also asks for keyword retrieval. On hybrid it does not ignore
 		// the field, it refuses the whole call:
@@ -1120,7 +1129,8 @@ export class ContextResource extends Resource {
 						max_results: params.maxResults,
 						mode: params.mode,
 						graph_context: params.graphContext,
-						follow_forceful_relations: params.followForcefulRelations,
+						query_explicit_relations: queryExplicitRelations,
+						additional_graph_context: additionalGraphContext,
 						alpha: params.alpha,
 						recency_bias: params.recencyBias,
 						query_apps: params.queryApps,
@@ -1173,7 +1183,7 @@ export class ContextResource extends Resource {
 		// supplies the SDK's auth, retry, timeout and fetch configuration, including
 		// for a ContextResource constructed directly without our RawTransport. Once
 		// the generated request exposes titles this can collapse back into sdk.query.
-		if (params.titles != null && params.titles.length > 0) {
+		if ((params.titles != null && params.titles.length > 0) || queryExplicitRelations != null || additionalGraphContext != null) {
 			return this.call(
 				"/query",
 				async () => {
@@ -1191,6 +1201,8 @@ export class ContextResource extends Resource {
 							max_results: params.maxResults,
 							mode: params.mode,
 							graph_context: params.graphContext,
+							query_explicit_relations: queryExplicitRelations,
+							additional_graph_context: additionalGraphContext,
 							alpha: params.alpha,
 							recency_bias: params.recencyBias,
 							query_apps: params.queryApps,
@@ -1361,18 +1373,19 @@ export class ContextResource extends Resource {
 			// Knowledge is multipart with the document as a file part — never the
 			// `app_knowledge` JSON field (guards the DX-G-002 class of bug).
 			if (params.text != null) {
-				request.documents = {
+				request.documents = [{
 					data: Buffer.from(params.text, "utf-8"),
 					// The title rides on the filename; the server's
 					// document_metadata does not accept a `title` key.
 					filename: params.filename ?? `${params.title ?? "document"}.md`,
 					contentType: "text/markdown",
-				};
+				}];
 			}
 		}
 
 		return this.call("/context/ingest", () =>
 			this.sdk.context.ingest(request, req(opts)),
+			opts?.onMeta,
 		);
 	}
 
@@ -1433,7 +1446,7 @@ export class ContextResource extends Resource {
 			...(params.upsert != null ? { upsert: params.upsert } : {}),
 		};
 		return this.call("/context/ingest", async () => {
-			const wire = await this.rawWire("unified ingest", "POST", "/context/ingest", body, opts?.signal);
+			const wire = await this.rawWire("unified ingest", "POST", "/context/ingest", body, opts?.signal, opts?.onMeta);
 			return parseUnifiedIngestResponse(wire);
 		});
 	}
@@ -1478,8 +1491,8 @@ export class ContextResource extends Resource {
 					}),
 					serialization.ListV2ListResponse.parseOrThrow,
 					opts?.signal,
+					opts?.onMeta,
 				),
-				opts?.onMeta,
 			);
 		}
 
@@ -1573,6 +1586,7 @@ export class ContextResource extends Resource {
 				pageSize: params.pageSize,
 				acl: params.acl,
 			}, req(opts)),
+			opts?.onMeta,
 		);
 	}
 
@@ -1589,6 +1603,7 @@ export class ContextResource extends Resource {
 				expirySeconds: params.expirySeconds,
 				acl: params.acl,
 			}, req(opts)),
+			opts?.onMeta,
 		);
 	}
 
@@ -1602,6 +1617,7 @@ export class ContextResource extends Resource {
 				...this.scope(params.collection, params.database),
 				ids: params.ids,
 			}, req(opts)),
+			opts?.onMeta,
 		);
 	}
 
@@ -1718,6 +1734,7 @@ export class ContextResource extends Resource {
 					}),
 					serialization.SourcesMemoryDeleteResponse.parseOrThrow,
 					opts?.signal,
+					opts?.onMeta,
 				),
 			);
 		}
@@ -1727,6 +1744,7 @@ export class ContextResource extends Resource {
 				ids: params.ids,
 				type: params.kind as SDK.SourcesV2SourceDeleteRequestType,
 			}, req(opts)),
+			opts?.onMeta,
 		);
 	}
 }
@@ -1737,7 +1755,7 @@ export class DatabasesResource extends Resource {
 	// biome-ignore lint/complexity/noUselessConstructor: widens visibility
 	constructor(
 		sdk: HydraDBClient,
-		database: string,
+		database: string | undefined,
 		collection?: string,
 		allowedDatabases?: readonly string[],
 		allowedCollections?: readonly string[],
@@ -2186,7 +2204,7 @@ export class FeedbackResource extends Resource {
 	// biome-ignore lint/complexity/noUselessConstructor: widens visibility
 	constructor(
 		sdk: HydraDBClient,
-		database: string,
+		database: string | undefined,
 		collection?: string,
 		allowedDatabases?: readonly string[],
 		allowedCollections?: readonly string[],
@@ -2255,7 +2273,11 @@ export class HydraDB {
 	/** Feedback about a query that already ran (POST /feedback). */
 	readonly feedback: FeedbackResource;
 	/** The default database every unscoped call uses. */
-	readonly database: string;
+	readonly defaultDatabase?: string;
+	get database(): string {
+		if (!this.defaultDatabase) throw new Error(MISSING_DATABASE_MESSAGE);
+		return this.defaultDatabase;
+	}
 	/** Databases a per-call override may name; undefined means any. */
 	readonly allowedDatabases?: readonly string[];
 	/** Collections a per-call override may name; undefined means any. */
@@ -2288,7 +2310,7 @@ export class HydraDB {
 				logging: { logger: STDERR_LOGGER },
 			});
 
-		this.database = config.database;
+		this.defaultDatabase = config.database?.trim() || undefined;
 		this.collection = config.collection;
 		this.allowedDatabases = config.allowedDatabases;
 		this.allowedCollections = config.allowedCollections;
@@ -2302,7 +2324,7 @@ export class HydraDB {
 
 		this.context = new ContextResource(
 			client,
-			config.database,
+			this.defaultDatabase,
 			config.collection,
 			config.allowedDatabases,
 			config.allowedCollections,
@@ -2310,7 +2332,7 @@ export class HydraDB {
 		);
 		this.feedback = new FeedbackResource(
 			client,
-			config.database,
+			this.defaultDatabase,
 			config.collection,
 			config.allowedDatabases,
 			config.allowedCollections,
@@ -2318,7 +2340,7 @@ export class HydraDB {
 		);
 		this.databases = new DatabasesResource(
 			client,
-			config.database,
+			this.defaultDatabase,
 			config.collection,
 			config.allowedDatabases,
 			config.allowedCollections,

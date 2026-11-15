@@ -47,6 +47,12 @@ function build(opts: {
 	};
 
 	const sdk = {
+		fetch: async (_path: string, init: RequestInit) => {
+			calls.push({ method: "sdk.fetch query", args: JSON.parse(String(init.body)) });
+			return new Response(JSON.stringify({ success: true, data: opts.rawQueryData ?? UNIFIED_BODY }), {
+				status: 200, headers: { "content-type": "application/json" },
+			});
+		},
 		query: (args: Record<string, unknown>) => {
 			calls.push({ method: "sdk.query", args });
 			const out = opts.sdkQuery ? opts.sdkQuery(args, sdkQueries++) : { chunks: [] };
@@ -119,21 +125,37 @@ async function connect(hydra: HydraDB) {
 const textOf = (res: { content?: unknown }) =>
 	((res.content as { type: string; text?: string }[]) ?? []).map((c) => c.text ?? "").join("\n");
 
+test("omitted selector negotiates unified, but explicit all preserves backend validation without retry", async () => {
+	const { hydra, calls } = build({ probe: "unified", sdkQuery: () => new HydraDBError({
+		statusCode: 400, body: { error: { code: "UNSUPPORTED_CORPUS_TYPE", message: 'type "all" is not valid on a unified database' } },
+	}) });
+	const client = await connect(hydra);
+	const omitted = await client.callTool({ name: "hydradb_query", arguments: { query: "refund" } });
+	assert.equal(omitted.isError, undefined, textOf(omitted));
+	assert.equal("type" in calls.find((c) => c.method === "raw POST /query")!.args, false);
+	const explicit = await client.callTool({ name: "hydradb_query", arguments: { query: "refund", type: "all" } });
+	assert.equal(explicit.isError, true);
+	assert.match(textOf(explicit), /not valid on a unified database/);
+	assert.equal(calls.find((c) => c.method === "sdk.query")?.args.type, "all");
+	assert.equal(calls.filter((c) => c.method === "raw POST /query").length, 1);
+	await client.close();
+});
+
 // ---------------------------------------------------------------- fix 1
 
-test("explicit kind=all on a known unified database is sent as unified (no type, raw route)", async () => {
-	const { hydra, calls } = build({ probe: "unified" });
+test("explicit kind=all remains explicit and a unified answer is still read by shape", async () => {
+	const { hydra, calls } = build({ probe: "unified", sdkQuery: () => UNIFIED_BODY });
 	const res = await (await connect(hydra)).callTool({ name: "hydradb_query", arguments: { query: "refund", kind: "all" } });
 
 	assert.equal(res.isError, undefined, textOf(res));
-	assert.equal(calls.find((c) => c.method === "sdk.query"), undefined, "must not take the v2 SDK route");
-	const q = calls.find((c) => c.method === "raw POST /query");
-	assert.ok(q, "unified query goes over the raw route");
-	assert.equal("type" in q.args, false, "no type on a unified database");
+	const q = calls.find((c) => c.method === "sdk.query");
+	assert.ok(q, "explicit all keeps the SDK route for backend validation");
+	assert.equal(q.args.type, "all");
+	assert.equal(calls.find((c) => c.method === "raw POST /query"), undefined);
 	assert.match(textOf(res), /Refund window is 30 days/);
 });
 
-test("explicit kind=all with follow_forceful_relations on a unified database is accepted", async () => {
+test("explicit kind=all with follow_forceful_relations stays explicit on the raw bridge", async () => {
 	const { hydra, calls } = build({ probe: "unified" });
 
 	const res = await (await connect(hydra)).callTool({
@@ -142,7 +164,8 @@ test("explicit kind=all with follow_forceful_relations on a unified database is 
 	});
 
 	assert.equal(res.isError, undefined, textOf(res));
-	assert.equal(calls.find((c) => c.method === "raw POST /query")?.args.follow_forceful_relations, true);
+	assert.equal(calls.find((c) => c.method === "sdk.fetch query")?.args.query_explicit_relations, true);
+	assert.equal(calls.find((c) => c.method === "sdk.fetch query")?.args.type, "all");
 });
 
 test("a unified answer on the v2 route (probe failed) is read by its shape, and the layout is remembered", async () => {
