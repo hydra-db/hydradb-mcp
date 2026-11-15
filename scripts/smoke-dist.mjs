@@ -37,7 +37,8 @@ const child = spawn(process.execPath, [ENTRY], {
 	env: {
 		...process.env,
 		HYDRADB_API_KEY: process.env.HYDRADB_API_KEY ?? "smoke-test-key",
-		HYDRADB_DATABASE: process.env.HYDRADB_DATABASE ?? "smoke-test-db",
+		HYDRADB_DATABASE: undefined,
+		HYDRA_DB_TENANT_ID: undefined,
 	},
 });
 
@@ -155,10 +156,18 @@ const REQUIRED = [
 	"hydradb_inspect",
 	"hydradb_delete",
 	"hydradb_status",
+	"hydradb_databases",
+	"hydradb_database_create",
 ];
 const names = tools.map((t) => t.name);
 const missing = REQUIRED.filter((t) => !names.includes(t));
 if (missing.length > 0) fail(`missing canonical tool(s): ${missing.join(", ")}`);
+
+send({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "hydradb_query", arguments: { query: "synthetic missing-scope probe" } } });
+const unscoped = await awaitResponse(3);
+if (unscoped.result?.isError !== true || !JSON.stringify(unscoped.result).includes("Missing database")) {
+	fail(`a scoped call without a database did not return actionable guidance: ${JSON.stringify(unscoped)}`);
+}
 
 clearTimeout(timer);
 finished = true;

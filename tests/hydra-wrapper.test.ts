@@ -1210,7 +1210,7 @@ test("unified query, list and delete send no type; the query answer is the four-
 	assert.deepEqual(q, UNIFIED_QUERY_FIXTURE, "the four-key body is returned untouched");
 	assert.deepEqual(JSON.parse(String(calls[0]!.init.body)), {
 		database: "db_u", collection: "c1", query: "acme", operator: "and", query_by: "text", max_results: 5,
-		follow_forceful_relations: false,
+		query_explicit_relations: false,
 	});
 	// The option travels under the contract's name and only when stated.
 	await hydra.context.query({ query: "acme", kind: "unified" });
@@ -1247,21 +1247,19 @@ test("a v2 answer to a unified query still goes through the SDK serializer", asy
 	assert.equal(v2.chunks?.[0]?.relevancyScore, 0.9);
 });
 
-// The split path goes through the pinned SDK, whose request knows only the
-// deprecated `query_forceful_relations`. Sending the option under that name
-// would contradict the contract; dropping it would tell the caller it was
-// honoured. So it is refused, and nothing reaches the wire.
-test("followForcefulRelations is refused on a split request", async () => {
-	let sdkCalls = 0;
-	const sdk = { query() { sdkCalls++; return Promise.resolve({ data: { chunks: [] }, success: true }); } } as unknown as HydraDBClient;
+test("followForcefulRelations is preserved via the canonical bridge on split requests", async () => {
+	const bodies: Record<string, unknown>[] = [];
+	const sdk = { async fetch(_path: string, init: RequestInit) {
+		bodies.push(JSON.parse(String(init.body)));
+		return new Response(JSON.stringify({ data: { chunks: [] }, success: true }), { status: 200 });
+	} } as unknown as HydraDBClient;
 	const hydra = new HydraDB({ token: "t", database: "db_s" }, sdk);
 	for (const kind of ["memory", "knowledge", "all", undefined] as const) {
-		await assert.rejects(
-			() => hydra.context.query({ query: "q", kind, followForcefulRelations: true }),
-			/followForcefulRelations applies to a unified database only/,
-		);
+		await hydra.context.query({ query: "q", kind, followForcefulRelations: true });
+		assert.equal(bodies.at(-1)?.query_explicit_relations, true);
+		assert.equal(bodies.at(-1)?.type, kind);
 	}
-	assert.equal(sdkCalls, 0);
+	assert.equal(bodies.length, 4);
 });
 
 // The shape detector, on its own: the unified body is the COMPLETE four-key

@@ -113,7 +113,7 @@ test("POST /mcp without credentials is 401 with a WWW-Authenticate header", asyn
 	assert.match(JSON.parse(res.body).error.message, /Authorization/);
 });
 
-test("POST / authenticated but with no database is 400", async () => {
+test("POST / authenticated with no database can list tools", async () => {
 	const res = await request(
 		"POST",
 		"/",
@@ -121,14 +121,16 @@ test("POST / authenticated but with no database is 400", async () => {
 			host: `127.0.0.1:${port}`,
 			"content-type": "application/json",
 			authorization: "Bearer some-key",
+			accept: "application/json, text/event-stream",
 		},
 		JSON.stringify({ jsonrpc: "2.0", method: "tools/list", id: 1 }),
 	);
-	assert.equal(res.status, 400);
-	assert.match(JSON.parse(res.body).error.message, /X-HydraDB-Database/);
+	assert.equal(res.status, 200);
+	assert.match(res.body, /hydradb_databases/);
+	assert.match(res.body, /hydradb_database_create/);
 });
 
-test("POST /mcp authenticated but with no database is 400", async () => {
+test("POST /mcp authenticated with no database can list tools", async () => {
 	const res = await request(
 		"POST",
 		"/mcp",
@@ -136,11 +138,56 @@ test("POST /mcp authenticated but with no database is 400", async () => {
 			host: `127.0.0.1:${port}`,
 			"content-type": "application/json",
 			authorization: "Bearer some-key",
+			accept: "application/json, text/event-stream",
 		},
 		JSON.stringify({ jsonrpc: "2.0", method: "tools/list", id: 1 }),
 	);
-	assert.equal(res.status, 400);
-	assert.match(JSON.parse(res.body).error.message, /X-HydraDB-Database/);
+	assert.equal(res.status, 200);
+	assert.match(res.body, /hydradb_databases/);
+	assert.match(res.body, /hydradb_database_create/);
+});
+
+test("HTTP key-only connection lists/creates databases and requires scope only for data", async () => {
+	const calls: string[] = [];
+	const backend = http.createServer((req, res) => {
+		calls.push(`${req.method} ${req.url}`);
+		req.resume();
+		res.setHeader("content-type", "application/json");
+		res.end(JSON.stringify({ success: true, data: req.method === "GET"
+			? { databases: ["existing-db"] } : { database: "new-db", status: "accepted" } }));
+	});
+	await new Promise<void>((resolve) => backend.listen(0, "127.0.0.1", resolve));
+	const previous = process.env.HYDRADB_BASE_URL;
+	const previousDatabase = process.env.HYDRADB_DATABASE;
+	process.env.HYDRADB_BASE_URL = `http://127.0.0.1:${(backend.address() as AddressInfo).port}`;
+	process.env.HYDRADB_DATABASE = "operator-db-must-not-be-borrowed";
+	const headers = {
+		host: `127.0.0.1:${port}`, "content-type": "application/json",
+		accept: "application/json, text/event-stream", authorization: "Bearer synthetic-test-key",
+	};
+	const call = (name: string, args: Record<string, unknown>) => request("POST", "/mcp", headers,
+		JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }));
+	try {
+		const listed = JSON.parse((await call("hydradb_databases", {})).body).result;
+		assert.equal(listed.isError, undefined);
+		assert.deepEqual(listed.structuredContent.databases, ["existing-db"]);
+		assert.equal(listed.structuredContent.default, null);
+		const created = JSON.parse((await call("hydradb_database_create", { database: "new-db" })).body).result;
+		assert.equal(created.isError, undefined);
+		assert.equal(created.structuredContent.database, "new-db");
+		const count = calls.length;
+		const missing = JSON.parse((await call("hydradb_query", { query: "synthetic" })).body).result;
+		assert.equal(missing.isError, true);
+		assert.match(JSON.stringify(missing.content), /Missing database/);
+		assert.equal(calls.length, count);
+		assert.deepEqual(calls, ["GET /databases", "POST /databases"]);
+	} finally {
+		if (previous == null) delete process.env.HYDRADB_BASE_URL;
+		else process.env.HYDRADB_BASE_URL = previous;
+		if (previousDatabase == null) delete process.env.HYDRADB_DATABASE;
+		else process.env.HYDRADB_DATABASE = previousDatabase;
+		await new Promise<void>((resolve) => backend.close(() => resolve()));
+	}
 });
 
 test("a malformed JSON body is refused with a JSON-RPC 400, not HTML", async () => {

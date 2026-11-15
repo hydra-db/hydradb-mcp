@@ -26,14 +26,16 @@ type RecallResponse = SDK.SearchV2RetrievalResult;
 type ScoredPath = SDK.SearchScoredPathResponse;
 
 type PathTriplet = {
-	source?: { name?: string };
+	source?: { name?: string | null };
 	relation?: {
+		canonicalPredicate?: string | null;
+		rawPredicate?: string | null;
 		canonical_predicate?: string;
 		raw_predicate?: string;
-		context?: string;
+		context?: string | null;
 		chunk_id?: string | null;
 	};
-	target?: { name?: string };
+	target?: { name?: string | null };
 };
 
 /**
@@ -138,7 +140,7 @@ function formatTriplet(triplet: PathTriplet): string {
 	const src = triplet.source?.name ?? "?";
 	const rel = triplet.relation;
 	const predicate =
-		rel?.raw_predicate ?? rel?.canonical_predicate ?? "related to";
+		rel?.rawPredicate ?? rel?.raw_predicate ?? rel?.canonicalPredicate ?? rel?.canonical_predicate ?? "related to";
 	const tgt = triplet.target?.name ?? "?";
 	const ctx = rel?.context ? ` [${rel.context}]` : "";
 	return `  (${src}) —[${predicate}]→ (${tgt})${ctx}`;
@@ -423,7 +425,7 @@ function render(
 			for (const [gid, rel] of Object.entries(relationIndex)) {
 				const triplets = rel.triplets ?? [];
 				const hasChunk = triplets.some(
-					(t) => t.relation?.chunk_id === chunkUuid,
+					(t) => (t.relation?.chunkId ?? (t.relation as PathTriplet["relation"])?.chunk_id) === chunkUuid,
 				);
 				if (hasChunk) {
 					const occurrences = groupOccurrenceCounts[gid] ?? 0;
@@ -511,8 +513,10 @@ function render(
 				const s = pt.source?.name;
 				const rel = pt.relation;
 				const p =
-					rel?.raw_predicate ??
-					rel?.canonical_predicate ??
+					rel?.rawPredicate ??
+					(rel as PathTriplet["relation"])?.raw_predicate ??
+					rel?.canonicalPredicate ??
+					(rel as PathTriplet["relation"])?.canonical_predicate ??
 					"related to";
 				const t = pt.target?.name;
 				segments.push(`(${s} -> ${p} -> ${t})`);
@@ -929,4 +933,3 @@ export function unifiedStructuredContent(
 		sources,
 	};
 }
-

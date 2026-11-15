@@ -338,15 +338,14 @@ test("API keys keep working unchanged with OAuth on", async () => {
 		TOOLS_LIST,
 	);
 	assert.equal(key.status, 200, key.body);
-	// And a key with no database is still the 400 it always was.
 	const noDb = await request(
 		"POST",
 		"/",
 		{ host: `127.0.0.1:${port}`, ...JSON_HEADERS, authorization: "Bearer sk_live_abc.def" },
 		TOOLS_LIST,
 	);
-	assert.equal(noDb.status, 400);
-	assert.match(JSON.parse(noDb.body).error.message, /X-HydraDB-Database/);
+	assert.equal(noDb.status, 200);
+	assert.match(noDb.body, /hydradb_databases/);
 });
 
 test("an OAuth token supplies the database, so no header is needed", async () => {
@@ -463,7 +462,7 @@ test("request headers cannot re-scope an OAuth identity after consent", async ()
 	assert.match(g.result.content[0].text, /confined to database "personal"/);
 });
 
-test("hydradb_databases is registered for OAuth connections only", async () => {
+test("hydradb_databases is registered for OAuth and API-key connections", async () => {
 	__resetIntrospectionCache();
 	introspectAnswer = () => ({ status: 200, body: active() });
 	const viaToken = await request("POST", "/", { host: `127.0.0.1:${port}`, ...JSON_HEADERS, authorization: "Bearer hmat_tools" }, TOOLS_LIST);
@@ -474,8 +473,7 @@ test("hydradb_databases is registered for OAuth connections only", async () => {
 		{ host: `127.0.0.1:${port}`, ...JSON_HEADERS, authorization: "Bearer sk_live_abc.def", "x-hydradb-database": "db" },
 		TOOLS_LIST,
 	);
-	// An API-key connection's tool list is exactly what it was before OAuth existed.
-	assert.ok(!toolNames(viaKey).includes("hydradb_databases"));
+	assert.ok(toolNames(viaKey).includes("hydradb_databases"));
 });
 
 // --- The graph surface must not be a way around consent ---

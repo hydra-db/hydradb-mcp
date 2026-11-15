@@ -138,11 +138,10 @@ test("a missing key is a 401 (single-tenant self-host is the env-fallback case)"
 	assert.equal(selfHost.credentials.database, "env-db");
 });
 
-test("an authenticated request with no database is a 400, not a 401", () => {
+test("an authenticated request can bootstrap without a database", () => {
 	const result = resolveRequestCredentials({ authorization: "Bearer k" }, {});
-	assert.ok(!result.ok);
-	assert.equal(result.status, 400);
-	assert.match(result.message, /X-HydraDB-Database/);
+	assert.ok(result.ok);
+	assert.equal(result.credentials.database, undefined);
 });
 
 test("baseUrl/timeout/retries are operator env only, never from headers", () => {
@@ -201,14 +200,13 @@ test("graph tools can be withheld by the operator regardless of caller", () => {
 
 test("a caller's key never pairs with the operator's env database", () => {
 	// The caller authenticated with their OWN key but named no database. The env
-	// database is the operator's, so this is refused rather than run the caller's
-	// key against it — a 400, asking for the header they omitted.
 	const result = resolveRequestCredentials(
 		{ authorization: "Bearer caller-key" },
 		{ HYDRADB_API_KEY: "operator-key", HYDRADB_DATABASE: "operator-db" },
 	);
-	assert.ok(!result.ok);
-	assert.equal(result.status, 400);
+	assert.ok(result.ok);
+	assert.equal(result.credentials.apiKey, "caller-key");
+	assert.equal(result.credentials.database, undefined);
 });
 
 test("a caller-authenticated request ignores the operator's graph env database", () => {
