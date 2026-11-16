@@ -351,3 +351,19 @@ test("an explicit existing graph operation needs no unrelated default context da
 	assert.equal(called, true);
 	await client.close();
 });
+
+test("is_markdown is refused, never dropped, where the backend has no markdown field", async () => {
+	for (const [layout, args] of [
+		["split", { text: "# Title\n\nbody", type: "knowledge", is_markdown: true }],
+		["unified", { text: "# Title\n\nbody", is_markdown: true }],
+		["unified", { text: "# Title\n\nbody", is_markdown: false }],
+	] as const) {
+		const { hydra, calls } = fixture({ database: "db-a", collection: "notes", layout });
+		const client = await connect(hydra);
+		const result = await client.callTool({ name: "hydradb_ingest", arguments: args });
+		assert.equal(result.isError, true, `${layout} ${text(result)}`);
+		assert.match(text(result), layout === "split" ? /already uploaded as a markdown document/ : /Drop is_markdown/);
+		assert.equal(calls.some((c) => c.path === "sdk.ingest" || c.path === "/context/ingest"), false, layout);
+		await client.close();
+	}
+});

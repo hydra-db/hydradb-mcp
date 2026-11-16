@@ -5360,7 +5360,8 @@ export function createHydraDBServer(
 				throw new Error(
 					`${TOOL_NAMES.INGEST} does not support ${memoryOnlyGiven.join(", ")} for ` +
 					`kind "knowledge" — those apply to memory ingestion only. Drop them, or ` +
-					`ingest this as a memory.`,
+					`ingest this as a memory.` +
+					(a.is_markdown != null ? " Knowledge text is already uploaded as a markdown document, so its headings and lists are kept without is_markdown." : ""),
 				);
 			}
 		}

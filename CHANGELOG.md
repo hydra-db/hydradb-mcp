@@ -25,6 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   inference or item-default aggregation.
 - Existing instruction carriers, app knowledge, database, connector and graph
   APIs remain supported. Public examples no longer recommend extraction controls.
+- `is_markdown` is refused on a unified database instead of being accepted and
+  dropped. On knowledge text the refusal now says that the text is already
+  uploaded as a markdown document.
 
 ### Fixed — OAuth discovery behind an MCP path prefix
 

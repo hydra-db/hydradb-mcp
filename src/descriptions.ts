@@ -228,8 +228,9 @@ const PARAM = {
 		"does not disable the normal ingestion pipeline.",
 	is_markdown:
 		"Set true when `text` contains markdown (headings, lists, code fences) so Hydra DB " +
-		"chunks on structure instead of splitting mid-section. Default false. Split databases " +
-		"only: a unified database takes text as sent, and this is not forwarded there.",
+		"chunks on structure instead of splitting mid-section. Default false. Memory text on a " +
+		"split database only: knowledge text is always uploaded as markdown, and a unified " +
+		"database stores text as sent. Both refuse this option rather than ignore it.",
 	turns: "Array of conversation turns, each with a 'user' and 'assistant' field",
 	user_name:
 		"What to call the user in the stored conversation (default: 'User'). Set it when " +
