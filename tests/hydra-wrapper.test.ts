@@ -113,7 +113,6 @@ function ingestSdk(): { sdk: HydraDBClient; calls: unknown[] } {
 test("knowledge ingest rejects memory-only params instead of dropping them", async () => {
 	for (const [name, extra] of [
 		["pairs", { pairs: [{ user: "hi", assistant: "hello" }] }],
-		["isMarkdown", { isMarkdown: true }],
 		["customInstructions", { customInstructions: "focus on X" }],
 		["userName", { userName: "Ada" }],
 	] as const) {
@@ -1927,9 +1926,9 @@ test("unified-only ingest fields are refused on a split database", async () => {
 
 // The unified item is decoded strictly (hydradb-application#1653): a turn is
 // exactly {role, content}, the speaker is the item's `user_name` on both
-// shapes, and `is_markdown` is not an item field. Sending any of the old keys
-// would be a 400 naming the key.
-test("unified ingest puts user_name on the item, never on a turn, and refuses is_markdown", async () => {
+// shapes, and `is_markdown` is not an item field, so it is accepted and left
+// out. Sending any of the old keys would be a 400 naming the key.
+test("unified ingest puts user_name on the item, never on a turn, and leaves out is_markdown", async () => {
 	const stub = () => fetchStub({ success: true, data: { success: true, success_count: 1, failed_count: 0, results: [{ source_id: "s", status: "queued" }] } });
 	const sdk = { context: { ingest() { throw new Error("SDK path must not be used for unified"); } } } as unknown as HydraDBClient;
 
@@ -1939,9 +1938,9 @@ test("unified ingest puts user_name on the item, never on a turn, and refuses is
 	const itemOf = (calls: { init: RequestInit }[]) =>
 		(JSON.parse(String(calls[0]!.init.body)) as { context: Record<string, unknown>[] }).context[0]!;
 
-	const refused = stub();
-	await assert.rejects(build(refused.fetch).context.ingest({ kind: "unified", text: "a note", isMarkdown: true }), /is_markdown/);
-	assert.equal(refused.calls.length, 0, "is_markdown is refused before the wire, never dropped");
+	const markdown = stub();
+	await build(markdown.fetch).context.ingest({ kind: "unified", text: "a note", isMarkdown: true });
+	assert.equal("is_markdown" in itemOf(markdown.calls), false, "the strict decoder would refuse is_markdown");
 
 	const text = stub();
 	await build(text.fetch).context.ingest({ kind: "unified", text: "a note", userName: "Ada" });

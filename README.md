@@ -255,7 +255,7 @@ items and sends one API request. Batch text has an 8 MiB total UTF-8 limit.
 | `source_id` | string | No | Identifier for this entry. **Reusing one REPLACES what is stored under it** |
 | `overwrite` | boolean | No | Allow that replacement (default: true) |
 | `infer` | boolean | No | Extract insights and graph entities (default: true) |
-| `is_markdown` | boolean | No | Chunk on markdown structure (default: false). Memory text on a split database only. Knowledge text is always uploaded as markdown, and a unified database stores text as sent, so both refuse it |
+| `is_markdown` | boolean | No | Chunk on markdown structure (default: false) |
 | `metadata` | object | No | Key/value metadata, matchable later via `metadata_filters` |
 | `additional_metadata` | object | No | Free-form fields stored with the item; supported on memory and knowledge |
 | `graph` | object | No | Caller-supplied `entities` and `relations`; MCP keys it by the item id |

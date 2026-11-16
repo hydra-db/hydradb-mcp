@@ -1775,7 +1775,6 @@ export class ContextResource extends Resource {
 				const unsupported = (
 					[
 						["pairs", input.pairs],
-						["isMarkdown", input.isMarkdown],
 						["customInstructions", input.customInstructions],
 						["userName", input.userName],
 						["observationDate", input.observationDate],
@@ -1906,7 +1905,6 @@ export class ContextResource extends Resource {
 			}
 			if ((input.text != null) === (input.pairs != null)) throw new Error("Unified context requires exactly one of text or pairs.");
 
-			if (input.isMarkdown != null) throw new Error("is_markdown is not supported on a unified database, which stores text as sent. Drop is_markdown.");
 		const item: Record<string, unknown> = {};
 		if (input.sourceId != null) item.context_id = input.sourceId;
 		if (input.title != null) item.title = input.title;
@@ -1922,6 +1920,8 @@ export class ContextResource extends Resource {
 		// The speaker lives on the item, for both shapes: a text item is what
 		// that person said, and a conversation's user turns are theirs.
 		if (input.userName != null) item.user_name = input.userName;
+		// `is_markdown` is not part of the unified item and would be refused by
+		// the strict decoder, so it is accepted and not forwarded.
 		item.enrich = input.infer ?? true;
 		if (input.customInstructions != null) {
 			item.instructions = input.customInstructions;

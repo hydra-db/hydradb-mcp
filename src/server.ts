@@ -1631,7 +1631,6 @@ export function createHydraDBServer(
 		const unsupported = (
 			[
 				["infer", args.infer],
-				["is_markdown", args.is_markdown],
 				["user_name", args.user_name],
 				["metadata", args.metadata],
 				["additional_metadata", args.additional_metadata],
@@ -5254,7 +5253,6 @@ export function createHydraDBServer(
 			a.title,
 			a.source_id,
 			a.infer,
-			a.is_markdown,
 			a.metadata,
 			a.additional_metadata,
 			a.relations,
@@ -5349,7 +5347,6 @@ export function createHydraDBServer(
 		if (a.kind === "knowledge") {
 			const memoryOnlyGiven = (
 				[
-					["is_markdown", a.is_markdown],
 					["user_name", a.user_name],
 					["observation_date", a.observation_date],
 					["custom_instructions", a.custom_instructions],
@@ -5362,8 +5359,7 @@ export function createHydraDBServer(
 				throw new Error(
 					`${TOOL_NAMES.INGEST} does not support ${memoryOnlyGiven.join(", ")} for ` +
 					`kind "knowledge" — those apply to memory ingestion only. Drop them, or ` +
-					`ingest this as a memory.` +
-					(a.is_markdown != null ? " Knowledge text is already uploaded as a markdown document, so its headings and lists are kept without is_markdown." : ""),
+					`ingest this as a memory.`,
 				);
 			}
 		}

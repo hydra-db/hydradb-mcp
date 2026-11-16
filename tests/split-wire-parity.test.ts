@@ -52,7 +52,9 @@ function recordWire(layout: "split" | "unified"): Sent[] {
 		const path = new URL(request.url).pathname;
 		let body: Record<string, unknown> = {};
 		if (request.headers.get("content-type")?.includes("multipart/form-data")) {
-			for (const [key, value] of (await request.formData()).entries()) body[key] = String(value);
+			for (const [key, value] of (await request.formData()).entries()) {
+				body[key] = value instanceof File ? `<file ${value.name} ${value.type} ${await value.text()}>` : value;
+			}
 		} else if (request.method !== "GET") {
 			const raw = await request.text();
 			body = raw ? JSON.parse(raw) : {};
@@ -78,6 +80,8 @@ async function call(name: string, args: Record<string, unknown>) {
 	try {
 		const result = await client.callTool({ name, arguments: args });
 		assert.equal(result.isError, undefined, JSON.stringify(result.content));
+
+		return result;
 	} finally {
 		await client.close();
 	}
@@ -136,4 +140,84 @@ test("a split text ingest with user_name sends the body main sends", async () =>
 		const body = bodyAt(sent, "/context/ingest");
 		assert.deepEqual({ ...body, memories: JSON.parse(String(body.memories)) }, MAIN_SPLIT_INGEST);
 	}
+});
+
+// is_markdown is accepted on every ingest path, without a notice, and travels
+// only as a split memory's flag. Elsewhere there is no field for it: the split
+// bodies are main's bodies without it, and the unified decoder refuses
+// unknown keys, so a context item never carries it.
+
+const MAIN_SPLIT_KNOWLEDGE_TEXT = {
+	database: "db-split",
+	collection: "notes",
+	type: "knowledge",
+	upsert: "true",
+	document_metadata: JSON.stringify([{ title: "note one" }]),
+	documents: "<file note one.md text/markdown note one>",
+};
+
+const MAIN_SPLIT_FILE = {
+	database: "db-split",
+	collection: "notes",
+	type: "knowledge",
+	upsert: "true",
+	documents: "<file a.txt text/plain hi>",
+};
+
+type Args = Parameters<typeof call>[1];
+
+async function sameBodyWithMarkdown(layout: "split" | "unified", without: Args, withMarkdown: Args) {
+	const bodies = [];
+
+	for (const args of [without, withMarkdown]) {
+		const sent = recordWire(layout);
+		const result = await call("hydradb_ingest", args);
+
+		assert.doesNotMatch(JSON.stringify(result.content), /markdown/i, "no notice for the option");
+		bodies.push(bodyAt(sent, "/context/ingest"));
+	}
+
+	assert.deepEqual(bodies[1], bodies[0], `${layout} ${JSON.stringify(withMarkdown)}`);
+
+	return bodies[0];
+}
+
+test("a split memory ingest with is_markdown sends the body main sends", async () => {
+	const sent = recordWire("split");
+	await call("hydradb_ingest", { text: "note one", is_markdown: true });
+	const body = bodyAt(sent, "/context/ingest");
+	assert.deepEqual(
+		{ ...body, memories: JSON.parse(String(body.memories)) },
+		{ ...MAIN_SPLIT_INGEST, memories: [{ ...MAIN_SPLIT_INGEST.memories[0], is_markdown: true }] },
+	);
+});
+
+test("split knowledge text, files and knowledge items accept is_markdown and send main's body without it", async () => {
+	const file = { filename: "a.txt", content_base64: Buffer.from("hi").toString("base64") };
+	const appKnowledge = [{ id: "a1", kind: "message", fields: { body: "hello" } }];
+
+	assert.deepEqual(
+		await sameBodyWithMarkdown("split", { text: "note one", kind: "knowledge" }, { text: "note one", kind: "knowledge", is_markdown: true }),
+		MAIN_SPLIT_KNOWLEDGE_TEXT,
+	);
+	assert.deepEqual(await sameBodyWithMarkdown("split", { file }, { file, is_markdown: true }), MAIN_SPLIT_FILE);
+	await sameBodyWithMarkdown(
+		"split",
+		{ kind: "knowledge", items: [{ text: "note one", source_id: "k1" }] },
+		{ kind: "knowledge", items: [{ text: "note one", source_id: "k1", is_markdown: true }] },
+	);
+	await sameBodyWithMarkdown("split", { app_knowledge: appKnowledge }, { app_knowledge: appKnowledge, is_markdown: true });
+});
+
+test("a unified database accepts is_markdown and leaves it out of every context item", async () => {
+	const turns = [{ user: "u", assistant: "a" }];
+	const text = await sameBodyWithMarkdown("unified", { text: "note one" }, { text: "note one", is_markdown: true });
+
+	await sameBodyWithMarkdown("unified", { turns, source_id: "c1" }, { turns, source_id: "c1", is_markdown: true });
+	await sameBodyWithMarkdown(
+		"unified",
+		{ items: [{ text: "note one", source_id: "i1" }] },
+		{ items: [{ text: "note one", source_id: "i1", is_markdown: true }] },
+	);
+	assert.doesNotMatch(JSON.stringify(text.context), /is_markdown/);
 });

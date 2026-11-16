@@ -125,7 +125,7 @@ const PARAM = {
 	ingest_kind:
 		"What to write: 'memory' for a personal fact, preference or conversation " +
 		"(default), or 'knowledge' to store a document as a searchable source. A `file` " +
-		"is always knowledge. Memory-only options (turns, infer, is_markdown, user_name, " +
+		"is always knowledge. Memory-only options (turns, infer, user_name, " +
 		"and source_id except with `file`) do not apply to knowledge and are rejected " +
 		"rather than ignored.",
 	title:
@@ -229,9 +229,7 @@ const PARAM = {
 		"does not disable the normal ingestion pipeline.",
 	is_markdown:
 		"Set true when `text` contains markdown (headings, lists, code fences) so Hydra DB " +
-		"chunks on structure instead of splitting mid-section. Default false. Memory text on a " +
-		"split database only: knowledge text is always uploaded as markdown, and a unified " +
-		"database stores text as sent. Both refuse this option rather than ignore it.",
+		"chunks on structure instead of splitting mid-section. Default false.",
 	turns: "Array of conversation turns, each with a 'user' and 'assistant' field",
 	user_name:
 		"What to call the user in the stored conversation (default: 'User'). Set it when " +

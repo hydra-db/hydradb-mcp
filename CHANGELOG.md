@@ -28,9 +28,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   database or the collection came from a default, not when the call passed both.
 - Existing instruction carriers, app knowledge, database, connector and graph
   APIs remain supported. Public examples no longer recommend extraction controls.
-- `is_markdown` is refused on a unified database instead of being accepted and
-  dropped. On knowledge text the refusal now says that the text is already
-  uploaded as a markdown document.
+- `is_markdown` is accepted on every ingest path and sent only as a split
+  memory's flag, as before. Knowledge text, files, knowledge items, app
+  knowledge and unified context items have no field for it, so there it is
+  accepted without a notice and the request is the one sent without it.
 
 ### Fixed — OAuth discovery behind an MCP path prefix
 
