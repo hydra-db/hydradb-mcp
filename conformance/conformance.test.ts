@@ -144,6 +144,12 @@ function makeRecorder(): { sdk: HydraDBClient; calls: RecordedCall[] } {
 	const json = "application/json";
 
 	const sdk = {
+		fetch: async (_path: string, init: RequestInit) => {
+			assert.ok(init.body instanceof FormData);
+			const args = Object.fromEntries(init.body.entries());
+			calls.push({ method: "ingest", args, contentType: "multipart/form-data" });
+			return Response.json({ success: true, data: {} });
+		},
 		query: record("query", "application/json"),
 		context: {
 			ingest: record("ingest", "multipart/form-data"),

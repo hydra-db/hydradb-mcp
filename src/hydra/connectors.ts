@@ -3,7 +3,7 @@ import type { HydraDBClient } from "@hydradb/sdk";
 import { z } from "zod";
 
 import type { RequestOptions } from "./client.js";
-import { unwrap } from "./envelope.js";
+import { readResponseMeta, unwrap } from "./envelope.js";
 import { translateError } from "./errors.js";
 
 const nonEmpty = z.string().trim().min(1);
@@ -350,9 +350,13 @@ export class ConnectorsResource {
 		run: () => Promise<unknown>,
 		schema: Schema,
 		label: string,
+		opts?: RequestOptions,
 	): Promise<z.output<Schema>> {
 		try {
-			return parse(schema, label, await run());
+			const response = await run();
+			const result = parse(schema, label, response);
+			opts?.onMeta?.(readResponseMeta(response));
+			return result;
 		} catch (error) {
 			throw translateError(path, error);
 		}
@@ -364,6 +368,7 @@ export class ConnectorsResource {
 			() => this.sdk.listProviders({}, requestOptions(opts)),
 			providerCatalogSchema,
 			"connector provider list",
+			opts,
 		);
 	}
 
@@ -373,6 +378,7 @@ export class ConnectorsResource {
 			() => this.sdk.listProviders({ id: provider }, requestOptions(opts)),
 			providerDetailSchema,
 			"connector provider",
+			opts,
 		);
 	}
 
@@ -389,6 +395,7 @@ export class ConnectorsResource {
 				),
 			connectorListSchema,
 			"connector list",
+			opts,
 		);
 	}
 
@@ -398,6 +405,7 @@ export class ConnectorsResource {
 			() => this.sdk.connectors.get({ id }, requestOptions(opts)),
 			connectorSchema,
 			"connector inspect",
+			opts,
 		);
 	}
 
@@ -407,6 +415,7 @@ export class ConnectorsResource {
 			() => this.sdk.connectors.status({ id }, requestOptions(opts)),
 			connectorStatusSchema,
 			"connector health",
+			opts,
 		);
 	}
 
@@ -427,6 +436,7 @@ export class ConnectorsResource {
 				),
 			discoverSchema,
 			"connector discovery",
+			opts,
 		);
 	}
 
@@ -436,6 +446,7 @@ export class ConnectorsResource {
 			() => this.sdk.connectors.listResources({ id }, requestOptions(opts)),
 			resourcesSchema,
 			"connector resources",
+			opts,
 		);
 	}
 
@@ -460,6 +471,7 @@ export class ConnectorsResource {
 				),
 			connectorUpdateSchema,
 			"connector update",
+			opts,
 		);
 	}
 
@@ -472,6 +484,7 @@ export class ConnectorsResource {
 			() => this.sdk.connectors.delete({ id }, requestOptions(opts)),
 			connectorDeleteSchema,
 			"connector delete",
+			opts,
 		);
 	}
 
@@ -484,6 +497,7 @@ export class ConnectorsResource {
 			() => this.sdk.connectors.sync({ id }, requestOptions(opts)),
 			connectorSyncSchema,
 			"connector sync",
+			opts,
 		);
 	}
 
@@ -496,6 +510,7 @@ export class ConnectorsResource {
 			() => this.sdk.connectors.pause({ id }, requestOptions(opts)),
 			connectorPauseSchema,
 			"connector pause",
+			opts,
 		);
 	}
 
@@ -508,6 +523,7 @@ export class ConnectorsResource {
 			() => this.sdk.connectors.resume({ id }, requestOptions(opts)),
 			connectorPauseSchema,
 			"connector resume",
+			opts,
 		);
 	}
 
@@ -526,6 +542,7 @@ export class ConnectorsResource {
 				),
 			configureSchema,
 			"connector resource add",
+			opts,
 		);
 	}
 
@@ -544,6 +561,7 @@ export class ConnectorsResource {
 				),
 			resourceUpdateSchema,
 			"connector resource update",
+			opts,
 		);
 	}
 
@@ -561,6 +579,7 @@ export class ConnectorsResource {
 				),
 			resourceDeleteSchema,
 			"connector resource delete",
+			opts,
 		);
 	}
 }

@@ -14,13 +14,27 @@ export {
 	DEFAULT_TIMEOUT_SECONDS,
 	DEFAULT_MAX_RETRIES,
 	hasEntries,
+	isUnifiedQueryResult,
+	toUnifiedQueryResult,
 } from "./client.js";
 
 export type {
 	HydraConfig,
 	ContextKind,
+	ContextCategory,
+	ForcefulRelations,
 	RequestOptions,
 	QueryKind,
+	QueryResult,
+	UnifiedQueryResult,
+	UnifiedChunk,
+	UnifiedTemporal,
+	UnifiedEntity,
+	UnifiedEdge,
+	UnifiedTriplet,
+	UnifiedGraphPath,
+	UnifiedForcefulRelation,
+	UnifiedGraphOrigin,
 	ConversationTurn,
 	QueryParams,
 	AppKnowledgeItem,
@@ -47,6 +61,7 @@ export type {
 	FeedbackRating,
 	FeedbackSource,
 	FeedbackGroundTruth,
+	Layout,
 } from "./client.js";
 
 export { GraphResource } from "./graph.js";
@@ -95,6 +110,7 @@ export {
 } from "./client.js";
 
 export { unwrap } from "./envelope.js";
+export type { ResponseMeta, ResponseWarning } from "./envelope.js";
 
 export { DEFAULT_BASE_URL, apiKeyId, newRawTransport, sendRaw } from "./transport.js";
 

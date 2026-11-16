@@ -20,7 +20,8 @@ const PARAM = {
 	query_kind:
 		"Which context family to search: 'memory' for stored user memories, " +
 		"'knowledge' for ingested documents and sources, or 'all' for both " +
-		"(default: 'all'). Leave unset unless you specifically want to exclude one family.",
+		"(default: 'all'). On a UNIFIED database (see hydradb_databases) there is one " +
+		"family only: leave unset or pass 'unified'; 'memory'/'knowledge' are refused there.",
 	max_results:
 		"Maximum CHUNKS to return (1-50, default: 10). Chunks, not whole memories or " +
 		"documents — several chunks often come from one source. Raise to 20-30 for broad " +
@@ -56,10 +57,10 @@ const PARAM = {
 		"arriving mid-sentence; prefer hydradb_inspect when you want a whole source.",
 	recency_bias:
 		"How much to favour recently-updated sources when ranking, 0 to 1 " +
-		"(default: 0, no recency preference). Raise it for 'where does this stand " +
+		"(default: 0.6). Raise it for 'where does this stand " +
 		"now' questions, where an older source can answer the words of the query " +
 		"perfectly and still be superseded — 0.8-0.9 puts the current version on " +
-		"top. Leave it at 0 when the age of a source says nothing about whether it " +
+		"top. Set it to 0 when the age of a source says nothing about whether it " +
 		"is the right one. This re-RANKS; it never excludes older sources, so " +
 		"check the dates in the results rather than assuming the top hit is current.",
 	query_apps:
@@ -76,8 +77,7 @@ const PARAM = {
 		"prefer a single `collection`, which is both faster and more precise. " +
 		"Pass either this or `collection`, never both.",
 	additional_context:
-		"Background text prepended to the query to steer retrieval, such as the " +
-		"project or person the question is about. It is not searched for itself.",
+		"Deprecated alias for additional_graph_context; canonical wins, including an empty string.",
 	alpha:
 		"Hybrid balance between keyword and vector search: 0 is keyword only, 1 is " +
 		"vector only, 'auto' lets Hydra DB choose (default: 0.8). Hybrid retrieval " +
@@ -86,8 +86,7 @@ const PARAM = {
 		"Retrieval method: 'hybrid' (default) searches keyword and vector together; " +
 		"'text' is keyword matching only. Setting operator implies 'text'.",
 	query_forceful_relations:
-		"In thinking mode, also follow the relations declared at ingest and return the " +
-		"chunks they point to alongside each match.",
+		"Deprecated alias for query_explicit_relations. The canonical field wins, then follow_forceful_relations, including false.",
 	temporal_reasoning:
 		"Resolve time-based questions ('when', 'how long', 'as of') using dated facts " +
 		"(default: true). Set false to skip it.",
@@ -112,6 +111,11 @@ const PARAM = {
 		"(Alice)-[prefers]->(Tea) — that connect facts across separate memories, and they " +
 		"often carry the answer the matching text alone does not. Set false only when you " +
 		"want the raw matching text and nothing else.",
+	follow_forceful_relations:
+		"Deprecated alias for query_explicit_relations. Also return chunks whose sources were declared related at ingest (see " +
+		"hydradb_ingest's forceful_relations), listed under FORCEFUL RELATIONS with " +
+		"[R1]-style labels (default: true). Set false to get only what matched the query. " +
+		"query_explicit_relations takes precedence, including explicit false.",
 	text:
 		"The information to store. Provide EXACTLY ONE of `text` or `turns` — passing " +
 		"both is an error, and so is passing neither. Write it standalone: it must still " +
@@ -163,8 +167,7 @@ const PARAM = {
 		"Stable handle for the entity that a knowledge document describes, such as " +
 		"user:kiran@acme.com or team:finance.",
 	custom_instructions:
-		"Memory extraction instructions. Caller text replaces the MCP default. Do not " +
-		"send this with infer false or with kind knowledge. Maximum 4000 characters.",
+		"Legacy memory extraction guidance, retained for existing callers. Maximum 4000 characters.",
 	graph:
 		"Caller-supplied graph for this item, as {entities, relations}. MCP keys the API " +
 		"graph payload by the item's source_id and generates an id when needed.",
@@ -188,6 +191,37 @@ const PARAM = {
 		"recency reflects the fact rather than the write. The server stores a date and no " +
 		"time of day: a date-time is truncated to its date part, and anything that is not " +
 		"a date is rejected.",
+	context_category:
+		"A label YOU put on this entry: 'user_preference', 'business_knowledge', " +
+		"'decision_trace', or 'auto' (the default, meaning no label). Nothing infers it, " +
+		"so send a preference or a decision as text with the matching label; it comes " +
+		"back as the enrichment kind in later hydradb_query results. UNIFIED databases " +
+		"only; refused on a split database.",
+	instructions:
+		"Existing per-entry extraction-guidance carrier, retained for compatibility with callers using this field or its older bindings.",
+	happened_at:
+		'When the fact was true, as a calendar date YYYY-MM-DD (e.g. "2026-07-04"), ' +
+		"distinct from when you stored it. The preferred name for `observation_date`; " +
+		"pass one or the other, they mean the same thing. A date-time is kept as its " +
+		"date part; anything that is not a date is rejected.",
+	attributes:
+		"Declared, filterable key/value attributes stored with this entry, as {key: " +
+		"value}: the keys hydradb_query's filters can match on later, so set them when " +
+		'you expect to narrow by them, e.g. {"project": "hydradb", "kind": "decision"}. ' +
+		"The preferred name for `metadata`; pass one or the other, they mean the same thing.",
+	custom_attributes:
+		"Free-form key/value data stored with this entry and returned alongside it, " +
+		"not filterable. Use `attributes` for anything you will filter on.",
+	forceful_relations:
+		"Source ids (context ids) this entry is explicitly related to, such as the " +
+		"thread, ticket or document it belongs to. A later hydradb_query that returns " +
+		"this entry can pull those in as FORCEFUL RELATIONS. Take the ids from hydradb_query, " +
+		"hydradb_list or an earlier hydradb_ingest result; never invent one. UNIFIED " +
+		"databases only; refused on a split database.",
+	ingest_acl:
+		"Principals that may read this entry: each an email, a `domain:<host>`, or a " +
+		"`group:<provider>:<id>`. Omit it for an entry anyone holding the key may read. " +
+		"Existing split memory and knowledge ACL support is retained as well as unified ACLs.",
 	infer:
 		"Let Hydra DB extract insights and knowledge-graph entities from this text " +
 		"(default: true). Keep it true for anything about the user or their work — that " +
@@ -196,12 +230,14 @@ const PARAM = {
 		"string, a code block).",
 	is_markdown:
 		"Set true when `text` contains markdown (headings, lists, code fences) so Hydra DB " +
-		"chunks on structure instead of splitting mid-section. Default false.",
+		"chunks on structure instead of splitting mid-section. Default false. Split databases " +
+		"only: a unified database takes text as sent, and this is not forwarded there.",
 	turns: "Array of conversation turns, each with a 'user' and 'assistant' field",
 	user_name:
 		"What to call the user in the stored conversation (default: 'User'). Set it when " +
 		"you know their actual name, so extracted facts read as being about a person " +
-		"rather than about an anonymous participant. Applies to `turns` only.",
+		"rather than about an anonymous participant. Applies to `turns`; on a unified " +
+		"database it also names the speaker of a `text` note.",
 	kind:
 		"Which family to list: 'memory' (stored memories), 'knowledge' (ingested " +
 		"sources), or 'all' (both in one page, rendered as source rows). REQUIRED. " +
@@ -276,8 +312,8 @@ const PARAM = {
 		"chunk whole; use it when the snippets are being cut off mid-answer. Either way " +
 		"the response is capped; hydradb_inspect reads a source in slices of at most 20000 characters.",
 	structured:
-		"Also return structured content alongside the text: resolved_scope, request_id and " +
-		"sources with ready-made inspect_args/list_args. Default false — the text already " +
+		"Also return full structured results alongside the text: resolved_scope and " +
+		"sources with ready-made inspect_args/list_args. Required scope, warning and request-id metadata is always machine readable. Default false — the text already " +
 		"carries every source id, collection and the scope, so leave this off when reading " +
 		"the result; set it only when code consumes the fields.",
 	fetch_source_id: "The source ID to fetch content for",
@@ -307,7 +343,8 @@ const PARAM = {
 		"one call, not N. Each is reported separately, and the response says how many " +
 		"were actually removed. This is irreversible.",
 	delete_kind:
-		"Which context family the ID belongs to: 'memory' or 'knowledge' (default: 'memory')",
+		"Which context family the ID belongs to: 'memory' or 'knowledge' (default: 'memory'). " +
+		"On a UNIFIED database leave unset or pass 'unified'.",
 	memory_id: "The ID of the memory to delete",
 	database:
 		"Database (tenant) to target for this request. Defaults to the database this " +
@@ -371,6 +408,8 @@ Searches both families by default. Every result carries \`[id: …]\` — pass i
 Tickets and other work items (Jira, Linear, GitHub): put the key in the query ("what happened with REV-2933"). The named item comes first; the items linked to it follow, each with a \`Relation:\` line saying how (e.g. "REV-3158 linked_to REV-2933"), and the named item's \`Links:\` line lists its links, parent and children. To trace a chain — an epic to its child, the child to a linked epic, that epic to the ticket that records the outcome — query each linked key in turn instead of stopping at the first document that summarises the plan. When the Metadata line carries an item's url, status or dates, cite the url and prefer the latest resolved item for "what was decided"; when it does not, open the item with hydradb_inspect before relying on them.
 
 Collections partition the database by use case. This connection's default (if it has one) is shown by hydradb_list_collections; when there is none, a search without \`collection\` covers every collection in the database (up to 10). Pass \`collection\`, or \`collections\` for several, to aim it where the answer should live.
+
+On a UNIFIED database (see hydradb_databases) the result is the server-built context block, whole when it fits the response budget. Long bodies are shortened while ids, headings and citations remain. Compact detail limits body length. Results are numbered 1, 2, and so on; forceful relations (linked by the author at ingest, not matched by the query) are R1, R2; related facts (graph paths) are P1, P2. Each entry shows its Id, which is its source id. Cite them in brackets ([1], [R1], [P1]) when you use what they mark.
 
 Examples:
   {"query": "how does the user prefer code review feedback"}
@@ -529,7 +568,6 @@ export const TOOL_DESCRIPTIONS = {
 		description: DATABASES_BODY,
 		params: {},
 	},
-
 	[TOOL_NAMES.DATABASE_CREATE]: {
 		title: "Create a Hydra DB Database",
 		description: `Create a database. Creation is asynchronous: after this accepts the request, poll ${TOOL_NAMES.DATABASE_READINESS} until ready_for_ingestion is true. An OAuth connection confined to named databases may create only a name already approved for that connection.`,
@@ -583,6 +621,7 @@ export const TOOL_DESCRIPTIONS = {
 			max_results: PARAM.max_results,
 			mode: PARAM.mode,
 			graph_context: PARAM.graph_context,
+			follow_forceful_relations: PARAM.follow_forceful_relations,
 			detail: PARAM.detail,
 			structured: PARAM.structured,
 			operator: PARAM.operator,
@@ -630,6 +669,16 @@ export const TOOL_DESCRIPTIONS = {
 			app_knowledge: PARAM.app_knowledge,
 			app_acl: PARAM.app_acl,
 			observation_date: PARAM.observation_date,
+			// The unified item's names (PRO-1618). `attributes` and `happened_at`
+			// are the preferred names for `metadata` and `observation_date` and
+			// work on every layout; the last three exist on a unified item only.
+			attributes: PARAM.attributes,
+			custom_attributes: PARAM.custom_attributes,
+			happened_at: PARAM.happened_at,
+			instructions: PARAM.instructions,
+			context_category: PARAM.context_category,
+			forceful_relations: PARAM.forceful_relations,
+			acl: PARAM.ingest_acl,
 			turns:
 				"The conversation to ingest, oldest first, as [{user, assistant}, ...]. Provide " +
 				"EXACTLY ONE of `text`, `turns` or `file` — passing more than one is an error, and so " +
@@ -661,7 +710,7 @@ export const TOOL_DESCRIPTIONS = {
 
 	[TOOL_NAMES.LIST]: {
 		title: "List Hydra DB Context",
-		description: `Enumerate what is stored in Hydra DB — every memory (kind: "memory"), every knowledge source (kind: "knowledge"), or both in one page (kind: "all"). Memories and knowledge are SEPARATE corpora: listing one tells you nothing about the other, so use "all" (or call twice) to see everything.
+		description: `Enumerate what is stored in Hydra DB — every memory (type: "memory"), every knowledge source (type: "knowledge"), or both in one page (type: "all"). A split database requires an explicit selector because its corpora are separate. Omit the selector only for a verified unified database, which has one corpus. Deprecated kind remains accepted.
 
 Use it for inventory questions ("what do you remember about me?", "which documents are indexed?") and to obtain ids. For "what do you know about X", use hydradb_query instead — listing everything and reading it is far more expensive and loses relevance ranking.
 
@@ -929,7 +978,7 @@ Confirm with the user before deleting a collection they did not name. Take the c
 	[TOOL_NAMES.CONNECTOR_UPDATE]: {
 		title: "Update Connector Settings",
 		description:
-			"Update noncredential connector settings. Set custom_instructions, sync_interval_seconds, or both. To replace credentials, use hydradb_connector_reconnect.",
+			"Update noncredential connector settings. To replace credentials, use hydradb_connector_reconnect.",
 		params: {
 			connector_id: CONNECTOR_ID_HELP,
 			custom_instructions: "Connector-level ingestion instructions. Send an empty string to clear them.",
@@ -1194,4 +1243,4 @@ Choose by the question, not the vocabulary: "what has the user told me about X" 
 
 Working against an unfamiliar collection, discover its structure by querying it — \`MATCH (n) UNWIND labels(n) AS l RETURN l, count(*) AS c ORDER BY l\` — rather than guessing labels, which yields empty results that look like missing data.
 
-All tools require HYDRADB_API_KEY and HYDRADB_DATABASE in the environment. The graph tools additionally read HYDRADB_GRAPH_DATABASE and HYDRADB_GRAPH_COLLECTION for their default scope, and can be disabled with HYDRADB_MCP_GRAPH_TOOLS=0. The database management tools (create, delete, readiness, stats and the two metadata schema tools) can be disabled with HYDRADB_MCP_DATABASE_TOOLS=0; ${TOOL_NAMES.DATABASES} stays.`;
+HYDRADB_API_KEY is required; HYDRADB_DATABASE is an optional default. Database discovery and creation work without it; scoped tools require a per-call database when no default exists. The graph tools additionally read HYDRADB_GRAPH_DATABASE and HYDRADB_GRAPH_COLLECTION for their default scope, and can be disabled with HYDRADB_MCP_GRAPH_TOOLS=0. The database management tools (create, delete, readiness, stats and the two metadata schema tools) can be disabled with HYDRADB_MCP_DATABASE_TOOLS=0; ${TOOL_NAMES.DATABASES} stays.`;

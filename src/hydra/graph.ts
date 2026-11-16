@@ -19,6 +19,7 @@
  * insulated from yet.
  */
 
+import type { ResponseMeta } from "./envelope.js";
 import { HydraWrapperError, scrub } from "./errors.js";
 import { DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT_SECONDS, type RetrySafety } from "./retry.js";
 import { newRawTransport, type RawTransport, sendRaw } from "./transport.js";
@@ -47,6 +48,7 @@ export interface GraphScopeParams {
 export type GraphRow = Record<string, unknown>;
 
 export interface RequestOptions {
+	onMeta?: (meta: ResponseMeta) => void;
 	signal?: AbortSignal;
 }
 
@@ -216,6 +218,6 @@ export class GraphResource {
 		opts?: RequestOptions,
 		safety?: RetrySafety,
 	): Promise<T> {
-		return sendRaw<T>(this.transport, path, method, body, { signal: opts?.signal, safety });
+		return sendRaw<T>(this.transport, path, method, body, { signal: opts?.signal, safety, onMeta: opts?.onMeta });
 	}
 }
