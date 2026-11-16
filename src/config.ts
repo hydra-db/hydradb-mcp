@@ -10,7 +10,7 @@
 
 export interface HydraDBConfig {
 	apiKey: string;
-	database: string;
+	database?: string;
 	/**
 	 * Collection (sub-tenant) scope. ABSENT means "let the workspace decide":
 	 * the request omits it and the API resolves the caller's own default
@@ -160,12 +160,6 @@ export function resolveConfig(
 	}
 
 	const database = readEnv(env, "HYDRADB_DATABASE", "HYDRA_DB_TENANT_ID", warn);
-
-	if (!database) {
-		throw new Error(
-			"HYDRADB_DATABASE (or its deprecated alias HYDRA_DB_TENANT_ID) environment variable is required",
-		);
-	}
 
 	// No fallback. Unset stays undefined so the request omits collection and
 	// the workspace decides.

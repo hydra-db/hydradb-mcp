@@ -29,6 +29,7 @@ import {
 	DEPRECATED_TOOL_NAMES,
 	GRAPH_TOOL_NAMES,
 } from "../src/tool-names.js";
+import { UNIFIED_INGEST_202, UNIFIED_QUERY_FIXTURE } from "./unified-fixture.js";
 
 type RecordedCall = { method: string; args: Record<string, unknown> };
 
@@ -107,8 +108,13 @@ function mockHydra(
 		fetch: async (input: string | URL | Request, init?: RequestInit) => {
 			const path = String(typeof input === "object" && "url" in input ? input.url : input);
 			const method = path.split("/").filter(Boolean).pop() ?? "fetch";
+			if (init?.body instanceof FormData) {
+				const args = Object.fromEntries(init.body.entries());
+				const data = await record("ingest", { success: true, successCount: 1, failedCount: 0 })({ ...args, appKnowledge: args.app_knowledge });
+				return Response.json(data);
+			}
 			calls.push({ method: `${method}-fetch`, args: JSON.parse(String(init?.body ?? "{}")) });
-			const data = "list" in responses ? responses.list : { sources: [], total: 0 };
+			const data = method === "query" ? responses.query ?? { chunks: [] } : responses.list ?? { sources: [], total: 0 };
 
 			return new Response(JSON.stringify({
 				success: true,
@@ -259,6 +265,7 @@ test("database stats preserve missing counts as unknown", async () => {
 		database: "db_test",
 		knowledge_rows: 265,
 		memory_rows: null,
+		request_id: "req-from-meta",
 	});
 	await client.close();
 });
@@ -723,7 +730,7 @@ test("hydradb_delete reports a successful removal unchanged", async () => {
 		{ id: "mem-1" },
 	);
 
-	assert.equal(text, "Deleted memory: mem-1");
+	assert.equal(text.split("\n\nScope notice:")[0], "Deleted memory: mem-1");
 });
 
 /** Call hydradb_ingest against a given API response and return the rendered text. */
@@ -1337,7 +1344,7 @@ test("hydradb_ingest validates app knowledge ACLs and input exclusivity", async 
 	const appItem = { kind: "message", fields: { body: "hello" } };
 
 	const cases = [
-		{ app_knowledge: [{ ...appItem, acl: [] }] },
+		{ app_knowledge: [{ ...appItem, acl: [null] }] },
 		{ app_knowledge: [{ ...appItem, acl: [""] }] },
 		{ app_knowledge: [{ ...appItem, acl: ["x".repeat(257)] }] },
 		{ app_knowledge: [{ ...appItem, acl: Array.from({ length: 1_001 }, (_, index) => `user-${index}`) }] },
@@ -2720,7 +2727,9 @@ test("no new tool call is accepted once shutdown has begun", async () => {
 });
 
 test("calls are accepted again once the shutdown flag is cleared", async () => {
-	const { hydra, calls } = mockHydra();
+	// mockHydraWithLayout so the layout probe lands in `raw`, not `calls` — the
+	// assertion below counts the SDK calls a query makes.
+	const { hydra, calls } = mockHydraWithLayout("split");
 	const client = await connect(hydra);
 
 	await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
@@ -2885,13 +2894,40 @@ test("hydradb_list requires kind rather than silently picking one", async () => 
 
 	const result = await client.callTool({ name: "hydradb_list", arguments: {} });
 
-	assert.equal(result.isError, true, "omitting kind must not quietly mean 'memory'");
-	assert.equal(
-		calls.filter((c) => c.method === "list").length,
-		0,
-		"no listing should be issued when the corpus is ambiguous",
+	assert.equal(result.isError, true);
+	const listCalls = calls.filter((c) => c.method === "list");
+	assert.equal(listCalls.length, 0);
+	assert.match(
+		(result.content as { text: string }[])[0]?.text ?? "",
+		/explicit kind|type.*required|pass.*kind/i,
+		"a memory-only listing must not read as the whole store",
 	);
 
+	await client.close();
+});
+
+// The note is for a kind the HOST chose. A caller who asked for memories knows
+// what they asked for, and telling them again is noise on every page.
+test("hydradb_list does not add the corpus note when the caller named the kind", async () => {
+	const { text } = await listText(
+		{ user_memories: [{ memory_id: "m1", memory_content: "prefers tabs" }], total: 1 },
+		{ kind: "memory" },
+	);
+	assert.doesNotMatch(text, /separate corpus/i);
+});
+
+// The whole point of making it optional: a unified database resolves to its one
+// corpus with no failed request and no kind for the model to invent.
+test("hydradb_list without kind lists unified on a unified database", async () => {
+	const { hydra, raw } = mockHydraWithLayout("unified");
+	const client = await connect(hydra);
+	const res = await client.callTool({ name: "hydradb_list", arguments: {} });
+	assert.notEqual(res.isError, true);
+	// The unified list goes over the raw path with NO `type` (CONTRACT: never
+	// send it there); the resolved kind still shows in the structured result.
+	const listBody = raw.find((c) => c.path === "/context/list")!.body as Record<string, unknown>;
+	assert.equal("type" in listBody, false);
+	assert.equal((res.structuredContent as { kind: string }).kind, "unified");
 	await client.close();
 });
 
@@ -3935,14 +3971,14 @@ test("hydradb_query sends every documented query field it is given", async () =>
 		},
 	});
 
-	const call = calls.find((c) => c.method === "query");
+	const call = calls.find((c) => c.method === "query-fetch");
 
-	assert.equal(call?.args.additionalContext, "project Atlas");
+	assert.equal(call?.args.additional_graph_context, "project Atlas");
 	assert.equal(call?.args.alpha, 0.3);
-	assert.equal(call?.args.queryBy, "hybrid");
-	assert.equal(call?.args.queryForcefulRelations, true);
-	assert.equal(call?.args.temporalReasoning, false);
-	assert.equal(call?.args.responseFormat, "structured");
+	assert.equal(call?.args.query_by, "hybrid");
+	assert.equal(call?.args.query_explicit_relations, true);
+	assert.equal(call?.args.temporal_reasoning, false);
+	assert.equal(call?.args.response_format, "structured");
 	await client.close();
 });
 
@@ -4624,7 +4660,7 @@ test("empty scope overrides are rejected or fall back to default", async () => {
 	await client.close();
 });
 
-test("query forwards recency_bias, and still defaults it to 0", async () => {
+test("query forwards recency_bias, and defaults it to 0 on a split database", async () => {
 	const { hydra, calls } = mockHydra();
 	const client = await connect(hydra);
 
@@ -4632,7 +4668,7 @@ test("query forwards recency_bias, and still defaults it to 0", async () => {
 	assert.equal(
 		calls.find((c) => c.method === "query")?.args.recencyBias,
 		0,
-		"the host default must not change for callers that do not set it",
+		"the host default applies when callers do not set it",
 	);
 
 	calls.length = 0;
@@ -4970,6 +5006,187 @@ test("every tool that advertises acl actually forwards it", async () => {
 	}
 
 	await client.close();
+});
+
+// PRO-1618: on a unified database the host-owned defaults switch to `unified`,
+// because `memory`/`knowledge`/`all` are refused there; on a split database
+// (every database created before) the defaults are unchanged.
+type RawCall = { path: string; method: string; body?: unknown };
+
+/**
+ * A fetch that answers the layout probe with the given type and records every
+ * other raw v2 call (the ones a unified kind takes instead of the SDK).
+ */
+function layoutFetch(type: "split" | "unified", raw: RawCall[] = []): typeof fetch {
+	return ((url: string | URL | Request, init?: RequestInit) => {
+		const path = new URL(String(url)).pathname;
+		const method = init?.method ?? "GET";
+		if (path !== "/databases") {
+			raw.push({ path, method, body: init?.body ? JSON.parse(String(init.body)) : undefined });
+		}
+		const data =
+			path === "/databases"
+				? { databases: ["db_test"], details: [{ database: "db_test", type }] }
+				: path === "/context/list"
+					? { sources: [], total: 0 }
+					: path === "/context"
+						? { success: true, deleted_count: 1, results: [] }
+						: path === "/context/ingest"
+							? { success: true, message: "queued", results: [], success_count: 1, failed_count: 0 }
+							// The unified four-key answer (PRO-1618); only a unified
+							// database reaches the raw path at all.
+							: { chunks: [], graph: [], forceful_relations: [], llm_prompt: "" };
+		return Promise.resolve(
+			new Response(JSON.stringify({ success: true, data }), {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			}),
+		);
+	}) as typeof fetch;
+}
+
+function mockHydraWithLayout(type: "split" | "unified"): { hydra: HydraDB; calls: RecordedCall[]; raw: RawCall[] } {
+	const calls: RecordedCall[] = [];
+	const raw: RawCall[] = [];
+	const record = (method: string, fallback: unknown) => (args?: Record<string, unknown>) => {
+		calls.push({ method, args: args ?? {} });
+		return Promise.resolve({ data: fallback, success: true });
+	};
+	const sdk = {
+		query: record("query", { chunks: [] }),
+		context: {
+			ingest: record("ingest", { success: true, successCount: 1, failedCount: 0 }),
+			list: record("list", { inner: { sources: [], total: 0 } }),
+			delete: record("delete", { success: true, deletedCount: 1 }),
+		},
+		databases: {
+			list: record("databases.list", { databases: ["db_test"], details: [{ database: "db_test", type }] }),
+		},
+	} as unknown as HydraDBClient;
+	const hydra = new HydraDB(
+		{ token: "t", database: "db_test", collection: "col_test", baseUrl: "https://api.test", fetchFn: layoutFetch(type, raw) },
+		sdk,
+	);
+	return { hydra, calls, raw };
+}
+
+test("hydradb_query defaults kind to unified on a unified database (raw v2 call) and to all on a split one (SDK)", async () => {
+	const unified = mockHydraWithLayout("unified");
+	await (await connect(unified.hydra)).callTool({ name: "hydradb_query", arguments: { query: "q" } });
+	assert.equal(unified.calls.find((c) => c.method === "query"), undefined, "unified must not use the SDK query serializer");
+	const rawQuery = unified.raw.find((c) => c.path === "/query")!;
+	assert.equal(rawQuery.method, "POST");
+	// CONTRACT: never `type` on a unified database; the layout is the request.
+	assert.equal("type" in (rawQuery.body as Record<string, unknown>), false);
+	assert.equal((rawQuery.body as { query: string }).query, "q");
+
+	const split = mockHydraWithLayout("split");
+	await (await connect(split.hydra)).callTool({ name: "hydradb_query", arguments: { query: "q" } });
+	assert.equal(split.calls.find((c) => c.method === "query")!.args.type, "all");
+	assert.equal(split.raw.length, 0, "a split database keeps every call on the SDK");
+});
+
+test("hydradb_delete defaults kind to unified on a unified database", async () => {
+	const { hydra, calls, raw } = mockHydraWithLayout("unified");
+	const client = await connect(hydra);
+	await client.callTool({ name: "hydradb_delete", arguments: { ids: ["x"] } });
+	assert.equal(calls.find((c) => c.method === "delete"), undefined);
+	const rawDelete = raw.find((c) => c.path === "/context")!;
+	assert.equal(rawDelete.method, "DELETE");
+	// CONTRACT: never `type` on a unified database.
+	assert.deepEqual(rawDelete.body, { database: "db_test", collection: "col_test", ids: ["x"] });
+});
+
+test("hydradb_list kind=unified lists every item in the source shape", async () => {
+	const { hydra, raw } = mockHydraWithLayout("unified");
+	const client = await connect(hydra);
+	const res = await client.callTool({ name: "hydradb_list", arguments: { kind: "unified" } });
+	const listBody = raw.find((c) => c.path === "/context/list")!.body as Record<string, unknown>;
+	// CONTRACT: never `type` on a unified database; the listing is the whole corpus.
+	assert.equal("type" in listBody, false);
+	assert.equal(listBody.database, "db_test");
+	assert.equal((res.structuredContent as { kind: string }).kind, "unified");
+});
+
+// The text half of hydradb_ingest resolved the layout; the conversation half
+// pinned kind:"memory" outside that resolution, so one tool had one of its two
+// input shapes answering a unified database with a 400.
+test("hydradb_ingest with turns defaults to unified on a unified database", async () => {
+	const { hydra, calls, raw } = mockHydraWithLayout("unified");
+	const client = await connect(hydra);
+
+	const res = await client.callTool({
+		name: "hydradb_ingest",
+		arguments: { turns: [{ user: "i prefer dark mode", assistant: "noted" }], user_name: "Ada" },
+	});
+
+	assert.notEqual(res.isError, true, JSON.stringify(res.content));
+	assert.equal(calls.find((c) => c.method === "ingest"), undefined, "unified must not use the SDK ingest serializer");
+	// The contract's list key is `context` (never `items`).
+	const body = raw.find((c) => c.path === "/context/ingest")!.body as {
+		context: { conversation: Record<string, unknown>[]; user_name?: string }[];
+	};
+	// A turn is exactly {role, content}; the speaker is the item's user_name.
+	assert.deepEqual(body.context[0]!.conversation, [
+		{ role: "user", content: "i prefer dark mode" },
+		{ role: "assistant", content: "noted" },
+	]);
+	assert.equal(body.context[0]!.user_name, "Ada");
+	await client.close();
+});
+
+test("hydradb_ingest with turns keeps the memory path on a split database", async () => {
+	const { hydra, calls, raw } = mockHydraWithLayout("split");
+	const client = await connect(hydra);
+	await client.callTool({
+		name: "hydradb_ingest",
+		arguments: { turns: [{ user: "hi", assistant: "hello" }] },
+	});
+	assert.equal(calls.find((c) => c.method === "ingest")?.args.type, "memory");
+	assert.equal(raw.length, 0, "a split database keeps every call on the SDK");
+	await client.close();
+});
+
+test("hydradb_databases names each database's layout", async () => {
+	const { hydra } = mockHydraWithLayout("unified");
+	// The databases tool is only registered for OAuth connections.
+	const server = createHydraDBServer(hydra, undefined, { oauthTools: true });
+	const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+	const client = new Client({ name: "test", version: "0.0.0" });
+	await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+	const res = await client.callTool({ name: "hydradb_databases", arguments: {} });
+	assert.deepEqual((res.structuredContent as { types: Record<string, string> }).types, { db_test: "unified" });
+	assert.match(JSON.stringify(res.content), /unified/);
+});
+
+test("a defaulted kind refused by a unified database is retried once as unified; an explicit kind is not", async () => {
+	// The probe says split (or fails), the server says unified.
+	const calls: RecordedCall[] = [];
+	const raw: RawCall[] = [];
+	const sdk = {
+		query: (args: Record<string, unknown>) => {
+			calls.push({ method: "query", args });
+			return Promise.reject(
+				new HydraDBError({ statusCode: 400, body: { error: { message: "type 'all' is not valid on a unified database" } } }),
+			);
+		},
+		context: {},
+		databases: { list: () => Promise.resolve({ data: { databases: ["db_test"] }, success: true }) },
+	} as unknown as HydraDBClient;
+	const hydra = new HydraDB(
+		{ token: "t", database: "db_test", collection: "col_test", baseUrl: "https://api.test", fetchFn: layoutFetch("split", raw) },
+		sdk,
+	);
+	const client = await connect(hydra);
+
+	const defaulted = await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
+	assert.equal(calls.length, 1, "the SDK path was tried with the default first");
+	assert.equal(raw.filter((c) => c.path === "/query").length, 1, "then retried once as unified over the raw path");
+	assert.notEqual(defaulted.isError, true);
+
+	const explicit = await client.callTool({ name: "hydradb_query", arguments: { query: "q", kind: "memory" } });
+	assert.equal(explicit.isError, true, "an explicit kind is never rewritten");
+	assert.equal(raw.filter((c) => c.path === "/query").length, 1);
 });
 
 // Greptile P1 on #77: discovery forwarded the caller's database straight to the
@@ -5312,6 +5529,7 @@ test("query: prints the request id so feedback has something to attach to", asyn
 	// reaches the agent and the feedback tool is unusable.
 	assert.match(text, /request_id: req-from-meta/);
 	assert.match(text, /hydradb_feedback/);
+	assert.equal((res.structuredContent as { request_id?: string }).request_id, "req-from-meta");
 });
 
 test("query: an empty result still prints its request id", async () => {
@@ -5928,4 +6146,626 @@ test("hydradb_relations caps limit", async () => {
 
 	assert.equal(isError, true);
 	assert.equal(calls.length, 0);
+});
+
+/**
+ * A fetch whose layout probe FAILS, so nothing can be learned from it, and
+ * whose SDK-path answers are the server's unified refusal. `message` is the
+ * refusal text under test.
+ */
+function refusingLayout(message: string, code?: string): {
+	hydra: HydraDB;
+	raw: RawCall[];
+	sdkQueries: () => number;
+} {
+	const raw: RawCall[] = [];
+	let sdkQueries = 0;
+	const sdk = {
+		query: () => {
+			sdkQueries += 1;
+			return Promise.reject(
+				new HydraDBError({
+					statusCode: 400,
+					body: { error: { message, ...(code != null ? { code } : {}) } },
+				}),
+			);
+		},
+		context: {},
+	} as unknown as HydraDBClient;
+	const fetchFn = ((url: string | URL | Request, init?: RequestInit) => {
+		const path = new URL(String(url)).pathname;
+		if (path === "/databases") {
+			return Promise.resolve(new Response("down", { status: 503 }));
+		}
+		raw.push({ path, method: init?.method ?? "GET", body: init?.body ? JSON.parse(String(init.body)) : undefined });
+		return Promise.resolve(
+			new Response(JSON.stringify({ success: true, data: { chunks: [], sources: [] } }), {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			}),
+		);
+	}) as typeof fetch;
+	const hydra = new HydraDB(
+		{ token: "t", database: "db_test", collection: "col_test", baseUrl: "https://api.test", fetchFn, maxRetries: 0 },
+		sdk,
+	);
+	return { hydra, raw, sdkQueries: () => sdkQueries };
+}
+
+// The probe is memoised; its FAILURE was not. So a process whose probe went
+// down paid the refused request on every defaulted call thereafter — it had
+// already been told the database is unified and threw the answer away.
+test("a layout recovered by the unified retry is remembered for the next call", async () => {
+	const { hydra, raw, sdkQueries } = refusingLayout("type 'all' is not valid on a unified database");
+	const client = await connect(hydra);
+
+	await client.callTool({ name: "hydradb_query", arguments: { query: "one" } });
+	assert.equal(sdkQueries(), 1, "the first call learns it the hard way");
+	assert.equal(raw.filter((c) => c.path === "/query").length, 1);
+
+	await client.callTool({ name: "hydradb_query", arguments: { query: "two" } });
+	assert.equal(sdkQueries(), 1, "the second call must not repeat the refused request");
+	assert.equal(raw.filter((c) => c.path === "/query").length, 2, "it goes straight to unified");
+
+	await client.close();
+});
+
+// The stable half of the signal. The server gives this refusal a code
+// (CORPUS_TYPE_UNSUPPORTED, hydradb-application#870); prose that no pattern here
+// has ever seen must still retry when the code says what happened.
+test("the structured error code triggers the retry on its own", async () => {
+	const { hydra, raw } = refusingLayout("le type demandé n'est pas accepté", "CORPUS_TYPE_UNSUPPORTED");
+	const client = await connect(hydra);
+	const res = await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
+	assert.notEqual(res.isError, true);
+	assert.equal(raw.filter((c) => c.path === "/query").length, 1);
+	await client.close();
+});
+
+// And it does not fire on a 400 that merely happens to be structured: a
+// different code with prose that says nothing about a layout is a real failure.
+test("an unrelated structured 400 is not retried as unified", async () => {
+	const { hydra, raw } = refusingLayout("max_results must be between 1 and 50", "INVALID_INPUT");
+	const client = await connect(hydra);
+	const res = await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
+	assert.equal(res.isError, true);
+	assert.equal(raw.filter((c) => c.path === "/query").length, 0);
+	await client.close();
+});
+
+// CORPUS_TYPE_UNSUPPORTED covers four refusals and only one of them is answered
+// by retrying as unified. The third below is the dangerous one: it is the
+// REVERSE direction, and a client that read the code alone would answer "unified
+// is only valid on a unified database" by sending unified again.
+test("the sibling refusals that share the code are not retried as unified", async () => {
+	// Copied from the server verbatim (handler/corpus.go, handler/errors.go,
+	// platform/storagelayout/corpus_type.go) rather than paraphrased — the whole
+	// point is that these exact strings decide the direction, so a paraphrase
+	// would pass while the real message failed.
+	const allOnIngest = "invalid type 'all': it selects both corpora for reads and deletes, but an ingest must name the one it writes to. ";
+	const siblings = [
+		`invalid type "bogus": must be 'knowledge', 'memory', 'unified' or 'all'. `,
+		`${allOnIngest}Use 'knowledge' or 'memory'. `,
+		// The same refusal's unified-database advice. It contains the sentence
+		// "This database is unified", which the PROSE fallback matches — so the
+		// `invalid type 'all':` opening is the only thing keeping it out of the
+		// retry. That opening survived the advice rewrite; this pins it.
+		`${allOnIngest}This database is unified, so send 'unified' or omit \`type\` entirely. `,
+		`type "unified" is only valid on a unified database; this database stores knowledge and memory separately, so use "knowledge", "memory" or "all", or create a new unified database. `,
+		"items cannot be combined with type=knowledge: items are memory-shaped (text or a conversation); omit type or use the unified default. ",
+		// Carries its OWN code (CONTEXT_CATEGORY_UNSUPPORTED), on purpose: it
+		// refuses a different field, and its fix is "stop sending
+		// context_category" rather than "retry with another type". So it cannot
+		// reach the branch under test as things stand. Asserted anyway, against
+		// the day someone reuses the corpus code here — it is a SPLIT database's
+		// refusal, so retrying it as unified would be the reverse direction.
+		'context_category is only supported on a unified database, where knowledge and memory are one corpus. This database is split, so `type` already selects the corpus; omit context_category (or send "auto"). ',
+	];
+	for (const message of siblings) {
+		const { hydra, raw } = refusingLayout(message, "CORPUS_TYPE_UNSUPPORTED");
+		const client = await connect(hydra);
+		const res = await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
+		assert.equal(res.isError, true, `should not have been retried: ${message}`);
+		assert.equal(raw.filter((c) => c.path === "/query").length, 0, message);
+		await client.close();
+	}
+});
+
+// The server has two wordings for this refusal and they put the words the other
+// way round: `type 'x' is not valid on a unified database` from the corpus-type
+// check, and `this database is unified: send the content as items…` from the
+// ingest handler.
+//
+// Each is checked BOTH ways on purpose. The ingest wording carries no code on
+// the current server, so the prose match is the only thing that catches it
+// today — but hydradb-application#870 is adding the same code to that site
+// next, and the answer has to stay the same when it does. Getting that wrong
+// is silent: the retry simply stops happening on a server upgrade.
+test("both of the server's unified refusal wordings trigger the retry, coded or not", async () => {
+	const wordings = [
+		"type 'all' is not valid on a unified database: knowledge and memory are one corpus here",
+		"this database is unified: send the content as `items` (a JSON array of text or conversation items)",
+	];
+	for (const message of wordings) {
+		for (const code of [undefined, "CORPUS_TYPE_UNSUPPORTED"]) {
+			const { hydra, raw } = refusingLayout(message, code);
+			const client = await connect(hydra);
+			const res = await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
+			assert.notEqual(res.isError, true, `not retried (code=${code}) for: ${message}`);
+			assert.equal(raw.filter((c) => c.path === "/query").length, 1, message);
+			await client.close();
+		}
+	}
+});
+
+// runDatabases asked for the same listing twice — once through the SDK for the
+// names, once through the layout probe for the types — when one response
+// carries both.
+test("hydradb_databases issues exactly one GET /databases", async () => {
+	let listings = 0;
+	const fetchFn = ((url: string | URL | Request) => {
+		const path = new URL(String(url)).pathname;
+		if (path === "/databases") listings += 1;
+		return Promise.resolve(
+			new Response(
+				JSON.stringify({
+					success: true,
+					data: { databases: ["db_test", "other"], details: [{ database: "db_test", type: "unified" }] },
+				}),
+				{ status: 200, headers: { "content-type": "application/json" } },
+			),
+		);
+	}) as typeof fetch;
+	const hydra = new HydraDB(
+		{ token: "t", database: "db_test", baseUrl: "https://api.test", fetchFn },
+	);
+	const server = createHydraDBServer(hydra, undefined, { oauthTools: true });
+	const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+	const client = new Client({ name: "test", version: "0.0.0" });
+	await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+
+	const res = await client.callTool({ name: "hydradb_databases", arguments: {} });
+	assert.equal(listings, 1);
+	assert.deepEqual(
+		(res.structuredContent as { types: Record<string, string> }).types,
+		{ db_test: "unified", other: "split" },
+	);
+	await client.close();
+});
+
+// --- PRO-1618: the unified contract, end to end through the MCP tools ---
+
+/**
+ * A HydraDB whose layout probe says `db_u` is unified and whose raw transport
+ * is a fetch stub. The SDK is present but every method throws: on a unified
+ * database nothing may take the SDK path, and a test that did would fail
+ * loudly here rather than pass on a serializer that knows the wrong names.
+ */
+function unifiedHydra(answers: Record<string, unknown> = {}, requestId?: string): {
+	hydra: HydraDB;
+	calls: { path: string; method: string; body: unknown; url: URL }[];
+} {
+	const calls: { path: string; method: string; body: unknown; url: URL }[] = [];
+	const fetchImpl = ((url: string | URL | Request, init?: RequestInit) => {
+		const parsed = new URL(String(url));
+		const body = init?.body != null ? JSON.parse(String(init.body)) : undefined;
+		calls.push({ path: parsed.pathname, method: init?.method ?? "GET", body, url: parsed });
+		const data =
+			parsed.pathname === "/databases"
+				? { databases: ["db_u"], details: [{ database: "db_u", type: "unified" }] }
+				: (answers[parsed.pathname] ?? {});
+
+		// The unified envelope's meta as the contract states it: request id,
+		// version, latency and the scope, and NO tenant_id, sub_tenant_id or
+		// source_type. Nothing on the unified path may need those. Without a
+		// request id there is no meta at all (JSON.stringify drops undefined).
+		const meta =
+			requestId == null
+				? undefined
+				: { request_id: requestId, api_version: "2", latency_ms: 12, database: "db_u", collection: "c1" };
+
+		return Promise.resolve(
+			new Response(
+				JSON.stringify({ success: true, data, meta }),
+				{
+					status: 200,
+					headers: { "content-type": "application/json" },
+				},
+			),
+		);
+	}) as typeof fetch;
+	const refuse = () => {
+		throw new Error("the SDK path must not be used on a unified database");
+	};
+	const sdk = {
+		query: refuse,
+		context: { ingest: refuse, list: refuse, delete: refuse, relations: refuse, inspect: refuse, status: refuse },
+	} as unknown as HydraDBClient;
+	const hydra = new HydraDB(
+		{ token: "t", database: "db_u", collection: "c1", baseUrl: "https://api.test", fetchFn: fetchImpl },
+		sdk,
+	);
+	return { hydra, calls };
+}
+
+test("hydradb_query on a unified database sends no type, renders llm_prompt verbatim and exposes the structured fields", async () => {
+	const { hydra, calls } = unifiedHydra({ "/query": UNIFIED_QUERY_FIXTURE });
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_query",
+		arguments: { query: "refund policy", follow_forceful_relations: true, structured: true },
+	});
+	assert.notEqual(result.isError, true, (result.content as { text: string }[])[0]?.text);
+
+	const sent = calls.find((c) => c.path === "/query");
+	assert.ok(sent, "the query must go over the raw transport");
+	const body = sent.body as Record<string, unknown>;
+	assert.equal("type" in body, false, "never send type on a unified database");
+	assert.equal(body.query_explicit_relations, true, "the legacy option travels under the canonical contract name");
+	assert.equal("query_forceful_relations" in body, false, "and only under that name");
+	assert.equal(body.query, "refund policy");
+
+	const text = (result.content as { text: string }[])[0]!.text;
+	assert.ok(text.includes(UNIFIED_QUERY_FIXTURE.llm_prompt), "llm_prompt must be surfaced verbatim");
+	assert.match(text, /^Found 2 context items \(1 forceful relation, 2 graph paths\):\n\n# Query results\n/);
+	assert.match(text, /## Forceful relations\n\nLinked to a result by the author at ingest time \(forceful_relations\), not by relevance to this query\./);
+	assert.match(text, /\*\*Enrichment:\*\* Refund window is 30 days; Finance owns refund processing\./);
+	assert.match(text, /Each Id above is a source id \(context_id in the structured content\): pass one to hydradb_inspect/);
+	assert.match(text, /cite them in brackets \(\[1\], \[R1\], \[P1\]\) when you use what they mark/);
+	// Nothing of the v2 rendering or the retired prompt layout: no per-chunk
+	// headers, no invented titles, no `=== ... ===` sections.
+	assert.doesNotMatch(text, /^Chunk \d+ {2}\[id:/m);
+	assert.doesNotMatch(text, /^Source: /m);
+	assert.doesNotMatch(text, /^=== /m);
+
+	const structured = result.structuredContent as {
+		layout: string;
+		chunks: { context_id: string; chunk_id?: string; score?: number; content: string; enrichment?: string; enrichment_kind?: string }[];
+		graph: { origin?: string; triplets?: unknown[]; path_summary: string }[];
+		forceful_relations: { via: { from: string; to: string }; chunk: { context_id: string; score?: number; enrichment?: string; enrichment_kind?: string } }[];
+		sources: Record<string, unknown>[];
+	};
+	assert.equal(structured.layout, "unified");
+	assert.deepEqual(structured.chunks.map((c) => c.context_id), ["refund-policy", "chat-2026-07-29"]);
+	assert.equal(structured.chunks[0]!.chunk_id, "ck_policy_3");
+	assert.equal(structured.chunks[0]!.score, 0.91);
+	assert.equal(structured.chunks[0]!.content, "Refunds are processed within 30 days of purchase by the Finance Department.");
+	assert.equal(structured.chunks[0]!.enrichment, "Refund window is 30 days; Finance owns refund processing.");
+	assert.equal(structured.chunks[0]!.enrichment_kind, "business_knowledge");
+	assert.equal(structured.chunks[1]!.enrichment, "User prefers short answers about refunds.");
+	assert.equal(structured.chunks[1]!.enrichment_kind, "user_preference");
+	assert.deepEqual(structured.chunks[0]!.temporal, UNIFIED_QUERY_FIXTURE.chunks[0]!.temporal);
+	assert.equal("temporal" in structured.chunks[1]!, false, "no temporal[] is invented");
+	assert.deepEqual(structured.graph, UNIFIED_QUERY_FIXTURE.graph, "every graph path whole, triplets included");
+	assert.deepEqual(structured.forceful_relations[0]!.via, { from: "refund-policy", to: "refund-faq" });
+	assert.equal(structured.forceful_relations[0]!.chunk.context_id, "refund-faq");
+	assert.equal(structured.forceful_relations[0]!.chunk.score, 0);
+	assert.equal("enrichment" in structured.forceful_relations[0]!.chunk, false);
+	assert.equal("enrichment_kind" in structured.forceful_relations[0]!.chunk, false);
+	assert.equal("relations" in structured, false, "the pre-rename key is not emitted");
+	// sources[] is built from context_id and carries no title: the body has
+	// none, and none is invented.
+	assert.deepEqual(structured.sources, [
+		{ id: "refund-policy" },
+		{ id: "chat-2026-07-29" },
+		{ id: "refund-faq" },
+	]);
+
+	await client.close();
+});
+
+// A unified answer is held to the same 40,000-character budget as a split one
+// (PRO-2187; it used to go out whole). This prompt has no body the MCP can find
+// in it — every line is server structure — so only the last-resort cut applies:
+// the text stops at the budget with a note, and the structured copy is bounded
+// on its own (graph triplets dropped, long bodies shortened, each flagged). Ids,
+// scores and temporal facts survive. A prompt that fits is covered by the
+// "whole" tests: it is still returned byte for byte.
+test("hydradb_query on a unified database holds an over-budget answer to the query budget, whatever detail says", async () => {
+	const body = `${"Refunds are processed by Finance. ".repeat(1_500)}END-OF-BODY`;
+	const enrichment = `${"Finance owns refund processing. ".repeat(500)}END-OF-ENRICHMENT`;
+	const lines = Array.from({ length: 3_000 }, (_, i) => `- **Id:** ctx-${i} · a line of the server-built prompt`);
+	const prompt = `# Query results\n\n${lines.join("\n")}\n\nEND-OF-PROMPT`;
+	assert.ok(prompt.length > 100_000, "the prompt is well over the split query budget");
+
+	const temporal = [{ content: "effective_from June 2026", start_date: "2026-06-01", end_date: null }];
+
+	const answer = {
+		chunks: [{ context_id: "long", chunk_id: "ck_1", score: 0.5, content: body, enrichment, enrichment_kind: "business_knowledge", temporal }],
+		graph: UNIFIED_QUERY_FIXTURE.graph,
+		forceful_relations: [{ via: { from: "long", to: "long-2" }, chunk: { context_id: "long-2", content: body, enrichment } }],
+		llm_prompt: prompt,
+	};
+
+	for (const args of [{ query: "q" }, { query: "q", detail: "compact" }, { query: "q", detail: "full" }]) {
+		const { hydra } = unifiedHydra({ "/query": answer });
+		const client = await connect(hydra);
+		const result = await client.callTool({ name: "hydradb_query", arguments: { ...args, structured: true } });
+
+		// SAFETY: a tool result's content is the text-block array this server always returns.
+		const blocks = result.content as { text: string }[];
+		assert.notEqual(result.isError, true, blocks[0]?.text);
+
+		const text = blocks[0]!.text;
+		assert.ok(text.length <= 40_000, `text held to the budget (${JSON.stringify(args)}): ${text.length}`);
+		assert.ok(text.startsWith("Found 1"), "the header is kept");
+		assert.match(text, /Answer cut at \d+ characters to fit the response budget/);
+
+		// SAFETY: the unified path returns unifiedStructuredContent, whose shape this narrows.
+		const structured = result.structuredContent as {
+			shortened?: boolean;
+			chunks: { context_id: string; score?: number; content: string; content_truncated?: boolean; temporal?: unknown }[];
+			forceful_relations: { chunk: { context_id: string; content: string } }[];
+		};
+
+		assert.equal(structured.shortened, true);
+		assert.ok(JSON.stringify(structured).length <= 40_000, "the structured copy has its own bound");
+		assert.equal(structured.chunks[0]!.context_id, "long");
+		assert.equal(structured.chunks[0]!.score, 0.5);
+		assert.deepEqual(structured.chunks[0]!.temporal, temporal);
+		assert.equal(structured.chunks[0]!.content_truncated, true);
+		assert.equal(structured.forceful_relations[0]!.chunk.context_id, "long-2");
+
+		await client.close();
+	}
+});
+
+test("hydradb_query on a unified database reports an empty four-key answer as no results", async () => {
+	const { hydra } = unifiedHydra({ "/query": { chunks: [], graph: [], forceful_relations: [], llm_prompt: "" } });
+	const client = await connect(hydra);
+	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "nothing" } });
+	assert.equal((result.content as { text: string }[])[0]!.text.split("\n\nScope notice:")[0], "No relevant context items found in Hydra DB.");
+	await client.close();
+});
+
+// The raw transport unwraps the envelope before `call` can read meta off it,
+// so the request id has to be captured inside the transport and rendered by
+// the unified path exactly like the v2 one — otherwise hydradb_feedback has
+// nothing to attach to after a unified query.
+test("hydradb_query on a unified database surfaces the request id for hydradb_feedback", async () => {
+	const { hydra } = unifiedHydra({ "/query": UNIFIED_QUERY_FIXTURE }, "req_u_1");
+	const client = await connect(hydra);
+
+	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "refund policy" } });
+	assert.notEqual(result.isError, true, (result.content as { text: string }[])[0]?.text);
+
+	const text = (result.content as { text: string }[])[0]!.text;
+	assert.match(text, /Was this useful\? Report it with hydradb_feedback using request_id: req_u_1/);
+	assert.equal((result.structuredContent as { request_id?: string }).request_id, "req_u_1");
+	await client.close();
+});
+
+test("hydradb_query on a unified database surfaces the request id on an empty answer too", async () => {
+	const { hydra } = unifiedHydra({ "/query": { chunks: [], graph: [], forceful_relations: [], llm_prompt: "" } }, "req_u_2");
+	const client = await connect(hydra);
+
+	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "nothing" } });
+	const text = (result.content as { text: string }[])[0]!.text;
+	assert.match(text, /No relevant context items found in Hydra DB\./);
+	assert.match(text, /request_id: req_u_2/);
+	assert.equal((result.structuredContent as { request_id?: string }).request_id, "req_u_2");
+	await client.close();
+});
+
+// The exact JSON `hydradb_ingest` sends to `/context/ingest` on a unified
+// database: list key `context`, the contract's item names, `forceful_relations`
+// with the ids under `ids`, `instructions` in place of the old
+// `custom_instructions`, and none of the removed names. The 202's
+// `results[].source_id` is the context id and comes back as the reported id.
+test("hydradb_ingest on a unified database sends the contract body and reports the context id", async () => {
+	const { hydra, calls } = unifiedHydra({ "/context/ingest": UNIFIED_INGEST_202 });
+	const client = await connect(hydra);
+
+	const result = await client.callTool({
+		name: "hydradb_ingest",
+		arguments: {
+			text: "Refund policy: 30-day window.",
+			title: "Refund policy",
+			source_id: "policy-1",
+			instructions: "steer it",
+			happened_at: "2026-07-29",
+			attributes: { team: "support" },
+			custom_attributes: { source_app: "wiki" },
+			context_category: "business_knowledge",
+			forceful_relations: ["chat-w1"],
+			acl: ["user_email:a@x.com", "domain:acme.com"],
+		},
+	});
+	assert.notEqual(result.isError, true, (result.content as { text: string }[])[0]?.text);
+
+	const sent = calls.find((c) => c.path === "/context/ingest");
+	assert.ok(sent, "the ingest must go over the raw transport");
+	assert.equal(sent.method, "POST");
+	assert.deepEqual(sent.body, {
+		database: "db_u",
+		collection: "c1",
+		upsert: true,
+		context: [
+			{
+				context_id: "policy-1",
+				title: "Refund policy",
+				text: "Refund policy: 30-day window.",
+				enrich: true,
+				instructions: "steer it",
+				happened_at: "2026-07-29",
+				attributes: { team: "support" },
+				custom_attributes: { source_app: "wiki" },
+				context_category: "business_knowledge",
+				forceful_relations: { context_ids: ["chat-w1"] },
+				acl: ["user_email:a@x.com", "domain:acme.com"],
+			},
+		],
+	});
+	const raw = JSON.stringify(sent.body);
+	for (const key of ["items", "contexts", "type", "relations", "custom_instructions", "observation_date", "metadata", "additional_metadata", "infer", "source_id", "name", "is_markdown", "ids"]) {
+		assert.equal(raw.includes(`"${key}"`), false, `${key} must not be sent on a unified ingest`);
+	}
+
+	const text = (result.content as { text: string }[])[0]!.text;
+	assert.match(text, /Saved to Hydra DB \(id: policy-1\) \(1 success, 0 failed\)/);
+	assert.equal((result.structuredContent as { id?: string }).id, "policy-1");
+
+	await client.close();
+});
+
+// The conversation shape takes the contract's names too, and the host's
+// default extraction guidance rides as `instructions` when the caller gave
+// none.
+test("hydradb_ingest turns on a unified database send a conversation with the contract's names", async () => {
+	const { hydra, calls } = unifiedHydra({ "/context/ingest": UNIFIED_INGEST_202 });
+	const client = await connect(hydra);
+
+	await client.callTool({
+		name: "hydradb_ingest",
+		arguments: {
+			turns: [{ user: "let's go with Postgres", assistant: "Agreed." }],
+			source_id: "chat-1",
+			user_name: "Ada",
+			attributes: { project: "hydradb" },
+			happened_at: "2026-07-29",
+			context_category: "decision_trace",
+			forceful_relations: ["policy-1"],
+		},
+	});
+
+	const item = (calls.find((c) => c.path === "/context/ingest")!.body as { context: Record<string, unknown>[] }).context[0]!;
+	assert.deepEqual(item.conversation, [
+		{ role: "user", content: "let's go with Postgres" },
+		{ role: "assistant", content: "Agreed." },
+	]);
+	assert.equal(item.context_id, "chat-1");
+	assert.equal(item.enrich, true);
+	assert.equal(typeof item.instructions, "string", "the host default rides as instructions");
+	assert.equal("custom_instructions" in item, false);
+	assert.deepEqual(item.attributes, { project: "hydradb" });
+	assert.equal(item.happened_at, "2026-07-29");
+	assert.equal(item.context_category, "decision_trace");
+	assert.deepEqual(item.forceful_relations, { context_ids: ["policy-1"] });
+	assert.equal(item.user_name, "Ada", "the speaker is the item's user_name");
+
+	await client.close();
+});
+
+// The older spellings fold onto the canonical ones before either ingest
+// branch runs, so a conversation given `metadata`/`observation_date` must
+// carry them exactly as `text` does — the turns path used to forward only
+// `a.attributes`/`a.happened_at` verbatim and drop the aliases in silence.
+test("hydradb_ingest turns folds metadata/observation_date onto the contract's names", async () => {
+	const unified = unifiedHydra({ "/context/ingest": UNIFIED_INGEST_202 });
+	const unifiedClient = await connect(unified.hydra);
+	await unifiedClient.callTool({
+		name: "hydradb_ingest",
+		arguments: {
+			turns: [{ user: "hi", assistant: "hello" }],
+			source_id: "chat-1",
+			metadata: { project: "hydradb" },
+			observation_date: "2026-07-29",
+		},
+	});
+	const unifiedItem = (
+		unified.calls.find((c) => c.path === "/context/ingest")!.body as {
+			context: Record<string, unknown>[];
+		}
+	).context[0]!;
+	assert.deepEqual(unifiedItem.attributes, { project: "hydradb" });
+	assert.equal(unifiedItem.happened_at, "2026-07-29");
+	await unifiedClient.close();
+
+	const split = mockHydra();
+	const splitClient = await connect(split.hydra);
+	await splitClient.callTool({
+		name: "hydradb_ingest",
+		arguments: {
+			turns: [{ user: "hi", assistant: "hello" }],
+			source_id: "chat-1",
+			metadata: { project: "hydradb" },
+			observation_date: "2026-07-29",
+		},
+	});
+	const splitItem = (
+		JSON.parse(
+			String(split.calls.find((c) => c.method === "ingest")!.args.memories),
+		) as Record<string, unknown>[]
+	)[0]!;
+	assert.deepEqual(splitItem.metadata, { project: "hydradb" });
+	assert.equal(splitItem.observation_date, "2026-07-29");
+	await splitClient.close();
+});
+
+// On a SPLIT database the preferred names fold onto the memory item's own
+// fields, and the unified-only ones are refused by name rather than dropped.
+test("hydradb_ingest on a split database folds attributes/happened_at and refuses the unified-only fields", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	const ok = await client.callTool({
+		name: "hydradb_ingest",
+		arguments: { text: "a note", attributes: { project: "hydradb" }, happened_at: "2026-07-29", custom_attributes: { source_app: "wiki" } },
+	});
+	assert.notEqual(ok.isError, true, (ok.content as { text: string }[])[0]?.text);
+	const ingest = calls.find((c) => c.method === "ingest");
+	assert.ok(ingest);
+	assert.equal(ingest.args.type, "memory", "the split body is the split body");
+	const item = (JSON.parse(String(ingest.args.memories)) as Record<string, unknown>[])[0]!;
+	assert.deepEqual(item.metadata, { project: "hydradb" }, "attributes is metadata on a split memory item");
+	assert.equal(item.observation_date, "2026-07-29", "happened_at is observation_date on a split memory item");
+	assert.deepEqual(item.additional_metadata, { source_app: "wiki" });
+	assert.equal("attributes" in item, false);
+	assert.equal("happened_at" in item, false);
+
+	for (const extra of [
+		{ context_category: "user_preference" },
+		{ forceful_relations: ["x"] },
+	]) {
+		const refused = await client.callTool({ name: "hydradb_ingest", arguments: { text: "a note", ...extra } });
+		assert.equal(refused.isError, true, `${Object.keys(extra)[0]} must be refused on a split database`);
+		assert.match((refused.content as { text: string }[])[0]!.text, /unified database only/);
+	}
+	assert.equal(calls.filter((c) => c.method === "ingest").length, 1, "a refused write never reaches the wire");
+
+	await client.close();
+});
+
+test("hydradb_ingest refuses a contradiction between a field and its older name", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+
+	const attrs = await client.callTool({
+		name: "hydradb_ingest",
+		arguments: { text: "a note", attributes: { a: 1 }, metadata: { a: 2 } },
+	});
+	assert.equal(attrs.isError, true);
+	assert.match((attrs.content as { text: string }[])[0]!.text, /different values for `attributes` and its older name `metadata`/);
+
+	const dates = await client.callTool({
+		name: "hydradb_ingest",
+		arguments: { text: "a note", happened_at: "2026-07-29", observation_date: "2026-07-30" },
+	});
+	assert.equal(dates.isError, undefined);
+	const dated = calls.find((call) => call.method === "ingest");
+	assert.equal(JSON.parse(String(dated?.args.memories))[0].observation_date, "2026-07-29");
+
+	// The same value under both names, in either key order, is not a contradiction.
+	const agree = await client.callTool({
+		name: "hydradb_ingest",
+		arguments: { text: "a note", attributes: { a: 1, b: 2 }, metadata: { b: 2, a: 1 } },
+	});
+	assert.notEqual(agree.isError, true);
+	assert.equal(calls.filter((c) => c.method === "ingest").length, 2);
+
+	await client.close();
+});
+
+test("hydradb_query carries follow_forceful_relations on a split database rather than dropping it", async () => {
+	const { hydra, calls } = mockHydra();
+	const client = await connect(hydra);
+	const result = await client.callTool({
+		name: "hydradb_query",
+		arguments: { query: "q", follow_forceful_relations: false },
+	});
+	assert.equal(result.isError, undefined);
+	assert.equal(calls.find((c) => c.method === "query-fetch")?.args.query_explicit_relations, false);
+	assert.equal(calls.filter((c) => c.method === "query").length, 0);
+	await client.close();
 });

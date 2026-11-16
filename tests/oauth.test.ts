@@ -527,15 +527,14 @@ test("API keys keep working unchanged with OAuth on", async () => {
 		TOOLS_LIST,
 	);
 	assert.equal(key.status, 200, key.body);
-	// And a key with no database is still the 400 it always was.
 	const noDb = await request(
 		"POST",
 		"/",
 		{ host: `127.0.0.1:${port}`, ...JSON_HEADERS, authorization: "Bearer sk_live_abc.def" },
 		TOOLS_LIST,
 	);
-	assert.equal(noDb.status, 400);
-	assert.match(JSON.parse(noDb.body).error.message, /X-HydraDB-Database/);
+	assert.equal(noDb.status, 200);
+	assert.match(noDb.body, /hydradb_databases/);
 });
 
 test("an OAuth token supplies the database, so no header is needed", async () => {

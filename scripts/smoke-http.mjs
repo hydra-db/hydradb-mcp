@@ -85,7 +85,6 @@ async function post(path, headers, body) {
 const MCP_HEADERS = {
 	Accept: "application/json, text/event-stream",
 	Authorization: "Bearer smoke-key",
-	"X-HydraDB-Database": "smoke-db",
 };
 
 try {
@@ -122,6 +121,17 @@ try {
 	const tools = parsed?.result?.tools;
 	if (!Array.isArray(tools) || tools.length === 0) {
 		fail(`tools/list returned no tools: ${JSON.stringify(parsed).slice(0, 300)}`);
+	}
+	for (const name of ["hydradb_databases", "hydradb_database_create"]) {
+		if (!tools.some((tool) => tool.name === name)) fail(`missing key-only tool: ${name}`);
+	}
+	const unscoped = await post("/mcp", MCP_HEADERS, {
+		jsonrpc: "2.0", id: 3, method: "tools/call",
+		params: { name: "hydradb_query", arguments: { query: "synthetic missing-scope probe" } },
+	});
+	const result = await unscoped.json();
+	if (result.result?.isError !== true || !JSON.stringify(result.result).includes("Missing database")) {
+		fail(`a scoped call without a database did not return actionable guidance: ${JSON.stringify(result)}`);
 	}
 
 	console.error(
