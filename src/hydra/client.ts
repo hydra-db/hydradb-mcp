@@ -114,12 +114,10 @@ export interface ForcefulRelations {
 
 // --- The unified `POST /query` response (PRO-1618) ---
 //
-// A unified database answers with EXACTLY four keys: `chunks`, `graph`,
-// `forceful_relations`, `llm_prompt`. It is not the v2 shape and is never run
-// through the SDK's v2 serializer: that serializer would rename nothing it
-// does not know and drop `llm_prompt` on the floor, and the server-built
-// prompt is the one thing a client is told to surface verbatim. Field names
-// below are the wire names, exactly as CONTRACT.md states them.
+// The unified structured response includes core `chunks`, `graph`,
+// `forceful_relations` and `llm_prompt` fields; additional fields may be present.
+// The types below model fields consumed by the unified renderer, using their
+// wire names.
 
 export interface UnifiedTemporal {
 	content?: string;
@@ -198,7 +196,7 @@ export interface UnifiedQueryResult {
 	llm_prompt: string;
 }
 
-/** What `context.query` resolves to: the v2 shape on a split database, the four-key shape on a unified one. */
+/** What `context.query` resolves to: the returned V2 or unified structured response, selected by response shape rather than physical layout alone. */
 export type SplitQueryResult = SDK.SearchV2RetrievalResult & {
 	additionalGraphContext?: SDK.SearchV2RetrievalResult["additionalContext"];
 };
@@ -312,9 +310,8 @@ function unifiedFromV2Route(response: unknown): unknown {
 }
 
 /**
- * The unified body with every array present, so a renderer can index
- * without null checks. Nothing is renamed and nothing is dropped: the server
- * sends all four keys, and a key it happened to omit reads as empty.
+ * Normalize the core array fields consumed by the unified renderer.
+ * Optional arrays omitted by the server read as empty here.
  */
 export function toUnifiedQueryResult(wire: UnifiedQueryResult): UnifiedQueryResult {
 	return {

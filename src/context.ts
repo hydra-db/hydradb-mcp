@@ -763,19 +763,13 @@ function render(
 
 // --- The unified rendering (PRO-1618) ---
 //
-// Everything above is the v2 renderer, this server's own port of the SDK's
-// buildString, and it is left exactly as it was: a split database keeps
-// producing the v2 shape and its rendering must not move by a byte. A unified
-// database answers with a server-built `llm_prompt` that already carries the
-// context, the forceful relations, the graph paths and citation labels ([1],
-// [R1], [P1]). The contract says to surface it verbatim rather than rebuild
-// it, so nothing below walks the chunks to rebuild it: the prompt goes to the
-// caller WHOLE, and the structured view beside it is read straight from the
-// four keys, also whole. Neither is trimmed or cut to a budget: the answer is
-// the server's, sized by the server (`max_results` is how a caller asks for
-// less), and this client does not compact it.
+// The v2 renderer above is preserved. The unified structured response includes
+// core `chunks`, `graph`, `forceful_relations` and `llm_prompt` fields; that list
+// is not exhaustive. The server-built prompt supplies citation labels, and the
+// structured view keeps the fields used by this renderer. Both views respect
+// their response budgets, retain provenance and mark any truncation.
 
-/** One chunk of the structured view: the contract's own field names, every field whole. */
+/** One chunk of the structured view using the contract's field names. */
 export interface UnifiedStructuredChunk {
 	context_id: string;
 	chunk_id?: string;
