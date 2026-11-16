@@ -336,13 +336,15 @@ test("a local file that changes while it is read is refused, never sent in part"
 	t.after(() => rm(dir, { recursive: true, force: true }));
 	await writeFile(path, "%PDF-1.4");
 
-	const read = readLocal(path, undefined, undefined);
+	// The handlers are attached before the truncate is awaited: the refusal can
+	// land first, and a rejection with no handler yet fails the test run.
+	const read = readLocal(path, undefined, undefined).then(
+		(file) => assert.ok(file.data.length === 8 || file.data.length === 2 * 1024 * 1024, "a whole file, either version"),
+		(err: Error) => assert.match(err.message, /changed while it was being read/),
+	);
 
 	// Grows after the read starts; depending on timing, before or after the size check.
 	await truncate(path, 2 * 1024 * 1024);
 
-	await read.then(
-		(file) => assert.ok(file.data.length === 8 || file.data.length === 2 * 1024 * 1024, "a whole file, either version"),
-		(err: Error) => assert.match(err.message, /changed while it was being read/),
-	);
+	await read;
 });
