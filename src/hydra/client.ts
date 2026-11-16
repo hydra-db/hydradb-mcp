@@ -1533,11 +1533,14 @@ export class ContextResource extends Resource {
 		const body = serialization.SearchQueryRequest.jsonOrThrow(request) as Record<string, unknown>;
 		for (const key of Object.keys(body)) if (body[key] == null) delete body[key];
 		if (params.kind === "unified") delete body.type;
-		delete body.query_forceful_relations;
-		delete body.additional_context;
+		const explicitRelations = params.queryExplicitRelations ?? params.followForcefulRelations ?? params.queryForcefulRelations;
+		const graphHint = params.additionalGraphContext ?? params.additionalContext;
+		// Backends from before the rename ignore the canonical names without an
+		// error, so each value also rides on its legacy name. Newer backends take
+		// the canonical name when both are present.
 		return compact({ ...body,
-			query_explicit_relations: params.queryExplicitRelations ?? params.followForcefulRelations ?? params.queryForcefulRelations,
-			additional_graph_context: params.additionalGraphContext ?? params.additionalContext });
+			query_explicit_relations: explicitRelations, query_forceful_relations: explicitRelations,
+			additional_graph_context: graphHint, additional_context: graphHint });
 	}
 
 	/**

@@ -6403,7 +6403,7 @@ test("hydradb_query on a unified database sends no type, renders llm_prompt verb
 	const body = sent.body as Record<string, unknown>;
 	assert.equal("type" in body, false, "never send type on a unified database");
 	assert.equal(body.query_explicit_relations, true, "the legacy option travels under the canonical contract name");
-	assert.equal("query_forceful_relations" in body, false);
+	assert.equal(body.query_forceful_relations, true, "and under the legacy name older backends read");
 	assert.equal(body.query, "refund policy");
 
 	const text = (result.content as { text: string }[])[0]!.text;

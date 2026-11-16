@@ -2089,9 +2089,9 @@ test("unified query, list and delete send no type; the query answer is the four-
 	assert.deepEqual(q, UNIFIED_QUERY_FIXTURE, "the four-key body is returned untouched");
 	assert.deepEqual(JSON.parse(String(calls[0]!.init.body)), {
 		database: "db_u", collection: "c1", query: "acme", operator: "and", query_by: "text", max_results: 5,
-		query_explicit_relations: false,
+		query_explicit_relations: false, query_forceful_relations: false,
 	});
-	// The option travels under the contract's name and only when stated.
+	// The option travels under the contract's name and its legacy twin, and only when stated.
 	await hydra.context.query({ query: "acme", kind: "unified" });
 	const bare = JSON.parse(String(calls[1]!.init.body)) as Record<string, unknown>;
 	assert.equal("follow_forceful_relations" in bare, false);

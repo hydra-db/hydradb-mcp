@@ -110,7 +110,7 @@ test("database list/create work without a default; scoped data fails before any 
 	await client.close();
 });
 
-test("canonical query selectors, aliases and defaults reach raw transport without SDK stripping", async () => {
+test("canonical query selectors win and also ride on their legacy wire names", async () => {
 	const { hydra, calls } = fixture({ database: "db-a", collection: "notes" });
 	const client = await connect(hydra);
 	const queryTool = (await client.listTools()).tools.find((tool) => tool.name === "hydradb_query")!;
@@ -124,9 +124,10 @@ test("canonical query selectors, aliases and defaults reach raw transport withou
 	assert.ok(query, "canonical options must use the wire bridge");
 	assert.equal(query.body.type, "knowledge");
 	assert.equal(query.body.query_explicit_relations, false);
+	assert.equal(query.body.query_forceful_relations, false);
 	assert.equal(query.body.additional_graph_context, "");
+	assert.equal(query.body.additional_context, "");
 	assert.equal(query.body.recency_bias, 0.6);
-	assert.equal("additional_context" in query.body, false);
 	assert.equal("follow_forceful_relations" in query.body, false);
 	const conflict = await client.callTool({ name: "hydradb_query", arguments: { query: "x", type: "memory", kind: "knowledge" } });
 	assert.equal(conflict.isError, true);
@@ -134,7 +135,7 @@ test("canonical query selectors, aliases and defaults reach raw transport withou
 	await client.close();
 });
 
-test("query legacy false and hint aliases remain supported on split and unified", async () => {
+test("legacy query names reach both canonical and legacy wire names on split and unified", async () => {
 	for (const layout of ["split", "unified"] as const) {
 		for (const relation of ["follow_forceful_relations", "query_forceful_relations"]) {
 			const { hydra, calls } = fixture({ database: "db-a", collection: "notes", layout });
@@ -143,7 +144,10 @@ test("query legacy false and hint aliases remain supported on split and unified"
 			assert.equal(result.isError, undefined, text(result));
 			const body = calls.find((c) => c.path === "/query")!.body;
 			assert.equal(body.query_explicit_relations, false);
+			assert.equal(body.query_forceful_relations, false);
 			assert.equal(body.additional_graph_context, "legacy hint");
+			assert.equal(body.additional_context, "legacy hint");
+			assert.equal("follow_forceful_relations" in body, false);
 			assert.equal(body.recency_bias, 0.6);
 			if (layout === "unified") assert.equal("type" in body, false);
 			else assert.equal(body.type, "all");
