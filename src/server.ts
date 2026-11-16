@@ -4307,7 +4307,7 @@ export function createHydraDBServer(
 					type: (inputSchema.kind as z.ZodTypeAny).describe("Canonical corpus selector. Omit for automatic layout-aware routing; kind is a deprecated alias."),
 					kind: (inputSchema.kind as z.ZodTypeAny).describe(`Deprecated alias for type. ${(inputSchema.kind as z.ZodTypeAny).description ?? ""}`),
 				} : inputSchema) as never,
-				...(outputSchema ? { outputSchema: { ...outputSchema, warnings: z.array(z.record(z.unknown())).optional(), warnings_omitted: z.number().optional(), scope_notice: z.record(z.unknown()).optional() } as never } : {}),
+				...(outputSchema ? { outputSchema: { ...outputSchema, request_id: z.string().optional(), warnings: z.array(z.record(z.unknown())).optional(), warnings_omitted: z.number().optional(), scope_notice: z.record(z.unknown()).optional() } as never } : {}),
 				...(annotations ? { annotations } : {}),
 			},
 			wrapped as never,
