@@ -341,6 +341,7 @@ test("scope notice reports the normalized effective database, not raw argument w
 test("scope notice fires only when the database or the collection came from a default", async () => {
 	const { hydra } = fixture({ database: "db-a", collection: "notes" });
 	const client = await connect(hydra);
+
 	for (const [scope, expected] of [
 		[{}, true],
 		[{ database: "db-b" }, true],
@@ -358,6 +359,7 @@ test("scope notice fires only when the database or the collection came from a de
 			assert.deepEqual(result.structuredContent?.warnings, warnings, label);
 		}
 	}
+
 	await client.close();
 });
 

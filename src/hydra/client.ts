@@ -1555,6 +1555,7 @@ export class ContextResource extends Resource {
 
 		return this.call("/query", "idempotent", opts, async (o) => {
 			let response: unknown;
+
 			if (params.kind === "unified" || params.queryExplicitRelations != null || params.followForcefulRelations != null || params.queryForcefulRelations != null || params.additionalGraphContext != null || params.additionalContext != null) {
 				const result = await this.sdk.fetch("/query", {
 					method: "POST", headers: { "API-Version": "2", "Content-Type": "application/json" }, body: JSON.stringify(this.queryWire(request, params)),
@@ -1904,6 +1905,7 @@ export class ContextResource extends Resource {
 				if (value != null) throw new Error(`${name} is not supported by unified context ingestion; use its documented context fields.`);
 			}
 			if ((input.text != null) === (input.pairs != null)) throw new Error("Unified context requires exactly one of text or pairs.");
+
 			if (input.isMarkdown != null) throw new Error("is_markdown is not supported on a unified database, which stores text as sent. Drop is_markdown.");
 		const item: Record<string, unknown> = {};
 		if (input.sourceId != null) item.context_id = input.sourceId;
