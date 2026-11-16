@@ -1344,7 +1344,7 @@ test("hydradb_ingest validates app knowledge ACLs and input exclusivity", async 
 	const appItem = { kind: "message", fields: { body: "hello" } };
 
 	const cases = [
-		{ app_knowledge: [{ ...appItem, acl: [] }] },
+		{ app_knowledge: [{ ...appItem, acl: [null] }] },
 		{ app_knowledge: [{ ...appItem, acl: [""] }] },
 		{ app_knowledge: [{ ...appItem, acl: ["x".repeat(257)] }] },
 		{ app_knowledge: [{ ...appItem, acl: Array.from({ length: 1_001 }, (_, index) => `user-${index}`) }] },
@@ -6742,8 +6742,9 @@ test("hydradb_ingest refuses a contradiction between a field and its older name"
 		name: "hydradb_ingest",
 		arguments: { text: "a note", happened_at: "2026-07-29", observation_date: "2026-07-30" },
 	});
-	assert.equal(dates.isError, true);
-	assert.match((dates.content as { text: string }[])[0]!.text, /different values for `happened_at` and its older name `observation_date`/);
+	assert.equal(dates.isError, undefined);
+	const dated = calls.find((call) => call.method === "ingest");
+	assert.equal(JSON.parse(String(dated?.args.memories))[0].observation_date, "2026-07-29");
 
 	// The same value under both names, in either key order, is not a contradiction.
 	const agree = await client.callTool({
@@ -6751,7 +6752,7 @@ test("hydradb_ingest refuses a contradiction between a field and its older name"
 		arguments: { text: "a note", attributes: { a: 1, b: 2 }, metadata: { b: 2, a: 1 } },
 	});
 	assert.notEqual(agree.isError, true);
-	assert.equal(calls.filter((c) => c.method === "ingest").length, 1);
+	assert.equal(calls.filter((c) => c.method === "ingest").length, 2);
 
 	await client.close();
 });

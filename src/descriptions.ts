@@ -180,7 +180,7 @@ const PARAM = {
 		"databases. Each item can include its app fields and an access list.",
 	app_acl:
 		"Principals that can read this item. Omit acl for unrestricted access. Send " +
-		'["__private__"] for private storage; an empty list is refused. Re-ingest replaces the ' +
+		'["__private__"] or [] for private storage; null is unrestricted. Re-ingest replaces the ' +
 		"old access list. A normal API-key read with no acl filter still sees the item.",
 	// The format is stated as the server's own, YYYY-MM-DD. This said "RFC3339",
 	// which is a date-TIME format: a caller that followed it sent
@@ -221,13 +221,11 @@ const PARAM = {
 	ingest_acl:
 		"Principals that may read this entry: each an email, a `domain:<host>`, or a " +
 		"`group:<provider>:<id>`. Omit it for an entry anyone holding the key may read. " +
-		"Existing split memory and knowledge ACL support is retained as well as unified ACLs.",
+		"Supported on unified context and split app_knowledge items. Legacy split memories, bare knowledge and files reject explicit ACLs rather than dropping them.",
 	infer:
-		"Let Hydra DB extract insights and knowledge-graph entities from this text " +
-		"(default: true). Keep it true for anything about the user or their work — that " +
-		"extraction is what makes the content findable by concept later. Set false only to " +
-		"store text verbatim with no interpretation (a config snippet, an exact error " +
-		"string, a code block).",
+		"Enable additional memory enrichment (default: true). Set false only to skip " +
+		"that additional enrichment; entity and graph extraction still run. This setting " +
+		"does not disable the normal ingestion pipeline.",
 	is_markdown:
 		"Set true when `text` contains markdown (headings, lists, code fences) so Hydra DB " +
 		"chunks on structure instead of splitting mid-section. Default false. Split databases " +

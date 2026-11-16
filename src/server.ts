@@ -10,7 +10,7 @@ import type { JsonValue, ListedFields, PageInfo, SourceListItem } from "./adapte
 import { resolveConfig, resolveConnectorConfig, resolveDatabaseToolsConfig, resolveGraphConfig } from "./config.js";
 import type { ConnectorConfig, DatabaseToolsConfig, GraphConfig } from "./config.js";
 import { type ConnectorToolResponse, ConnectorTools } from "./connectors.js";
-import { renderRecalledContext, boundStructuredContent, fitUnifiedPrompt, unifiedStructuredContent } from "./context.js";
+import { renderRecalledContext, boundStructuredContent, fitUnifiedPrompt, unifiedStructuredContent, type UnifiedStructuredContent } from "./context.js";
 import { COLLECTION_PATTERN, MAX_BODY_BYTES, renderRows } from "./cypher.js";
 import { extname } from "node:path";
 
@@ -1622,9 +1622,9 @@ export function createHydraDBServer(
 			);
 		}
 
-		if (args.kind === "memory") {
+		if (args.kind !== undefined && args.kind !== "knowledge") {
 			throw new Error(
-				`${TOOL_NAMES.INGEST} ingests a \`file\` as knowledge, not memory. Drop \`kind\`, or extract ` +
+				`${TOOL_NAMES.INGEST} ingests a \`file\` as knowledge, not ${args.kind}. Drop \`kind\`, or extract ` +
 				"the facts worth remembering and send them as `text`.",
 			);
 		}
@@ -1642,8 +1642,9 @@ export function createHydraDBServer(
 				["evidence_kind", args.evidence_kind],
 				["evidence_subject", args.evidence_subject],
 				["observation_date", args.observation_date],
+				["acl", args.acl],
 			] as const
-		).flatMap(([name, value]) => (value != null ? [name] : []));
+		).flatMap(([name, value]) => (value !== undefined ? [name] : []));
 
 		if (unsupported.length > 0) {
 			throw new Error(
@@ -1740,7 +1741,7 @@ export function createHydraDBServer(
 		/** Unified only; the wrapper refuses it on a split database. */
 		forceful_relations?: string[];
 		/** Unified only; the wrapper refuses it on a split database. */
-		acl?: string[];
+		acl?: string[] | null;
 		database?: string;
 		collection?: string;
 	}, signal?: AbortSignal, onMeta?: (meta: ResponseMeta) => void): Promise<ToolResult> {
@@ -1781,6 +1782,7 @@ export function createHydraDBServer(
 						additionalMetadata: args.custom_attributes ?? args.additional_metadata,
 						observationDate: args.observation_date,
 						graph: args.graph,
+						userName: args.user_name,
 					}
 				: {
 						sourceId,
@@ -1952,7 +1954,7 @@ export function createHydraDBServer(
 			kind?: ContextKind;
 			contextCategory?: ContextCategory;
 			forcefulRelations?: string[];
-			acl?: string[];
+			acl?: string[] | null;
 			attributes?: IngestParams["metadata"];
 			customAttributes?: IngestParams["additionalMetadata"];
 			happenedAt?: string;
@@ -2088,6 +2090,22 @@ export function createHydraDBServer(
 		});
 	}
 
+	function normalizeIngestAliases<T extends {
+		metadata?: IngestItem["metadata"]; attributes?: IngestItem["metadata"];
+		additional_metadata?: IngestItem["additionalMetadata"]; custom_attributes?: IngestItem["additionalMetadata"];
+		observation_date?: string; happened_at?: string; custom_instructions?: string; instructions?: string;
+	}>(input: T): T {
+		if (input.attributes !== undefined && input.metadata !== undefined && canonicalJson(input.attributes) !== canonicalJson(input.metadata)) {
+			throw new Error(`${TOOL_NAMES.INGEST} received different values for \`attributes\` and its older name \`metadata\`. Pass only \`attributes\`.`);
+		}
+		return { ...input,
+			metadata: input.attributes !== undefined ? input.attributes : input.metadata,
+			additional_metadata: input.custom_attributes !== undefined ? input.custom_attributes : input.additional_metadata,
+			observation_date: input.happened_at !== undefined ? input.happened_at : input.observation_date,
+			custom_instructions: input.instructions !== undefined ? input.instructions : input.custom_instructions,
+		};
+	}
+
 	async function runIngestBatch(args: {
 		kind?: ContextKind;
 		items: IngestToolItem[];
@@ -2096,9 +2114,12 @@ export function createHydraDBServer(
 		database?: string;
 		collection?: string;
 	}, signal?: AbortSignal, onMeta?: (meta: ResponseMeta) => void): Promise<ToolResult> {
-		const kind = args.kind ?? "memory";
+		const refused = await refuseUnifiedOnSplit(TOOL_NAMES.INGEST, args.kind, args.database, signal);
+		if (refused) return refused;
+		const kind: ContextKind = args.kind ?? ((await isUnifiedDatabase(args.database, signal)) ? "unified" : "memory");
 
-		const items: IngestItem[] = args.items.map((item, index) => {
+		const items: IngestItem[] = args.items.map((original, index) => {
+			const item = normalizeIngestAliases(original);
 			const hasText = item.text != null;
 			const hasTurns = item.turns != null && item.turns.length > 0;
 
@@ -2114,10 +2135,6 @@ export function createHydraDBServer(
 
 			if (kind === "knowledge" && callerInstructions != null) {
 				throw new Error("custom_instructions applies to memory ingestion only.");
-			}
-
-			if (item.infer === false && callerInstructions != null) {
-				throw new Error(`items[${index}] cannot use custom_instructions when infer is false.`);
 			}
 
 			const sourceId = item.source_id || generatedSourceId();
@@ -2142,6 +2159,9 @@ export function createHydraDBServer(
 				evidenceSubject: item.evidence_subject,
 				observationDate: item.observation_date,
 				graph: item.graph,
+				acl: item.acl,
+				contextCategory: item.context_category,
+				forcefulRelations: item.forceful_relations !== undefined ? { ids: item.forceful_relations } : undefined,
 			};
 
 			return normalized;
@@ -2153,13 +2173,13 @@ export function createHydraDBServer(
 			throw new Error("hydradb_ingest item ids must be unique within one batch.");
 		}
 
-		const raw = await hydra.context.ingest({
-			kind,
+		const raw = await withUnifiedFallback(args.kind == null, kind, (kindToSend) => hydra.context.ingest({
+			kind: kindToSend,
 			items,
 			upsert: args.overwrite ?? true,
 			database: args.database,
 			collection: args.collection,
-		}, { signal, onMeta });
+		}, { signal, onMeta }), args.database);
 
 		const res = toAddMemoryResponse(raw);
 		const outcome = ingestOutcome(res);
@@ -4254,10 +4274,15 @@ export function createHydraDBServer(
 				...(typeof result.structuredContent?.request_id === "string" ? { request_id: result.structuredContent.request_id } : {}),
 				...(typeof result.structuredContent?.scope_warning === "string" ? { scope_warning: result.structuredContent.scope_warning } : {}),
 			} : result.structuredContent;
+			const structuredContent = { ...notices.fields, ...payload };
+			if (canonical === TOOL_NAMES.QUERY && structuredContent.layout === "unified" && JSON.stringify(structuredContent).length > QUERY_CHAR_BUDGET) {
+				structuredContent.shortened = true;
+				boundStructuredContent(structuredContent as UnifiedStructuredContent, QUERY_CHAR_BUDGET);
+			}
 			return {
 				...result,
 				content: result.content.map((part, index) => index === 0 ? { ...part, text: part.text + notices.text } : part),
-				structuredContent: { ...notices.fields, ...payload },
+				structuredContent,
 			};
 				};
 
@@ -4547,6 +4572,16 @@ export function createHydraDBServer(
 		})),
 	});
 
+	const ingestAliasesSchema = {
+		attributes: z.record(jsonValue).optional().describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.attributes),
+		custom_attributes: z.record(jsonValue).optional().describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.custom_attributes),
+		happened_at: ingestMetadataSchema.observation_date.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.happened_at),
+		instructions: customInstructionsSchema.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.instructions),
+		context_category: z.enum(["auto", "user_preference", "business_knowledge", "decision_trace"]).optional().describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.context_category),
+		forceful_relations: z.array(z.string().min(1)).min(1).optional().describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.forceful_relations),
+		acl: ingestAclSchema.optional().describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.acl),
+	};
+
 	const ingestItemSchema = z.object({
 		text: z
 			.string()
@@ -4567,6 +4602,7 @@ export function createHydraDBServer(
 		custom_instructions: customInstructionsSchema,
 		graph: graphSchema.optional(),
 		...ingestMetadataSchema,
+		...ingestAliasesSchema,
 	});
 
 	const appKnowledgeKindSchema = z.enum([
@@ -4660,42 +4696,7 @@ export function createHydraDBServer(
 			})
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.file),
-		attributes: z
-			.record(jsonValue)
-			.optional()
-			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.attributes),
-		custom_attributes: z
-			.record(jsonValue)
-			.optional()
-			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.custom_attributes),
-		happened_at: z
-			.string()
-			.regex(OBSERVATION_DATE_PATTERN, {
-				message:
-					"happened_at must be a calendar date as YYYY-MM-DD (e.g. 2026-07-04); " +
-					"a date-time is accepted and kept as its date part",
-			})
-			.transform((value) => value.slice(0, CALENDAR_DATE_LENGTH))
-			.optional()
-			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.happened_at),
-		instructions: z
-			.string()
-			.min(1)
-			.optional()
-			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.instructions),
-		context_category: z
-			.enum(["auto", "user_preference", "business_knowledge", "decision_trace"])
-			.optional()
-			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.context_category),
-		forceful_relations: z
-			.array(z.string().min(1))
-			.min(1)
-			.optional()
-			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.forceful_relations),
-		acl: z
-			.array(z.string())
-			.optional()
-			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.acl),
+		...ingestAliasesSchema,
 	};
 
 	type IngestToolItem = z.infer<typeof ingestItemSchema>;
@@ -4729,7 +4730,7 @@ export function createHydraDBServer(
 		instructions?: string;
 		context_category?: ContextCategory;
 		forceful_relations?: string[];
-		acl?: string[];
+		acl?: string[] | null;
 	};
 
 	const conversationSchema = {
@@ -5228,7 +5229,7 @@ export function createHydraDBServer(
 		ingestSchema,
 		async (args, extra) => {
 			// SAFETY: register validates args against ingestSchema before this handler runs.
-			const a = args as IngestToolArguments;
+			const a = normalizeIngestAliases(args as IngestToolArguments);
 
 			if (a.file == null) {
 				assertIngestPayloadSize(a);
@@ -5262,12 +5263,15 @@ export function createHydraDBServer(
 			a.observation_date,
 			a.user_name,
 			a.graph,
+			a.context_category,
+			a.forceful_relations,
+			a.acl,
 		];
 
-		const hasOtherFlatFields = otherFlatFields.some((value) => value != null);
+		const hasOtherFlatFields = otherFlatFields.some((value) => value !== undefined);
 
 		if (a.app_knowledge != null) {
-			if (a.kind === "memory") {
+			if (a.kind !== undefined && a.kind !== "knowledge") {
 				throw new Error("app_knowledge requires kind knowledge; omit kind or set it to knowledge.");
 			}
 
@@ -5325,33 +5329,8 @@ export function createHydraDBServer(
 			);
 		}
 
-		// `attributes`/`metadata` and `happened_at`/`observation_date` are one
-		// field each under two names (PRO-1618 renamed them). Both are accepted
-		// so nothing that worked stops working; a caller that sends both with
-		// different values has stated two things and only they can say which,
-		// so it is refused rather than one of them silently winning.
-		if (
-			a.attributes != null &&
-			a.metadata != null &&
-			canonicalJson(a.attributes) !== canonicalJson(a.metadata)
-		) {
-			throw new Error(
-				`${TOOL_NAMES.INGEST} received different values for \`attributes\` and its ` +
-				`older name \`metadata\`. Pass only \`attributes\`.`,
-			);
-		}
-		if (
-			a.happened_at != null &&
-			a.observation_date != null &&
-			a.happened_at !== a.observation_date
-		) {
-			throw new Error(
-				`${TOOL_NAMES.INGEST} received different values for \`happened_at\` and its ` +
-				`older name \`observation_date\`. Pass only \`happened_at\`.`,
-			);
-		}
-		const attributes = a.attributes ?? a.metadata;
-		const happenedAt = a.happened_at ?? a.observation_date;
+		const attributes = a.metadata;
+		const happenedAt = a.observation_date;
 
 		// A conversation is a memory by definition; there is no knowledge document
 		// made of user/assistant pairs. Reject rather than quietly ingesting it as
@@ -5386,10 +5365,6 @@ export function createHydraDBServer(
 					`ingest this as a memory.`,
 				);
 			}
-		}
-
-		if (a.infer === false && a.custom_instructions != null) {
-			throw new Error("custom_instructions cannot be used when infer is false.");
 		}
 
 		// `text` and `turns` are mutually exclusive — reject rather than silently

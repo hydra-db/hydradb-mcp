@@ -789,10 +789,11 @@ export interface UnifiedStructuredChunk {
 	enrichment_truncated?: true;
 	/** Set when `temporal` was cut to its first entries to keep the answer within its budget. */
 	temporal_truncated?: true;
+	temporal_total?: number;
 	/** The declared `context_category`, passed through as sent. */
 	enrichment_kind?: string;
 	/** Present only when the server sent it: the query engaged temporal reasoning. */
-	temporal?: UnifiedTemporal[];
+	temporal?: (UnifiedTemporal & { content_truncated?: true; content_chars?: number })[];
 }
 
 // A type alias rather than an interface so it is assignable to the
@@ -801,7 +802,13 @@ export type UnifiedStructuredContent = {
 	layout: "unified";
 	chunks: UnifiedStructuredChunk[];
 	/** `origin` and `triplets` are passed through as sent, and omitted when the server sent none. */
-	graph: { origin?: UnifiedGraphOrigin; triplets?: UnifiedTriplet[]; path_summary: string }[];
+	graph: {
+		origin?: UnifiedGraphOrigin;
+		triplets?: UnifiedTriplet[];
+		path_summary: string;
+		path_summary_truncated?: true;
+		path_summary_chars?: number;
+	}[];
 	forceful_relations: { via: { from: string; to: string }; chunk: UnifiedStructuredChunk }[];
 	/** Every distinct context id in the answer, in order of first appearance. No titles: the body carries none, and none are invented. */
 	sources: { id: string }[];
@@ -820,28 +827,48 @@ export type UnifiedStructuredContent = {
  * answer could stay far over budget. Reductions are applied in order, each only
  * if the copy is still too large, and each is flagged so a host can tell what
  * was left out: triplets dropped (summaries kept, shortened), temporal lists cut
- * to their first entries, chunk text shortened, then graph paths cut from the
- * end. Ids, scores, categories and `sources[]` are never removed, so every
+ * to their first entries, chunk and temporal text shortened, then graph paths
+ * cut from the end. Remaining text is reduced further if its serialized JSON
+ * still exceeds the budget, including escaping and truncation markers.
+ * Ids, scores, categories, dates and `sources[]` are never removed, so every
  * result stays citable and fetchable with hydradb_inspect. Returns whether
- * anything was cut.
+ * anything was cut. Throws when provenance and required metadata alone cannot
+ * fit, rather than silently returning oversized content or corrupting ids.
  */
 export function boundStructuredContent(content: UnifiedStructuredContent, maxChars: number): boolean {
 	const size = () => JSON.stringify(content).length;
 
 	if (size() <= maxChars) return false;
 
-	const allChunks = () => [...content.chunks, ...content.forceful_relations.map((r) => r.chunk)];
+	const allChunks = [...content.chunks, ...content.forceful_relations.map((r) => r.chunk)];
+	const cutText = (text: string, max: number): string | undefined => {
+		const cut = cutAtWord(text, max);
+		if (cut === undefined) return undefined;
+		const last = cut.charCodeAt(cut.length - 1);
+		const next = text.charCodeAt(cut.length);
+		return last >= 0xd800 && last <= 0xdbff && next >= 0xdc00 && next <= 0xdfff ? cut.slice(0, -1) : cut;
+	};
 
-	content.graph = content.graph.map((path) => ({
-		...(path.origin != null ? { origin: path.origin } : {}),
-		path_summary: cutAtWord(path.path_summary, 300) ?? path.path_summary,
-	}));
-	content.graph_triplets_omitted = true;
+	content.graph = content.graph.map((path) => {
+		const kept = { ...path };
+		if (path.triplets != null && path.triplets.length > 0) {
+			delete kept.triplets;
+			content.graph_triplets_omitted = true;
+		}
+		const cut = cutText(path.path_summary, 300);
+		if (cut !== undefined) {
+			kept.path_summary = cut;
+			kept.path_summary_truncated = true;
+			kept.path_summary_chars = path.path_summary_chars ?? path.path_summary.length;
+		}
+		return kept;
+	});
 
 	if (size() <= maxChars) return true;
 
-	for (const chunk of allChunks()) {
+	for (const chunk of allChunks) {
 		if (chunk.temporal != null && chunk.temporal.length > 3) {
+			chunk.temporal_total = chunk.temporal_total ?? chunk.temporal.length;
 			chunk.temporal = chunk.temporal.slice(0, 3);
 			chunk.temporal_truncated = true;
 		}
@@ -849,30 +876,42 @@ export function boundStructuredContent(content: UnifiedStructuredContent, maxCha
 
 	if (size() <= maxChars) return true;
 
-	for (const chunk of allChunks()) {
-		const cut = cutAtWord(chunk.content, 300);
+	const total = content.graph_paths_total ?? content.graph.length;
+	for (let cap = 300; ; cap = Math.floor(cap / 2)) {
+		for (const chunk of allChunks) {
+			const cut = cutText(chunk.content, cap);
+			if (cut !== undefined) {
+				chunk.content_chars = chunk.content_chars ?? chunk.content.length;
+				chunk.content = cut;
+				chunk.content_truncated = true;
+			}
 
-		if (cut !== undefined) {
-			chunk.content_chars = chunk.content_chars ?? chunk.content.length;
-			chunk.content = cut;
-			chunk.content_truncated = true;
+			const cutEnrichment = chunk.enrichment != null ? cutText(chunk.enrichment, cap) : undefined;
+			if (cutEnrichment !== undefined) {
+				chunk.enrichment = cutEnrichment;
+				chunk.enrichment_truncated = true;
+			}
+
+			if (chunk.temporal != null) {
+				chunk.temporal = chunk.temporal.map((fact) => {
+					const cut = fact.content != null ? cutText(fact.content, cap) : undefined;
+					return cut === undefined ? fact : {
+						...fact, content: cut, content_truncated: true, content_chars: fact.content_chars ?? fact.content!.length,
+					};
+				});
+			}
 		}
 
-		const cutEnrichment = chunk.enrichment != null ? cutAtWord(chunk.enrichment, 300) : undefined;
+		while (size() > maxChars && content.graph.length > 0) {
+			content.graph.pop();
+			content.graph_paths_total = total;
+		}
 
-		if (cutEnrichment !== undefined) {
-			chunk.enrichment = cutEnrichment;
-			chunk.enrichment_truncated = true;
+		if (size() <= maxChars) return true;
+		if (cap === 0) {
+			throw new RangeError(`Unified structured content cannot fit within ${maxChars} characters while preserving source provenance and required metadata. Request fewer results (max_results).`);
 		}
 	}
-
-	const total = content.graph.length;
-
-	while (size() > maxChars && content.graph.length > 0) content.graph.pop();
-
-	if (content.graph.length < total) content.graph_paths_total = total;
-
-	return true;
 }
 
 /** Cut `text` to at most `max` characters at a word boundary; `undefined` when it already fits. */

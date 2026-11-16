@@ -266,7 +266,7 @@ items and sends one API request. Batch text has an 8 MiB total UTF-8 limit.
 | `custom_attributes` | object | No | Free-form key/value data stored beside the entry, not filterable |
 | `context_category` | string | No | Your label for the entry: `user_preference`, `business_knowledge`, `decision_trace`, or `auto` (default, no label). Unified databases only |
 | `forceful_relations` | array | No | Source ids this entry is explicitly related to; a later query can pull them in under FORCEFUL RELATIONS. Unified databases only |
-| `acl` | array | No | Principals that may read the entry (email, `domain:<host>`, `group:<provider>:<id>`). Existing split ACL support is preserved |
+| `acl` | array or null | No | Unified context ACL (`[]` private, `null` unrestricted). Split app records support per-item ACLs; legacy memories, bare knowledge and files reject explicit ACLs |
 
 The `context_category` and `forceful_relations` arguments are refused by name on a split database
 rather than dropped.
@@ -281,7 +281,8 @@ Use plain `text` with `kind: "knowledge"` for an unstructured document. Use
 `additional_metadata`, `attachments`, `relations`, and `acl`.
 
 An omitted app-record `acl` makes the item unrestricted. Send `["__private__"]`
-for private ingest or `["__public__"]` for public ingest. An empty list is refused.
+or `[]` for private ingest, or `["__public__"]` for public ingest. Explicit `null`
+is unrestricted. These are ingest semantics; metadata-update ACL semantics differ.
 Re-ingesting an existing `id` without `acl` removes its previous access list. If
 `__public__` appears with other principals, the item is public and HydraDB drops the
 other principals.

@@ -247,17 +247,19 @@ export function isUnifiedQueryResult(value: unknown): value is UnifiedQueryResul
 }
 
 /**
- * Keys only the unified `/query` body carries. A response showing any of
- * them was meant to be unified; one that then fails `isUnifiedQueryResult`
+ * Structures specific to a unified `/query` body. Shared prompt or relation
+ * field names alone do not distinguish it from a rollout-disabled v2 body.
+ * A response showing unified structures that fails `isUnifiedQueryResult`
  * is a protocol violation, and routing it to the v2 serializer would quietly
  * produce an empty-looking answer for what was a broken response.
  */
 function carriesUnifiedMarkers(wire: unknown): boolean {
 	if (wire == null || typeof wire !== "object" || Array.isArray(wire)) return false;
 	const record = wire as Record<string, unknown>;
-	if ("graph_context" in record) return false;
-
-	return "llm_prompt" in record || "forceful_relations" in record || Array.isArray(record.graph);
+	if ("graph_context" in record || record.graphContext != null) return false;
+	return Array.isArray(record.graph) || Array.isArray(record.forceful_relations) ||
+		(Array.isArray(record.chunks) && record.chunks.some((chunk) => chunk != null && typeof chunk === "object" &&
+			("context_id" in chunk || ("content" in chunk && !("chunk_content" in chunk) && !("chunkContent" in chunk)))));
 }
 
 /**
@@ -281,26 +283,26 @@ function malformedUnifiedResponse(wire: unknown): HydraWrapperError {
  * A `/query` answer that came back in the unified shape on a route that asked
  * for `all`, `memory` or `knowledge`.
  *
- * The SDK's parse passes every unified key through
- * untouched (none of them are v2-declared), so the body is read here by its
- * shape instead. The envelope is kept around it so `call` still reads the
+ * The SDK preserves the unknown unified structures but renames the shared
+ * llm_prompt field to llmPrompt. The body is read by structure and that prompt
+ * name is normalized. The envelope is kept so `call` still reads the
  * request id. `undefined` means the answer is v2 and the v2 checks apply.
  */
 function unifiedFromV2Route(response: unknown): unknown {
 	const payload = unwrap<unknown>(response);
+	const candidate = payload != null && typeof payload === "object" && !Array.isArray(payload)
+		? { ...payload, llm_prompt: (payload as Record<string, unknown>).llm_prompt ?? (payload as Record<string, unknown>).llmPrompt }
+		: payload;
 
-	if (!isUnifiedQueryResult(payload)) {
-		// Only `llm_prompt` marks a broken unified body on this route: a v2
-		// body also carries additive `graph`/`forceful_relations` objects, and
-		// drops `graph_context` when the caller turned the graph off.
-		if (payload != null && typeof payload === "object" && "llm_prompt" in payload) {
+	if (!isUnifiedQueryResult(candidate)) {
+		if (carriesUnifiedMarkers(candidate)) {
 			throw malformedUnifiedResponse(payload);
 		}
 
 		return undefined;
 	}
 
-	const unified = toUnifiedQueryResult(payload);
+	const unified = toUnifiedQueryResult(candidate);
 
 	if (payload === response) return unified;
 
@@ -695,7 +697,7 @@ export interface AppKnowledgeItem {
 	additional_metadata?: Record<string, JsonValue>;
 	attachments?: Array<Record<string, JsonValue>>;
 	relations?: { ids: string[]; properties?: Record<string, JsonValue> } | Array<Record<string, JsonValue>>;
-	acl?: string[];
+	acl?: string[] | null;
 }
 
 export interface IngestItem {
@@ -719,8 +721,7 @@ export interface IngestItem {
 	contextCategory?: ContextCategory;
 	/** Unified only (PRO-1618): declared relations to other context ids. Refused on a split database. */
 	forcefulRelations?: ForcefulRelations;
-	/** Unified only (PRO-1618): principals that may read the item. Refused on a split database. */
-	acl?: string[];
+	acl?: string[] | null;
 	/**
 	 * Tenant metadata stored alongside the memory, and matchable later via
 	 * `metadataFilters` on query.
@@ -1510,6 +1511,7 @@ export class ContextResource extends Resource {
 			const body = await this.rawWire("unified query", "POST", "/query", this.queryWire(request, params), opts?.signal, opts?.onMeta);
 			if (isUnifiedQueryResult(body)) return toUnifiedQueryResult(body);
 			if (carriesUnifiedMarkers(body)) throw malformedUnifiedResponse(body);
+			validateQueryResponse(body);
 			return normalizeQueryResult(serialization.SearchV2RetrievalResult.parseOrThrow(body, SDK_PARSE_OPTS));
 		}
 		return this.call("/query", "idempotent", opts, async (o) => {
@@ -1586,6 +1588,7 @@ export class ContextResource extends Resource {
 		params: IngestParams,
 		opts?: RequestOptions,
 	): Promise<SDK.IngestionV2IngestResponse> {
+		if (params.items != null && params.acl !== undefined) throw new Error("acl must be specified per item, not beside items.");
 		if (params.kind === "unified") return this.ingestUnified(params, opts);
 
 		// The unified item's own fields (PRO-1618) have no home on either split
@@ -1594,20 +1597,18 @@ export class ContextResource extends Resource {
 		// reason the knowledge branch below refuses memory-only params: a
 		// caller answered "success: 1" has been told the label, the relations
 		// or the ACL were stored when they were discarded.
-		const unifiedOnly = (
-			[
-				["contextCategory", params.contextCategory],
-				["forcefulRelations", params.forcefulRelations],
-			] as const
-		)
-			.filter(([, value]) => value != null)
-			.map(([name]) => name);
+		const unifiedOnly = [...new Set([params, ...(params.items ?? [])].flatMap((input) => (
+			[["contextCategory", input.contextCategory], ["forcefulRelations", input.forcefulRelations]] as const
+		).filter(([, value]) => value != null).map(([name]) => name)))];
 		if (unifiedOnly.length > 0) {
 			throw new Error(
 				`${unifiedOnly.join(", ")} ${unifiedOnly.length === 1 ? "applies" : "apply"} to a ` +
 				`unified database only (kind "unified"); this request names kind "${params.kind}". ` +
 				`Drop ${unifiedOnly.length === 1 ? "it" : "them"}, or pass kind "unified".`,
 			);
+		}
+		if (params.acl !== undefined || params.items?.some((item) => item.acl !== undefined)) {
+			throw new Error("acl is not supported by legacy split memory, bare knowledge, or file ingestion. Use appKnowledge item ACLs or an explicitly selected unified context API.");
 		}
 
 		const request: SDK.IngestContextRequest = {
@@ -1940,7 +1941,7 @@ export class ContextResource extends Resource {
 				properties: input.forcefulRelations.properties,
 			});
 		}
-		if (input.acl != null) item.acl = input.acl;
+		if (input.acl !== undefined) item.acl = input.acl;
 		if (params.items != null && input.upsert != null) item.upsert = input.upsert;
 		return item;
 		});
