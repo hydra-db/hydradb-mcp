@@ -113,9 +113,11 @@ test("database list/create work without a default; scoped data fails before any 
 test("canonical query selectors, aliases and defaults reach raw transport without SDK stripping", async () => {
 	const { hydra, calls } = fixture({ database: "db-a", collection: "notes" });
 	const client = await connect(hydra);
+	const queryTool = (await client.listTools()).tools.find((tool) => tool.name === "hydradb_query")!;
+	assert.equal("context" in (queryTool.inputSchema.properties ?? {}), false);
 	const result = await client.callTool({ name: "hydradb_query", arguments: {
 		query: "hello", type: "knowledge", query_explicit_relations: false, follow_forceful_relations: true,
-		query_forceful_relations: true, additional_graph_context: "", additional_context: "legacy", context: "oldest",
+		query_forceful_relations: true, additional_graph_context: "", additional_context: "legacy",
 	} });
 	assert.equal(result.isError, undefined, text(result));
 	const query = calls.find((c) => c.path === "/query")!;
@@ -311,7 +313,7 @@ test("canonical and legacy selectors may agree and explicit recency zero is pres
 	const { hydra, calls } = fixture({ database: "db-a", collection: "notes" });
 	const client = await connect(hydra);
 	const result = await client.callTool({ name: "hydradb_query", arguments: {
-		query: "x", type: "memory", kind: "memory", recency_bias: 0, additional_graph_context: null, additional_context: "", context: "old",
+		query: "x", type: "memory", kind: "memory", recency_bias: 0, additional_graph_context: null, additional_context: "",
 	} });
 	assert.equal(result.isError, undefined, text(result));
 	const body = calls.find((c) => c.path === "/query")!.body;

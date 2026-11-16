@@ -195,7 +195,7 @@ chunks with their source id, a relevance score, and knowledge-graph context.
 | `structured` | boolean | No | Include full structured results and source references. Default: false — results stay text-only; required scope, warning and request-id metadata remains machine readable |
 | `graph_context` | boolean | No | Include knowledge-graph relations (default: true) |
 | `query_explicit_relations` | boolean | No | Include explicitly linked context (default: true). Deprecated aliases: `follow_forceful_relations`, then `query_forceful_relations`; canonical wins, including false |
-| `additional_graph_context` | string | No | Factual retrieval hint, not a filter. Deprecated aliases: `additional_context`, then `context`; canonical wins, including an empty string |
+| `additional_graph_context` | string | No | Factual retrieval hint, not a filter. Deprecated alias: `additional_context`; canonical wins, including an empty string |
 | `operator` | string | No | `or`, `and`, or `phrase`. Switches the query to keyword retrieval (`query_by=text`), which is the only mode Hydra DB accepts an operator on — semantic matching is off for that query. Unset (the default) is hybrid semantic search |
 | `source_ids` | array | No | Restrict the search to these sources |
 | `titles` | array | No | Restrict to exact document titles (case-insensitive); resolved to source IDs before normal search |

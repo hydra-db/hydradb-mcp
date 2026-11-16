@@ -633,7 +633,6 @@ export interface QueryParams {
 	followForcefulRelations?: boolean;
 	queryExplicitRelations?: boolean;
 	additionalGraphContext?: string;
-	context?: string;
 	/** Per-call collection override. */
 	collection?: string;
 	/**
@@ -1503,7 +1502,7 @@ export class ContextResource extends Resource {
 	): Promise<QueryResult> {
 		const request = this.queryRequest(params);
 		const queryExplicitRelations = params.queryExplicitRelations ?? params.followForcefulRelations ?? params.queryForcefulRelations;
-		const additionalGraphContext = params.additionalGraphContext ?? params.additionalContext ?? params.context;
+		const additionalGraphContext = params.additionalGraphContext ?? params.additionalContext;
 		if (params.kind === "unified") {
 			const body = await this.rawWire("unified query", "POST", "/query", this.queryWire(request, params), opts?.signal, opts?.onMeta);
 			if (isUnifiedQueryResult(body)) return toUnifiedQueryResult(body);
@@ -1538,7 +1537,7 @@ export class ContextResource extends Resource {
 		delete body.additional_context;
 		return compact({ ...body,
 			query_explicit_relations: params.queryExplicitRelations ?? params.followForcefulRelations ?? params.queryForcefulRelations,
-			additional_graph_context: params.additionalGraphContext ?? params.additionalContext ?? params.context });
+			additional_graph_context: params.additionalGraphContext ?? params.additionalContext });
 	}
 
 	/**
@@ -1553,7 +1552,7 @@ export class ContextResource extends Resource {
 
 		return this.call("/query", "idempotent", opts, async (o) => {
 			let response: unknown;
-			if (params.kind === "unified" || params.queryExplicitRelations != null || params.followForcefulRelations != null || params.queryForcefulRelations != null || params.additionalGraphContext != null || params.additionalContext != null || params.context != null) {
+			if (params.kind === "unified" || params.queryExplicitRelations != null || params.followForcefulRelations != null || params.queryForcefulRelations != null || params.additionalGraphContext != null || params.additionalContext != null) {
 				const result = await this.sdk.fetch("/query", {
 					method: "POST", headers: { "API-Version": "2", "Content-Type": "application/json" }, body: JSON.stringify(this.queryWire(request, params)),
 				}, o);

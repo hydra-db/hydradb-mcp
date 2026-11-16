@@ -1060,7 +1060,6 @@ export function createHydraDBServer(
 		query_forceful_relations?: boolean;
 		additional_graph_context?: string | null;
 		additional_context?: string | null;
-		context?: string | null;
 		detail?: "compact" | "full";
 		structured?: boolean;
 		operator?: "or" | "and" | "phrase";
@@ -1162,7 +1161,7 @@ export function createHydraDBServer(
 			numRelatedChunks: args.num_related_chunks,
 			graphContext: args.graph_context ?? true,
 			queryExplicitRelations: args.query_explicit_relations ?? args.follow_forceful_relations ?? args.query_forceful_relations,
-			additionalGraphContext: args.additional_graph_context ?? args.additional_context ?? args.context ?? undefined,
+			additionalGraphContext: args.additional_graph_context ?? args.additional_context ?? undefined,
 			queryApps: args.query_apps,
 			database: args.database,
 			collection: scopeCollection,
@@ -4362,9 +4361,8 @@ export function createHydraDBServer(
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.graph_context),
 		query_explicit_relations: z.boolean().optional().describe("Include explicitly linked context (default true). Takes precedence over deprecated relation selectors, including false."),
 		query_forceful_relations: z.boolean().optional().describe("Deprecated alias for query_explicit_relations; follow_forceful_relations takes precedence."),
-		additional_graph_context: z.string().nullish().describe("Short factual retrieval hint, not a filter. Takes precedence over additional_context and context, including an empty string."),
+		additional_graph_context: z.string().nullish().describe("Short factual retrieval hint, not a filter. Takes precedence over additional_context, including an empty string."),
 		additional_context: z.string().nullish().describe("Deprecated request-hint alias for additional_graph_context."),
-		context: z.string().nullish().describe("Deprecated request-hint alias; additional_graph_context and additional_context take precedence."),
 		follow_forceful_relations: z
 			.boolean()
 			.optional()
