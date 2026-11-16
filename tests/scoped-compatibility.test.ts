@@ -111,7 +111,9 @@ test("database list/create work without a default; scoped data fails before any 
 	await client.close();
 });
 
-test("canonical query selectors win and also ride on their legacy wire names", async () => {
+const LEGACY_QUERY_NAMES = ["query_forceful_relations", "follow_forceful_relations", "additional_context", "context"];
+
+test("canonical query selectors win and are sent once, under their new names only", async () => {
 	const { hydra, calls } = fixture({ database: "db-a", collection: "notes" });
 	const client = await connect(hydra);
 	const queryTool = (await client.listTools()).tools.find((tool) => tool.name === "hydradb_query")!;
@@ -125,18 +127,16 @@ test("canonical query selectors win and also ride on their legacy wire names", a
 	assert.ok(query, "canonical options must use the wire bridge");
 	assert.equal(query.body.type, "knowledge");
 	assert.equal(query.body.query_explicit_relations, false);
-	assert.equal(query.body.query_forceful_relations, false);
 	assert.equal(query.body.additional_graph_context, "");
-	assert.equal(query.body.additional_context, "");
 	assert.equal(query.body.recency_bias, 0);
-	assert.equal("follow_forceful_relations" in query.body, false);
+	assert.deepEqual(LEGACY_QUERY_NAMES.filter((name) => name in query.body), []);
 	const conflict = await client.callTool({ name: "hydradb_query", arguments: { query: "x", type: "memory", kind: "knowledge" } });
 	assert.equal(conflict.isError, true);
 	assert.match(text(conflict), /type.*kind|kind.*type/);
 	await client.close();
 });
 
-test("legacy query names reach both canonical and legacy wire names on split and unified", async () => {
+test("legacy query input names are sent once, under the new wire names, on split and unified", async () => {
 	for (const layout of ["split", "unified"] as const) {
 		for (const relation of ["follow_forceful_relations", "query_forceful_relations"]) {
 			const { hydra, calls } = fixture({ database: "db-a", collection: "notes", layout });
@@ -145,10 +145,8 @@ test("legacy query names reach both canonical and legacy wire names on split and
 			assert.equal(result.isError, undefined, text(result));
 			const body = calls.find((c) => c.path === "/query")!.body;
 			assert.equal(body.query_explicit_relations, false);
-			assert.equal(body.query_forceful_relations, false);
 			assert.equal(body.additional_graph_context, "legacy hint");
-			assert.equal(body.additional_context, "legacy hint");
-			assert.equal("follow_forceful_relations" in body, false);
+			assert.deepEqual(LEGACY_QUERY_NAMES.filter((name) => name in body), []);
 
 			if (layout === "unified") assert.equal("type" in body || "recency_bias" in body, false);
 			else assert.deepEqual([body.type, body.recency_bias], ["all", 0]);

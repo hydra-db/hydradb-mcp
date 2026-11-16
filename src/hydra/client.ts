@@ -1535,12 +1535,11 @@ export class ContextResource extends Resource {
 		if (params.kind === "unified") delete body.type;
 		const explicitRelations = params.queryExplicitRelations ?? params.followForcefulRelations ?? params.queryForcefulRelations;
 		const graphHint = params.additionalGraphContext ?? params.additionalContext;
-		// Backends from before the rename ignore the canonical names without an
-		// error, so each value also rides on its legacy name. Newer backends take
-		// the canonical name when both are present.
+		// The SDK request carries the legacy names; each setting goes out once,
+		// under its new name.
 		return compact({ ...body,
-			query_explicit_relations: explicitRelations, query_forceful_relations: explicitRelations,
-			additional_graph_context: graphHint, additional_context: graphHint });
+			query_forceful_relations: undefined, additional_context: undefined,
+			query_explicit_relations: explicitRelations, additional_graph_context: graphHint });
 	}
 
 	/**

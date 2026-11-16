@@ -221,3 +221,9 @@ test("a unified database accepts is_markdown and leaves it out of every context 
 	);
 	assert.doesNotMatch(JSON.stringify(text.context), /is_markdown/);
 });
+
+test("a split query with main's relation and hint inputs sends main's body, except both settings are under their new names", async () => {
+	const sent = recordWire("split");
+	await call("hydradb_query", { query: "hello", query_forceful_relations: false, additional_context: "hint" });
+	assert.deepEqual(bodyAt(sent, "/query"), { ...MAIN_SPLIT_QUERY, query_explicit_relations: false, additional_graph_context: "hint" });
+});

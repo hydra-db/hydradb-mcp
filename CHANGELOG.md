@@ -18,9 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   selector. Canonical `type` accepts deprecated `kind`.
 - Queries send canonical `query_explicit_relations` and
   `additional_graph_context`, retaining all previous aliases and explicit false
-  or empty-string values. Each value is also sent under its legacy name
-  (`query_forceful_relations`, `additional_context`), so a backend from before
-  the rename still honours it. Full structured results remain opt-in.
+  or empty-string values. Each value is sent once, under its new name only, so
+  a backend without the rename (hydradb-application #3665) ignores both
+  settings. Full structured results remain opt-in.
 - Backend warnings, request ids and effective scope survive SDK and raw
   transports. Human and structured notices are bounded and credential-redacted.
   Backend default-warning codes and messages pass through without client-side
