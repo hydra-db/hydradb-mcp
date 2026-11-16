@@ -53,7 +53,7 @@ function recordWire(layout: "split" | "unified"): Sent[] {
 		let body: Record<string, unknown> = {};
 		if (request.headers.get("content-type")?.includes("multipart/form-data")) {
 			for (const [key, value] of (await request.formData()).entries()) {
-				body[key] = value instanceof File ? `<file ${value.name} ${value.type} ${await value.text()}>` : value;
+				body[key] = typeof value === "string" ? value : `<file ${value.name} ${value.type} ${await value.text()}>`;
 			}
 		} else if (request.method !== "GET") {
 			const raw = await request.text();
