@@ -201,7 +201,7 @@ chunks with their source id, a relevance score, and knowledge-graph context.
 | `titles` | array | No | Restrict to exact document titles (case-insensitive); resolved to source IDs before normal search |
 | `metadata_filters` | object | No | Exact-match filters over stored metadata |
 | `num_related_chunks` | number | No | Adjacent chunks to attach per match (0-5, default: 0) |
-| `recency_bias` | number | No | Favour recently-updated sources when ranking, 0-1 (default: 0.6). Re-ranks only; it never excludes older sources |
+| `recency_bias` | number | No | Favour recently-updated sources when ranking, 0-1 (default: 0 on a split database; a unified database uses the server's default). Re-ranks only; it never excludes older sources |
 | `query_apps` | boolean | No | App-aware retrieval over connector sources — exact IDs and actors, thread reconstruction, linked and parent/child items (on by default: Hydra DB applies it when omitted; pass `false` to skip) |
 | `collections` | array | No | Search several collections at once. Pass either this or `collection`, never both |
 | `additional_context` | string | No | Deprecated alias for `additional_graph_context` |

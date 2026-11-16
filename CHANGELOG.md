@@ -12,8 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - API-key-only startup no longer requires a default database. Discovery and
   database creation work immediately; other tools accept an explicit database.
 - Unified databases use their single corpus when the selector is omitted.
-  Split queries default to `all` with recency bias `0.6`; split listings still
-  require an explicit selector. Canonical `type` accepts deprecated `kind`.
+  Split queries keep what they always sent: `all` and recency bias `0`. A
+  unified query sends no recency bias, so the server's default applies, and a
+  caller's own value is always sent. Split listings still require an explicit
+  selector. Canonical `type` accepts deprecated `kind`.
 - Queries send canonical `query_explicit_relations` and
   `additional_graph_context`, retaining all previous aliases and explicit false
   or empty-string values. Each value is also sent under its legacy name

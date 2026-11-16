@@ -128,7 +128,7 @@ test("canonical query selectors win and also ride on their legacy wire names", a
 	assert.equal(query.body.query_forceful_relations, false);
 	assert.equal(query.body.additional_graph_context, "");
 	assert.equal(query.body.additional_context, "");
-	assert.equal(query.body.recency_bias, 0.6);
+	assert.equal(query.body.recency_bias, 0);
 	assert.equal("follow_forceful_relations" in query.body, false);
 	const conflict = await client.callTool({ name: "hydradb_query", arguments: { query: "x", type: "memory", kind: "knowledge" } });
 	assert.equal(conflict.isError, true);
@@ -149,9 +149,9 @@ test("legacy query names reach both canonical and legacy wire names on split and
 			assert.equal(body.additional_graph_context, "legacy hint");
 			assert.equal(body.additional_context, "legacy hint");
 			assert.equal("follow_forceful_relations" in body, false);
-			assert.equal(body.recency_bias, 0.6);
-			if (layout === "unified") assert.equal("type" in body, false);
-			else assert.equal(body.type, "all");
+
+			if (layout === "unified") assert.equal("type" in body || "recency_bias" in body, false);
+			else assert.deepEqual([body.type, body.recency_bias], ["all", 0]);
 			await client.close();
 		}
 	}
@@ -310,7 +310,7 @@ test("canonical type preserves explicit split knowledge ingestion and query defa
 	await client.callTool({ name: "hydradb_query", arguments: { query: "x" } });
 	const query = calls.find((c) => c.path === "sdk.query")!.body;
 	assert.equal(query.type, "all");
-	assert.equal(query.recencyBias, 0.6);
+	assert.equal(query.recencyBias, 0);
 	await client.close();
 });
 

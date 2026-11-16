@@ -57,7 +57,8 @@ const PARAM = {
 		"arriving mid-sentence; prefer hydradb_inspect when you want a whole source.",
 	recency_bias:
 		"How much to favour recently-updated sources when ranking, 0 to 1 " +
-		"(default: 0.6). Raise it for 'where does this stand " +
+		"(default: 0, no recency preference, on a split database; a unified database " +
+		"uses the server's default). Raise it for 'where does this stand " +
 		"now' questions, where an older source can answer the words of the query " +
 		"perfectly and still be superseded — 0.8-0.9 puts the current version on " +
 		"top. Set it to 0 when the age of a source says nothing about whether it " +

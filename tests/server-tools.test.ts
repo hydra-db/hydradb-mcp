@@ -4660,14 +4660,14 @@ test("empty scope overrides are rejected or fall back to default", async () => {
 	await client.close();
 });
 
-test("query forwards recency_bias, and defaults it to 0.6", async () => {
+test("query forwards recency_bias, and defaults it to 0 on a split database", async () => {
 	const { hydra, calls } = mockHydra();
 	const client = await connect(hydra);
 
 	await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
 	assert.equal(
 		calls.find((c) => c.method === "query")?.args.recencyBias,
-		0.6,
+		0,
 		"the host default applies when callers do not set it",
 	);
 

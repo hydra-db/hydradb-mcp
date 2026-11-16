@@ -1176,12 +1176,7 @@ export function createHydraDBServer(
 			// that is not hybrid. A caller's own alpha is always sent, and the
 			// wrapper refuses it on text retrieval.
 			alpha: args.alpha ?? (textRetrieval ? undefined : 0.8),
-			// Host-owned default (CONTRACT §2 rule 5), and 0 is also what the API
-			// applies when the field is omitted — so the default ranking is
-			// unchanged. It stops being a constant here because "what is the
-			// current state of X" is a different question from "what matches X",
-			// and only a caller that can raise this can ask the first one.
-			recencyBias: args.recency_bias ?? 0.6,
+			recencyBias: args.recency_bias,
 			additionalContext: args.additional_context ?? undefined,
 			queryForcefulRelations: args.query_forceful_relations,
 			temporalReasoning: args.temporal_reasoning,
@@ -1198,6 +1193,9 @@ export function createHydraDBServer(
 
 		const send = () => withUnifiedFallback(args.kind == null, kind, (kindToSend) => hydra.context.query({
 			...params, kind: kindToSend, collection: scopeCollection, collections: scopeCollections,
+			// A split database keeps the 0 this server has always sent, so existing
+			// rankings do not move. A unified database gets the server's own default.
+			recencyBias: params.recencyBias ?? (kindToSend === "unified" ? undefined : 0),
 			responseFormat: args.response_format === "structured" ? "structured" : undefined,
 		}, requestOptions), args.database);
 
