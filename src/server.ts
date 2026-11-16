@@ -5756,7 +5756,7 @@ export function createHydraDBServer(
 				}, { signal, onMeta }));
 
 				return structuredResult(
-					`Database "${result.database}" creation was ${result.status}. Provisioning is asynchronous; ` +
+					`Database "${result.database}" creation status: ${result.status}. Provisioning is asynchronous; ` +
 						`poll ${TOOL_NAMES.DATABASE_READINESS} until it is ready for ingestion.`,
 					{ database: result.database, status: result.status, message: result.message ?? null },
 				);

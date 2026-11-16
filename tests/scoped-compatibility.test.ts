@@ -99,6 +99,7 @@ test("database list/create work without a default; scoped data fails before any 
 	assert.equal(listed.structuredContent?.default, null);
 	const created = await client.callTool({ name: "hydradb_database_create", arguments: { database: "new-db" } });
 	assert.equal(created.isError, undefined, text(created));
+	assert.match(text(created), /Database \\"new-db\\" creation status: accepted\./);
 	const before = calls.length;
 	const missing = await client.callTool({ name: "hydradb_query", arguments: { query: "hello" } });
 	assert.equal(missing.isError, true);
