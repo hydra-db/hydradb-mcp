@@ -128,3 +128,12 @@ test("an untyped unified query sends no type and leaves recency to the server un
 		assert.deepEqual(bodyAt(sent, "/query"), expected);
 	}
 });
+
+test("a split text ingest with user_name sends the body main sends", async () => {
+	for (const args of [{}, { kind: "memory" }]) {
+		const sent = recordWire("split");
+		await call("hydradb_ingest", { text: "note one", user_name: "alice", ...args });
+		const body = bodyAt(sent, "/context/ingest");
+		assert.deepEqual({ ...body, memories: JSON.parse(String(body.memories)) }, MAIN_SPLIT_INGEST);
+	}
+});

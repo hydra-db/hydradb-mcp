@@ -1781,7 +1781,6 @@ export function createHydraDBServer(
 						additionalMetadata: args.custom_attributes ?? args.additional_metadata,
 						observationDate: args.observation_date,
 						graph: args.graph,
-						userName: args.user_name,
 					}
 				: {
 						sourceId,
@@ -1799,6 +1798,9 @@ export function createHydraDBServer(
 			text: args.text,
 			title: args.title ?? defaultTitle(args.text),
 			...kindSpecific,
+			// main never sent user_name on a split text memory, and the server
+			// ignores it there, so only the unified item carries the speaker.
+			userName: kindToSend === "unified" ? args.user_name : undefined,
 			...unifiedOnly,
 			database: args.database,
 			collection: args.collection,
@@ -5414,12 +5416,6 @@ export function createHydraDBServer(
 					kind: a.kind,
 					title: a.title,
 					source_id: a.source_id,
-					// Forwarded, not dropped. The schema accepts `user_name` on
-					// every non-knowledge ingest, and the memory item shape has a
-					// field for it — but the text path used to hand it to nobody,
-					// so a caller naming the speaker on a note was answered
-					// "success: 1" and had it discarded. On a unified database it
-					// has nowhere to go (see the wrapper) and is now refused.
 					user_name: a.user_name,
 					infer: a.infer,
 					is_markdown: a.is_markdown,

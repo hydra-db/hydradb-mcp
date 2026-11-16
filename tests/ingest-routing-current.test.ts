@@ -2,13 +2,15 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { currentIngestFixture } from "./current-ingest-fixture.js";
 
-test("text ingestion carries user_name on real split SDK and unified raw items", async () => {
+test("text ingestion carries user_name on unified items and leaves it off split memories, as main does", async () => {
 	for (const layout of ["split", "unified"] as const) {
 		const fixture = await currentIngestFixture({ layout });
 		try {
 			const result = await fixture.call({ text: "Ada likes concise answers.", user_name: "Ada", source_id: "ada-1" });
 			assert.equal(result.isError, undefined, JSON.stringify(result.content));
-			assert.equal(((fixture.writes[0]!.context ?? fixture.writes[0]!.memories) as { user_name: string }[])[0]!.user_name, "Ada");
+			const items = fixture.writes[0]!.context ?? fixture.writes[0]!.memories;
+			assert.ok(Array.isArray(items));
+			assert.equal(items[0].user_name, layout === "unified" ? "Ada" : undefined);
 		} finally { await fixture.close(); }
 	}
 });
