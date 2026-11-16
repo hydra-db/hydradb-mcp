@@ -680,8 +680,10 @@ database. Without a key the request receives `401`; with a key but no database,
 connection setup and database list/create work, while data calls require a
 per-call `database` or the default header.
 
-Scoped results include a human-readable scope notice and machine-readable
-`scope_notice`: the effective database, explicit per-call versus connection-default
+A scoped result whose database or collection came from a default (the
+connection's or the API's) includes a human-readable scope notice and
+machine-readable `scope_notice`. A call that passes both `database` and
+`collection` (or `collections`) gets none. The notice names the effective database, explicit per-call versus connection-default
 selection, and OAuth restrictions. When the API resolves an omitted collection
 without reporting its name, the notice marks it API-resolved/unreported rather
 than guessing. Existing automatic query widening is unchanged. OAuth overrides

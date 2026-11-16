@@ -330,10 +330,33 @@ test("canonical and legacy selectors may agree and explicit recency zero is pres
 test("scope notice reports the normalized effective database, not raw argument whitespace", async () => {
 	const { hydra } = fixture({ database: "db-a", collection: "notes", allowedCollections: ["notes"] });
 	const client = await connect(hydra);
-	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "x", database: "  db-b  ", collection: "  notes  " } });
+	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "x", database: "  db-b  " } });
 	assert.equal(result.isError, undefined, text(result));
 	assert.equal((result.structuredContent?.scope_notice as Record<string, unknown>).database, "db-b");
 	assert.equal((result.structuredContent?.scope_notice as Record<string, unknown>).collection, "notes");
+	await client.close();
+});
+
+test("scope notice fires only when the database or the collection came from a default", async () => {
+	const { hydra } = fixture({ database: "db-a", collection: "notes" });
+	const client = await connect(hydra);
+	for (const [scope, expected] of [
+		[{}, true],
+		[{ database: "db-b" }, true],
+		[{ collection: "notes" }, true],
+		[{ database: "db-b", collection: "notes" }, false],
+		[{ database: "db-b", collections: ["notes"] }, false],
+	] as const) {
+		for (const call of [{ name: "hydradb_query", arguments: { query: "x", ...scope } }, { name: "hydradb_ingest", arguments: { text: "x", ...scope } }]) {
+			if (call.name === "hydradb_ingest" && "collections" in scope) continue;
+			const result = await client.callTool(call);
+			const label = `${call.name} ${JSON.stringify(scope)}`;
+			assert.equal(result.isError, undefined, `${label} ${text(result)}`);
+			assert.equal(result.structuredContent?.scope_notice != null, expected, label);
+			assert.equal(/Scope notice:/.test(text(result)), expected, label);
+			assert.deepEqual(result.structuredContent?.warnings, warnings, label);
+		}
+	}
 	await client.close();
 });
 

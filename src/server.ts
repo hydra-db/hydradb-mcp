@@ -1027,6 +1027,7 @@ export function createHydraDBServer(
 		if (!scoped) return { text, fields };
 		const explicitDatabase = typeof args.database === "string" ? args.database.trim() : undefined;
 		const explicitCollection = typeof args.collection === "string" ? args.collection.trim() : undefined;
+		if (explicitDatabase && (explicitCollection || args.collections != null)) return { text, fields };
 		const database = explicitDatabase || hydra.database;
 		const collections = resolved?.collections ?? args.collections;
 		const collection = collections ? undefined : meta.collection ?? resolved?.collection ?? (explicitCollection || hydra.collection);

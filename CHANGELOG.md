@@ -22,7 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Backend warnings, request ids and effective scope survive SDK and raw
   transports. Human and structured notices are bounded and credential-redacted.
   Backend default-warning codes and messages pass through without client-side
-  inference or item-default aggregation.
+  inference or item-default aggregation. The scope notice appears only when the
+  database or the collection came from a default, not when the call passed both.
 - Existing instruction carriers, app knowledge, database, connector and graph
   APIs remain supported. Public examples no longer recommend extraction controls.
 - `is_markdown` is refused on a unified database instead of being accepted and
