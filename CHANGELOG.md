@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed: `context_category` from `hydradb_list` `include_fields`
+
+An item's shape (`text` or `conversation`) is its type, so the API no longer
+stores or returns a separate `context_category` label. `hydradb_list` stops
+offering it as an `include_fields` value; naming it is now a schema error.
+
 ### Fixed — OAuth discovery behind an MCP path prefix
 
 Path-prefixed MCP deployments now serve protected-resource metadata through
