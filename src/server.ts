@@ -429,7 +429,6 @@ const LIST_INCLUDE_FIELDS = [
 	"relations",
 	"metadata",
 	"additional_metadata",
-	"context_category",
 ] as const;
 
 type ListIncludeField = (typeof LIST_INCLUDE_FIELDS)[number];
