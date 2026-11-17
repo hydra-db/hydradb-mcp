@@ -402,9 +402,7 @@ every rendering byte for byte.
   with its citation labels ([1], [R1], [P1]), its `## Forceful relations`
   section and each entry's `**Id:**`; the same answer rides beside it as
   structured content (`chunks[].context_id`, `score`, `content`, `enrichment`
-  as a plain string, `enrichment_kind`, the declared `context_category`,
-  passed through even when there is no enrichment text, and `temporal[]` when
-  the server sent it; `graph[].origin` (`query_path` or `chunk_relation`),
+  as a plain string, and `temporal[]` when the server sent it; `graph[].origin` (`query_path` or `chunk_relation`),
   `graph[].triplets` and `graph[].path_summary`; `forceful_relations[]`,
   whose `chunk` has the same shape; distinct `sources[]` built from
   `context_id`, with no titles invented). Nothing on this path reads
@@ -422,7 +420,7 @@ every rendering byte for byte.
   than sent under the wrong key or dropped.
 - `hydradb_ingest` sends the contract body: list key `context`, item fields
   `text` or `conversation`, `context_id`, `title`, `enrich`, `instructions`,
-  `happened_at`, `attributes`, `custom_attributes`, `context_category`,
+  `happened_at`, `attributes`, `custom_attributes`,
   `forceful_relations` (`{context_ids}`), `acl`, `user_name`; request-level `upsert`. The 202 is
   read by hand so `results[].source_id` (the context id) reaches the caller;
   the SDK serializer reads a wire `id` and would have lost it.
@@ -430,7 +428,7 @@ every rendering byte for byte.
   preferred names for `metadata` and `observation_date`; both spellings are
   accepted and a contradiction between them is refused), `custom_attributes`,
   `instructions` (replaces the server's default extraction guidance for that
-  entry), `context_category`, `forceful_relations` and `acl`. The last three
+  entry), `forceful_relations` and `acl`. The last two
   exist on a unified item only and are refused by name on a split database.
   The contract-named arguments work with `turns` as well as `text`.
 - `hydradb_list`, `hydradb_delete` and the relations read no longer send

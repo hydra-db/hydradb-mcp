@@ -97,13 +97,6 @@ export interface RequestOptions {
 export type QueryKind = ContextKind | "all";
 
 /**
- * The label a caller puts on a unified item (PRO-1618). Nothing infers it: a
- * preference or a decision is sent as TEXT with this label. `auto` is the
- * server default and is omitted from the item when chosen.
- */
-export type ContextCategory = "auto" | "user_preference" | "business_knowledge" | "decision_trace";
-
-/**
  * Caller-declared relations from one unified item to other context ids
  * (PRO-1618). Wire key `forceful_relations`, ids under `ids`.
  */
@@ -134,12 +127,6 @@ export interface UnifiedChunk {
 	content?: string;
 	/** The enrichment text, a plain string; absent when there is none. */
 	enrichment?: string;
-	/**
-	 * The caller's declared `context_category` (`user_preference`,
-	 * `business_knowledge` or `decision_trace`), a sibling of `enrichment`.
-	 * Absent when none was declared; present even when `enrichment` is absent.
-	 */
-	enrichment_kind?: string;
 	/** Present only when the query engaged temporal reasoning. */
 	temporal?: UnifiedTemporal[];
 }
@@ -713,8 +700,6 @@ export interface IngestItem {
 	 */
 	customInstructions?: string;
 	upsert?: boolean;
-	/** Unified only (PRO-1618): the caller's label for the item. Refused on a split database. */
-	contextCategory?: ContextCategory;
 	/** Unified only (PRO-1618): declared relations to other context ids. Refused on a split database. */
 	forcefulRelations?: ForcefulRelations;
 	acl?: string[] | null;
@@ -1594,10 +1579,10 @@ export class ContextResource extends Resource {
 		// path: the memory item does not carry them and the knowledge path is a
 		// bare document. Refused by name rather than dropped, for the same
 		// reason the knowledge branch below refuses memory-only params: a
-		// caller answered "success: 1" has been told the label, the relations
-		// or the ACL were stored when they were discarded.
+		// caller answered "success: 1" has been told the relations or the ACL
+		// were stored when they were discarded.
 		const unifiedOnly = [...new Set([params, ...(params.items ?? [])].flatMap((input) => (
-			[["contextCategory", input.contextCategory], ["forcefulRelations", input.forcefulRelations]] as const
+			[["forcefulRelations", input.forcefulRelations]] as const
 		).filter(([, value]) => value != null).map(([name]) => name)))];
 		if (unifiedOnly.length > 0) {
 			throw new Error(
@@ -1928,11 +1913,6 @@ export class ContextResource extends Resource {
 		if (input.observationDate != null) item.happened_at = input.observationDate;
 		if (input.metadata != null) item.attributes = input.metadata;
 		if (input.additionalMetadata != null) item.custom_attributes = input.additionalMetadata;
-		// `auto` is the server's default and means "no label"; it is not sent,
-		// so the item says only what the caller decided.
-		if (input.contextCategory != null && input.contextCategory !== "auto") {
-			item.context_category = input.contextCategory;
-		}
 		if (input.forcefulRelations != null) {
 			item.forceful_relations = compact({
 				context_ids: input.forcefulRelations.ids,
