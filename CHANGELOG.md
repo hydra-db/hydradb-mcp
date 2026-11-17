@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed: `context_category` from `hydradb_list` `include_fields`
+
+An item's shape (`text` or `conversation`) is its type, so the API no longer
+stores or returns a separate `context_category` label. `hydradb_list` stops
+offering it as an `include_fields` value; naming it is now a schema error.
+
 ### Added — unified routing and connection scope notices
 
 - API-key-only startup no longer requires a default database. Discovery and
