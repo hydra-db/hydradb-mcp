@@ -110,7 +110,7 @@ export const UNIFIED_QUERY_ENVELOPE = {
 			"## Results\n" +
 			"\n" +
 			"### 1. Refund policy\n" +
-			"- **Relevance:** 0.91 · **Collection:** support · **Type:** file · **Category:** business_knowledge\n" +
+			"- **Relevance:** 0.91 · **Collection:** support · **Type:** file\n" +
 			"- **Id:** refund-policy · **Last updated:** 2026-07-02\n" +
 			"\n" +
 			"Refunds are processed within 30 days of purchase by the Finance Department.\n" +
@@ -120,7 +120,7 @@ export const UNIFIED_QUERY_ENVELOPE = {
 			"---\n" +
 			"\n" +
 			"### 2. Support chat with Priya\n" +
-			"- **Relevance:** 0.84 · **Collection:** support · **Type:** message · **Category:** user_preference\n" +
+			"- **Relevance:** 0.84 · **Collection:** support · **Type:** message\n" +
 			"- **Id:** chat-2026-07-29 · **Last updated:** 2026-07-29\n" +
 			"\n" +
 			"user: Keep refund answers short please\n" +
