@@ -192,12 +192,6 @@ const PARAM = {
 		"recency reflects the fact rather than the write. The server stores a date and no " +
 		"time of day: a date-time is truncated to its date part, and anything that is not " +
 		"a date is rejected.",
-	context_category:
-		"A label YOU put on this entry: 'user_preference', 'business_knowledge', " +
-		"'decision_trace', or 'auto' (the default, meaning no label). Nothing infers it, " +
-		"so send a preference or a decision as text with the matching label; it comes " +
-		"back as the enrichment kind in later hydradb_query results. UNIFIED databases " +
-		"only; refused on a split database.",
 	instructions:
 		"Existing per-entry extraction-guidance carrier, retained for compatibility with callers using this field or its older bindings.",
 	happened_at:
@@ -279,7 +273,7 @@ const PARAM = {
 		"per-document metadata connectors and ingest callers attach. Several keys must all match.",
 	list_include_fields:
 		"Return only these fields for each row, plus its id: title, type, description, note, " +
-		"timestamp, relations, metadata, additional_metadata, context_category. Use it to see " +
+		"timestamp, relations, metadata, additional_metadata. Use it to see " +
 		"metadata in the listing, or to keep rows small. Knowledge and 'all' listings only; " +
 		"content is never listed, use hydradb_inspect for it.",
 	list_group_threads:
@@ -669,12 +663,11 @@ export const TOOL_DESCRIPTIONS = {
 			observation_date: PARAM.observation_date,
 			// The unified item's names (PRO-1618). `attributes` and `happened_at`
 			// are the preferred names for `metadata` and `observation_date` and
-			// work on every layout; the last three exist on a unified item only.
+			// work on every layout; the last two exist on a unified item only.
 			attributes: PARAM.attributes,
 			custom_attributes: PARAM.custom_attributes,
 			happened_at: PARAM.happened_at,
 			instructions: PARAM.instructions,
-			context_category: PARAM.context_category,
 			forceful_relations: PARAM.forceful_relations,
 			acl: PARAM.ingest_acl,
 			turns:

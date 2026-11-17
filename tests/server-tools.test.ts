@@ -5932,10 +5932,12 @@ test("hydradb_list leaves small projected fields whole and unmarked", async () =
 });
 
 test("hydradb_list rejects an include_fields name the API does not project", async () => {
-	const { isError, calls } = await listCall({ kind: "knowledge", include_fields: ["content"] });
+	for (const field of ["content", "context_category"]) {
+		const { isError, calls } = await listCall({ kind: "knowledge", include_fields: [field] });
 
-	assert.equal(isError, true);
-	assert.equal(calls.length, 0);
+		assert.equal(isError, true, field);
+		assert.equal(calls.length, 0, field);
+	}
 });
 
 test("hydradb_list group_threads nests comments under their parent", async () => {
@@ -6253,13 +6255,6 @@ test("the sibling refusals that share the code are not retried as unified", asyn
 		`${allOnIngest}This database is unified, so send 'unified' or omit \`type\` entirely. `,
 		`type "unified" is only valid on a unified database; this database stores knowledge and memory separately, so use "knowledge", "memory" or "all", or create a new unified database. `,
 		"items cannot be combined with type=knowledge: items are memory-shaped (text or a conversation); omit type or use the unified default. ",
-		// Carries its OWN code (CONTEXT_CATEGORY_UNSUPPORTED), on purpose: it
-		// refuses a different field, and its fix is "stop sending
-		// context_category" rather than "retry with another type". So it cannot
-		// reach the branch under test as things stand. Asserted anyway, against
-		// the day someone reuses the corpus code here — it is a SPLIT database's
-		// refusal, so retrying it as unified would be the reverse direction.
-		'context_category is only supported on a unified database, where knowledge and memory are one corpus. This database is split, so `type` already selects the corpus; omit context_category (or send "auto"). ',
 	];
 	for (const message of siblings) {
 		const { hydra, raw } = refusingLayout(message, "CORPUS_TYPE_UNSUPPORTED");
@@ -6421,9 +6416,9 @@ test("hydradb_query on a unified database sends no type, renders llm_prompt verb
 
 	const structured = result.structuredContent as {
 		layout: string;
-		chunks: { context_id: string; chunk_id?: string; score?: number; content: string; enrichment?: string; enrichment_kind?: string }[];
+		chunks: { context_id: string; chunk_id?: string; score?: number; content: string; enrichment?: string }[];
 		graph: { origin?: string; triplets?: unknown[]; path_summary: string }[];
-		forceful_relations: { via: { from: string; to: string }; chunk: { context_id: string; score?: number; enrichment?: string; enrichment_kind?: string } }[];
+		forceful_relations: { via: { from: string; to: string }; chunk: { context_id: string; score?: number; enrichment?: string } }[];
 		sources: Record<string, unknown>[];
 	};
 	assert.equal(structured.layout, "unified");
@@ -6432,9 +6427,7 @@ test("hydradb_query on a unified database sends no type, renders llm_prompt verb
 	assert.equal(structured.chunks[0]!.score, 0.91);
 	assert.equal(structured.chunks[0]!.content, "Refunds are processed within 30 days of purchase by the Finance Department.");
 	assert.equal(structured.chunks[0]!.enrichment, "Refund window is 30 days; Finance owns refund processing.");
-	assert.equal(structured.chunks[0]!.enrichment_kind, "business_knowledge");
 	assert.equal(structured.chunks[1]!.enrichment, "User prefers short answers about refunds.");
-	assert.equal(structured.chunks[1]!.enrichment_kind, "user_preference");
 	assert.deepEqual(structured.chunks[0]!.temporal, UNIFIED_QUERY_FIXTURE.chunks[0]!.temporal);
 	assert.equal("temporal" in structured.chunks[1]!, false, "no temporal[] is invented");
 	assert.deepEqual(structured.graph, UNIFIED_QUERY_FIXTURE.graph, "every graph path whole, triplets included");
@@ -6442,7 +6435,6 @@ test("hydradb_query on a unified database sends no type, renders llm_prompt verb
 	assert.equal(structured.forceful_relations[0]!.chunk.context_id, "refund-faq");
 	assert.equal(structured.forceful_relations[0]!.chunk.score, 0);
 	assert.equal("enrichment" in structured.forceful_relations[0]!.chunk, false);
-	assert.equal("enrichment_kind" in structured.forceful_relations[0]!.chunk, false);
 	assert.equal("relations" in structured, false, "the pre-rename key is not emitted");
 	// sources[] is built from context_id and carries no title: the body has
 	// none, and none is invented.
@@ -6472,7 +6464,7 @@ test("hydradb_query on a unified database holds an over-budget answer to the que
 	const temporal = [{ content: "effective_from June 2026", start_date: "2026-06-01", end_date: null }];
 
 	const answer = {
-		chunks: [{ context_id: "long", chunk_id: "ck_1", score: 0.5, content: body, enrichment, enrichment_kind: "business_knowledge", temporal }],
+		chunks: [{ context_id: "long", chunk_id: "ck_1", score: 0.5, content: body, enrichment, temporal }],
 		graph: UNIFIED_QUERY_FIXTURE.graph,
 		forceful_relations: [{ via: { from: "long", to: "long-2" }, chunk: { context_id: "long-2", content: body, enrichment } }],
 		llm_prompt: prompt,
@@ -6567,7 +6559,6 @@ test("hydradb_ingest on a unified database sends the contract body and reports t
 			happened_at: "2026-07-29",
 			attributes: { team: "support" },
 			custom_attributes: { source_app: "wiki" },
-			context_category: "business_knowledge",
 			forceful_relations: ["chat-w1"],
 			acl: ["user_email:a@x.com", "domain:acme.com"],
 		},
@@ -6591,14 +6582,14 @@ test("hydradb_ingest on a unified database sends the contract body and reports t
 				happened_at: "2026-07-29",
 				attributes: { team: "support" },
 				custom_attributes: { source_app: "wiki" },
-				context_category: "business_knowledge",
 				forceful_relations: { context_ids: ["chat-w1"] },
 				acl: ["user_email:a@x.com", "domain:acme.com"],
 			},
 		],
 	});
 	const raw = JSON.stringify(sent.body);
-	for (const key of ["items", "contexts", "type", "relations", "custom_instructions", "observation_date", "metadata", "additional_metadata", "infer", "source_id", "name", "is_markdown", "ids"]) {
+
+	for (const key of ["items", "contexts", "type", "relations", "custom_instructions", "observation_date", "metadata", "additional_metadata", "infer", "source_id", "name", "is_markdown", "ids", "context_category"]) {
 		assert.equal(raw.includes(`"${key}"`), false, `${key} must not be sent on a unified ingest`);
 	}
 
@@ -6624,7 +6615,6 @@ test("hydradb_ingest turns on a unified database send a conversation with the co
 			user_name: "Ada",
 			attributes: { project: "hydradb" },
 			happened_at: "2026-07-29",
-			context_category: "decision_trace",
 			forceful_relations: ["policy-1"],
 		},
 	});
@@ -6640,7 +6630,6 @@ test("hydradb_ingest turns on a unified database send a conversation with the co
 	assert.equal("custom_instructions" in item, false);
 	assert.deepEqual(item.attributes, { project: "hydradb" });
 	assert.equal(item.happened_at, "2026-07-29");
-	assert.equal(item.context_category, "decision_trace");
 	assert.deepEqual(item.forceful_relations, { context_ids: ["policy-1"] });
 	assert.equal(item.user_name, "Ada", "the speaker is the item's user_name");
 
@@ -6715,7 +6704,6 @@ test("hydradb_ingest on a split database folds attributes/happened_at and refuse
 	assert.equal("happened_at" in item, false);
 
 	for (const extra of [
-		{ context_category: "user_preference" },
 		{ forceful_relations: ["x"] },
 	]) {
 		const refused = await client.callTool({ name: "hydradb_ingest", arguments: { text: "a note", ...extra } });

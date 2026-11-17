@@ -28,7 +28,6 @@ import {
 } from "./hydra/index.js";
 import type {
 	ContextKind,
-	ContextCategory,
 	UnifiedQueryResult,
 	ResponseMeta,
 	ResponseWarning,
@@ -581,7 +580,6 @@ const LIST_INCLUDE_FIELDS = [
 	"relations",
 	"metadata",
 	"additional_metadata",
-	"context_category",
 ] as const;
 
 type ListIncludeField = (typeof LIST_INCLUDE_FIELDS)[number];
@@ -901,21 +899,7 @@ export function createHydraDBServer(
 			// shared across four clients, unreachable-today is one config change
 			// from reachable, and "correct by coincidence" is not worth keeping
 			// when the alternative is one alternation.
-			//
-			// `only SUPPORTED on a unified database` covers one refusal that
-			// does not carry THIS code: `context_category is only supported on a
-			// unified database … This database is split`. It carries its own
-			// `CONTEXT_CATEGORY_UNSUPPORTED` instead, deliberately, because it
-			// refuses a different FIELD — the repair is "stop sending
-			// context_category", not "retry with another type", and filing it
-			// under the corpus code would send a caller round the `type` values
-			// forever.
-			//
-			// So this alternation is belt and braces: that message cannot reach
-			// this branch as things stand. It is kept because if anyone ever did
-			// reuse the corpus code there, the failure would be a SPLIT
-			// database's refusal answered by a retry as unified, in silence.
-			return !/invalid type|only (?:valid|supported) on a unified database|items cannot be combined with/i.test(
+			return !/invalid type|only valid on a unified database|items cannot be combined with/i.test(
 				err.message,
 			);
 		}
@@ -1735,8 +1719,6 @@ export function createHydraDBServer(
 		/** Replaces the host's default extraction guidance for this entry. */
 		instructions?: string;
 		/** Unified only; the wrapper refuses it on a split database. */
-		context_category?: ContextCategory;
-		/** Unified only; the wrapper refuses it on a split database. */
 		forceful_relations?: string[];
 		/** Unified only; the wrapper refuses it on a split database. */
 		acl?: string[] | null;
@@ -1758,7 +1740,6 @@ export function createHydraDBServer(
 		// answer a caller who set them needs, where dropping them here would
 		// report "success: 1" for a label or an ACL that was never stored.
 		const unifiedOnly = {
-			contextCategory: args.context_category,
 			forcefulRelations:
 				args.forceful_relations != null ? { ids: args.forceful_relations } : undefined,
 			acl: args.acl,
@@ -1952,7 +1933,6 @@ export function createHydraDBServer(
 		sourceId: string,
 		opts?: {
 			kind?: ContextKind;
-			contextCategory?: ContextCategory;
 			forcefulRelations?: string[];
 			acl?: string[] | null;
 			attributes?: IngestParams["metadata"];
@@ -2006,7 +1986,6 @@ export function createHydraDBServer(
 			metadata: opts?.attributes ?? opts?.metadata,
 			additionalMetadata: opts?.customAttributes ?? opts?.additionalMetadata,
 			observationDate: opts?.happenedAt ?? opts?.observationDate,
-			contextCategory: opts?.contextCategory,
 			forcefulRelations: opts?.forcefulRelations ? { ids: opts.forcefulRelations } : undefined,
 			acl: opts?.acl,
 			graph: opts?.graph,
@@ -2160,7 +2139,6 @@ export function createHydraDBServer(
 				observationDate: item.observation_date,
 				graph: item.graph,
 				acl: item.acl,
-				contextCategory: item.context_category,
 				forcefulRelations: item.forceful_relations !== undefined ? { ids: item.forceful_relations } : undefined,
 			};
 
@@ -4576,7 +4554,6 @@ export function createHydraDBServer(
 		custom_attributes: z.record(jsonValue).optional().describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.custom_attributes),
 		happened_at: ingestMetadataSchema.observation_date.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.happened_at),
 		instructions: customInstructionsSchema.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.instructions),
-		context_category: z.enum(["auto", "user_preference", "business_knowledge", "decision_trace"]).optional().describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.context_category),
 		forceful_relations: z.array(z.string().min(1)).min(1).optional().describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.forceful_relations),
 		acl: ingestAclSchema.optional().describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.acl),
 	};
@@ -4727,7 +4704,6 @@ export function createHydraDBServer(
 		custom_attributes?: IngestParams["additionalMetadata"];
 		happened_at?: string;
 		instructions?: string;
-		context_category?: ContextCategory;
 		forceful_relations?: string[];
 		acl?: string[] | null;
 	};
@@ -5261,7 +5237,6 @@ export function createHydraDBServer(
 			a.observation_date,
 			a.user_name,
 			a.graph,
-			a.context_category,
 			a.forceful_relations,
 			a.acl,
 		];
@@ -5395,7 +5370,7 @@ export function createHydraDBServer(
 					customInstructions: a.custom_instructions,
 					graph: a.graph,
 					observationDate: happenedAt,
-					contextCategory: a.context_category, forcefulRelations: a.forceful_relations, acl: a.acl,
+					forcefulRelations: a.forceful_relations, acl: a.acl,
 					customAttributes: a.custom_attributes, instructions: a.instructions,
 					database: a.database,
 					collection: a.collection,
@@ -5424,7 +5399,7 @@ export function createHydraDBServer(
 					evidence_kind: a.evidence_kind,
 					evidence_subject: a.evidence_subject,
 					observation_date: happenedAt,
-					context_category: a.context_category, forceful_relations: a.forceful_relations, acl: a.acl,
+					forceful_relations: a.forceful_relations, acl: a.acl,
 					custom_attributes: a.custom_attributes, instructions: a.instructions,
 					database: a.database,
 					collection: a.collection,

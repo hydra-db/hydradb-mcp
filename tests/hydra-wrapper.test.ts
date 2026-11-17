@@ -1805,7 +1805,7 @@ function fetchStub(body: unknown, status = 200): { fetch: typeof fetch; calls: {
 // The exact JSON `POST /context/ingest` receives on a unified database, per
 // CONTRACT.md: list key `context` (not `items`), `instructions` (not
 // `custom_instructions`), `forceful_relations` (not `relations`) with the ids
-// under `ids`, `context_category` and `acl` on the item, `upsert` on the
+// under `ids`, `acl` on the item, `upsert` on the
 // request. The server accepts the old names as aliases; a client sends the
 // documented ones and none of the removed ones.
 test("unified ingest posts the contract body: context[], instructions, forceful_relations", async () => {
@@ -1824,7 +1824,6 @@ test("unified ingest posts the contract body: context[], instructions, forceful_
 		metadata: { topic: "ui" },
 		additionalMetadata: { source_app: "wiki" },
 		observationDate: "2026-09-01",
-		contextCategory: "user_preference",
 		forcefulRelations: { ids: ["chat-w1"] },
 		acl: ["user_email:a@x.com", "domain:acme.com"],
 		upsert: true,
@@ -1853,27 +1852,16 @@ test("unified ingest posts the contract body: context[], instructions, forceful_
 				happened_at: "2026-09-01",
 				attributes: { topic: "ui" },
 				custom_attributes: { source_app: "wiki" },
-				context_category: "user_preference",
 				forceful_relations: { context_ids: ["chat-w1"] },
 				acl: ["user_email:a@x.com", "domain:acme.com"],
 			},
 		],
 	});
+
 	// CONTRACT client rule 2: none of the pre-rename keys, and never `type`.
-	for (const key of ["items", "contexts", "type", "relations", "custom_instructions", "observation_date", "metadata", "additional_metadata", "infer", "source_id", "name", "is_markdown", "ids"]) {
+	for (const key of ["items", "contexts", "type", "relations", "custom_instructions", "observation_date", "metadata", "additional_metadata", "infer", "source_id", "name", "is_markdown", "ids", "context_category"]) {
 		assert.equal(raw.includes(`"${key}"`), false, `${key} must not be sent on a unified ingest`);
 	}
-});
-
-// `auto` is the server's default and means "no label": the item says only
-// what the caller decided, so the key is absent rather than sent as "auto".
-test("unified ingest omits context_category when it is auto", async () => {
-	const { fetch, calls } = fetchStub({ success: true, data: UNIFIED_INGEST_202 });
-	const sdk = { context: { ingest() { throw new Error("SDK path must not be used for unified"); } } } as unknown as HydraDBClient;
-	const hydra = new HydraDB({ token: "t", database: "db_u", baseUrl: "https://api.test", fetchFn: fetch }, sdk);
-	await hydra.context.ingest({ kind: "unified", text: "a note", contextCategory: "auto" });
-	const item = (JSON.parse(String(calls[0]!.init.body)) as { context: Record<string, unknown>[] }).context[0]!;
-	assert.equal("context_category" in item, false);
 });
 
 // The 202 is read by hand: the pinned SDK's serializer reads each result's id
@@ -1905,17 +1893,13 @@ test("unified ingest reads results[].source_id as the id, and the rest of the 20
 
 // The unified item's own fields have no home on a split path. They are refused
 // by name, on the memory branch and the knowledge branch alike, rather than
-// dropped: a caller answered "success: 1" has been told the label, the
-// relations or the ACL were stored when they were discarded.
+// dropped: a caller answered "success: 1" has been told the relations or the
+// ACL were stored when they were discarded.
 test("unified-only ingest fields are refused on a split database", async () => {
 	let sdkCalls = 0;
 	const sdk = { context: { ingest() { sdkCalls++; return Promise.resolve({ data: {}, success: true }); } } } as unknown as HydraDBClient;
 	const hydra = new HydraDB({ token: "t", database: "db_s" }, sdk);
 	for (const kind of ["memory", "knowledge"] as const) {
-		await assert.rejects(
-			() => hydra.context.ingest({ kind, text: "a note", contextCategory: "decision_trace" }),
-			/contextCategory applies to a unified database only/,
-		);
 		await assert.rejects(
 			() => hydra.context.ingest({ kind, text: "a note", forcefulRelations: { ids: ["x"] }, acl: ["a@x.com"] }),
 			/forcefulRelations applies to a unified database only/,
