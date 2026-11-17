@@ -279,7 +279,7 @@ const PARAM = {
 		"per-document metadata connectors and ingest callers attach. Several keys must all match.",
 	list_include_fields:
 		"Return only these fields for each row, plus its id: title, type, description, note, " +
-		"timestamp, relations, metadata, additional_metadata, context_category. Use it to see " +
+		"timestamp, relations, metadata, additional_metadata. Use it to see " +
 		"metadata in the listing, or to keep rows small. Knowledge and 'all' listings only; " +
 		"content is never listed, use hydradb_inspect for it.",
 	list_group_threads:

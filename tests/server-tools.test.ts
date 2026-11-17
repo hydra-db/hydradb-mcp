@@ -5932,10 +5932,12 @@ test("hydradb_list leaves small projected fields whole and unmarked", async () =
 });
 
 test("hydradb_list rejects an include_fields name the API does not project", async () => {
-	const { isError, calls } = await listCall({ kind: "knowledge", include_fields: ["content"] });
+	for (const field of ["content", "context_category"]) {
+		const { isError, calls } = await listCall({ kind: "knowledge", include_fields: [field] });
 
-	assert.equal(isError, true);
-	assert.equal(calls.length, 0);
+		assert.equal(isError, true, field);
+		assert.equal(calls.length, 0, field);
+	}
 });
 
 test("hydradb_list group_threads nests comments under their parent", async () => {

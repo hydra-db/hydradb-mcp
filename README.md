@@ -342,7 +342,7 @@ sources exist.
 | `page_size` | number | No | Items per page (1-100) |
 | `metadata` | object | No | Exact-match filter on each item's `metadata`, as `{key: value}` |
 | `additional_metadata` | object | No | Exact-match filter on each item's `additional_metadata`; merged with `connector_id` |
-| `include_fields` | array | No | Return only these fields per row (plus id): `title`, `type`, `description`, `note`, `timestamp`, `relations`, `metadata`, `additional_metadata`, `context_category`. Knowledge and `all` only |
+| `include_fields` | array | No | Return only these fields per row (plus id): `title`, `type`, `description`, `note`, `timestamp`, `relations`, `metadata`, `additional_metadata`. Knowledge and `all` only |
 | `group_threads` | boolean | No | Nest comments and replies under the item they belong to (default false). Knowledge and `all` only |
 
 The response reports how many of the total it showed and how to reach the rest.
