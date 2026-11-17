@@ -21,7 +21,6 @@ export {
 export type {
 	HydraConfig,
 	ContextKind,
-	ContextCategory,
 	ForcefulRelations,
 	RequestOptions,
 	QueryKind,

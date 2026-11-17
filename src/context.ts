@@ -784,8 +784,6 @@ export interface UnifiedStructuredChunk {
 	/** Set when `temporal` was cut to its first entries to keep the answer within its budget. */
 	temporal_truncated?: true;
 	temporal_total?: number;
-	/** The declared `context_category`, passed through as sent. */
-	enrichment_kind?: string;
 	/** Present only when the server sent it: the query engaged temporal reasoning. */
 	temporal?: (UnifiedTemporal & { content_truncated?: true; content_chars?: number })[];
 }
@@ -1056,20 +1054,14 @@ function structuredChunk(chunk: UnifiedChunk, maxChars?: number): UnifiedStructu
 	if (chunk.chunk_id != null) out.chunk_id = chunk.chunk_id;
 	if (typeof chunk.score === "number") out.score = chunk.score;
 
-	// Both are plain strings on the wire, siblings on the chunk. The kind is
-	// independent of the text: a declared category with no enrichment text is
-	// still passed through, and neither is invented when the server sent none.
-	// The string checks keep a server that still sends the retired
+	// A plain string on the wire, never invented when the server sent none.
+	// The string check keeps a server that still sends the retired
 	// `{ text, kind }` object from leaking an object where a string belongs.
 	if (typeof chunk.enrichment === "string" && chunk.enrichment !== "") {
 		const cutEnrichment = maxChars != null ? cutAtWord(chunk.enrichment, maxChars) : undefined;
 		out.enrichment = cutEnrichment ?? chunk.enrichment;
 
 		if (cutEnrichment !== undefined) out.enrichment_truncated = true;
-	}
-
-	if (typeof chunk.enrichment_kind === "string" && chunk.enrichment_kind !== "") {
-		out.enrichment_kind = chunk.enrichment_kind;
 	}
 
 	// Sent only when the query engaged temporal reasoning; passed through as
@@ -1092,11 +1084,11 @@ function structuredPath(path: UnifiedGraphPath): UnifiedStructuredContent["graph
 
 /**
  * The structured view of a unified answer: `chunks[].content`,
- * `chunks[].enrichment` (a string), `chunks[].enrichment_kind`,
- * `graph[].origin`, `graph[].path_summary` and `forceful_relations[]` (whose
- * `chunk` has the same shape) under the contract's names, plus the distinct
- * context ids as `sources[]`. Every chunk carries its `temporal[]` when the
- * server sent one, and every graph path its `triplets[]`. Bodies and
+ * `chunks[].enrichment` (a string), `graph[].origin`, `graph[].path_summary`
+ * and `forceful_relations[]` (whose `chunk` has the same shape) under the
+ * contract's names, plus the distinct context ids as `sources[]`. Every chunk
+ * carries its `temporal[]` when the server sent one, and every graph path its
+ * `triplets[]`. Bodies and
  * enrichment come through whole unless `maxChunkChars` is set — which the
  * renderer does exactly when it had to shorten the prompt beside them — and
  * then each shortened field is flagged (`content_truncated` with the full

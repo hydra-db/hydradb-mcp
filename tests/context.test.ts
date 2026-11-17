@@ -1148,7 +1148,6 @@ test("unifiedStructuredContent reads the four keys whole", () => {
 				score: 0.91,
 				content: "Refunds are processed within 30 days of purchase by the Finance Department.",
 				enrichment: "Refund window is 30 days; Finance owns refund processing.",
-				enrichment_kind: "business_knowledge",
 				temporal: [
 					{
 						content: "Refund policy effective_from June 2026. Start: 2026-06-01",
@@ -1164,7 +1163,6 @@ test("unifiedStructuredContent reads the four keys whole", () => {
 				score: 0.84,
 				content: "user: Keep refund answers short please\nassistant: Got it.",
 				enrichment: "User prefers short answers about refunds.",
-				enrichment_kind: "user_preference",
 			},
 		],
 		// Each path whole: origin, triplets and summary as the server sent them.
@@ -1173,7 +1171,7 @@ test("unifiedStructuredContent reads the four keys whole", () => {
 			{
 				via: { from: "refund-policy", to: "refund-faq" },
 				// A score of 0 is still a score, and a chunk with no enrichment
-				// gets neither field invented.
+				// gets none invented.
 				chunk: {
 					context_id: "refund-faq",
 					chunk_id: "ck_faq_1",
@@ -1201,7 +1199,7 @@ test("unifiedStructuredContent never trims chunk bodies or the enrichment string
 	const temporal = [{ content: "effective_from June 2026", start_date: "2026-06-01", end_date: null }];
 
 	const structured = unifiedStructuredContent({
-		chunks: [{ context_id: "long", content: body, enrichment, enrichment_kind: "business_knowledge", temporal }],
+		chunks: [{ context_id: "long", content: body, enrichment, temporal }],
 		graph: [],
 		forceful_relations: [{ via: { from: "long", to: "long-2" }, chunk: { context_id: "long-2", content: body, enrichment } }],
 		llm_prompt: "",
@@ -1215,29 +1213,21 @@ test("unifiedStructuredContent never trims chunk bodies or the enrichment string
 	assert.doesNotMatch(JSON.stringify(structured), /\.\.\."/, "no clamp marker anywhere");
 });
 
-// `enrichment` and `enrichment_kind` are independent siblings: a declared
-// category comes back even when there is no enrichment text, on a result chunk
-// and on a forceful relation's chunk alike.
-test("unifiedStructuredContent passes enrichment_kind through without enrichment", () => {
+// The API no longer declares a category, so a server that still sends
+// `enrichment_kind` gets it dropped, on a result chunk and on a forceful
+// relation's chunk alike.
+test("unifiedStructuredContent does not echo enrichment_kind", () => {
+	// Parsed from the wire like any response, so the retired field arrives untyped.
+	const chunk = (id: string): UnifiedChunk => JSON.parse(`{"context_id":"${id}","content":"x","enrichment_kind":"decision_trace"}`);
 	const structured = unifiedStructuredContent({
-		chunks: [{ context_id: "d1", content: "We chose Postgres.", enrichment_kind: "decision_trace" }],
+		chunks: [chunk("d1")],
 		graph: [],
-		forceful_relations: [
-			{
-				via: { from: "d1", to: "d2" },
-				chunk: { context_id: "d2", content: "Why Postgres.", enrichment: "Postgres chosen for JSONB.", enrichment_kind: "decision_trace" },
-			},
-		],
+		forceful_relations: [{ via: { from: "d1", to: "d2" }, chunk: chunk("d2") }],
 		llm_prompt: "",
 	});
 
-	assert.deepEqual(structured.chunks, [{ context_id: "d1", content: "We chose Postgres.", enrichment_kind: "decision_trace" }]);
-	assert.deepEqual(structured.forceful_relations[0]!.chunk, {
-		context_id: "d2",
-		content: "Why Postgres.",
-		enrichment: "Postgres chosen for JSONB.",
-		enrichment_kind: "decision_trace",
-	});
+	assert.deepEqual(structured.chunks, [{ context_id: "d1", content: "x" }]);
+	assert.deepEqual(structured.forceful_relations[0]!.chunk, { context_id: "d2", content: "x" });
 });
 
 // The retired `{ text, kind }` object is not the contract: a server that

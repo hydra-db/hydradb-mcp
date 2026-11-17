@@ -230,9 +230,8 @@ author at ingest, not matched by the query) `R1`, `R2`, and related facts
 (graph paths) `P1`, `P2`; cite them as `[1]`, `[R1]`, `[P1]`. Each entry shows
 its `**Id:**`, which is its source id. The same answer is returned as
 structured content when `structured: true`, with its own size budget (`chunks[]` with `context_id`, `score`, the
-full `content`, `enrichment` (the enrichment text, a string, in full),
-`enrichment_kind` (the declared `context_category`, present even when there is
-no enrichment text) and `temporal[]` when the server sent it; `graph[]` with
+full `content`, `enrichment` (the enrichment text, a string, in full) and
+`temporal[]` when the server sent it; `graph[]` with
 `origin` (`query_path` or `chunk_relation`), `triplets[]` and `path_summary`;
 `forceful_relations[]`, whose `chunk` has the same shape; distinct
 `sources[]`). A split database keeps the rendering it always had.
@@ -264,11 +263,10 @@ items and sends one API request. Batch text has an 8 MiB total UTF-8 limit.
 | `attributes` | object | No | Preferred name for `metadata`; pass one or the other |
 | `happened_at` | string | No | Preferred name for `observation_date`; pass one or the other |
 | `custom_attributes` | object | No | Free-form key/value data stored beside the entry, not filterable |
-| `context_category` | string | No | Your label for the entry: `user_preference`, `business_knowledge`, `decision_trace`, or `auto` (default, no label). Unified databases only |
 | `forceful_relations` | array | No | Source ids this entry is explicitly related to; a later query can pull them in under FORCEFUL RELATIONS. Unified databases only |
 | `acl` | array or null | No | Unified context ACL (`[]` private, `null` unrestricted). Split app records support per-item ACLs; legacy memories, bare knowledge and files reject explicit ACLs |
 
-The `context_category` and `forceful_relations` arguments are refused by name on a split database
+The `forceful_relations` argument is refused by name on a split database
 rather than dropped.
 
 \* Combining any input modes is an error. Each single item or `items` entry requires

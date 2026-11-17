@@ -5,9 +5,8 @@
  *
  * The query envelope is a REAL one, copied byte for byte from what the
  * server's own handler test renders (hydradb-application #1639): two chunks
- * whose `enrichment` is a plain string with `enrichment_kind` beside it, one
- * carrying `temporal[]`; one graph path per `origin`; one forceful relation
- * whose chunk has neither; and the markdown `llm_prompt` exactly as the
+ * whose `enrichment` is a plain string, one carrying `temporal[]`; one graph
+ * path per `origin`; one forceful relation whose chunk has no enrichment; and the markdown `llm_prompt` exactly as the
  * server's builder lays it out (`# Query results`, `## Results`,
  * `## Forceful relations`, `## Related facts`, `## Temporal facts`,
  * `## Sources`).
@@ -25,7 +24,6 @@ export const UNIFIED_QUERY_ENVELOPE = {
 				score: 0.91,
 				content: "Refunds are processed within 30 days of purchase by the Finance Department.",
 				enrichment: "Refund window is 30 days; Finance owns refund processing.",
-				enrichment_kind: "business_knowledge",
 				temporal: [
 					{
 						content: "Refund policy effective_from June 2026. Start: 2026-06-01",
@@ -40,7 +38,6 @@ export const UNIFIED_QUERY_ENVELOPE = {
 				score: 0.84,
 				content: "user: Keep refund answers short please\nassistant: Got it.",
 				enrichment: "User prefers short answers about refunds.",
-				enrichment_kind: "user_preference",
 			},
 		],
 		graph: [
