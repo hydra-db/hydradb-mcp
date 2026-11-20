@@ -110,6 +110,7 @@ interface IngestArgs {
 	kind?: string;
 	title?: string;
 	source_id?: string;
+	record_type?: string | { name: string; fields: Record<string, string> };
 }
 
 async function ingest(client: Client, args: IngestArgs) {
@@ -162,6 +163,66 @@ test("an all-failed file upload does not claim the file was saved", async (t) =>
 	assert.doesNotMatch(result.text, /^Saved /);
 	assert.match(result.text, /rejected every ingest item/i);
 	assert.equal(uploads.length, 1);
+});
+
+test("file ingest forwards the record type definition or its reusable name", async (t) => {
+	const uploads = captureUploads(t);
+	const client = await connect();
+	const file = { filename: "example.pdf", content_base64: "aGVsbG8=" };
+	const definition = { name: "transaction", fields: { date: "date", amount: "number" } };
+	const first = await ingest(client, { file, record_type: definition, source_id: "statement" });
+	const second = await ingest(client, { file, record_type: "transaction" });
+
+	assert.equal(first.isError, false, first.text);
+	assert.match(first.text, /use hydradb_inspect/i);
+	assert.equal(second.isError, false, second.text);
+	assert.equal(uploads.length, 2);
+	assert.deepEqual(JSON.parse(uploads[0]?.fields.get("record_type") ?? "null"), definition);
+	assert.equal(uploads[0]?.fields.get("database"), "db_test");
+	assert.deepEqual(JSON.parse(uploads[0]?.fields.get("document_metadata") ?? "null"), [{ id: "statement" }]);
+	assert.equal(uploads[1]?.fields.get("record_type"), "transaction");
+	assert.equal(await uploads[0]?.files[0]?.text(), "hello");
+});
+
+test("ingest rejects a record type without an uploaded document", async (t) => {
+	const uploads = captureUploads(t);
+	const client = await connect();
+	const result = await ingest(client, { text: "a note", record_type: "transaction" });
+	assert.equal(result.isError, true);
+	assert.match(result.text, /record_type requires an uploaded file/);
+	assert.equal(uploads.length, 0);
+});
+
+test("Inspect exposes PDF extraction and record validation separately", async (t) => {
+	const report = { record_type: "transaction", records: 4, rejected: 1, tables: [] };
+	const extraction = { status: "partial", method: "layout", rows_recovered: 2 };
+	t.mock.method(globalThis, "fetch", async () => Response.json({
+		success: true,
+		data: { id: "statement", success: true, record_type_report: report, table_extraction: extraction },
+	}));
+	const client = await connect();
+	const result = await client.callTool({ name: "hydradb_inspect", arguments: { id: "statement" } });
+	assert.deepEqual(result.structuredContent?.record_type_report, report);
+	assert.deepEqual(result.structuredContent?.table_extraction, extraction);
+	assert.match(JSON.stringify(result.content), /4 imported, 1 rejected/);
+	assert.match(JSON.stringify(result.content), /query totals may omit rows/i);
+});
+
+test("a query with no text chunks preserves table totals and PDF coverage", async (t) => {
+	const table = { status: "ok", records: [{ total: "12.00" }], extraction_status: "unverified" };
+	t.mock.method(globalThis, "fetch", async () => Response.json({
+		success: true, data: { chunks: [], tabular_data: table },
+	}));
+	const client = await connect();
+
+	const result = await client.callTool({
+		name: "hydradb_query",
+		arguments: { query: "What is the total?", collection: "statements", structured: true },
+	});
+
+	assert.deepEqual(result.structuredContent?.tabular_data, table);
+	assert.match(JSON.stringify(result.content), /PDF table coverage is unverified/);
+	assert.match(JSON.stringify(result.content), /12\.00/);
 });
 
 test("on the stdio server a DOCX can be ingested by path", async (t) => {
@@ -336,13 +397,11 @@ test("a local file that changes while it is read is refused, never sent in part"
 	t.after(() => rm(dir, { recursive: true, force: true }));
 	await writeFile(path, "%PDF-1.4");
 
-	const read = readLocal(path, undefined, undefined);
-
-	// Grows after the read starts; depending on timing, before or after the size check.
-	await truncate(path, 2 * 1024 * 1024);
-
-	await read.then(
+	const read = readLocal(path, undefined, undefined).then(
 		(file) => assert.ok(file.data.length === 8 || file.data.length === 2 * 1024 * 1024, "a whole file, either version"),
 		(err: Error) => assert.match(err.message, /changed while it was being read/),
 	);
+
+	// Observe both promises immediately: the reader can reject before truncate returns.
+	await Promise.all([read, truncate(path, 2 * 1024 * 1024)]);
 });

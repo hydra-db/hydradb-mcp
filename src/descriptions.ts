@@ -140,7 +140,7 @@ const PARAM = {
 		"you set it, else the filename. Pass EITHER `content_base64`, the file's bytes as base64, AT MOST 8 MB per file, " +
 		"OR `path`, an absolute path to the file on this machine, AT MOST 50 MB, which " +
 		"works on the local (stdio) server only; the hosted server cannot read your disk. " +
-		"A larger file is refused before upload: split it. Use instead of `text` and " +
+		"For a file above the inline limit, use the REST upload API or the local path option. Use instead of `text` and " +
 		"`turns`; `source_id` sets the document's id and `overwrite` applies as usual.",
 	overwrite:
 		"Whether ingesting with an existing source_id may replace what is stored there " +
@@ -637,6 +637,11 @@ export const TOOL_DESCRIPTIONS = {
 				"conclusion matters, prefer `text` with the distilled fact.",
 			user_name: PARAM.user_name,
 			file: PARAM.file,
+			record_type:
+				"Optional schema for tables in an uploaded file (preview). Specify a name and fields " +
+				"(e.g. {name: 'transaction', fields: {date: 'date', amount: 'number'}}), or reuse " +
+				"a name already defined in this database. After indexing, call hydradb_inspect to " +
+				"check validation results and PDF extraction coverage.",
 			database: PARAM.database,
 			collection: PARAM.collection,
 		},
