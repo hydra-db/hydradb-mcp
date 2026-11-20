@@ -147,7 +147,7 @@ function invalidSuccessfulResponse(
 	message: string,
 	response: ValidatableResponse,
 ): HydraDBError {
-	const requestId = readRequestId(response);
+	const requestId = readResponseMeta(response).requestId;
 
 	const body: InvalidResponseBody = { error: { code, message } };
 

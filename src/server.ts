@@ -1099,10 +1099,6 @@ export function createHydraDBServer(
 
 		const raw = await send();
 
-		const feedbackLine = requestId
-			? `\nWas this useful? Report it with ${TOOL_NAMES.FEEDBACK} using request_id: ${requestId}`
-			: "";
-
 		// The renderer reads the SDK payload directly; there is no longer a
 		// snake_case mirror to convert into.
 		const res = raw;
