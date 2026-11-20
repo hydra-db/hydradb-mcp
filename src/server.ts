@@ -1102,10 +1102,17 @@ export function createHydraDBServer(
 		// The renderer reads the SDK payload directly; there is no longer a
 		// snake_case mirror to convert into.
 		const res = raw;
-		const extras = z.object({ tabular_data: z.unknown().optional(), tabularData: z.unknown().optional() }).parse(raw);
+		const extras = z.object({
+			tabular_data: z.unknown().optional(), tabularData: z.unknown().optional(),
+			graph: z.unknown().optional(), forceful_relations: z.unknown().optional(),
+		}).parse(raw);
 		const table = extras.tabular_data ?? extras.tabularData;
 		const tableText = table == null ? "" : formatTabularData(table);
-		const tableFields = table == null ? {} : { tabular_data: table };
+		const retrievalFields = {
+			...(table == null ? {} : { tabular_data: table }),
+			...(extras.graph == null ? {} : { graph: extras.graph }),
+			...(extras.forceful_relations == null ? {} : { forceful_relations: extras.forceful_relations }),
+		};
 
 		const feedbackLine = requestId
 			? `\nWas this useful? Report it with ${TOOL_NAMES.FEEDBACK} using request_id: ${requestId}`
@@ -1121,7 +1128,7 @@ export function createHydraDBServer(
 		if ((!res.chunks || res.chunks.length === 0) && table != null) {
 			const feedback = feedbackLine ? `\n\n---${feedbackLine}` : "";
 
-			return queryResult(`${scopeText(resolvedScope)}${tableText}${feedback}`, tableFields);
+			return queryResult(`${scopeText(resolvedScope)}${tableText}${feedback}`, retrievalFields);
 		}
 		if (!res.chunks || res.chunks.length === 0) {
 			// Name WHERE nothing was found. "No results" is ambiguous the moment a
@@ -1135,6 +1142,7 @@ export function createHydraDBServer(
 					`No relevant ${resultNoun(kind)} found in any of the ${widened.length} collections of database ` +
 						`"${database}" (${widened.join(", ")}). Try rephrasing the question, or pass \`collection\` ` +
 						`to search one collection with its full result budget.${feedbackLine}`,
+					retrievalFields,
 				);
 			}
 
@@ -1163,6 +1171,7 @@ export function createHydraDBServer(
 						`elsewhere, call ${TOOL_NAMES.LIST_COLLECTIONS} and pass \`collection\` (or \`collections\` ` +
 						`to search several at once).${tooMany}`) +
 					feedbackLine,
+				retrievalFields,
 			);
 		}
 
@@ -1235,7 +1244,7 @@ export function createHydraDBServer(
 
 		return queryResult(
 			`Found ${shown} ${resultNoun(kind, shown)}:\n${scopeLine}\n\n${contextStr}${tableText}${legend}`,
-			{ sources: [...sourceRefs.values()], ...tableFields },
+			{ sources: [...sourceRefs.values()], ...retrievalFields },
 		);
 	}
 

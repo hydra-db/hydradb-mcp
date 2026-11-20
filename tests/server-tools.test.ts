@@ -30,6 +30,49 @@ import {
 	GRAPH_TOOL_NAMES,
 } from "../src/tool-names.js";
 
+for (const shape of ["chunks", "empty", "table"] as const) {
+	test(`released SDK structured query retains graph and relation roots for ${shape}`, async (t) => {
+		const graph = { paths: [{ chunk_ids: ["c1"], combined_context: "Graph evidence", relevancy_score: 0.5 }] };
+		const forcefulRelations = { declared: [{ via: { from: "s1", to: "s2" }, chunk: {
+			id: "s2", chunk_uuid: "c2", chunk_content: "Linked evidence",
+			metadata: { customerID: 1, customer_id: 2 },
+		} }], inferred: [] };
+		let includeRoots = true;
+		let calls = 0;
+		t.mock.method(globalThis, "fetch", async (_input: Request | string | URL, init?: RequestInit) => {
+			calls++;
+			const body = JSON.parse(String(init?.body));
+			assert.equal(body.database, "db_test");
+			assert.equal(body.collection, "col_test");
+			return Response.json({ success: true, data: {
+				chunks: shape === "chunks" ? [{ id: "s1", chunk_uuid: "c1", chunk_content: "Existing body" }] : [],
+				...(shape === "table" ? { tabular_data: [{ columns: ["name"], records: [{ name: "Ada" }] }] } : {}),
+				...(includeRoots ? { graph, forceful_relations: forcefulRelations } : {}),
+			}, meta: { request_id: "r-roots" } });
+		});
+		const client = await connect(new HydraDB({ token: "fixture-token", database: "db_test", collection: "col_test", maxRetries: 0 }));
+		try {
+			const request = { name: "hydradb_query", arguments: { query: "q", structured: true } };
+			const result = await client.callTool(request);
+			assert.notEqual(result.isError, true);
+			assert.deepEqual(result.structuredContent?.graph, graph);
+			assert.deepEqual(result.structuredContent?.forceful_relations, forcefulRelations);
+			assert.equal(result.structuredContent?.request_id, "r-roots");
+			const plain = await client.callTool({ name: "hydradb_query", arguments: { query: "q" } });
+			assert.equal(plain.structuredContent, undefined);
+			includeRoots = false;
+			const baseline = await client.callTool(request);
+			assert.equal(baseline.structuredContent?.graph, undefined);
+			assert.equal(baseline.structuredContent?.forceful_relations, undefined);
+			assert.deepEqual(result.content, baseline.content);
+			assert.deepEqual(plain.content, baseline.content);
+			assert.equal(calls, 3);
+		} finally {
+			await client.close();
+		}
+	});
+}
+
 type RecordedCall = { method: string; args: Record<string, unknown> };
 
 /** Per-method response overrides, for tests that care what the API returned. */
@@ -116,7 +159,7 @@ function mockHydra(
 
 			const parsed = z.record(z.string(), z.unknown()).safeParse(data);
 
-			const body = parsed.success && "success" in parsed.data
+			const body = "listFetch" in responses && parsed.success && "success" in parsed.data
 				? data
 				: { success: true, data, meta: { request_id: "req-from-meta" } };
 
@@ -6049,8 +6092,8 @@ test("all non-query ACL reads bound warnings across every list path", async () =
 	const envelope = <T>(data: T) => ({ success: true, data, meta: { requestId: "r-warning", warnings } });
 
 	const { hydra } = mockHydra({
-		list: async () => envelope({ inner: { sources: [], total: 0 } }),
-		listFetch: envelope({ sources: [], total: 0 }),
+		list: async () => envelope({ inner: { sources: [], userMemories: [], total: 0 } }),
+		listFetch: envelope({ sources: [], user_memories: [], total: 0 }),
 		inspect: async () => envelope({ success: true, content: "body" }),
 		relations: async () => envelope({ relations: [], isTruncated: false }),
 	});
