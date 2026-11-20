@@ -70,6 +70,15 @@
       }
     },
     {
+      "id": "ingest-app-knowledge-acl",
+      "$comment": "Structured app knowledge is a multipart form field. The ACL must travel with the item so the server can enforce document visibility.",
+      "call": { "op": "ingest", "args": { "kind": "knowledge", "app_knowledge": [{ "id": "slack-C1-1", "kind": "message", "fields": { "body": "Q3 bands" }, "acl": ["grace@acme.com"] }] } },
+      "expect": {
+        "wrapper_method": "context.ingest",
+        "sdk": { "method": "ingest", "content_type": "multipart/form-data", "args_include": { "type": "knowledge" }, "source_field_in": ["app_knowledge"] }
+      }
+    },
+    {
       "id": "list-memory",
       "call": { "op": "list", "args": { "kind": "memory" } },
       "expect": {
@@ -150,6 +159,34 @@
         "sdk": { "method": "status", "args_include": { "database": "db_test" } }
       },
       "aliases": { "cli": ["tenant monitor"] }
+    },
+    {
+      "id": "database-stats",
+      "call": { "op": "database.stats", "args": { "database": "db_test" } },
+      "expect": {
+        "wrapper_method": "databases.stats",
+        "sdk": { "method": "stats", "args_include": { "database": "db_test" } }
+      }
+    },
+    {
+      "id": "database-metadata-schema-inspect",
+      "$comment": "Renamed away from `get`: the wrapper's inspectMetadataSchema maps to SDK databases.getMetadataSchema.",
+      "optional_for": ["cli", "plugin", "openclaw"],
+      "call": { "op": "database.inspectMetadataSchema", "args": { "database": "db_test" } },
+      "expect": {
+        "wrapper_method": "databases.inspectMetadataSchema",
+        "sdk": { "method": "getMetadataSchema", "args_include": { "database": "db_test" } }
+      }
+    },
+    {
+      "id": "database-metadata-schema-update",
+      "$comment": "Additive only: the request names the fields to add and nothing else.",
+      "optional_for": ["cli", "plugin", "openclaw"],
+      "call": { "op": "database.updateMetadataSchema", "args": { "database": "db_test", "add_fields": [{ "name": "region", "data_type": "VARCHAR" }] } },
+      "expect": {
+        "wrapper_method": "databases.updateMetadataSchema",
+        "sdk": { "method": "updateMetadataSchema", "args_include": { "database": "db_test", "add_fields": [{ "name": "region", "data_type": "VARCHAR" }] } }
+      }
     },
     {
       "id": "context-ingestion-status",

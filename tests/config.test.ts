@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { resolveConfig, resolveConnectorConfig } from "../src/config.js";
+import { resolveConfig, resolveConnectorConfig, resolveDatabaseToolsConfig } from "../src/config.js";
 import { LogLevel, resolveLogLevel } from "../src/logger.js";
 
 // A fresh warning sink per call keeps assertions isolated from the module-level
@@ -35,6 +35,7 @@ test("canonical HYDRADB_* names are read as primary with no warning", () => {
 			collection: "default",
 		},
 		connectors: { enabled: true, dashboardUrl: "https://app.hydradb.com" },
+		databaseTools: { enabled: true },
 	});
 	assert.deepEqual(messages, []);
 });
@@ -249,4 +250,16 @@ test("the retired HYDRADB_DASHBOARD_URL no longer changes connector links", () =
 		}).dashboardUrl,
 		"https://dashboard.hydradb.com",
 	);
+});
+
+test("database tools are enabled by default and accept normal false spellings", () => {
+	assert.equal(resolveDatabaseToolsConfig({}).enabled, true);
+
+	for (const value of ["0", "false", "FALSE", "no", "off", " off "]) {
+		assert.equal(
+			resolveDatabaseToolsConfig({ HYDRADB_MCP_DATABASE_TOOLS: value }).enabled,
+			false,
+			`"${value}" should disable the database tools`,
+		);
+	}
 });
