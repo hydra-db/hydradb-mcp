@@ -2554,8 +2554,10 @@ export function createHydraDBServer(
 			const report = extraction.data;
 			reportFields.table_extraction = report;
 			parts.push(report.status === "partial"
-				? "PDF table extraction was partial. Query totals may omit rows."
+				? "Table import was partial. Query totals may omit rows."
 				: "PDF table coverage is unverified. Query totals cover the rows HydraDB imported.");
+
+			if (report.reason != null) parts.push(report.reason);
 		}
 
 		// `presignedUrl` was never read, so `mode: "url"` — documented in the
