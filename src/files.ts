@@ -148,8 +148,8 @@ export function decodeInline(filename: string, contentBase64: string): IngestFil
 	if (size > MAX_INLINE_FILE_BYTES) {
 		throw new Error(
 			`"${filename}" is ${megabytes(size)}; a file sent inline as content_base64 can be at most ` +
-			`${megabytes(MAX_INLINE_FILE_BYTES)}. Split it into smaller files` +
-			`, or on the local (stdio) server pass its \`path\` instead (up to ${megabytes(MAX_FILE_BYTES)}).`,
+			`${megabytes(MAX_INLINE_FILE_BYTES)}. To keep the file whole, use the REST upload API or ` +
+			`pass its \`path\` on the local (stdio) server (up to ${megabytes(MAX_FILE_BYTES)}).`,
 		);
 	}
 
