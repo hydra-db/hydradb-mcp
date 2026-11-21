@@ -56,6 +56,8 @@ const connectorSchema = z.object({
 	nextSyncAt: z.string().optional(),
 	paused: z.boolean().optional(),
 	pausedAt: z.string().optional(),
+	pausedReason: z.string().nullable().optional(),
+	paused_reason: z.string().nullable().optional(),
 	provider: z.string().optional(),
 	providerAccountScope: z.string().optional(),
 	resourcesPendingFirstSync: z.number().optional(),
