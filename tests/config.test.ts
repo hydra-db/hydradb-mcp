@@ -140,10 +140,7 @@ test("missing required config throws naming the canonical variable", () => {
 		() => resolveConfig({ HYDRADB_DATABASE: "db" }, warn),
 		/HYDRADB_API_KEY/,
 	);
-	assert.throws(
-		() => resolveConfig({ HYDRADB_API_KEY: "key" }, warn),
-		/HYDRADB_DATABASE/,
-	);
+	assert.equal(resolveConfig({ HYDRADB_API_KEY: "key" }, warn).database, undefined);
 });
 
 test("timeout and retry overrides are read when set", () => {

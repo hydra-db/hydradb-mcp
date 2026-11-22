@@ -188,34 +188,54 @@ chunks with their source id, a relevance score, and knowledge-graph context.
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `query` | string | Yes | What you want to know, as a question or topic |
-| `kind` | string | No | `memory`, `knowledge`, or `all` (default: `all`) |
+| `type` | string | No | `memory`, `knowledge`, or `all` (default on split); omitted on unified for its single corpus. Deprecated `kind` is accepted; conflicting selectors fail |
 | `max_results` | number | No | Maximum chunks to return (1-50, default: 10) |
 | `mode` | string | No | `fast`, `thinking` (default), or `auto` |
 | `detail` | string | No | `compact` (default) trims each chunk; `full` returns them whole |
-| `structured` | boolean | No | Also return `structuredContent` (`resolved_scope`, `request_id`, `sources` with `inspect_args`). Default: false — text only |
+| `structured` | boolean | No | Include full structured results and source references. Default: false — results stay text-only; required scope, warning and request-id metadata remains machine readable |
 | `graph_context` | boolean | No | Include knowledge-graph relations (default: true) |
+| `query_explicit_relations` | boolean | No | Include explicitly linked context (default: true). Deprecated aliases: `follow_forceful_relations`, then `query_forceful_relations`; canonical wins, including false |
+| `additional_graph_context` | string | No | Factual retrieval hint, not a filter. Deprecated alias: `additional_context`; canonical wins, including an empty string |
 | `operator` | string | No | `or`, `and`, or `phrase`. Switches the query to keyword retrieval (`query_by=text`), which is the only mode Hydra DB accepts an operator on — semantic matching is off for that query. Unset (the default) is hybrid semantic search |
 | `source_ids` | array | No | Restrict the search to these sources |
 | `titles` | array | No | Restrict to exact document titles (case-insensitive); resolved to source IDs before normal search |
 | `metadata_filters` | object | No | Exact-match filters over stored metadata |
 | `num_related_chunks` | number | No | Adjacent chunks to attach per match (0-5, default: 0) |
-| `recency_bias` | number | No | Favour recently-updated sources when ranking, 0-1 (default: 0). Re-ranks only; it never excludes older sources |
+| `recency_bias` | number | No | Favour recently-updated sources when ranking, 0-1 (default: 0 on a split database; a unified database uses the server's default). Re-ranks only; it never excludes older sources |
 | `query_apps` | boolean | No | App-aware retrieval over connector sources — exact IDs and actors, thread reconstruction, linked and parent/child items (on by default: Hydra DB applies it when omitted; pass `false` to skip) |
 | `collections` | array | No | Search several collections at once. Pass either this or `collection`, never both |
-| `additional_context` | string | No | Background text prepended to the query to steer retrieval; not searched for itself |
+| `additional_context` | string | No | Deprecated alias for `additional_graph_context` |
 | `alpha` | number or `auto` | No | Hybrid balance, 0 (keyword) to 1 (vector), or `auto` (default: 0.8). Hybrid only: refused with `operator` or `query_by: text` |
 | `query_by` | string | No | `hybrid` (default) or `text` (keyword only). Setting `operator` implies `text` |
-| `query_forceful_relations` | boolean | No | In thinking mode, also follow relations declared at ingest and return their chunks |
+| `query_forceful_relations` | boolean | No | Deprecated alias for `query_explicit_relations` |
 | `temporal_reasoning` | boolean | No | Resolve time-based questions using dated facts (Hydra DB default: true) |
 | `response_format` | string | No | `structured` (the default rendering, with source ids) or `markdown` (Hydra DB's own Markdown rendering, returned as-is, without per-chunk ids) |
 
-Results are text only by default: each chunk carries its source id and
+Results stay text only by default; required scope, warning and request-id metadata
+is also machine readable. Each chunk carries its source id and
 collection, and the header names the resolved scope. With `structured: true`,
 results also include structured `resolved_scope` and per-source `inspect_args` when
 the source's collection is known. Copy those arguments, including your ACL, to follow-up calls;
 tools never inherit a previous call's scope. With multiple collections, an ID
 alone is not enough: use the collection attached to that source. If it is missing,
 resolve the collection before inspecting. Explicit scope is never widened.
+
+On a **unified** database the result text is the server-built `llm_prompt`,
+whole when it fits the 40,000-character response budget. Long bodies are shortened
+without removing ids, headings or citations; `detail: compact` limits body length.
+It is markdown (`# Query results`, then `## Results`,
+`## Forceful relations`, `## Related facts`, `## Temporal facts` and
+`## Sources`): results are numbered `1`, `2`, forceful relations (linked by the
+author at ingest, not matched by the query) `R1`, `R2`, and related facts
+(graph paths) `P1`, `P2`; cite them as `[1]`, `[R1]`, `[P1]`. Each entry shows
+its `**Id:**`, which is its source id. The same answer is returned as
+structured content when `structured: true`, with its own size budget (`chunks[]` with `context_id`, `score`, the
+full `content`, `enrichment` (the enrichment text, a string, in full),
+`enrichment_kind` (the declared `context_category`, present even when there is
+no enrichment text) and `temporal[]` when the server sent it; `graph[]` with
+`origin` (`query_path` or `chunk_relation`), `triplets[]` and `path_summary`;
+`forceful_relations[]`, whose `chunk` has the same shape; distinct
+`sources[]`). A split database keeps the rendering it always had.
 
 ### **hydradb_ingest**
 
@@ -230,7 +250,7 @@ items and sends one API request. Batch text has an 8 MiB total UTF-8 limit.
 | `items` | array | No\* | Batch of 1 to 100 items; each item has exactly one of `text` or `turns` |
 | `app_knowledge` | array | No\* | Batch of 1 to 100 structured app records with `kind`, `fields`, and optional ACL data; split databases only |
 | `file` | object | No\* | A PDF, Word, PowerPoint, spreadsheet, image or text file, ingested as knowledge. See below |
-| `kind` | string | No | `memory` (default) or `knowledge` for a document |
+| `type` | string | No | Omit for layout-aware routing: `memory` on split, one corpus on verified unified. Explicit `knowledge` preserves document ingestion. Deprecated `kind` is accepted; conflicting selectors fail |
 | `title` | string | No | Label shown in later search results — always set it |
 | `source_id` | string | No | Identifier for this entry. **Reusing one REPLACES what is stored under it** |
 | `overwrite` | boolean | No | Allow that replacement (default: true) |
@@ -238,10 +258,18 @@ items and sends one API request. Batch text has an 8 MiB total UTF-8 limit.
 | `is_markdown` | boolean | No | Chunk on markdown structure (default: false) |
 | `metadata` | object | No | Key/value metadata, matchable later via `metadata_filters` |
 | `additional_metadata` | object | No | Free-form fields stored with the item; supported on memory and knowledge |
-| `custom_instructions` | string | No | Memory extraction guidance, up to 4000 characters; replaces the MCP default and requires inference |
 | `graph` | object | No | Caller-supplied `entities` and `relations`; MCP keys it by the item id |
 | `observation_date` | string | No | When the fact was true, as `YYYY-MM-DD` (e.g. `2026-07-04`), vs when it was stored |
-| `user_name` | string | No | What to call the user, used with `turns` (default: `User`) |
+| `user_name` | string | No | What to call the user, used with `turns` (default: `User`). On a unified database it also names the speaker of a `text` note |
+| `attributes` | object | No | Preferred name for `metadata`; pass one or the other |
+| `happened_at` | string | No | Preferred name for `observation_date`; pass one or the other |
+| `custom_attributes` | object | No | Free-form key/value data stored beside the entry, not filterable |
+| `context_category` | string | No | Your label for the entry: `user_preference`, `business_knowledge`, `decision_trace`, or `auto` (default, no label). Unified databases only |
+| `forceful_relations` | array | No | Source ids this entry is explicitly related to; a later query can pull them in under FORCEFUL RELATIONS. Unified databases only |
+| `acl` | array or null | No | Unified context ACL (`[]` private, `null` unrestricted). Split app records support per-item ACLs; legacy memories, bare knowledge and files reject explicit ACLs |
+
+The `context_category` and `forceful_relations` arguments are refused by name on a split database
+rather than dropped.
 
 \* Combining any input modes is an error. Each single item or `items` entry requires
 exactly one of `text` or `turns`. Knowledge items require `text`.
@@ -253,7 +281,8 @@ Use plain `text` with `kind: "knowledge"` for an unstructured document. Use
 `additional_metadata`, `attachments`, `relations`, and `acl`.
 
 An omitted app-record `acl` makes the item unrestricted. Send `["__private__"]`
-for private ingest or `["__public__"]` for public ingest. An empty list is refused.
+or `[]` for private ingest, or `["__public__"]` for public ingest. Explicit `null`
+is unrestricted. These are ingest semantics; metadata-update ACL semantics differ.
 Re-ingesting an existing `id` without `acl` removes its previous access list. If
 `__public__` appears with other principals, the item is public and HydraDB drops the
 other principals.
@@ -333,11 +362,11 @@ sources exist.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `kind` | string | **Yes** | `memory`, `knowledge`, or `all` (both in one page, as source rows) |
+| `type` | string | Split only | `memory`, `knowledge`, or `all` (both in one page). Omit only for a verified unified database. Deprecated `kind` remains accepted |
 | `ids` | array | No | Restrict to these ids |
 | `source_ids` | array | No | Deprecated alias for `ids` |
 | `external_id` | string | No | Exact originating-system ID, such as a Confluence page ID or Drive file ID; knowledge only |
-| `parent_external_id` | string | No | Exact provider parent ID; returns indexed direct children only. Requires `kind: "knowledge"`, `provider` and `connector_id` |
+| `parent_external_id` | string | No | Exact provider parent ID; returns indexed direct children only. Requires `type: "knowledge"`, `provider` and `connector_id` |
 | `connector_id` | string | No | Exact originating connector instance from stored `additional_metadata.connector_id`; required for parent lookup, optional for other knowledge lookups |
 | `url` | string | No | Exact original URL stored at ingestion; knowledge only, not a live web fetch |
 | `provider` | string | No | Connector provider, such as `confluence` or `google_drive`; knowledge only |
@@ -372,7 +401,7 @@ URL matching does not normalize links, follow redirects or fetch external pages.
 Multiple sites or copies may match an ID; inspect the candidates and pagination.
 No visible match in a scope is not proof a document was never ingested. For a
 document known only by name, use `hydradb_query.titles` or ordinary search instead.
-These selectors are rejected for `kind: "memory"`, never silently ignored.
+These selectors are rejected for `type: "memory"`, never silently ignored.
 
 To enumerate indexed children, resolve the parent first, then use `parent_external_id`
 with its provider ID, `provider`, `connector_id`, and the same database, collection
@@ -468,7 +497,7 @@ under a ticket, the documents a page links to.
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `id` | string | Yes | The item to start from, from `hydradb_query` or `hydradb_list` |
-| `kind` | string | No | `knowledge` (default) or `memory` — the two graphs are separate |
+| `type` | string | No | `knowledge` (default) or `memory` — the two graphs are separate. Deprecated `kind` remains accepted |
 | `depth` | number | No | Hops to traverse (default 5, max 10) |
 | `max_sources` | number | No | Cap on members returned (default 200, max 1000) |
 | `database`, `collection` | string | No | Scope overrides |
@@ -492,7 +521,7 @@ Removes items by id. Irreversible.
 |-----------|------|----------|-------------|
 | `ids` | array | No\* | The ids to delete — accepts several at once |
 | `id` | string | No\* | A single id |
-| `kind` | string | No | `memory` (default) or `knowledge` |
+| `type` | string | No | `memory` (default) or `knowledge`; `unified` on a unified database (the default there). Deprecated `kind` remains accepted |
 
 \* Provide one of them.
 
@@ -509,14 +538,14 @@ Checks whether ingested sources have finished indexing.
 ### Get Your Credentials
 
 1. Get your Hydra DB API Key from [Hydra DB](https://app.hydradb.com)
-2. Get your database name from the Hydra DB dashboard
+2. Optionally set a default database, or use `hydradb_databases` / `hydradb_database_create` after connecting with just the key
 
 ### Environment Variables
 
 | Variable             | Description                          | Default                   |
 | -------------------- | ------------------------------------ | ------------------------- |
 | `HYDRADB_API_KEY`    | Your Hydra DB API key                | *Required*                |
-| `HYDRADB_DATABASE`   | Your Hydra DB database (tenant scope) | *Required*                |
+| `HYDRADB_DATABASE`   | Optional default database (tenant scope) | *none* — pass `database` per scoped call |
 | `HYDRADB_COLLECTION` | Collection (sub-tenant) for partitioning | *none* — unset means the workspace's own collection; the model can also name one per call via `collection`/`collections` (see `hydradb_list_collections`) |
 | `HYDRADB_BASE_URL`   | Base URL override                    | `https://api.hydradb.com` |
 | `HYDRADB_LOG_LEVEL`  | Log level: DEBUG, INFO, WARN, ERROR  | `ERROR`                   |
@@ -672,16 +701,27 @@ number of independent users. The headers a request may send:
 | Header | Maps to | Required |
 | --- | --- | --- |
 | `Authorization: Bearer <key>` | Hydra DB API key (`X-HydraDB-Api-Key` also accepted) | Yes\* |
-| `X-HydraDB-Database` | Default database (tenant scope) | Yes\* |
+| `X-HydraDB-Database` | Optional default database (tenant scope) | No |
 | `X-HydraDB-Collection` | Default collection (sub-tenant); unset means the workspace's own collection | No |
 | `X-HydraDB-Graph-Database` | Default graph database for the Cypher tools; defaults to the request's database | No |
 | `X-HydraDB-Graph-Collection` | Default graph collection; defaults to `default` | No |
 
-\* Unless the server was started with `HYDRADB_API_KEY` / `HYDRADB_DATABASE` in
-its environment (single-tenant self-host, below), in which case a request may
-omit them and fall back to the server's own credentials. A request that supplies
-neither a header nor a server-side default is refused: `401` with no key, `400`
-with a key but no database.
+\* A single-tenant self-host may provide credentials through its environment.
+A request that authenticates with its own API key never borrows the operator's
+database. Without a key the request receives `401`; with a key but no database,
+connection setup and database list/create work, while data calls require a
+per-call `database` or the default header.
+
+A scoped result whose database or collection came from a default (the
+connection's or the API's) includes a human-readable scope notice and
+machine-readable `scope_notice`. A call that passes both `database` and
+`collection` (or `collections`) gets none. The notice names the effective database, explicit per-call versus connection-default
+selection, and OAuth restrictions. When the API resolves an omitted collection
+without reporting its name, the notice marks it API-resolved/unreported rather
+than guessing. Existing automatic query widening is unchanged. OAuth overrides
+outside the approved database/collection grant fail before any API request.
+Nonfatal backend `meta.warnings` retain their code, message and optional
+collections in structured `warnings` and human-visible warning text.
 
 Every tool additionally accepts optional `database` and `collection` parameters
 directly in its arguments (e.g. `hydradb_query` with `{"query": "...", "database": "tenant_b"}`),

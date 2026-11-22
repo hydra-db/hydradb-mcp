@@ -318,7 +318,8 @@ test("query returns text only unless structured: true, in either detail mode", a
 	for (const detail of ["compact", "full"] as const) {
 		const plain = await client.callTool({ name: "hydradb_query", arguments: { query: "build", kind: "knowledge", detail } });
 		assert.equal(plain.isError, undefined);
-		assert.equal(plain.structuredContent, undefined, `${detail}: no structuredContent by default`);
+		assert.deepEqual(Object.keys(plain.structuredContent ?? {}).sort(), ["request_id", "scope_notice"], `${detail}: only required metadata by default`);
+		assert.equal(plain.structuredContent?.request_id, "request-1");
 		const body = text(plain);
 		assert.match(body, /\[id: shared-id\]/);
 		assert.match(body, /Collection: "docs"/);

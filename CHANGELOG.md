@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — unified routing and connection scope notices
+
+- API-key-only startup no longer requires a default database. Discovery and
+  database creation work immediately; other tools accept an explicit database.
+- Unified databases use their single corpus when the selector is omitted.
+  Split queries keep what they always sent: `all` and recency bias `0`. A
+  unified query sends no recency bias, so the server's default applies, and a
+  caller's own value is always sent. Split listings still require an explicit
+  selector. Canonical `type` accepts deprecated `kind`.
+- Queries send canonical `query_explicit_relations` and
+  `additional_graph_context`, retaining all previous aliases and explicit false
+  or empty-string values. Each value is sent once, under its new name only, so
+  a backend without the rename (hydradb-application #3665) ignores both
+  settings. Full structured results remain opt-in.
+- Backend warnings, request ids and effective scope survive SDK and raw
+  transports. Human and structured notices are bounded and credential-redacted.
+  Backend default-warning codes and messages pass through without client-side
+  inference or item-default aggregation. The scope notice appears only when the
+  database or the collection came from a default, not when the call passed both.
+- Existing instruction carriers, app knowledge, database, connector and graph
+  APIs remain supported. Public examples no longer recommend extraction controls.
+- `is_markdown` is accepted on every ingest path and sent only as a split
+  memory's flag, as before. Knowledge text, files, knowledge items, app
+  knowledge and unified context items have no field for it, so there it is
+  accepted without a notice and the request is the one sent without it.
+
 ### Fixed — `hydradb_status` stops waiting on errored sources
 
 `hydradb_status` treated only `completed` and `failed` as final, but the API
@@ -296,6 +322,47 @@ request id, any scope warning — and hosts that surface both handed the model
 the same facts twice. `structured: true` adds `resolved_scope`, `request_id`
 and `sources[]` with ready-made `inspect_args` for programmatic callers. The
 tool declares no `outputSchema`, so this is within the MCP spec.
+### Fixed — unified search hardening from the staging run (PRO-2187)
+
+- **A unified answer is read by its shape on every route.** `kind: "all"` on a
+  unified database, or a defaulted search sent while the layout probe could not
+  answer, came back in the four-key body and was refused as
+  `INVALID_QUERY_RESPONSE`. The v2 route now recognises that body, reads it, and
+  remembers the database is unified. Explicit `all` on a known unified database
+  is sent as `unified`. A missing `forceful_relations` reads as none.
+- **Unified answers are bounded without losing a citation.** One search was
+  measured at ~265k characters. Result bodies are found in the prompt by the
+  answer's own `chunks[]` text (they are written verbatim and may be Markdown,
+  so the prompt's lines are not parsed for structure) and shortened in place,
+  each naming `hydradb_inspect` for the full text; every heading, id and label
+  is kept. If the prompt is still over budget, it is cut at a line with a note,
+  so the 40,000-character bound always holds. `detail: "compact"` caps bodies
+  at 600 characters. The structured copy is shortened to match and has its own
+  bound (graph triplets dropped, temporal lists cut, long bodies shortened,
+  then graph paths cut), each flagged (`content_truncated`,
+  `graph_triplets_omitted`, `temporal_truncated`, `graph_paths_total`,
+  `shortened`). A prompt that fits is unchanged.
+- **One graph write no longer breaks every widened search.** The collection
+  listing includes graph-only collections; when the API refuses one as
+  `sub_tenant_ids do not exist`, a search this server widened drops it,
+  searches the rest, and says so in a scope warning. Collections the caller
+  named are never narrowed. Unified answers now carry scope warnings too.
+- **`kind: "unified"` on a known split database is refused before sending**
+  (query, ingest, list, delete). It used to hit knowledge or memory silently.
+- **Database layouts are re-read after five minutes**, and forgotten when this
+  client creates or deletes a database. The cache is keyed by name, and a name
+  can be deleted and recreated under the other layout while a stdio server runs.
+
+### Changed — unified ingest follows the strict item contract (hydradb-application#1653)
+
+The server now decodes a unified item strictly and refuses unknown keys, so
+three things the MCP sent would be a 400:
+
+- A conversation turn is exactly `{role, content}`: no per-turn `name`. The
+  speaker is the item's `user_name`, on conversations and text notes alike.
+- Forced links are `forceful_relations: {context_ids, properties}` (was
+  `ids`). The tool parameter is unchanged: a list of context ids.
+- `is_markdown` is not sent to a unified database; it still applies on split.
 
 ### Changed — the model resolves collection scope (PRO-1942)
 
@@ -324,6 +391,53 @@ Also hardened: an OAuth grant confined to a database but with no chosen
 collection previously could serialise its collection allowlist as an empty
 list, which refused every per-call `collection` override. Empty allowlists
 from the issuer are now treated as absent.
+### Changed: unified databases follow the PRO-1618 API contract
+
+On a UNIFIED database only. A split database keeps every request body and
+every rendering byte for byte.
+
+- `hydradb_query` sends no `type` and reads the four-key answer (`chunks`,
+  `graph`, `forceful_relations`, `llm_prompt`) by shape, never through the
+  SDK's v2 serializer, which knows neither `llm_prompt` nor `context_id`. The
+  shape requires a `forceful_relations` array; a body carrying the pre-rename
+  `relations` key instead is refused as malformed, not read in its place. The
+  text the model sees is the server-built `llm_prompt` verbatim: markdown,
+  with its citation labels ([1], [R1], [P1]), its `## Forceful relations`
+  section and each entry's `**Id:**`; the same answer rides beside it as
+  structured content (`chunks[].context_id`, `score`, `content`, `enrichment`
+  as a plain string, `enrichment_kind`, the declared `context_category`,
+  passed through even when there is no enrichment text, and `temporal[]` when
+  the server sent it; `graph[].origin` (`query_path` or `chunk_relation`),
+  `graph[].triplets` and `graph[].path_summary`; `forceful_relations[]`,
+  whose `chunk` has the same shape; distinct `sources[]` built from
+  `context_id`, with no titles invented). Nothing on this path reads
+  `tenant_id`, `sub_tenant_id` or `source_type` from the response meta, which
+  a unified response does not carry. A v2 answer
+  to a unified request, from a server that predates the unified response,
+  still goes to the v2 renderer. The unified answer is held to the same
+  40,000-character budget as a split one by shortening long result bodies
+  only (see "unified search hardening" above); a prompt that fits is returned
+  whole.
+- New `follow_forceful_relations` on `hydradb_query` toggles the chunks
+  declared related at ingest. It is a unified-database option: the split
+  path goes through the pinned SDK, which knows only the deprecated
+  `query_forceful_relations` name, so it is refused on a split request rather
+  than sent under the wrong key or dropped.
+- `hydradb_ingest` sends the contract body: list key `context`, item fields
+  `text` or `conversation`, `context_id`, `title`, `enrich`, `instructions`,
+  `happened_at`, `attributes`, `custom_attributes`, `context_category`,
+  `forceful_relations` (`{context_ids}`), `acl`, `user_name`; request-level `upsert`. The 202 is
+  read by hand so `results[].source_id` (the context id) reaches the caller;
+  the SDK serializer reads a wire `id` and would have lost it.
+- New `hydradb_ingest` arguments: `attributes` and `happened_at` (the
+  preferred names for `metadata` and `observation_date`; both spellings are
+  accepted and a contradiction between them is refused), `custom_attributes`,
+  `instructions` (replaces the server's default extraction guidance for that
+  entry), `context_category`, `forceful_relations` and `acl`. The last three
+  exist on a unified item only and are refused by name on a split database.
+  The contract-named arguments work with `turns` as well as `text`.
+- `hydradb_list`, `hydradb_delete` and the relations read no longer send
+  `type: "unified"`, and the subgraph read never sends `type` for that kind.
 
 ## [1.4.0] - 2026-09-01
 
@@ -354,6 +468,46 @@ Three retrieval controls the API accepts were unreachable through the MCP.
 Temporal retrieval (`temporal_now` / `temporal_facts`) remains unreachable: the
 fields are live in the API but absent from the OpenAPI spec, so `@hydradb/sdk`
 does not generate them. Blocked on the spec, not on this server.
+
+### Added — unified databases (PRO-1618)
+
+A database created with `type: "unified"` keeps knowledge and memory in ONE
+corpus. On it the server accepts only `kind: "unified"` (its default) and
+refuses `memory`/`knowledge`, so the server's host-owned defaults now follow
+the database's layout: `hydradb_query` defaults to `unified` there (still
+`all` on a split database), `hydradb_ingest` and `hydradb_delete` default to
+`unified` there (still `memory` on split), and `hydradb_list` defaults to
+`unified` there too, listing every item in one page. `hydradb_databases` names
+each database's layout. The layout comes from one memoised `GET /databases`
+probe (`details[].type`); a probe that fails reads as split, so nothing
+changes for any existing database, and a layout the server reveals by refusing
+a defaulted kind is remembered rather than relearned on every call.
+
+Both of `hydradb_ingest`'s input shapes follow the layout. The conversation
+path (`turns`) pinned `memory` outside the resolution the text path went
+through, so it answered a unified database with a 400 while the text path
+worked; it now resolves and retries the same way, and an explicit `kind` is
+carried there instead of being replaced.
+
+`hydradb_list`'s `kind` is optional again as a result. On a split database an
+omitted `kind` still lists memories, and now says so: knowledge is a separate
+corpus there and the listing names what it did not cover, so it cannot be read
+as the whole store.
+
+`is_markdown` and `user_name` are carried onto a unified item rather than
+dropped — both are fields on the server's ingest item. `user_name` goes on the
+item for a text ingest and stays on the turn for a conversation, because a
+turn's `name` is the finer-grained statement of the same fact and the server
+reads it first; sending both would risk one day discarding the per-turn
+speaker identity that anchoring depends on. `user_name` is also no longer
+discarded on a text ingest, which lost it on every layout.
+
+Unified ingest sends the `context[]` body (text or a role/content conversation
+per item) and `hydradb_databases` can create a unified database through
+`type`. The pinned SDK predates both, so those calls and the layout probe go
+over the wrapper's shared raw v2 transport (`src/hydra/transport.ts`, the
+same one the BYOG and subgraph paths use) with the same envelope unwrap and
+error translation; they move back onto the SDK once it is regenerated.
 
 ## [1.3.0] - 2026-08-28
 

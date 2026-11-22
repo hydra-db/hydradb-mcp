@@ -10,7 +10,7 @@ import type { JsonValue, ListedFields, PageInfo, SourceListItem } from "./adapte
 import { resolveConfig, resolveConnectorConfig, resolveDatabaseToolsConfig, resolveGraphConfig } from "./config.js";
 import type { ConnectorConfig, DatabaseToolsConfig, GraphConfig } from "./config.js";
 import { type ConnectorToolResponse, ConnectorTools } from "./connectors.js";
-import { renderRecalledContext } from "./context.js";
+import { renderRecalledContext, boundStructuredContent, fitUnifiedPrompt, unifiedStructuredContent, type UnifiedStructuredContent } from "./context.js";
 import { COLLECTION_PATTERN, MAX_BODY_BYTES, renderRows } from "./cypher.js";
 import { extname } from "node:path";
 
@@ -24,9 +24,14 @@ import {
 	assertCollectionAllowed,
 	assertDatabaseAllowed,
 	hasEntries,
+	isUnifiedQueryResult,
 } from "./hydra/index.js";
 import type {
 	ContextKind,
+	ContextCategory,
+	UnifiedQueryResult,
+	ResponseMeta,
+	ResponseWarning,
 	AppKnowledgeItem,
 	CreateDatabaseParams,
 	IngestGraph,
@@ -52,6 +57,85 @@ const INGEST_INSTRUCTIONS =
 	"that would help personalise future interactions.";
 
 
+type RenderedWarning = ResponseWarning & { collections_omitted?: number };
+
+const RESPONSE_WARNING_COUNT_LIMIT = 10;
+
+const RESPONSE_WARNING_CHAR_BUDGET = 4_000;
+
+function renderWarningText(warnings: RenderedWarning[], omitted: number): string {
+	if (warnings.length === 0) return "";
+
+	const lines = warnings.map((warning) => {
+		const collections = warning.collections?.length
+			? ` (collections: ${warning.collections.join(", ")})`
+			: "";
+
+		const collectionsOmitted = warning.collections_omitted
+			? ` (${warning.collections_omitted} additional collections omitted)`
+			: "";
+
+		return `- ${warning.code}: ${warning.message}${collections}${collectionsOmitted}`;
+	});
+
+	return `\n\nWarnings:\n${lines.join("\n")}${omitted ? `\n(${omitted} additional warnings omitted)` : ""}`;
+}
+
+function warningPayloadFits(warnings: RenderedWarning[], omitted: number): boolean {
+	return Math.max(
+		renderWarningText(warnings, omitted).length,
+		JSON.stringify({ warnings, warnings_omitted: omitted }).length,
+	) <= RESPONSE_WARNING_CHAR_BUDGET;
+}
+
+function boundResponseWarnings(input: ResponseWarning[], shorten: (value: string) => string) {
+	const candidates = input.slice(0, RESPONSE_WARNING_COUNT_LIMIT);
+	let omitted = Math.max(input.length - candidates.length, 0);
+	const warnings: RenderedWarning[] = [];
+
+	for (let i = 0; i < candidates.length; i++) {
+		const warning = candidates[i]!;
+		const rawCollections = warning.collections ?? [];
+
+		let rendered: RenderedWarning = {
+			code: shorten(warning.code),
+			message: shorten(warning.message),
+		};
+
+		if (warning.collections) rendered.collections = [];
+
+		if (rawCollections.length) rendered.collections_omitted = rawCollections.length;
+
+		const reserveOmitted = omitted + candidates.length - i - 1;
+
+		if (!warningPayloadFits([...warnings, rendered], reserveOmitted)) {
+			omitted += candidates.length - i;
+			break;
+		}
+
+		for (const rawCollection of rawCollections.slice(0, 50)) {
+			const nextCollections = [...(rendered.collections ?? []), shorten(rawCollection)];
+
+			const next: RenderedWarning = {
+				code: rendered.code,
+				message: rendered.message,
+				collections: nextCollections,
+			};
+
+			if (nextCollections.length < rawCollections.length) {
+				next.collections_omitted = rawCollections.length - nextCollections.length;
+			}
+
+			if (!warningPayloadFits([...warnings, next], reserveOmitted)) break;
+			rendered = next;
+		}
+
+		warnings.push(rendered);
+	}
+
+	return { warnings, omitted };
+}
+
 type ToolResult = {
 	content: { type: "text"; text: string }[];
 	structuredContent?: Record<string, unknown>;
@@ -60,6 +144,44 @@ type ToolResult = {
 
 interface ToolInputFields {
 	[name: string]: z.ZodTypeAny;
+}
+
+/**
+ * The machine-readable code the server sends when a request's `type` is not one
+ * the target database can answer — which on a defaulted kind means the storage
+ * layout is not the one this process assumed (PRO-1618,
+ * hydradb-application#870, `ErrCodeCorpusTypeUnsupported`).
+ *
+ * Deciding whether to retry as `unified` used to rest entirely on a regex over
+ * the server's English message: it changes with copy edits, and it already had
+ * two wordings to match. The code is the stable signal; the prose match
+ * survives only as a fallback, for a server that predates the code and for the
+ * one refusal that still goes out without it (see `refusedForUnified`).
+ */
+const UNIFIED_LAYOUT_ERROR_CODE = "CORPUS_TYPE_UNSUPPORTED";
+
+/**
+ * The error code an API failure body carries, if any.
+ *
+ * Reads the v2 envelope's `error.code` first and the deprecated
+ * `detail.error_code` second — both are written on the same response, and a
+ * client that reads only one is betting on which half a given handler filled
+ * in.
+ */
+function layoutErrorCode(body: unknown): string | undefined {
+	if (body == null || typeof body !== "object") return undefined;
+	const record = body as { error?: unknown; detail?: unknown };
+	const error = record.error;
+	if (error != null && typeof error === "object") {
+		const { code } = error as { code?: unknown };
+		if (typeof code === "string" && code !== "") return code;
+	}
+	const detail = record.detail;
+	if (detail != null && typeof detail === "object") {
+		const legacy = (detail as { error_code?: unknown }).error_code;
+		if (typeof legacy === "string" && legacy !== "") return legacy;
+	}
+	return undefined;
 }
 
 /**
@@ -111,6 +233,19 @@ function textResult(text: string): ToolResult {
 }
 
 /**
+ * A key-order-independent encoding, for telling whether two records the
+ * caller sent under two names say the same thing. Only objects are
+ * normalised; arrays keep their order because it carries meaning there.
+ */
+function canonicalJson(value: unknown): string {
+	return JSON.stringify(value, (_key, inner: unknown) => {
+		if (inner == null || typeof inner !== "object" || Array.isArray(inner)) return inner;
+		const record = inner as Record<string, unknown>;
+		return Object.fromEntries(Object.keys(record).sort().map((k) => [k, record[k]]));
+	});
+}
+
+/**
  * A result the caller can read OR parse.
  *
  * Every handler returned prose only, so a caller wanting an id had to pull it
@@ -143,6 +278,23 @@ function structuredResult(
  */
 function errorResult(text: string): ToolResult {
 	return { content: [{ type: "text" as const, text }], isError: true };
+}
+
+/**
+ * The collection names a `/query` refusal says are not searchable, from the
+ * API's `sub_tenant_ids do not exist: [a, b]` message. Empty for any other
+ * error, so only that refusal can narrow a search.
+ */
+export function unsearchableCollections(err: unknown): string[] {
+	const message = err instanceof Error ? err.message : String(err);
+	const match = /(?:sub_tenant_ids|collections) do not exist: \[([^\]]*)\]/.exec(message);
+
+	if (!match) return [];
+
+	return match[1]
+		.split(",")
+		.map((name) => name.trim().replace(/^["']|["']$/g, ""))
+		.filter((name) => name !== "");
 }
 
 /**
@@ -671,6 +823,137 @@ export function createHydraDBServer(
 	// --- Handlers (shared by canonical tools and their deprecated aliases) ---
 
 	/**
+	 * Whether the database a call targets was created with `type: "unified"`
+	 * (PRO-1618). On such a database `memory`/`knowledge` are refused by the
+	 * server, so every host-owned default below switches to `unified` there;
+	 * on a split database (every one created before) nothing changes. One
+	 * memoised `GET /databases` probe answers for the whole process.
+	 */
+	async function isUnifiedDatabase(database?: string, signal?: AbortSignal): Promise<boolean> {
+		const target = database?.trim() || hydra.database;
+		return (await hydra.databases.layout(target, signal)) === "unified";
+	}
+
+	/**
+	 * `kind: "unified"` named by the caller on a database KNOWN to be split.
+	 * A unified request goes out without `type`, and a split database reads an
+	 * absent type as its own default — knowledge for a search, list or delete,
+	 * memory for a write — so the call would quietly succeed against a corpus
+	 * the caller did not ask for. Refused here instead. Only a known layout is
+	 * trusted: when the probe cannot answer, the request goes out and the
+	 * server decides, as before.
+	 */
+	async function refuseUnifiedOnSplit(
+		tool: string,
+		kind: string | undefined,
+		database?: string,
+		signal?: AbortSignal,
+	): Promise<ToolResult | undefined> {
+		if (kind !== "unified") return undefined;
+		const target = database?.trim() || hydra.database;
+
+		if ((await hydra.databases.knownLayout(target, signal)) !== "split") return undefined;
+		const kinds = tool === TOOL_NAMES.QUERY ? `"memory", "knowledge" or "all"` : `"memory" or "knowledge"`;
+
+		return errorResult(
+			`${tool} was called with kind "unified", but database "${target}" is a split database: ` +
+				`it keeps memory and knowledge apart, so nothing was sent. Leave \`kind\` out, or pass ${kinds}.`,
+		);
+	}
+
+	/**
+	 * The server names the rule when a split kind reaches a unified database:
+	 * `type 'memory' is not valid on a unified database`. When the kind was a
+	 * host-owned DEFAULT (not the caller's choice) and the layout probe could
+	 * not tell (it failed, or the database is not in the list it saw), that
+	 * refusal is the missing answer: retry once as `unified` rather than fail
+	 * a valid request over a transient probe. An explicit kind is never
+	 * rewritten.
+	 */
+	function refusedForUnified(err: unknown): boolean {
+		if (!(err instanceof HydraWrapperError) || err.status !== 400) return false;
+		if (layoutErrorCode(err.body) === UNIFIED_LAYOUT_ERROR_CODE) {
+			// The code names the CLASS — "that `type` is not one this request can
+			// use" — and FOUR refusals share it, only one of which this retry
+			// answers. So the code decides that we are looking at a corpus-type
+			// problem, and the line below decides which one. Matching the code
+			// alone would turn the other three into a second, equally refused
+			// request:
+			//   - `invalid type "x": must be 'knowledge', 'memory', …` (unknown value)
+			//   - `invalid type 'all': … an ingest must name the one it writes to`
+			//   - `type "unified" is only valid on a unified database …` — the
+			//     REVERSE direction, where retrying as unified is exactly wrong
+			//   - `items cannot be combined with type=knowledge …`
+			// The siblings are excluded by name rather than the target being
+			// matched by name, so a copy edit to the one wording we do want
+			// still retries. That is the whole reason to prefer the code.
+			//
+			// The `all` refusal ends with layout-aware advice, and on a unified
+			// database that advice contains the sentence "This database is
+			// unified". The prose fallback below matches that phrase — so this
+			// exclusion, keyed on the unchanged `invalid type 'all':` opening,
+			// is the only thing keeping a bad `all` from being retried. Pinned
+			// by test, both advice variants.
+			//
+			// Two of these are unreachable from this client (`all` cannot be
+			// sent to `context.ingest` at all — it exists only on QueryKind —
+			// and the unified body carries no `type`, so items+knowledge cannot
+			// be built either). They are excluded anyway: the same list is
+			// shared across four clients, unreachable-today is one config change
+			// from reachable, and "correct by coincidence" is not worth keeping
+			// when the alternative is one alternation.
+			//
+			// `only SUPPORTED on a unified database` covers one refusal that
+			// does not carry THIS code: `context_category is only supported on a
+			// unified database … This database is split`. It carries its own
+			// `CONTEXT_CATEGORY_UNSUPPORTED` instead, deliberately, because it
+			// refuses a different FIELD — the repair is "stop sending
+			// context_category", not "retry with another type", and filing it
+			// under the corpus code would send a caller round the `type` values
+			// forever.
+			//
+			// So this alternation is belt and braces: that message cannot reach
+			// this branch as things stand. It is kept because if anyone ever did
+			// reuse the corpus code there, the failure would be a SPLIT
+			// database's refusal answered by a retry as unified, in silence.
+			return !/invalid type|only (?:valid|supported) on a unified database|items cannot be combined with/i.test(
+				err.message,
+			);
+		}
+		// No code: fall back to the server's English prose. Both wordings are
+		// covered — `type %q is not valid on a unified database` from the
+		// corpus-type check, and `this database is unified: send the content as
+		// items…` from the ingest handler, which a bare /unified database/
+		// pattern misses because the two words are the other way round. That
+		// second one is still the ONLY refusal here that goes out with no code,
+		// so this is not dead weight against a current server.
+		return /is not valid on a unified database|database is unified/i.test(err.message);
+	}
+
+	async function withUnifiedFallback<K extends string, T>(
+		defaulted: boolean,
+		kind: K,
+		run: (kind: K | "unified") => Promise<T>,
+		database?: string,
+	): Promise<T> {
+		try {
+			return await run(kind);
+		} catch (err) {
+			if (defaulted && kind !== "unified" && refusedForUnified(err)) {
+				logger.warn("kind was defaulted but the database is unified; retrying as unified");
+				const result = await run("unified");
+				// The retry succeeding is the answer the probe could not give.
+				// Record it, or a process whose probe failed pays the same
+				// refused request on every defaulted call for the rest of its
+				// life — the probe is memoised, its failure was not.
+				hydra.databases.recordLayout(database?.trim() || hydra.database, "unified");
+				return result;
+			}
+			throw err;
+		}
+	}
+
+	/**
 	 * A database's collections, or null when they cannot be listed within
 	 * fanoutListTimeoutMs. Never throws: a query must not fail because the
 	 * optional widening could not be worked out.
@@ -730,12 +1013,56 @@ export function createHydraDBServer(
 				scope.collection == null ? "workspace default" : `collection ${JSON.stringify(scope.collection)}`) + ".";
 	}
 
+	function resultNotices(
+		args: { database?: unknown; collection?: unknown; collections?: unknown },
+		meta: ResponseMeta,
+		resolved?: { collection?: unknown; collections?: unknown },
+		scoped = true,
+	) {
+		const { warnings, omitted } = boundResponseWarnings(meta.warnings ?? [], briefly);
+		let text = renderWarningText(warnings, omitted);
+		const fields: Record<string, unknown> = {
+			...(meta.requestId ? { request_id: meta.requestId } : {}),
+			...(warnings.length ? { warnings } : {}), ...(omitted ? { warnings_omitted: omitted } : {}),
+		};
+		if (!scoped) return { text, fields };
+		const explicitDatabase = typeof args.database === "string" ? args.database.trim() : undefined;
+		const explicitCollection = typeof args.collection === "string" ? args.collection.trim() : undefined;
+
+		if (explicitDatabase && (explicitCollection || args.collections != null)) return { text, fields };
+		const database = explicitDatabase || hydra.database;
+		const collections = resolved?.collections ?? args.collections;
+		const collection = collections ? undefined : meta.collection ?? resolved?.collection ?? (explicitCollection || hydra.collection);
+		const collectionSource = explicitCollection || args.collections != null ? "per_call"
+			: collections || (resolved?.collection != null && !hydra.collection) ? "automatic_search"
+				: hydra.collection ? "connection_default" : "api_resolved";
+		fields.scope_notice = {
+			code: "RESOLVED_SCOPE", database,
+			database_source: explicitDatabase ? "per_call" : "connection_default",
+			collection: collection ?? null, ...(collections ? { collections } : {}),
+			collection_source: collectionSource,
+			collection_reported: collection != null || collections != null,
+			oauth_restricted: hydra.allowedDatabases != null || hydra.allowedCollections != null,
+			...(hydra.allowedDatabases ? { allowed_databases: hydra.allowedDatabases } : {}),
+			...(hydra.allowedCollections ? { allowed_collections: hydra.allowedCollections } : {}),
+		};
+		text += `\n\nScope notice: database ${JSON.stringify(database)} (${explicitDatabase ? "explicit per-call scope" : "connection-default fallback"}); ` +
+			(collections ? `collections ${JSON.stringify(collections)}` : collection != null ? `collection ${JSON.stringify(collection)}` : "collection API-resolved, unreported") +
+			". Per-call database/collection overrides the connection defaults; OAuth switching stays within the approved grant.";
+		return { text, fields };
+	}
+
 	async function runQuery(args: {
 		query: string;
 		kind?: QueryKind;
 		max_results?: number;
 		mode?: "fast" | "thinking" | "auto";
 		graph_context?: boolean;
+		query_explicit_relations?: boolean;
+		follow_forceful_relations?: boolean;
+		query_forceful_relations?: boolean;
+		additional_graph_context?: string | null;
+		additional_context?: string | null;
 		detail?: "compact" | "full";
 		structured?: boolean;
 		operator?: "or" | "and" | "phrase";
@@ -749,18 +1076,26 @@ export function createHydraDBServer(
 		database?: string;
 		collection?: string;
 		collections?: string[];
-		additional_context?: string;
 		alpha?: number | "auto";
 		query_by?: "hybrid" | "text";
-		query_forceful_relations?: boolean;
 		temporal_reasoning?: boolean;
 		response_format?: "structured" | "markdown";
-	}, signal?: AbortSignal): Promise<ToolResult> {
+	}, signal?: AbortSignal, onMeta?: (meta: ResponseMeta) => void): Promise<ToolResult> {
 		// Host-owned default (CONTRACT §2 rule 5): search BOTH families. This tool
 		// used to pin `kind: "memory"`, which made every ingested knowledge source
 		// unreachable from the MCP — `hydradb_list`/`hydradb_inspect` could browse
 		// knowledge but nothing could search it.
-		const kind = args.kind ?? "all";
+		const refused = await refuseUnifiedOnSplit(TOOL_NAMES.QUERY, args.kind, args.database, signal);
+
+		if (refused) return refused;
+
+		let kind: QueryKind;
+		try {
+			kind = args.kind ?? ((await isUnifiedDatabase(args.database, signal)) ? "unified" : "all");
+		} catch (error) {
+			if (signal?.reason instanceof DeadlineExceeded) throw new HydraWrapperError(`Hydra DB /query → ERR: ${signal.reason.message}`, "/query");
+			throw error;
+		}
 		logger.debug(`${TOOL_NAMES.QUERY}: "${args.query}" (kind=${kind})`);
 
 		const maxResults = args.max_results ?? 10;
@@ -811,6 +1146,7 @@ export function createHydraDBServer(
 		// Captured per call, not stored on the resource: two tools can be in
 		// flight at once and a shared slot would hand one the other's id.
 		let requestId: string | undefined;
+		let responseMeta: ResponseMeta = {};
 
 		const textRetrieval = args.operator != null || args.query_by === "text";
 
@@ -827,6 +1163,8 @@ export function createHydraDBServer(
 			acl: args.acl,
 			numRelatedChunks: args.num_related_chunks,
 			graphContext: args.graph_context ?? true,
+			queryExplicitRelations: args.query_explicit_relations ?? args.follow_forceful_relations ?? args.query_forceful_relations,
+			additionalGraphContext: args.additional_graph_context ?? args.additional_context ?? undefined,
 			queryApps: args.query_apps,
 			database: args.database,
 			collection: scopeCollection,
@@ -839,38 +1177,38 @@ export function createHydraDBServer(
 			// that is not hybrid. A caller's own alpha is always sent, and the
 			// wrapper refuses it on text retrieval.
 			alpha: args.alpha ?? (textRetrieval ? undefined : 0.8),
-			// Host-owned default (CONTRACT §2 rule 5), and 0 is also what the API
-			// applies when the field is omitted — so the default ranking is
-			// unchanged. It stops being a constant here because "what is the
-			// current state of X" is a different question from "what matches X",
-			// and only a caller that can raise this can ask the first one.
-			recencyBias: args.recency_bias ?? 0,
-			additionalContext: args.additional_context,
+			recencyBias: args.recency_bias,
+			additionalContext: args.additional_context ?? undefined,
 			queryForcefulRelations: args.query_forceful_relations,
 			temporalReasoning: args.temporal_reasoning,
 		};
 
 		const requestOptions = {
 			signal,
-			onMeta: (meta: { requestId?: string }) => {
+			onMeta: (meta: ResponseMeta) => {
+				responseMeta = meta;
+				onMeta?.(meta);
 				requestId = meta.requestId;
 			},
 		};
 
-		const send = () => hydra.context.query({
-			...params,
+		const send = () => withUnifiedFallback(args.kind == null, kind, (kindToSend) => hydra.context.query({
+			...params, kind: kindToSend, collection: scopeCollection, collections: scopeCollections,
+			// A split database keeps the 0 this server has always sent, so existing
+			// rankings do not move. A unified database gets the server's own default.
+			recencyBias: params.recencyBias ?? (kindToSend === "unified" ? undefined : 0),
 			responseFormat: args.response_format === "structured" ? "structured" : undefined,
-		}, requestOptions);
+		}, requestOptions), args.database);
 
 		// Once the search scope has been chosen, a failed query must remain a
 		// failure. Retrying in the workspace default silently changed the corpus
 		// and could turn malformed responses or inaccessible partitions into an
 		// apparently successful empty/partial answer.
-		const searchedCollections = scopeCollections != null
+		let searchedCollections = scopeCollections != null
 			? Array.isArray(scopeCollections) ? scopeCollections : Object.keys(scopeCollections)
 			: undefined;
 
-		const resolvedScope = searchedCollections
+		let resolvedScope = searchedCollections
 			? { database, collections: searchedCollections }
 			: singleScope({ database, collection: scopeCollection });
 
@@ -887,7 +1225,6 @@ export function createHydraDBServer(
 		const queryResult = (text: string, extra: Record<string, unknown> = {}) => {
 			const body = scopeWarning ? `${text}\n\nScope warning: ${scopeWarning}` : text;
 
-			if (args.structured !== true) return textResult(body);
 
 			return structuredResult(body, {
 				resolved_scope: resolvedScope, ...(requestId ? { request_id: requestId } : {}), ...extra,
@@ -915,7 +1252,7 @@ export function createHydraDBServer(
 				`\n\n(truncated: ${markdown.length} characters, showing ${showing})`;
 
 			const framing =
-				`${scopeText(resolvedScope)}\n\n`.length + feedback.length + warning.length;
+				`${scopeText(resolvedScope)}\n\n`.length + feedback.length + warning.length + resultNotices(args, responseMeta, resolvedScope).text.length;
 
 			const budget = Math.max(QUERY_CHAR_BUDGET - framing - note(QUERY_CHAR_BUDGET).length, 0);
 
@@ -926,7 +1263,25 @@ export function createHydraDBServer(
 			return queryResult(`${scopeText(resolvedScope)}\n\n${shown}${feedback}`);
 		}
 
-		const raw = await send();
+		let raw: Awaited<ReturnType<typeof send>>;
+		try { raw = await send(); } catch (error) {
+			const refused = widened ? unsearchableCollections(error) : [];
+			const remaining = (widened ?? []).filter((name) => !refused.includes(name));
+			if (!refused.length || !remaining.length || remaining.length === widened?.length) throw error;
+			scopeCollection = remaining.length === 1 ? remaining[0] : undefined;
+			scopeCollections = remaining.length > 1 ? remaining : undefined;
+			scopeWarning = `Skipped collection${refused.length === 1 ? "" : "s"} ${refused.map((name) => JSON.stringify(name)).join(", ")}: listed for this database but not searchable. The other collections were searched.`;
+			raw = await send();
+			searchedCollections = scopeCollections;
+			resolvedScope = searchedCollections ? { database, collections: searchedCollections } : singleScope({ database, collection: scopeCollection });
+		}
+		if (isUnifiedQueryResult(raw)) {
+			hydra.databases.recordLayout(database, "unified");
+			const notices = resultNotices(args, responseMeta, resolvedScope);
+			const result = renderUnifiedQuery(raw, kind, requestId, { detail: args.detail, scopeWarning,
+				noticeChars: Math.max(notices.text.length, JSON.stringify(notices.fields).length) });
+			return { ...result, structuredContent: { ...result.structuredContent, resolved_scope: resolvedScope } };
+		}
 
 		const feedbackLine = requestId
 			? `\nWas this useful? Report it with ${TOOL_NAMES.FEEDBACK} using request_id: ${requestId}`
@@ -1021,7 +1376,8 @@ export function createHydraDBServer(
 			feedbackLine;
 
 		const scopeLine = scopeText(resolvedScope);
-		const headerAllowance = 120 + scopeLine.length + (scopeWarning?.length ?? 0) + 20;
+		const notices = resultNotices(args, responseMeta, resolvedScope);
+		const headerAllowance = 120 + scopeLine.length + (scopeWarning?.length ?? 0) + 20 + notices.text.length;
 		const sourceRefs = new Map<string, Record<string, unknown>>();
 
 		const singleCollection = "collection" in resolvedScope
@@ -1099,6 +1455,67 @@ export function createHydraDBServer(
 	 * document's status), and a credential cut in half by the shortening could
 	 * no longer be matched.
 	 */
+	function renderUnifiedQuery(
+		res: UnifiedQueryResult,
+		kind: QueryKind,
+		requestId?: string,
+		opts: { detail?: "compact" | "full"; scopeWarning?: string; noticeChars?: number } = {},
+	): ToolResult {
+		const { chunks, graph, forceful_relations: forcefulRelations } = res;
+		// The same line and the same structured field as the v2 path above: the
+		// request id is the ONLY key POST /feedback correlates on, and an empty
+		// answer is still a query the caller may want to rate.
+		const feedbackLine = requestId
+			? `\nWas this useful? Report it with ${TOOL_NAMES.FEEDBACK} using request_id: ${requestId}`
+			: "";
+
+		const warningLine = opts.scopeWarning ? `\n\nScope warning: ${opts.scopeWarning}` : "";
+		const warningField = opts.scopeWarning ? { scope_warning: opts.scopeWarning } : {};
+
+		if (chunks.length === 0 && forcefulRelations.length === 0 && graph.length === 0) {
+			const text = `No relevant ${resultNoun(kind)} found in Hydra DB.${warningLine}${feedbackLine}`;
+
+			return requestId != null || opts.scopeWarning
+				? structuredResult(text, { ...(requestId != null ? { request_id: requestId } : {}), ...warningField })
+				: textResult(text);
+		}
+		const legend =
+			`\n\n---\nEach Id above is a source id (context_id in the structured content): pass one ` +
+			`to ${TOOL_NAMES.INSPECT} for that source's full content, or to ${TOOL_NAMES.DELETE} to ` +
+			`remove it. Results are numbered 1, 2, and so on, forceful relations R1, R2 and related ` +
+			`facts P1, P2: cite them in brackets ([1], [R1], [P1]) when you use what they mark.` +
+			feedbackLine;
+		const extras = [
+			forcefulRelations.length > 0
+				? `${forcefulRelations.length} forceful relation${forcefulRelations.length === 1 ? "" : "s"}`
+				: "",
+			graph.length > 0 ? `${graph.length} graph path${graph.length === 1 ? "" : "s"}` : "",
+		].filter((s) => s !== "");
+		const header =
+			`Found ${chunks.length} ${resultNoun(kind, chunks.length)}` +
+			`${extras.length > 0 ? ` (${extras.join(", ")})` : ""}:`;
+
+		const fit = fitUnifiedPrompt(res, {
+			maxTotalChars: QUERY_CHAR_BUDGET - header.length - legend.length - warningLine.length - 4 - (opts.noticeChars ?? 0),
+			maxBodyChars: opts.detail === "compact" ? COMPACT_CHUNK_CHARS : undefined,
+		});
+		const structured = unifiedStructuredContent(res, fit.bodyCap != null ? { maxChunkChars: fit.bodyCap } : {});
+		// The structured copy carries graph triplets and temporal facts the
+		// prompt cut does not reach, so it gets its own bound.
+		const structuredCut = boundStructuredContent(structured, QUERY_CHAR_BUDGET - (opts.noticeChars ?? 0));
+
+		return structuredResult(
+			`${header}\n\n${fit.text}${warningLine}${legend}`,
+			{
+				...structured,
+				...(fit.trimmed || structuredCut ? { shortened: true } : {}),
+				...warningField,
+				...(requestId != null ? { request_id: requestId } : {}),
+			},
+		);
+	}
+
+
 	function briefly(message: string): string {
 		const safe = hydra.redact(message);
 
@@ -1207,6 +1624,7 @@ export function createHydraDBServer(
 		},
 		file: FileArg,
 		signal?: AbortSignal,
+		onMeta?: (meta: ResponseMeta) => void,
 	): Promise<ToolResult> {
 		if (args.text != null || args.turns != null) {
 			throw new Error(
@@ -1214,9 +1632,9 @@ export function createHydraDBServer(
 			);
 		}
 
-		if (args.kind === "memory") {
+		if (args.kind !== undefined && args.kind !== "knowledge") {
 			throw new Error(
-				`${TOOL_NAMES.INGEST} ingests a \`file\` as knowledge, not memory. Drop \`kind\`, or extract ` +
+				`${TOOL_NAMES.INGEST} ingests a \`file\` as knowledge, not ${args.kind}. Drop \`kind\`, or extract ` +
 				"the facts worth remembering and send them as `text`.",
 			);
 		}
@@ -1224,7 +1642,6 @@ export function createHydraDBServer(
 		const unsupported = (
 			[
 				["infer", args.infer],
-				["is_markdown", args.is_markdown],
 				["user_name", args.user_name],
 				["metadata", args.metadata],
 				["additional_metadata", args.additional_metadata],
@@ -1234,8 +1651,9 @@ export function createHydraDBServer(
 				["evidence_kind", args.evidence_kind],
 				["evidence_subject", args.evidence_subject],
 				["observation_date", args.observation_date],
+				["acl", args.acl],
 			] as const
-		).flatMap(([name, value]) => (value != null ? [name] : []));
+		).flatMap(([name, value]) => (value !== undefined ? [name] : []));
 
 		if (unsupported.length > 0) {
 			throw new Error(
@@ -1285,7 +1703,7 @@ export function createHydraDBServer(
 			collection: args.collection,
 			upsert: args.overwrite ?? true,
 			recordType: args.record_type,
-		}, { signal });
+		}, { signal, onMeta });
 
 		const res = toAddMemoryResponse(raw);
 		const outcome = ingestOutcome(res, args.source_id);
@@ -1315,6 +1733,7 @@ export function createHydraDBServer(
 		kind?: ContextKind;
 		title?: string;
 		source_id?: string;
+		user_name?: string;
 		infer?: boolean;
 		is_markdown?: boolean;
 		overwrite?: boolean;
@@ -1326,16 +1745,39 @@ export function createHydraDBServer(
 		evidence_kind?: IngestParams["evidenceKind"];
 		evidence_subject?: string;
 		observation_date?: string;
+		/** Free-form data beside the entry (unified `custom_attributes`, split `additional_metadata`). */
+		custom_attributes?: IngestParams["additionalMetadata"];
+		/** Replaces the host's default extraction guidance for this entry. */
+		instructions?: string;
+		/** Unified only; the wrapper refuses it on a split database. */
+		context_category?: ContextCategory;
+		/** Unified only; the wrapper refuses it on a split database. */
+		forceful_relations?: string[];
+		/** Unified only; the wrapper refuses it on a split database. */
+		acl?: string[] | null;
 		database?: string;
 		collection?: string;
-	}, signal?: AbortSignal): Promise<ToolResult> {
-		const kind = args.kind ?? "memory";
+	}, signal?: AbortSignal, onMeta?: (meta: ResponseMeta) => void): Promise<ToolResult> {
+		const refused = await refuseUnifiedOnSplit(TOOL_NAMES.INGEST, args.kind, args.database, signal);
+		if (refused) return refused;
+		const kind: ContextKind = args.kind ?? ((await isUnifiedDatabase(args.database, signal)) ? "unified" : "memory");
 		const sourceId = args.source_id ?? (args.graph == null ? undefined : generatedSourceId());
 
-		const customInstructions = args.custom_instructions ??
+		const customInstructions = args.instructions ?? args.custom_instructions ??
 			(args.infer === false ? undefined : INGEST_INSTRUCTIONS);
 
 		logger.debug(`${TOOL_NAMES.INGEST}: "${args.text.slice(0, 50)}..." (kind=${kind})`);
+
+		// The unified item's own fields (PRO-1618) are forwarded on EVERY kind:
+		// on a split database the wrapper refuses them by name, which is the
+		// answer a caller who set them needs, where dropping them here would
+		// report "success: 1" for a label or an ACL that was never stored.
+		const unifiedOnly = {
+			contextCategory: args.context_category,
+			forcefulRelations:
+				args.forceful_relations != null ? { ids: args.forceful_relations } : undefined,
+			acl: args.acl,
+		};
 
 		// The memory item shape has no counterpart on the knowledge path, which
 		// carries only a document and its filename — so those fields are sent only
@@ -1343,14 +1785,14 @@ export function createHydraDBServer(
 		// branch rather than dropping them, and passing them here unconditionally
 		// would make every knowledge write fail.
 		const kindSpecific =
-			kind === "memory"
+			(kind === "memory" || kind === "unified")
 				? {
 						sourceId,
 						infer: args.infer ?? true,
-						isMarkdown: args.is_markdown ?? false,
+						isMarkdown: kind === "unified" ? args.is_markdown : args.is_markdown ?? false,
 						customInstructions,
 						metadata: args.metadata,
-						additionalMetadata: args.additional_metadata,
+						additionalMetadata: args.custom_attributes ?? args.additional_metadata,
 						observationDate: args.observation_date,
 						graph: args.graph,
 					}
@@ -1358,25 +1800,29 @@ export function createHydraDBServer(
 						sourceId,
 						infer: args.infer,
 						metadata: args.metadata,
-						additionalMetadata: args.additional_metadata,
+						additionalMetadata: args.custom_attributes ?? args.additional_metadata,
 						relations: args.relations,
 						evidenceKind: args.evidence_kind,
 						evidenceSubject: args.evidence_subject,
 						graph: args.graph,
 					};
 
-		const raw = await hydra.context.ingest({
-			kind,
+		const raw = await withUnifiedFallback(args.kind == null, kind, (kindToSend) => hydra.context.ingest({
+			kind: kindToSend,
 			text: args.text,
 			title: args.title ?? defaultTitle(args.text),
 			...kindSpecific,
+			// main never sent user_name on a split text memory, and the server
+			// ignores it there, so only the unified item carries the speaker.
+			userName: kindToSend === "unified" ? args.user_name : undefined,
+			...unifiedOnly,
 			database: args.database,
 			collection: args.collection,
 			// Default stays true. An ingest is no longer retried after an unclear
 			// failure, but a caller who re-sends one after "outcome unknown" can
 			// still land it twice; upsert makes that an overwrite, not a duplicate.
 			upsert: args.overwrite ?? true,
-		}, { signal });
+		}, { signal, onMeta }), args.database);
 
 		const res = toAddMemoryResponse(raw);
 
@@ -1411,7 +1857,7 @@ export function createHydraDBServer(
 		acl?: string[] | null;
 		database?: string;
 		collection?: string;
-	}, signal?: AbortSignal): Promise<ToolResult> {
+	}, signal?: AbortSignal, onMeta?: (meta: ResponseMeta) => void): Promise<ToolResult> {
 		const databaseMetadataPresent =
 			args.database_metadata != null && Object.keys(args.database_metadata).length > 0;
 
@@ -1439,7 +1885,7 @@ export function createHydraDBServer(
 		// accepts arrays only, so normalize null without collapsing omission.
 		if (args.acl !== undefined) update.acl = args.acl ?? [];
 
-		const res = await hydra.context.update(update, { signal });
+		const res = await hydra.context.update(update, { signal, onMeta });
 
 		const id = res.id ?? args.id;
 		const database = res.database ?? args.database;
@@ -1520,6 +1966,14 @@ export function createHydraDBServer(
 		turns: ConversationTurn[],
 		sourceId: string,
 		opts?: {
+			kind?: ContextKind;
+			contextCategory?: ContextCategory;
+			forcefulRelations?: string[];
+			acl?: string[] | null;
+			attributes?: IngestParams["metadata"];
+			customAttributes?: IngestParams["additionalMetadata"];
+			happenedAt?: string;
+			instructions?: string;
 			userName?: string;
 			infer?: boolean;
 			title?: string;
@@ -1534,31 +1988,47 @@ export function createHydraDBServer(
 			collection?: string;
 		},
 		signal?: AbortSignal,
+		onMeta?: (meta: ResponseMeta) => void,
 	): Promise<ToolResult> {
+		// The kind was pinned to "memory" here, outside the layout resolution
+		// every sibling handler goes through, so the conversation half of
+		// `hydradb_ingest` answered a unified database with a 400 while the text
+		// half worked — one tool, one of its two input shapes broken. Resolved
+		// and retried exactly as `runStore` does.
+		const refused = await refuseUnifiedOnSplit(TOOL_NAMES.INGEST, opts?.kind, opts?.database, signal);
+
+		if (refused) return refused;
+		const kind: ContextKind =
+			opts?.kind ?? ((await isUnifiedDatabase(opts?.database, signal)) ? "unified" : "memory");
 		logger.debug(
-			`${TOOL_NAMES.INGEST}: ${turns.length} turns -> ${sourceId}`,
+			`${TOOL_NAMES.INGEST}: ${turns.length} turns -> ${sourceId} (kind=${kind})`,
 		);
 
-		const customInstructions = opts?.customInstructions ??
+		const customInstructions = opts?.instructions ?? opts?.customInstructions ??
 			(opts?.infer === false ? undefined : INGEST_INSTRUCTIONS);
 
-		const raw = await hydra.context.ingest({
-			kind: "memory",
+		const raw = await withUnifiedFallback(opts?.kind == null, kind, (kindToSend) => hydra.context.ingest({
+			kind: kindToSend,
 			pairs: turns,
 			sourceId,
+			// On the unified path this is the item's `user_name`, which is where
+			// speaker identity lives there — so it is carried, not dropped.
 			userName: opts?.userName ?? "User",
 			infer: opts?.infer ?? true,
 			title: opts?.title,
 			isMarkdown: opts?.isMarkdown,
 			customInstructions,
-			metadata: opts?.metadata,
-			additionalMetadata: opts?.additionalMetadata,
-			observationDate: opts?.observationDate,
+			metadata: opts?.attributes ?? opts?.metadata,
+			additionalMetadata: opts?.customAttributes ?? opts?.additionalMetadata,
+			observationDate: opts?.happenedAt ?? opts?.observationDate,
+			contextCategory: opts?.contextCategory,
+			forcefulRelations: opts?.forcefulRelations ? { ids: opts.forcefulRelations } : undefined,
+			acl: opts?.acl,
 			graph: opts?.graph,
 			upsert: opts?.overwrite ?? true,
 			database: opts?.database,
 			collection: opts?.collection,
-		}, { signal });
+		}, { signal, onMeta }), opts?.database);
 
 		const res = toAddMemoryResponse(raw);
 
@@ -1635,6 +2105,22 @@ export function createHydraDBServer(
 		});
 	}
 
+	function normalizeIngestAliases<T extends {
+		metadata?: IngestItem["metadata"]; attributes?: IngestItem["metadata"];
+		additional_metadata?: IngestItem["additionalMetadata"]; custom_attributes?: IngestItem["additionalMetadata"];
+		observation_date?: string; happened_at?: string; custom_instructions?: string; instructions?: string;
+	}>(input: T): T {
+		if (input.attributes !== undefined && input.metadata !== undefined && canonicalJson(input.attributes) !== canonicalJson(input.metadata)) {
+			throw new Error(`${TOOL_NAMES.INGEST} received different values for \`attributes\` and its older name \`metadata\`. Pass only \`attributes\`.`);
+		}
+		return { ...input,
+			metadata: input.attributes !== undefined ? input.attributes : input.metadata,
+			additional_metadata: input.custom_attributes !== undefined ? input.custom_attributes : input.additional_metadata,
+			observation_date: input.happened_at !== undefined ? input.happened_at : input.observation_date,
+			custom_instructions: input.instructions !== undefined ? input.instructions : input.custom_instructions,
+		};
+	}
+
 	async function runIngestBatch(args: {
 		kind?: ContextKind;
 		items: IngestToolItem[];
@@ -1642,10 +2128,13 @@ export function createHydraDBServer(
 		overwrite?: boolean;
 		database?: string;
 		collection?: string;
-	}, signal?: AbortSignal): Promise<ToolResult> {
-		const kind = args.kind ?? "memory";
+	}, signal?: AbortSignal, onMeta?: (meta: ResponseMeta) => void): Promise<ToolResult> {
+		const refused = await refuseUnifiedOnSplit(TOOL_NAMES.INGEST, args.kind, args.database, signal);
+		if (refused) return refused;
+		const kind: ContextKind = args.kind ?? ((await isUnifiedDatabase(args.database, signal)) ? "unified" : "memory");
 
-		const items: IngestItem[] = args.items.map((item, index) => {
+		const items: IngestItem[] = args.items.map((original, index) => {
+			const item = normalizeIngestAliases(original);
 			const hasText = item.text != null;
 			const hasTurns = item.turns != null && item.turns.length > 0;
 
@@ -1661,10 +2150,6 @@ export function createHydraDBServer(
 
 			if (kind === "knowledge" && callerInstructions != null) {
 				throw new Error("custom_instructions applies to memory ingestion only.");
-			}
-
-			if (item.infer === false && callerInstructions != null) {
-				throw new Error(`items[${index}] cannot use custom_instructions when infer is false.`);
 			}
 
 			const sourceId = item.source_id || generatedSourceId();
@@ -1689,6 +2174,9 @@ export function createHydraDBServer(
 				evidenceSubject: item.evidence_subject,
 				observationDate: item.observation_date,
 				graph: item.graph,
+				acl: item.acl,
+				contextCategory: item.context_category,
+				forcefulRelations: item.forceful_relations !== undefined ? { ids: item.forceful_relations } : undefined,
 			};
 
 			return normalized;
@@ -1700,13 +2188,13 @@ export function createHydraDBServer(
 			throw new Error("hydradb_ingest item ids must be unique within one batch.");
 		}
 
-		const raw = await hydra.context.ingest({
-			kind,
+		const raw = await withUnifiedFallback(args.kind == null, kind, (kindToSend) => hydra.context.ingest({
+			kind: kindToSend,
 			items,
 			upsert: args.overwrite ?? true,
 			database: args.database,
 			collection: args.collection,
-		}, { signal });
+		}, { signal, onMeta }), args.database);
 
 		const res = toAddMemoryResponse(raw);
 		const outcome = ingestOutcome(res);
@@ -1765,7 +2253,7 @@ export function createHydraDBServer(
 		overwrite?: boolean;
 		database?: string;
 		collection?: string;
-	}, signal?: AbortSignal): Promise<ToolResult> {
+	}, signal?: AbortSignal, onMeta?: (meta: ResponseMeta) => void): Promise<ToolResult> {
 		const explicitIds = args.items.flatMap((item) => item.id ? [item.id] : []);
 
 		if (new Set(explicitIds).size !== explicitIds.length) {
@@ -1781,7 +2269,7 @@ export function createHydraDBServer(
 				upsert: args.overwrite ?? true,
 				database: args.database,
 				collection: args.collection,
-			}, { signal });
+			}, { signal, onMeta });
 		} catch (error) {
 			if (error instanceof Error && /CORPUS_TYPE_UNSUPPORTED/.test(error.message)) {
 				throw new Error(
@@ -1858,6 +2346,24 @@ export function createHydraDBServer(
 		return `${shown} of ${total} (page ${current})${more ? ` — pass page=${current + 1} for more` : ""}`;
 	}
 
+	/**
+	 * `hydradb_list`, with the corpus resolved the way every other tool
+	 * resolves it (PRO-1618).
+	 *
+	 * `kind` is the caller's when they gave one — an explicit kind is never
+	 * rewritten. When they did not, the layout decides: `unified` on a unified
+	 * database (which accepts nothing else), `memory` on a split one, and the
+	 * same one-shot retry the other tools use covers a layout probe that could
+	 * not answer.
+	 */
+
+	/**
+	 * `noteOtherCorpus` appends the one thing a memory-only listing cannot say
+	 * for itself: that it is not the whole store. Without it a caller who asked
+	 * "what does Hydra DB have?" reads a memory page as the complete inventory
+	 * and never learns the knowledge corpus exists — the bug that made `kind`
+	 * required in the first place.
+	 */
 	async function runListMemories(args: {
 		source_ids?: string[];
 		page?: number;
@@ -1867,8 +2373,12 @@ export function createHydraDBServer(
 		acl?: string[];
 		database?: string;
 		collection?: string;
-	} = {}, signal?: AbortSignal): Promise<ToolResult> {
+	} = {}, signal?: AbortSignal, onMeta?: (meta: ResponseMeta) => void, noteOtherCorpus = false): Promise<ToolResult> {
 		logger.debug(TOOL_NAMES.LIST);
+		const corpusNote = noteOtherCorpus
+			? `\n\nMemories only — knowledge is a separate corpus on this database and is ` +
+				`not listed here. Call ${TOOL_NAMES.LIST} again with kind="knowledge" for it.`
+			: "";
 
 		const raw = await hydra.context.list({
 			kind: "memory",
@@ -1880,7 +2390,7 @@ export function createHydraDBServer(
 			acl: args.acl,
 			database: args.database,
 			collection: args.collection,
-		}, { signal });
+		}, { signal, onMeta });
 
 		const { memories, page } = toMemoryList(raw);
 		const resolvedScope = singleScope(args);
@@ -1892,11 +2402,11 @@ export function createHydraDBServer(
 			const filtered = hasEntries(args.metadata) || hasEntries(args.additional_metadata);
 
 			return structuredResult(
-				args.page != null && args.page > 1
+				(args.page != null && args.page > 1
 					? `No memories on page ${args.page}.`
 					: filtered
 						? "No memories match the supplied metadata filters."
-						: emptyListText("memories", args.database, args.collection),
+						: emptyListText("memories", args.database, args.collection)) + corpusNote,
 				{
 					kind: "memory",
 					resolved_scope: resolvedScope,
@@ -1921,7 +2431,7 @@ export function createHydraDBServer(
 		});
 
 		return structuredResult(
-			`${coverage(memories.length, page, args.page)} memories:\n${scopeText(resolvedScope)}\n\n${lines.join("\n")}`,
+			`${coverage(memories.length, page, args.page)} memories:\n${scopeText(resolvedScope)}\n\n${lines.join("\n")}${corpusNote}`,
 			{
 				kind: "memory",
 				resolved_scope: resolvedScope,
@@ -1959,7 +2469,7 @@ export function createHydraDBServer(
 	}
 
 	async function runListSources(args: {
-		kind: "knowledge" | "all";
+		kind?: "knowledge" | "all" | "unified";
 		source_ids?: string[];
 		external_id?: string;
 		parent_external_id?: string;
@@ -1975,8 +2485,14 @@ export function createHydraDBServer(
 		acl?: string[];
 		database?: string;
 		collection?: string;
-	}, signal?: AbortSignal): Promise<ToolResult> {
+		/** `unified` lists every item of a unified database in one page (PRO-1618); the rows have the source shape. */
+	}, signal?: AbortSignal, onMeta?: (meta: ResponseMeta) => void): Promise<ToolResult> {
 		logger.debug(TOOL_NAMES.LIST);
+		// The canonical tool resolves the kind from the layout and always names
+		// one (see `runList`). This default is the deprecated
+		// `hydradb_list_sources` alias's own meaning — that tool IS the knowledge
+		// listing — not a guess standing in for a layout it never checked.
+		const listKind = args.kind ?? "knowledge";
 
 		const sourceFields: Record<string, string> = {};
 
@@ -2002,7 +2518,7 @@ export function createHydraDBServer(
 			acl: args.acl,
 			database: args.database,
 			collection: args.collection,
-		}, { signal });
+		}, { signal, onMeta });
 
 		const { sources, page } = toSourceList(raw, args.include_fields);
 		const noun = args.kind === "all" ? "items (memories and knowledge together)" : "sources";
@@ -2115,6 +2631,7 @@ export function createHydraDBServer(
 			collection?: string;
 		},
 		signal?: AbortSignal,
+		onMeta?: (meta: ResponseMeta) => void,
 	): Promise<ToolResult> {
 		// Like subgraph: blank is refused, anything else goes out byte for byte.
 		// A blank id would otherwise read as "omitted" and return the whole
@@ -2140,7 +2657,7 @@ export function createHydraDBServer(
 					database: args.database,
 					collection: args.collection,
 				},
-				{ signal },
+				{ signal, onMeta },
 			),
 		);
 
@@ -2239,7 +2756,8 @@ export function createHydraDBServer(
 	 * query over a corpus of long documents could dominate the caller's context.
 	 * `compact` trims each body and drops the extra-context blocks; `full`
 	 * restores the previous rendering. The total budget applies either way,
-	 * because fifty capped chunks still add up.
+	 * because fifty capped chunks still add up. Both are split-database
+	 * ceilings: a unified answer is returned whole (see renderUnifiedQuery).
 	 */
 	const COMPACT_CHUNK_CHARS = 600;
 	const QUERY_CHAR_BUDGET = 40_000;
@@ -2379,6 +2897,7 @@ export function createHydraDBServer(
 			collection?: string;
 		},
 		signal?: AbortSignal,
+		onMeta?: (meta: ResponseMeta) => void,
 	): Promise<ToolResult> {
 		// Blank is rejected; anything else is forwarded byte for byte. The
 		// server treats an item id as opaque (ingest stores a caller's
@@ -2405,7 +2924,7 @@ export function createHydraDBServer(
 				database: args.database,
 				collection: args.collection,
 			},
-			{ signal },
+			{ signal, onMeta },
 		);
 
 		// Soft failure, like inspect: the server's own message, flagged.
@@ -2517,7 +3036,7 @@ export function createHydraDBServer(
 		acl?: string[];
 		database?: string;
 		collection?: string;
-	}, signal?: AbortSignal): Promise<ToolResult> {
+	}, signal?: AbortSignal, onMeta?: (meta: ResponseMeta) => void): Promise<ToolResult> {
 		logger.debug(`${TOOL_NAMES.INSPECT}: ${args.source_id}`);
 
 		const res = await hydra.context.inspect({
@@ -2527,7 +3046,7 @@ export function createHydraDBServer(
 			acl: args.acl,
 			database: args.database,
 			collection: args.collection,
-		}, { signal });
+		}, { signal, onMeta });
 
 		// Soft failure: return a normal (non-error) text result, matching v1.
 		if (!res.success || res.error) {
@@ -2608,6 +3127,7 @@ export function createHydraDBServer(
 	async function runStatus(
 		args: { ids: string[]; database?: string; collection?: string },
 		signal?: AbortSignal,
+		onMeta?: (meta: ResponseMeta) => void,
 	): Promise<ToolResult> {
 		logger.debug(`${TOOL_NAMES.STATUS}: ${args.ids.join(", ")}`);
 
@@ -2615,7 +3135,7 @@ export function createHydraDBServer(
 			ids: args.ids,
 			database: args.database,
 			collection: args.collection,
-		}, { signal });
+		}, { signal, onMeta });
 
 		const statuses = res.statuses ?? [];
 
@@ -2664,7 +3184,7 @@ export function createHydraDBServer(
 	 * gone when the server just declined to remove it.
 	 */
 	function deleteReport(
-		kind: "memory" | "knowledge",
+		kind: "memory" | "knowledge" | "unified",
 		ids: string[],
 		res: { success?: boolean; message?: string; results?: unknown },
 		removed: boolean,
@@ -2799,7 +3319,7 @@ export function createHydraDBServer(
 		const a = args as {
 			id?: string;
 			ids?: string[];
-			kind?: "memory" | "knowledge";
+			kind?: ContextKind;
 			database?: string;
 			collection?: string;
 		};
@@ -2818,24 +3338,27 @@ export function createHydraDBServer(
 
 	async function runDelete(args: {
 		ids: string[];
-		kind?: "memory" | "knowledge";
+		kind?: ContextKind;
 		database?: string;
 		collection?: string;
-	}, signal?: AbortSignal): Promise<ToolResult> {
+	}, signal?: AbortSignal, onMeta?: (meta: ResponseMeta) => void): Promise<ToolResult> {
 		// Whether the caller CHOSE memory, or merely got it. A wrong-family delete
 		// is silent — the server removes nothing and says so in the vocabulary of
 		// the family we asked about — so the report has to know which happened.
+		const refused = await refuseUnifiedOnSplit(TOOL_NAMES.DELETE, args.kind, args.database, signal);
+
+		if (refused) return refused;
 		const kindAssumed = args.kind == null;
-		const kind = args.kind ?? "memory";
+		const kind: ContextKind =
+			args.kind ?? ((await isUnifiedDatabase(args.database, signal)) ? "unified" : "memory");
 		logger.debug(`${TOOL_NAMES.DELETE}: ${kind}${kindAssumed ? " (assumed)" : ""} ${args.ids.join(", ")}`);
 
-		const res = await hydra.context.delete({
+		const res = await withUnifiedFallback(args.kind == null, kind, (kindToSend) => hydra.context.delete({
 			ids: args.ids,
-			kind,
+			kind: kindToSend,
 			database: args.database,
 			collection: args.collection,
-		}, { signal });
-
+		}, { signal, onMeta }), args.database);
 		// `userMemoryDeleted` is a COUNT on the v2 wire — a live delete returned
 		// `{"deletedCount":1,"userMemoryDeleted":1}` — and the SDK types it as a
 		// number. The v1 memory-delete handler returns a boolean for the same
@@ -2877,23 +3400,36 @@ export function createHydraDBServer(
 	 * call: the list IS the answer, and asking the API would only show
 	 * databases the connection is not permitted to use.
 	 */
-	async function runDatabases(signal?: AbortSignal): Promise<ToolResult> {
-		const defaultDatabase = hydra.database;
+	async function runDatabases(signal?: AbortSignal, onMeta?: (meta: ResponseMeta) => void): Promise<ToolResult> {
+		const defaultDatabase = hydra.defaultDatabase;
 		let databases: string[];
 		let confined = false;
-
+		const layouts = new Map<string, string>();
 		if (hydra.allowedDatabases) {
 			databases = [...hydra.allowedDatabases];
 			confined = true;
 		} else {
-			const listed = await hydra.databases.list({ signal });
+			const listed = await hydra.databases.list({ signal, onMeta });
 			databases = (listed.databases ?? listed.tenantIds ?? []).filter(Boolean);
+			for (const row of listed.details ?? []) {
+				if (row.database) layouts.set(row.database, row.type === "unified" ? "unified" : "split");
+			}
 		}
 
-		if (!databases.includes(defaultDatabase)) databases.unshift(defaultDatabase);
+		if (defaultDatabase && !databases.includes(defaultDatabase)) databases.unshift(defaultDatabase);
+		// Storage layout per database (PRO-1618). A unified database takes no
+		// `kind`; naming it here is what lets a caller avoid a refused call. A
+		// confined connection keeps answering without a network call, as
+		// promised above; its per-call defaults still resolve the layout lazily.
+		const types: Record<string, string> = {};
+		if (!confined) {
+			for (const d of databases) types[d] = layouts.get(d) ?? "split";
+		}
 
 		const lines = databases.map(
-			(d) => `  - ${d}${d === defaultDatabase ? "  (default for this connection)" : ""}`,
+			(d) =>
+				`  - ${d}${types[d] === "unified" ? "  [unified: one corpus, kind not needed]" : ""}` +
+				`${d === defaultDatabase ? "  (default for this connection)" : ""}`,
 		);
 
 		const note = confined
@@ -2903,7 +3439,7 @@ export function createHydraDBServer(
 
 		return structuredResult(
 			`${databases.length} database(s):\n${lines.join("\n")}${note}`,
-			{ databases, default: defaultDatabase, confined },
+			{ databases, default: defaultDatabase ?? null, confined, ...(confined ? {} : { types }) },
 		);
 	}
 
@@ -2962,6 +3498,7 @@ export function createHydraDBServer(
 	async function runListCollections(
 		args: { database?: string },
 		signal?: AbortSignal,
+		onMeta?: (meta: ResponseMeta) => void,
 	): Promise<ToolResult> {
 		const database = args.database?.trim() || hydra.database;
 		// Scoped like every other per-database tool. Both calls below go straight
@@ -2969,7 +3506,7 @@ export function createHydraDBServer(
 		// without this a database-confined grant could enumerate the collection
 		// names and row counts of a database the user never approved.
 		assertDatabaseAllowed(database, hydra.allowedDatabases);
-		const res = await hydra.databases.collections(database, { signal });
+		const res = await hydra.databases.collections(database, { signal, onMeta });
 		const listed = collectionNamesOf(res);
 
 		if (listed == null) {
@@ -3011,7 +3548,7 @@ export function createHydraDBServer(
 
 		try {
 			const stats = await Promise.race([
-				hydra.databases.stats(database, { signal: statsAbort.signal }),
+				hydra.databases.stats(database, { signal: statsAbort.signal, onMeta }),
 				aborted,
 			]);
 
@@ -3072,6 +3609,7 @@ export function createHydraDBServer(
 	async function runDeleteCollection(
 		args: { database?: string; collection?: string },
 		signal?: AbortSignal,
+		onMeta?: (meta: ResponseMeta) => void,
 	): Promise<ToolResult> {
 		const collection = args.collection?.trim() ?? "";
 
@@ -3086,7 +3624,7 @@ export function createHydraDBServer(
 
 		const res = await hydra.databases.deleteCollection(
 			{ database, collection },
-			{ signal },
+			{ signal, onMeta },
 		);
 
 		return structuredResult(
@@ -3119,7 +3657,7 @@ export function createHydraDBServer(
 	function graphDatabase(override?: string): string {
 		const database = override?.trim() || graphConfig.database;
 
-		if (database && database !== hydra.database) {
+		if (database && database !== hydra.defaultDatabase) {
 			assertDatabaseAllowed(database, hydra.allowedDatabases);
 		}
 
@@ -3254,6 +3792,7 @@ export function createHydraDBServer(
 			max_rows?: number;
 		},
 		signal?: AbortSignal,
+		onMeta?: (meta: ResponseMeta) => void,
 	): Promise<ToolResult> {
 		const scope = graphScope(args);
 
@@ -3263,7 +3802,7 @@ export function createHydraDBServer(
 
 		const rows = await hydra.graph.query(
 			{ ...scope, query: args.query, params: args.params },
-			{ signal },
+			{ signal, onMeta },
 		);
 
 		// A write with no RETURN legitimately yields zero rows. Reporting that as
@@ -3301,6 +3840,7 @@ export function createHydraDBServer(
 	async function runGraphCollections(
 		args: { database?: string },
 		signal?: AbortSignal,
+		onMeta?: (meta: ResponseMeta) => void,
 	): Promise<ToolResult> {
 		const database = graphDatabase(args.database);
 
@@ -3313,7 +3853,7 @@ export function createHydraDBServer(
 
 		logger.debug(`${TOOL_NAMES.GRAPH_COLLECTIONS}: ${database}`);
 
-		const collections = await hydra.graph.listCollections({ database }, { signal });
+		const collections = await hydra.graph.listCollections({ database }, { signal, onMeta });
 
 		if (collections.length === 0) {
 			return structuredResult(
@@ -3333,6 +3873,7 @@ export function createHydraDBServer(
 	async function runGraphAdmin(
 		args: { action: string; database?: string; collection?: string },
 		signal?: AbortSignal,
+		onMeta?: (meta: ResponseMeta) => void,
 	): Promise<ToolResult> {
 		const database = graphDatabase(args.database);
 
@@ -3346,7 +3887,7 @@ export function createHydraDBServer(
 		logger.debug(`${TOOL_NAMES.GRAPH_ADMIN}: ${args.action} ${database}`);
 
 		if (args.action === "create_database") {
-			const res = await hydra.graph.createDatabase(database, { signal });
+			const res = await hydra.graph.createDatabase(database, { signal, onMeta });
 
 			return structuredResult(
 				`Created graph database "${database}" (status: ${res.status ?? "ready"}). ` +
@@ -3374,7 +3915,7 @@ export function createHydraDBServer(
 				assertCollectionAllowed(collection, hydra.allowedCollections);
 			}
 
-			await hydra.graph.dropCollection({ database, collection }, { signal });
+			await hydra.graph.dropCollection({ database, collection }, { signal, onMeta });
 
 			// The endpoint is idempotent and does not report whether anything was
 			// there, so this states what was requested rather than claiming a
@@ -3408,7 +3949,7 @@ export function createHydraDBServer(
 				);
 			}
 
-			const res = await hydra.graph.dropDatabase(database, { signal });
+			const res = await hydra.graph.dropDatabase(database, { signal, onMeta });
 			const dropped = res.deleted_collections ?? [];
 
 			const listed =
@@ -3475,6 +4016,7 @@ export function createHydraDBServer(
 			collection?: string;
 		},
 		signal?: AbortSignal,
+		onMeta?: (meta: ResponseMeta) => void,
 	): Promise<ToolResult> {
 		const requestId = args.request_id?.trim() ?? "";
 
@@ -3509,7 +4051,7 @@ export function createHydraDBServer(
 				database: args.database,
 				collection: args.collection,
 			},
-			{ signal },
+			{ signal, onMeta },
 		);
 
 		// `recorded: false` is a real outcome, not an error: the submission was
@@ -3540,7 +4082,7 @@ export function createHydraDBServer(
 	// --- Registration helper ---
 
 	/** The part of the MCP request context the tool wrapper reads. */
-	type ToolExtra = { signal?: AbortSignal; requestId?: string | number };
+	type ToolExtra = { signal?: AbortSignal; requestId?: string | number; onMeta?: (meta: ResponseMeta) => void };
 
 	/**
 	 * The last stop before a failure reaches the model: strip this connection's
@@ -3717,7 +4259,7 @@ export function createHydraDBServer(
 		inputSchema: ToolInputFields | z.ZodType,
 		handler: (
 			args: Record<string, unknown>,
-			extra?: { signal?: AbortSignal },
+			extra?: { signal?: AbortSignal; onMeta?: (meta: ResponseMeta) => void },
 		) => Promise<ToolResult>,
 		annotations?: {
 			readOnlyHint?: boolean;
@@ -3737,14 +4279,58 @@ export function createHydraDBServer(
 			const isConnector = CONNECTOR_TOOL_NAMES.some((toolName) => toolName === name);
 
 			return trackInFlight(() => redactFailure(() => withCallBudget(extra, (signal) => {
-				const run = () => handler(args, { ...extra, signal });
+				const run = async () => {
+			if (args.type != null && args.kind != null && args.type !== args.kind) {
+				throw new Error("Conflicting selectors: `type` and deprecated `kind` differ. Pass only `type`.");
+			}
+			const normalized = args.type != null && !(inputSchema instanceof z.ZodType) && inputSchema.kind ? { ...args, kind: args.type } : args;
+			const canonical = ALIAS_REPLACEMENTS[name] ?? name;
+			const scoped = [TOOL_NAMES.QUERY, TOOL_NAMES.INGEST, TOOL_NAMES.LIST, TOOL_NAMES.INSPECT,
+				TOOL_NAMES.DELETE, TOOL_NAMES.UPDATE, TOOL_NAMES.RELATIONS, TOOL_NAMES.STATUS, TOOL_NAMES.SUBGRAPH, TOOL_NAMES.LIST_COLLECTIONS,
+				TOOL_NAMES.DELETE_COLLECTION].includes(canonical as never);
+			let database: string | undefined;
+			if (scoped) {
+				database = typeof args.database === "string" ? args.database.trim() || hydra.database : hydra.database;
+				assertDatabaseAllowed(database, hydra.allowedDatabases);
+				if (typeof args.collection === "string") {
+					const collection = args.collection.trim() || hydra.collection;
+					if (collection) assertCollectionAllowed(collection, hydra.allowedCollections);
+				}
+				if (Array.isArray(args.collections)) {
+					for (const collection of args.collections) assertCollectionAllowed(String(collection), hydra.allowedCollections);
+				}
+			}
+			let responseMeta: ResponseMeta = {};
+			const result = await handler(normalized, { ...extra, signal, onMeta: (meta) => {
+				responseMeta = { ...responseMeta, ...meta, warnings: [...(responseMeta.warnings ?? []), ...(meta.warnings ?? [])] };
+				extra?.onMeta?.(meta);
+			} });
+			if (result.isError) return result;
+			const notices = resultNotices(args, responseMeta,
+				result.structuredContent?.resolved_scope as { collection?: unknown; collections?: unknown } | undefined, scoped);
+			if (!notices.text && Object.keys(notices.fields).length === 0) return result;
+			const payload = canonical === TOOL_NAMES.QUERY && args.structured !== true ? {
+				...(typeof result.structuredContent?.request_id === "string" ? { request_id: result.structuredContent.request_id } : {}),
+				...(typeof result.structuredContent?.scope_warning === "string" ? { scope_warning: result.structuredContent.scope_warning } : {}),
+			} : result.structuredContent;
+			const structuredContent = { ...notices.fields, ...payload };
+			if (canonical === TOOL_NAMES.QUERY && structuredContent.layout === "unified" && JSON.stringify(structuredContent).length > QUERY_CHAR_BUDGET) {
+				structuredContent.shortened = true;
+				boundStructuredContent(structuredContent as UnifiedStructuredContent, QUERY_CHAR_BUDGET);
+			}
+			return {
+				...result,
+				content: result.content.map((part, index) => index === 0 ? { ...part, text: part.text + notices.text } : part),
+				structuredContent,
+			};
+				};
 
 				return isConnector ? hideConnectorFailure(run, signal) : run();
 			})));
 		};
 
 		const wrapped = isDeprecated
-			? (args: Record<string, unknown>, extra?: { signal?: AbortSignal }) => {
+			? (args: Record<string, unknown>, extra?: { signal?: AbortSignal; onMeta?: (meta: ResponseMeta) => void }) => {
 					warnDeprecatedAlias(name);
 
 					return counted(args, extra);
@@ -3756,8 +4342,11 @@ export function createHydraDBServer(
 			{
 				title: desc.title,
 				description: desc.description,
-				inputSchema: inputSchema as never,
-				...(outputSchema ? { outputSchema: outputSchema as never } : {}),
+				inputSchema: (!(inputSchema instanceof z.ZodType) && inputSchema.kind ? { ...inputSchema,
+					type: (inputSchema.kind as z.ZodTypeAny).describe("Canonical corpus selector. Omit for automatic layout-aware routing; kind is a deprecated alias."),
+					kind: (inputSchema.kind as z.ZodTypeAny).describe(`Deprecated alias for type. ${(inputSchema.kind as z.ZodTypeAny).description ?? ""}`),
+				} : inputSchema) as never,
+				...(outputSchema ? { outputSchema: { ...outputSchema, request_id: z.string().optional(), warnings: z.array(z.record(z.unknown())).optional(), warnings_omitted: z.number().optional(), scope_notice: z.record(z.unknown()).optional() } as never } : {}),
 				...(annotations ? { annotations } : {}),
 			},
 			wrapped as never,
@@ -3793,7 +4382,7 @@ export function createHydraDBServer(
 	const querySchema = {
 		query: z.string().describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.query),
 		kind: z
-			.enum(["memory", "knowledge", "all"])
+			.enum(["memory", "knowledge", "all", "unified"])
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.kind),
 		max_results: z
@@ -3810,6 +4399,14 @@ export function createHydraDBServer(
 			.boolean()
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.graph_context),
+		query_explicit_relations: z.boolean().optional().describe("Include explicitly linked context (default true). Takes precedence over deprecated relation selectors, including false."),
+		query_forceful_relations: z.boolean().optional().describe("Deprecated alias for query_explicit_relations; follow_forceful_relations takes precedence."),
+		additional_graph_context: z.string().nullish().describe("Short factual retrieval hint, not a filter. Takes precedence over additional_context, including an empty string."),
+		additional_context: z.string().nullish().describe("Deprecated request-hint alias for additional_graph_context."),
+		follow_forceful_relations: z
+			.boolean()
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.follow_forceful_relations),
 		detail: z
 			.enum(["compact", "full"])
 			.optional()
@@ -3862,11 +4459,6 @@ export function createHydraDBServer(
 			.array(z.string())
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.acl),
-		additional_context: z
-			.string()
-			.min(1)
-			.optional()
-			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.additional_context),
 		alpha: z
 			.union([z.literal("auto"), z.number().min(0).max(1)])
 			.optional()
@@ -3875,10 +4467,6 @@ export function createHydraDBServer(
 			.enum(["hybrid", "text"])
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.query_by),
-		query_forceful_relations: z
-			.boolean()
-			.optional()
-			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.query_forceful_relations),
 		temporal_reasoning: z
 			.boolean()
 			.optional()
@@ -4022,6 +4610,16 @@ export function createHydraDBServer(
 		})),
 	});
 
+	const ingestAliasesSchema = {
+		attributes: z.record(jsonValue).optional().describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.attributes),
+		custom_attributes: z.record(jsonValue).optional().describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.custom_attributes),
+		happened_at: ingestMetadataSchema.observation_date.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.happened_at),
+		instructions: customInstructionsSchema.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.instructions),
+		context_category: z.enum(["auto", "user_preference", "business_knowledge", "decision_trace"]).optional().describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.context_category),
+		forceful_relations: z.array(z.string().min(1)).min(1).optional().describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.forceful_relations),
+		acl: ingestAclSchema.optional().describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.acl),
+	};
+
 	const ingestItemSchema = z.object({
 		text: z
 			.string()
@@ -4042,6 +4640,7 @@ export function createHydraDBServer(
 		custom_instructions: customInstructionsSchema,
 		graph: graphSchema.optional(),
 		...ingestMetadataSchema,
+		...ingestAliasesSchema,
 	});
 
 	const appKnowledgeKindSchema = z.enum([
@@ -4087,7 +4686,7 @@ export function createHydraDBServer(
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.text),
 		kind: z
-			.enum(["memory", "knowledge"])
+			.enum(["memory", "knowledge", "unified"])
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.kind),
 		turns: z
@@ -4136,6 +4735,7 @@ export function createHydraDBServer(
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.file),
 		record_type: recordTypeSchema.optional().describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.record_type),
+		...ingestAliasesSchema,
 	};
 
 	type IngestToolItem = z.infer<typeof ingestItemSchema>;
@@ -4164,6 +4764,13 @@ export function createHydraDBServer(
 		user_name?: string;
 		database?: string;
 		collection?: string;
+		attributes?: IngestParams["metadata"];
+		custom_attributes?: IngestParams["additionalMetadata"];
+		happened_at?: string;
+		instructions?: string;
+		context_category?: ContextCategory;
+		forceful_relations?: string[];
+		acl?: string[] | null;
 	};
 
 	const conversationSchema = {
@@ -4183,12 +4790,19 @@ export function createHydraDBServer(
 	};
 
 	const listSchema = {
-		// Required, not defaulted. `hydradb_list({})` used to return memories only
-		// and read as the complete inventory, so a caller asking "what does Hydra
-		// DB have?" never saw the knowledge corpus — which hydradb_query searches
-		// by default. Same class of bug as the query `kind` pin, on the list path.
+		// Optional, because a UNIFIED database has no kind to choose (PRO-1618):
+		// requiring one there means the caller either guesses and eats a refused
+		// request, or is told to name a corpus that does not exist. The host
+		// resolves it from the layout instead, exactly as query/ingest/delete do.
+		//
+		// It was made required to fix a real bug — `hydradb_list({})` returned
+		// memories only and read as the complete inventory, so a caller asking
+		// "what does Hydra DB have?" never saw the knowledge corpus. That fix is
+		// kept without the requirement: on a SPLIT database an omitted kind still
+		// lists memories, and the listing now says in as many words that
+		// knowledge is a separate corpus it did not cover.
 		kind: z
-			.enum(["memory", "knowledge", "all"])
+			.enum(["memory", "knowledge", "all", "unified"]).optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.LIST].params.kind),
 		ids: z
 			.array(z.string())
@@ -4404,7 +5018,7 @@ export function createHydraDBServer(
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.DELETE].params.id),
 		kind: z
-			.enum(["memory", "knowledge"])
+			.enum(["memory", "knowledge", "unified"])
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.DELETE].params.kind),
 		...scopeSchema,
@@ -4426,7 +5040,7 @@ export function createHydraDBServer(
 	);
 
 	const listOutputSchema = {
-		kind: z.enum(["memory", "knowledge", "all"]),
+		kind: z.enum(["memory", "knowledge", "all", "unified"]),
 		resolved_scope: z.object({ database: z.string(), collection: z.string().nullable() }).optional(),
 		items: z.array(
 			z.object({
@@ -4479,7 +5093,7 @@ export function createHydraDBServer(
 
 	const deleteOutputSchema = {
 		ids: z.array(z.string()),
-		kind: z.enum(["memory", "knowledge"]),
+		kind: z.enum(["memory", "knowledge", "unified"]),
 		deleted: z.boolean(),
 		/** Absent when the server confirmed a removal without saying how many. */
 		deleted_count: z.number().optional(),
@@ -4646,7 +5260,7 @@ export function createHydraDBServer(
 	register(
 		TOOL_NAMES.QUERY,
 		querySchema,
-		(args, extra) => runQuery(args as Parameters<typeof runQuery>[0], extra?.signal),
+		(args, extra) => runQuery(args as Parameters<typeof runQuery>[0], extra?.signal, extra?.onMeta),
 		searchAnnotations,
 	);
 
@@ -4655,7 +5269,7 @@ export function createHydraDBServer(
 		ingestSchema,
 		async (args, extra) => {
 			// SAFETY: register validates args against ingestSchema before this handler runs.
-			const a = args as IngestToolArguments;
+			const a = normalizeIngestAliases(args as IngestToolArguments);
 
 			if (a.file == null) {
 				if (a.record_type != null) throw new Error("record_type requires an uploaded file. Pass file, or remove record_type.");
@@ -4671,7 +5285,7 @@ export function createHydraDBServer(
 					);
 				}
 
-				return runIngestFile(a, a.file, extra?.signal);
+				return runIngestFile(a, a.file, extra?.signal, extra?.onMeta);
 			}
 
 		const hasTurns = a.turns != null && a.turns.length > 0;
@@ -4681,7 +5295,6 @@ export function createHydraDBServer(
 			a.title,
 			a.source_id,
 			a.infer,
-			a.is_markdown,
 			a.metadata,
 			a.additional_metadata,
 			a.relations,
@@ -4690,12 +5303,15 @@ export function createHydraDBServer(
 			a.observation_date,
 			a.user_name,
 			a.graph,
+			a.context_category,
+			a.forceful_relations,
+			a.acl,
 		];
 
-		const hasOtherFlatFields = otherFlatFields.some((value) => value != null);
+		const hasOtherFlatFields = otherFlatFields.some((value) => value !== undefined);
 
 		if (a.app_knowledge != null) {
-			if (a.kind === "memory") {
+			if (a.kind !== undefined && a.kind !== "knowledge") {
 				throw new Error("app_knowledge requires kind knowledge; omit kind or set it to knowledge.");
 			}
 
@@ -4713,6 +5329,7 @@ export function createHydraDBServer(
 					collection: a.collection,
 				},
 				extra?.signal,
+				extra?.onMeta,
 			);
 		}
 
@@ -4748,8 +5365,12 @@ export function createHydraDBServer(
 					collection: a.collection,
 				},
 				extra?.signal,
+				extra?.onMeta,
 			);
 		}
+
+		const attributes = a.metadata;
+		const happenedAt = a.observation_date;
 
 		// A conversation is a memory by definition; there is no knowledge document
 		// made of user/assistant pairs. Reject rather than quietly ingesting it as
@@ -4768,7 +5389,6 @@ export function createHydraDBServer(
 		if (a.kind === "knowledge") {
 			const memoryOnlyGiven = (
 				[
-					["is_markdown", a.is_markdown],
 					["user_name", a.user_name],
 					["observation_date", a.observation_date],
 					["custom_instructions", a.custom_instructions],
@@ -4784,10 +5404,6 @@ export function createHydraDBServer(
 					`ingest this as a memory.`,
 				);
 			}
-		}
-
-		if (a.infer === false && a.custom_instructions != null) {
-			throw new Error("custom_instructions cannot be used when infer is false.");
 		}
 
 		// `text` and `turns` are mutually exclusive — reject rather than silently
@@ -4807,20 +5423,27 @@ export function createHydraDBServer(
 				a.turns,
 				sourceId,
 				{
+					// Forwarded like every other option on this path: the kind
+					// was dropped here, so an explicit one was silently replaced
+					// by the pinned "memory" the handler used to send.
+					kind: a.kind,
 					userName: a.user_name,
 					infer: a.infer,
 					title: a.title,
 					isMarkdown: a.is_markdown,
 					overwrite: a.overwrite,
-					metadata: a.metadata,
+					metadata: attributes,
 					additionalMetadata: a.additional_metadata,
 					customInstructions: a.custom_instructions,
 					graph: a.graph,
-					observationDate: a.observation_date,
+					observationDate: happenedAt,
+					contextCategory: a.context_category, forcefulRelations: a.forceful_relations, acl: a.acl,
+					customAttributes: a.custom_attributes, instructions: a.instructions,
 					database: a.database,
 					collection: a.collection,
 				},
 				extra?.signal,
+				extra?.onMeta,
 			);
 		}
 
@@ -4831,21 +5454,25 @@ export function createHydraDBServer(
 					kind: a.kind,
 					title: a.title,
 					source_id: a.source_id,
+					user_name: a.user_name,
 					infer: a.infer,
 					is_markdown: a.is_markdown,
 					overwrite: a.overwrite,
-					metadata: a.metadata,
+					metadata: attributes,
 					additional_metadata: a.additional_metadata,
 					custom_instructions: a.custom_instructions,
 					graph: a.graph,
 					relations: a.relations,
 					evidence_kind: a.evidence_kind,
 					evidence_subject: a.evidence_subject,
-					observation_date: a.observation_date,
+					observation_date: happenedAt,
+					context_category: a.context_category, forceful_relations: a.forceful_relations, acl: a.acl,
+					custom_attributes: a.custom_attributes, instructions: a.instructions,
 					database: a.database,
 					collection: a.collection,
 				},
 				extra?.signal,
+				extra?.onMeta,
 			);
 		}
 
@@ -4864,7 +5491,7 @@ export function createHydraDBServer(
 		(args, extra) => {
 			// SAFETY: the MCP SDK validated args against updateSchema, which
 			// declares exactly the fields and types accepted by runUpdate.
-			return runUpdate(args as Parameters<typeof runUpdate>[0], extra?.signal);
+			return runUpdate(args as Parameters<typeof runUpdate>[0], extra?.signal, extra?.onMeta);
 		},
 		destructiveIdempotentWrite,
 		updateOutputSchema,
@@ -4873,11 +5500,11 @@ export function createHydraDBServer(
 	register(
 		TOOL_NAMES.LIST,
 		listSchema,
-		(args, extra) => {
+		async (args, extra) => {
 			// SAFETY: the MCP SDK validated args against listSchema, which
 			// declares exactly these keys and types.
 			const a = args as {
-				kind?: "memory" | "knowledge" | "all";
+				kind?: "memory" | "knowledge" | "all" | "unified";
 				ids?: string[];
 				source_ids?: string[];
 				external_id?: string;
@@ -4895,6 +5522,14 @@ export function createHydraDBServer(
 				database?: string;
 				collection?: string;
 			};
+
+			if (a.kind == null) {
+				const database = a.database?.trim() || hydra.database;
+				if ((await hydra.databases.knownLayout(database, extra?.signal)) !== "unified") throw new Error("kind/type is required on a split database; choose memory, knowledge, or all.");
+				a.kind = "unified";
+			}
+			const refused = await refuseUnifiedOnSplit(TOOL_NAMES.LIST, a.kind, a.database, extra?.signal);
+			if (refused) return refused;
 
 			// Compare as SETS. These are filters, so order carries no meaning —
 			// rejecting ["a","b"] against ["b","a"] refuses a request that asked
@@ -4981,7 +5616,7 @@ export function createHydraDBServer(
 				);
 			}
 
-			if (a.kind === "knowledge" || a.kind === "all") {
+			if (a.kind === "knowledge" || a.kind === "all" || a.kind === "unified") {
 				return runListSources(
 					{
 						kind: a.kind,
@@ -5002,22 +5637,13 @@ export function createHydraDBServer(
 						collection: a.collection,
 					},
 					extra?.signal,
+				extra?.onMeta,
 				);
 			}
 
-			return runListMemories(
-				{
-					source_ids: ids,
-					page: a.page,
-					page_size: a.page_size,
-					metadata: a.metadata,
-					additional_metadata: a.additional_metadata,
-					acl: a.acl,
-					database: a.database,
-					collection: a.collection,
-				},
-				extra?.signal,
-			);
+			return runListMemories({ source_ids: ids, page: a.page, page_size: a.page_size,
+				metadata: a.metadata, additional_metadata: a.additional_metadata, acl: a.acl,
+				database: a.database, collection: a.collection }, extra?.signal, extra?.onMeta);
 		},
 		readOnly,
 		listOutputSchema,
@@ -5026,14 +5652,14 @@ export function createHydraDBServer(
 	register(
 		TOOL_NAMES.INSPECT,
 		inspectSchema,
-		(args, extra) => runInspect(toInspectArgs(args), extra?.signal),
+		(args, extra) => runInspect(toInspectArgs(args), extra?.signal, extra?.onMeta),
 		readOnly,
 	);
 
 	register(
 		TOOL_NAMES.SUBGRAPH,
 		subgraphSchema,
-		(args, extra) => runSubgraph(args as Parameters<typeof runSubgraph>[0], extra?.signal),
+		(args, extra) => runSubgraph(args as Parameters<typeof runSubgraph>[0], extra?.signal, extra?.onMeta),
 		readOnly,
 	);
 
@@ -5042,7 +5668,7 @@ export function createHydraDBServer(
 		relationsSchema,
 		// SAFETY: the MCP SDK validated args against relationsSchema, whose keys
 		// and types are exactly runRelations' parameter.
-		(args, extra) => runRelations(args as Parameters<typeof runRelations>[0], extra?.signal),
+		(args, extra) => runRelations(args as Parameters<typeof runRelations>[0], extra?.signal, extra?.onMeta),
 		readOnly,
 		relationsOutputSchema,
 	);
@@ -5050,7 +5676,7 @@ export function createHydraDBServer(
 	register(
 		TOOL_NAMES.DELETE,
 		deleteSchema,
-		(args, extra) => runDelete(toDeleteArgs(args), extra?.signal),
+		(args, extra) => runDelete(toDeleteArgs(args), extra?.signal, extra?.onMeta),
 		destructive,
 		deleteOutputSchema,
 	);
@@ -5111,18 +5737,18 @@ export function createHydraDBServer(
 	register(
 		TOOL_NAMES.FEEDBACK,
 		feedbackSchema,
-		(args, extra) => runFeedback(z.object(feedbackSchema).parse(args), extra?.signal),
+		(args, extra) => runFeedback(z.object(feedbackSchema).parse(args), extra?.signal, extra?.onMeta),
 		additiveWrite,
 	);
 
 	register(
 		TOOL_NAMES.STATUS,
 		statusSchema,
-		(args, extra) => runStatus(args as Parameters<typeof runStatus>[0], extra?.signal),
+		(args, extra) => runStatus(args as Parameters<typeof runStatus>[0], extra?.signal, extra?.onMeta),
 		readOnly,
 	);
 
-	register(TOOL_NAMES.DATABASES, {}, (_args, extra) => runDatabases(extra?.signal), readOnly);
+	register(TOOL_NAMES.DATABASES, {}, (_args, extra) => runDatabases(extra?.signal, extra?.onMeta), readOnly);
 
 	// --- Database tools (ENG-3340) ---
 	//
@@ -5134,13 +5760,13 @@ export function createHydraDBServer(
 			name: (typeof DATABASE_TOOL_NAMES)[number],
 			annotations: typeof readOnly,
 			fields: Fields,
-			run: (input: z.output<z.ZodObject<Fields>>, signal?: AbortSignal) => Promise<ToolResult>,
+			run: (input: z.output<z.ZodObject<Fields>>, signal?: AbortSignal, onMeta?: (meta: ResponseMeta) => void) => Promise<ToolResult>,
 		) =>
 			register(
 				name,
 				fields,
 				// SAFETY: the MCP SDK parsed args against exactly these fields before calling this.
-				(args, extra) => run(args as z.output<z.ZodObject<Fields>>, extra?.signal),
+				(args, extra) => run(args as z.output<z.ZodObject<Fields>>, extra?.signal, extra?.onMeta),
 				annotations,
 			);
 
@@ -5155,15 +5781,15 @@ export function createHydraDBServer(
 				embeddings_dimension: z.number().int().min(1).optional().describe(create.embeddings_dimension),
 				database_metadata_schema: z.array(metadataFieldSchema).optional().describe(create.database_metadata_schema),
 			},
-			async (input, signal) => {
+			async (input, signal, onMeta) => {
 				const result = await databaseWrite(() => hydra.databases.create({
 					database: input.database,
 					embeddingsDimension: input.embeddings_dimension,
 					databaseMetadataSchema: input.database_metadata_schema?.map(metadataField),
-				}, { signal }));
+				}, { signal, onMeta }));
 
 				return structuredResult(
-					`Database "${result.database}" creation was ${result.status}. Provisioning is asynchronous; ` +
+					`Database "${result.database}" creation status: ${result.status}. Provisioning is asynchronous; ` +
 						`poll ${TOOL_NAMES.DATABASE_READINESS} until it is ready for ingestion.`,
 					{ database: result.database, status: result.status, message: result.message ?? null },
 				);
@@ -5174,8 +5800,8 @@ export function createHydraDBServer(
 			TOOL_NAMES.DATABASE_DELETE,
 			destructive,
 			{ database: z.string().trim().min(1).describe(TOOL_DESCRIPTIONS[TOOL_NAMES.DATABASE_DELETE].params.database) },
-			async (input, signal) => {
-				const result = await databaseWrite(() => hydra.databases.delete(input.database, { signal }));
+			async (input, signal, onMeta) => {
+				const result = await databaseWrite(() => hydra.databases.delete(input.database, { signal, onMeta }));
 
 				return structuredResult(
 					`Database "${result.database}" deletion was ${result.status}.`,
@@ -5184,8 +5810,8 @@ export function createHydraDBServer(
 			},
 		);
 
-		databaseTool(TOOL_NAMES.DATABASE_READINESS, readOnly, byDatabase, async (input, signal) => {
-			const result = await hydra.databases.readiness(input.database ?? hydra.database, { signal });
+		databaseTool(TOOL_NAMES.DATABASE_READINESS, readOnly, byDatabase, async (input, signal, onMeta) => {
+			const result = await hydra.databases.readiness(input.database ?? hydra.database, { signal, onMeta });
 			const ready = result.infra?.readyForIngestion === true;
 
 			return structuredResult(
@@ -5203,8 +5829,8 @@ export function createHydraDBServer(
 			);
 		});
 
-		databaseTool(TOOL_NAMES.DATABASE_STATS, readOnly, byDatabase, async (input, signal) => {
-			const result = await hydra.databases.stats(input.database ?? hydra.database, { signal });
+		databaseTool(TOOL_NAMES.DATABASE_STATS, readOnly, byDatabase, async (input, signal, onMeta) => {
+			const result = await hydra.databases.stats(input.database ?? hydra.database, { signal, onMeta });
 			const knowledgeRows = result.knowledgeCollection?.rowCount ?? null;
 			const memoryRows = result.memoryCollection?.rowCount ?? null;
 			const knowledgeText = knowledgeRows == null ? "knowledge row count is unknown" : `${knowledgeRows} knowledge row(s)`;
@@ -5216,8 +5842,8 @@ export function createHydraDBServer(
 			);
 		});
 
-		databaseTool(TOOL_NAMES.DATABASE_SCHEMA_INSPECT, readOnly, byDatabase, async (input, signal) => {
-			const result = await hydra.databases.inspectMetadataSchema(input.database ?? hydra.database, { signal });
+		databaseTool(TOOL_NAMES.DATABASE_SCHEMA_INSPECT, readOnly, byDatabase, async (input, signal, onMeta) => {
+			const result = await hydra.databases.inspectMetadataSchema(input.database ?? hydra.database, { signal, onMeta });
 			const fields = result.fields.map(renderMetadataField);
 
 			return structuredResult(
@@ -5238,11 +5864,11 @@ export function createHydraDBServer(
 					.min(1)
 					.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.DATABASE_SCHEMA_UPDATE].params.add_fields),
 			},
-			async (input, signal) => {
+			async (input, signal, onMeta) => {
 				const result = await databaseWrite(() => hydra.databases.updateMetadataSchema(
 					input.database ?? hydra.database,
 					input.add_fields.map(metadataField),
-					{ signal },
+					{ signal, onMeta },
 				));
 
 				return structuredResult(
@@ -5263,7 +5889,7 @@ export function createHydraDBServer(
 				.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.LIST_COLLECTIONS].params.database),
 		},
 		(args, extra) =>
-			runListCollections(args as Parameters<typeof runListCollections>[0], extra?.signal),
+			runListCollections(args as Parameters<typeof runListCollections>[0], extra?.signal, extra?.onMeta),
 		readOnly,
 		{
 			database: z.string(),
@@ -5291,7 +5917,7 @@ export function createHydraDBServer(
 				.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.DELETE_COLLECTION].params.database),
 		},
 		(args, extra) =>
-			runDeleteCollection(args as Parameters<typeof runDeleteCollection>[0], extra?.signal),
+			runDeleteCollection(args as Parameters<typeof runDeleteCollection>[0], extra?.signal, extra?.onMeta),
 		destructive,
 		{
 			database: z.string(),
@@ -5310,7 +5936,7 @@ export function createHydraDBServer(
 			name: (typeof CONNECTOR_TOOL_NAMES)[number],
 			annotations: typeof readOnly,
 			fields: Fields,
-			run: (input: z.output<z.ZodObject<Fields, "strict">>, signal?: AbortSignal) => Promise<ConnectorToolResponse>,
+			run: (input: z.output<z.ZodObject<Fields, "strict">>, signal?: AbortSignal, onMeta?: (meta: ResponseMeta) => void) => Promise<ConnectorToolResponse>,
 			rule?: { check: (input: z.output<z.ZodObject<Fields, "strict">>) => boolean; message: string },
 		) => {
 			const schema = z.object(fields).strict();
@@ -5325,7 +5951,7 @@ export function createHydraDBServer(
 					// The rule's own words, not zod's issue dump, so the model knows what to change.
 					if (!input.success) throw new Error(input.error.issues.map((issue) => issue.message).join(" "));
 
-					const result = await run(input.data, extra?.signal);
+					const result = await run(input.data, extra?.signal, extra?.onMeta);
 
 					return structuredResult(result.text, result.data);
 				},
@@ -5386,13 +6012,13 @@ export function createHydraDBServer(
 				{ message: "Set exactly one of replication_key or change_history." },
 			);
 
-		connectorTool(TOOL_NAMES.CONNECTOR_PROVIDER_LIST, readOnly, {}, (_, signal) => connectorTools.providerList({ signal }));
+		connectorTool(TOOL_NAMES.CONNECTOR_PROVIDER_LIST, readOnly, {}, (_, signal, onMeta) => connectorTools.providerList({ signal, onMeta }));
 
 		connectorTool(
 			TOOL_NAMES.CONNECTOR_PROVIDER_INSPECT,
 			readOnly,
 			{ provider: id(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_PROVIDER_INSPECT].params.provider) },
-			(input, signal) => connectorTools.providerInspect(input.provider, { signal }),
+			(input, signal, onMeta) => connectorTools.providerInspect(input.provider, { signal, onMeta }),
 		);
 
 		connectorTool(
@@ -5402,11 +6028,11 @@ export function createHydraDBServer(
 				provider: z.string().trim().min(1).optional().describe(list.provider),
 				include_health: z.boolean().optional().describe(list.include_health),
 			},
-			(input, signal) => connectorTools.list({ provider: input.provider, includeHealth: input.include_health }, { signal }),
+			(input, signal, onMeta) => connectorTools.list({ provider: input.provider, includeHealth: input.include_health }, { signal, onMeta }),
 		);
 
-		connectorTool(TOOL_NAMES.CONNECTOR_INSPECT, readOnly, byConnector, (input, signal) => connectorTools.inspect(input.connector_id, { signal }));
-		connectorTool(TOOL_NAMES.CONNECTOR_HEALTH, readOnly, byConnector, (input, signal) => connectorTools.health(input.connector_id, { signal }));
+		connectorTool(TOOL_NAMES.CONNECTOR_INSPECT, readOnly, byConnector, (input, signal, onMeta) => connectorTools.inspect(input.connector_id, { signal, onMeta }));
+		connectorTool(TOOL_NAMES.CONNECTOR_HEALTH, readOnly, byConnector, (input, signal, onMeta) => connectorTools.health(input.connector_id, { signal, onMeta }));
 
 		connectorTool(
 			TOOL_NAMES.CONNECTOR_CONNECT,
@@ -5415,7 +6041,7 @@ export function createHydraDBServer(
 			(input) => connectorTools.connect(input.provider),
 		);
 
-		connectorTool(TOOL_NAMES.CONNECTOR_RECONNECT, idempotentWrite, byConnector, (input, signal) => connectorTools.reconnect(input.connector_id, { signal }));
+		connectorTool(TOOL_NAMES.CONNECTOR_RECONNECT, idempotentWrite, byConnector, (input, signal, onMeta) => connectorTools.reconnect(input.connector_id, { signal, onMeta }));
 
 		connectorTool(
 			TOOL_NAMES.CONNECTOR_UPDATE,
@@ -5425,10 +6051,10 @@ export function createHydraDBServer(
 				custom_instructions: z.string().max(4000).optional().describe(update.custom_instructions),
 				sync_interval_seconds: z.number().int().min(0).optional().describe(update.sync_interval_seconds),
 			},
-			(input, signal) =>
+			(input, signal, onMeta) =>
 				connectorTools.update(
 					{ connectorId: input.connector_id, customInstructions: input.custom_instructions, syncIntervalSeconds: input.sync_interval_seconds },
-					{ signal },
+					{ signal, onMeta },
 				),
 			{
 				check: (input) => input.custom_instructions !== undefined || input.sync_interval_seconds !== undefined,
@@ -5436,10 +6062,10 @@ export function createHydraDBServer(
 			},
 		);
 
-		connectorTool(TOOL_NAMES.CONNECTOR_DELETE, destructive, byConnector, (input, signal) => connectorTools.delete(input.connector_id, { signal }));
-		connectorTool(TOOL_NAMES.CONNECTOR_SYNC, additiveWrite, byConnector, (input, signal) => connectorTools.sync(input.connector_id, { signal }));
-		connectorTool(TOOL_NAMES.CONNECTOR_PAUSE, idempotentWrite, byConnector, (input, signal) => connectorTools.pause(input.connector_id, { signal }));
-		connectorTool(TOOL_NAMES.CONNECTOR_RESUME, idempotentWrite, byConnector, (input, signal) => connectorTools.resume(input.connector_id, { signal }));
+		connectorTool(TOOL_NAMES.CONNECTOR_DELETE, destructive, byConnector, (input, signal, onMeta) => connectorTools.delete(input.connector_id, { signal, onMeta }));
+		connectorTool(TOOL_NAMES.CONNECTOR_SYNC, additiveWrite, byConnector, (input, signal, onMeta) => connectorTools.sync(input.connector_id, { signal, onMeta }));
+		connectorTool(TOOL_NAMES.CONNECTOR_PAUSE, idempotentWrite, byConnector, (input, signal, onMeta) => connectorTools.pause(input.connector_id, { signal, onMeta }));
+		connectorTool(TOOL_NAMES.CONNECTOR_RESUME, idempotentWrite, byConnector, (input, signal, onMeta) => connectorTools.resume(input.connector_id, { signal, onMeta }));
 
 		connectorTool(
 			TOOL_NAMES.CONNECTOR_DISCOVER,
@@ -5449,10 +6075,10 @@ export function createHydraDBServer(
 				cursor: z.string().min(1).optional().describe(discover.cursor),
 				limit: z.number().int().min(1).max(100).optional().describe(discover.limit),
 			},
-			(input, signal) => connectorTools.discover({ connectorId: input.connector_id, cursor: input.cursor, limit: input.limit }, { signal }),
+			(input, signal, onMeta) => connectorTools.discover({ connectorId: input.connector_id, cursor: input.cursor, limit: input.limit }, { signal, onMeta }),
 		);
 
-		connectorTool(TOOL_NAMES.CONNECTOR_RESOURCE_LIST, readOnly, byConnector, (input, signal) => connectorTools.resourceList(input.connector_id, { signal }));
+		connectorTool(TOOL_NAMES.CONNECTOR_RESOURCE_LIST, readOnly, byConnector, (input, signal, onMeta) => connectorTools.resourceList(input.connector_id, { signal, onMeta }));
 
 		// One way to attach resources (CONTRACT.md §3 Connectors): a list, sent to the configure
 		// endpoint, which adds them and starts syncing. Rows come from discover; a resource that
@@ -5467,7 +6093,7 @@ export function createHydraDBServer(
 				full_visibility_roles: z.array(z.string().min(1)).optional().describe(add.full_visibility_roles),
 				table_configs: z.array(tableConfig).optional().describe(add.table_configs),
 			},
-			(input, signal) =>
+			(input, signal, onMeta) =>
 				connectorTools.resourceAdd(
 					{
 						connectorId: input.connector_id,
@@ -5491,7 +6117,7 @@ export function createHydraDBServer(
 							changeHistory: table.change_history,
 						})),
 					},
-					{ signal },
+					{ signal, onMeta },
 				),
 		);
 
@@ -5504,10 +6130,10 @@ export function createHydraDBServer(
 				acl: z.array(z.string().min(1)).optional().describe(change.acl),
 				custom_instructions: z.string().max(4000).optional().describe(change.custom_instructions),
 			},
-			(input, signal) =>
+			(input, signal, onMeta) =>
 				connectorTools.resourceUpdate(
 					{ connectorId: input.connector_id, resourceId: input.resource_id, acl: input.acl, customInstructions: input.custom_instructions },
-					{ signal },
+					{ signal, onMeta },
 				),
 			{ check: (input) => input.acl !== undefined || input.custom_instructions !== undefined, message: "Set acl or custom_instructions." },
 		);
@@ -5516,7 +6142,7 @@ export function createHydraDBServer(
 			TOOL_NAMES.CONNECTOR_RESOURCE_DELETE,
 			destructive,
 			{ ...byConnector, resource_id: id(TOOL_DESCRIPTIONS[TOOL_NAMES.CONNECTOR_RESOURCE_DELETE].params.resource_id) },
-			(input, signal) => connectorTools.resourceDelete(input.connector_id, input.resource_id, { signal }),
+			(input, signal, onMeta) => connectorTools.resourceDelete(input.connector_id, input.resource_id, { signal, onMeta }),
 		);
 	}
 
@@ -5539,7 +6165,7 @@ export function createHydraDBServer(
 			TOOL_NAMES.GRAPH_QUERY,
 			graphCypherSchema,
 			(args, extra) =>
-				runGraphCypher(args as Parameters<typeof runGraphCypher>[0], extra?.signal),
+				runGraphCypher(args as Parameters<typeof runGraphCypher>[0], extra?.signal, extra?.onMeta),
 			// Destructive, not read-only: this one tool runs arbitrary Cypher, so
 			// DELETE is as reachable through it as MATCH. Annotating it any other
 			// way would tell a host it is safe to auto-approve, which is exactly
@@ -5556,6 +6182,7 @@ export function createHydraDBServer(
 				runGraphCollections(
 					args as Parameters<typeof runGraphCollections>[0],
 					extra?.signal,
+				extra?.onMeta,
 				),
 			readOnly,
 		);
@@ -5564,7 +6191,7 @@ export function createHydraDBServer(
 			TOOL_NAMES.GRAPH_ADMIN,
 			graphAdminSchema,
 			(args, extra) =>
-				runGraphAdmin(args as Parameters<typeof runGraphAdmin>[0], extra?.signal),
+				runGraphAdmin(args as Parameters<typeof runGraphAdmin>[0], extra?.signal, extra?.onMeta),
 			destructive,
 		);
 	}
@@ -5595,14 +6222,14 @@ export function createHydraDBServer(
 	register(
 		TOOL_NAMES.SEARCH,
 		querySchema,
-		(args, extra) => runQuery(args as Parameters<typeof runQuery>[0], extra?.signal),
+		(args, extra) => runQuery(args as Parameters<typeof runQuery>[0], extra?.signal, extra?.onMeta),
 		searchAnnotations,
 	);
 
 	register(
 		TOOL_NAMES.STORE,
 		storeSchema,
-		(args, extra) => runStore(args as Parameters<typeof runStore>[0], extra?.signal),
+		(args, extra) => runStore(args as Parameters<typeof runStore>[0], extra?.signal, extra?.onMeta),
 		overwritingWrite,
 	);
 
@@ -5629,6 +6256,7 @@ export function createHydraDBServer(
 					collection: a.collection,
 				},
 				extra?.signal,
+				extra?.onMeta,
 			);
 		},
 		overwritingWrite,
@@ -5641,6 +6269,7 @@ export function createHydraDBServer(
 			runListMemories(
 				args as { acl?: string[]; database?: string; collection?: string },
 				extra?.signal,
+				extra?.onMeta,
 			),
 		readOnly,
 	);
@@ -5662,6 +6291,7 @@ export function createHydraDBServer(
 					}),
 				},
 				extra?.signal,
+				extra?.onMeta,
 			),
 		readOnly,
 	);
@@ -5669,7 +6299,7 @@ export function createHydraDBServer(
 	register(
 		TOOL_NAMES.FETCH_CONTENT,
 		inspectSchema,
-		(args, extra) => runInspect(toInspectArgs(args), extra?.signal),
+		(args, extra) => runInspect(toInspectArgs(args), extra?.signal, extra?.onMeta),
 		readOnly,
 	);
 
@@ -5691,6 +6321,7 @@ export function createHydraDBServer(
 					collection: a.collection,
 				},
 				extra?.signal,
+				extra?.onMeta,
 			);
 		},
 		destructive,

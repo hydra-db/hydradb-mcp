@@ -15,7 +15,7 @@
 import { createHash } from "node:crypto";
 
 import { SERVER_VERSION } from "../version.js";
-import { unwrap } from "./envelope.js";
+import { readResponseMeta, type ResponseMeta, unwrap } from "./envelope.js";
 import { HydraWrapperError, responseError, translateError } from "./errors.js";
 import { type RetrySafety, withRetries } from "./retry.js";
 
@@ -66,6 +66,7 @@ export interface RawTransport {
 }
 
 export interface RawRequestOptions {
+	onMeta?: (meta: ResponseMeta) => void;
 	signal?: AbortSignal;
 	/**
 	 * Whether the request may be sent twice. Defaults to `idempotent` for GET
@@ -108,7 +109,7 @@ export function sendRaw<T>(
 		budget: { deadlineMs: t.timeoutMs, maxRetries: t.maxRetries },
 		signal: opts?.signal,
 		known: [t.token],
-		attempt: (signal) => attemptRaw<T>(t, path, method, body, signal),
+		attempt: (signal) => attemptRaw<T>(t, path, method, body, signal, opts?.onMeta),
 	});
 }
 
@@ -118,6 +119,7 @@ async function attemptRaw<T>(
 	method: "GET" | "POST" | "DELETE",
 	body: unknown,
 	signal: AbortSignal,
+	onMeta?: (meta: ResponseMeta) => void,
 ): Promise<T> {
 	const doFetch = t.fetchFn ?? fetch;
 	const multipart = body instanceof FormData;
@@ -152,6 +154,8 @@ async function attemptRaw<T>(
 			// and all. The headers ride along for `Retry-After`.
 			throw responseError(path, response.status, parsed, [t.token], response.headers);
 		}
+
+		onMeta?.(readResponseMeta(parsed));
 
 		return unwrap<T>(parsed);
 	} catch (err) {
