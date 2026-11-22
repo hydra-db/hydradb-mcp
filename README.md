@@ -301,8 +301,40 @@ is refused before anything is uploaded. `source_id` sets the document's id and
 `overwrite` applies as usual; `infer`, `metadata` and the other memory options
 do not apply to files.
 
+To keep a file above the inline limit whole, use the local `path` option or
+send multipart `POST /context/ingest` directly.
+
 Ingestion is **asynchronous** — content is not searchable the instant it is
 saved. Use `hydradb_status` to confirm.
+
+**Schemas for uploaded tables (preview).** On an enabled organization, supply
+`record_type` on the same ingest call as the file. For example:
+
+```json
+{
+  "database": "finance",
+  "collection": "statements",
+  "file": { "filename": "october.csv", "content_base64": "..." },
+  "record_type": {
+    "name": "bank_transaction",
+    "fields": {
+      "date": { "type": "date", "required": true, "date_order": "DMY" },
+      "description": "string",
+      "debit": "decimal",
+      "credit": "decimal"
+    }
+  }
+}
+```
+
+Replace the placeholder with the file's base64 bytes. Use `decimal` for exact
+fixed-point amounts, with up to nine fractional digits. Subsequent uploads in
+that database can send `"record_type": "bank_transaction"`. After indexing,
+call `hydradb_inspect` with the returned ID to see the inferred column mapping
+and rejected rows. For a PDF, `table_extraction` reports partial or unverified
+coverage. A table query over such rows carries the same warning. Use
+`structured: true` on `hydradb_query` to return table records and citations
+as JSON.
 
 ### **hydradb_update**
 
