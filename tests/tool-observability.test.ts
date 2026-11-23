@@ -195,11 +195,14 @@ test("a reworded unified-database ingest error is rejected with its status", asy
 		statusCode: 400,
 		body: { error: { code: "CORPUS_TYPE_UNSUPPORTED", message: "app_knowledge is not supported for this corpus" } },
 	}));
+
 	const { client } = await connect({ query: async () => ({ success: true, chunks: [] }), context: { ingest: fail } }, { maxRetries: 0 });
+
 	const lines = await captureLogs(() => client.callTool({
 		name: "hydradb_ingest",
 		arguments: { app_knowledge: [{ kind: "message", fields: { body: "hello" }, acl: ["bob"] }] },
 	}));
+
 	assert.equal(count("hydradb_ingest", "rejected"), 1);
 	assert.equal(failureLogs(lines)[0]?.error_type, "HYDRADB_HTTP_400");
 });
