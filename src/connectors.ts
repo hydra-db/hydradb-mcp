@@ -253,6 +253,8 @@ function projectStatus(status: ConnectorStatus): Record<string, unknown> {
 		last_attempted_sync_at: status.lastAttemptedSyncAt,
 		last_successful_sync_at: status.lastSuccessfulSyncAt,
 		next_sync_at: status.nextSyncAt,
+		resources_failing: status.resourcesFailing,
+		resources_retrying: status.resourcesRetrying,
 		plan_cap: status.planCap
 			? cleanObject({ meter: status.planCap.meter, plan: status.planCap.plan, message: status.planCap.message })
 			: undefined,
@@ -269,6 +271,17 @@ function projectStatus(status: ConnectorStatus): Record<string, unknown> {
 				resource_id: resource.resourceId,
 				display_name: resource.displayName,
 				status: resource.status,
+				sync_state: resource.syncState,
+				next_attempt_at: resource.nextAttemptAt,
+				last_progress_at: resource.lastProgressAt,
+				last_successful_sync_at: resource.lastSuccessfulSyncAt,
+				consecutive_failures: resource.consecutiveFailures,
+				failing_since: resource.failingSince,
+				backfill_status: resource.backfillStatus,
+				backfill_oldest: resource.backfillOldest,
+				backfill_next_chunk_at: resource.backfillNextChunkAt,
+				backfill_retrying: resource.backfillRetrying,
+				has_backfill_error: resource.backfillLastError === undefined ? undefined : resource.backfillLastError.length > 0,
 				last_row_count: resource.lastRowCount,
 				retryable: resource.retryable,
 				http_status: resource.httpStatus,
@@ -300,6 +313,9 @@ function renderHealth(status: ConnectorStatus, withheld: number): string {
 
 	if (status.lastAttemptedSyncAt) lines.push(`Latest attempted sync: ${status.lastAttemptedSyncAt}.`);
 
+	if (status.resourcesFailing !== undefined) lines.push(`Failing resources: ${status.resourcesFailing}.`);
+	if (status.resourcesRetrying !== undefined) lines.push(`Retrying resources: ${status.resourcesRetrying}.`);
+
 	if (status.planCap) lines.push("A plan limit is stopping connector syncs.");
 
 	if (status.error) {
@@ -314,6 +330,9 @@ function renderHealth(status: ConnectorStatus, withheld: number): string {
 		const label = resource.displayName ?? resource.resourceId ?? "unnamed resource";
 		const action = resourceAction(resource);
 		lines.push(`Resource ${label}: ${resource.status ?? "unknown"}.`);
+
+		if (resource.syncState !== undefined) lines.push(`Resource sync state: ${resource.syncState}.`);
+		if (resource.backfillLastError) lines.push("The history import encountered an error. Review connector health and the next sync result.");
 
 		if (action) lines.push(action);
 
@@ -416,6 +435,12 @@ export class ConnectorTools {
 			? Object.fromEntries(Object.entries(result.health).filter(([id]) => visibleIds.has(id)))
 			: undefined;
 
+		const healthCounts = !this.scoped && result.healthCounts
+			? Object.fromEntries(Object.entries(result.healthCounts).filter(([id]) => visibleIds.has(id)).map(([id, counts]) => [
+				id, cleanObject({ resources_failing: counts.resourcesFailing, resources_retrying: counts.resourcesRetrying }),
+			]))
+			: undefined;
+
 		const connectorLimit = result.connectorLimit
 			? cleanObject({
 				count: result.connectorLimit.count,
@@ -441,7 +466,7 @@ export class ConnectorTools {
 
 					return `${labelled(connector.name, connector.connectorId)}: ${state}`;
 				})),
-			data: cleanObject({ connectors, health, connector_limit: connectorLimit, plan_cap: planCap }),
+			data: cleanObject({ connectors, health, health_counts: healthCounts, connector_limit: connectorLimit, plan_cap: planCap }),
 		};
 	}
 
@@ -472,6 +497,17 @@ export class ConnectorTools {
 			: status;
 
 		const withheld = status.resources.length - shown.resources.length;
+
+		if (allowedIds) {
+			const knownStates = new Set(["syncing", "retrying", "failing", "needs_you", "stopped", "ok", "empty", "unknown"]);
+			const trustworthy = shown.resources.length > 0 && shown.resources.every((resource) => resource.syncState !== undefined && knownStates.has(resource.syncState));
+			shown.resourcesFailing = trustworthy && status.resourcesFailing !== undefined
+				? shown.resources.filter((resource) => resource.syncState === "failing").length
+				: undefined;
+			shown.resourcesRetrying = trustworthy && status.resourcesRetrying !== undefined
+				? shown.resources.filter((resource) => resource.syncState === "retrying").length
+				: undefined;
+		}
 
 		return {
 			text: renderHealth(shown, withheld),
