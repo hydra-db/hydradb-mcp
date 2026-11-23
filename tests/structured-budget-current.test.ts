@@ -10,7 +10,7 @@ import { createHydraDBServer } from "../src/server.js";
 const budget = 40_000;
 const size = (value: unknown) => JSON.stringify(value).length;
 const answer = (overrides: Partial<UnifiedQueryResult> = {}): UnifiedQueryResult => ({
-	chunks: [{ context_id: "source-1", chunk_id: "chunk-1", score: 0.9, content: "A policy.", enrichment_kind: "decision_trace" }],
+	chunks: [{ context_id: "source-1", chunk_id: "chunk-1", score: 0.9, content: "A policy." }],
 	graph: [], forceful_relations: [], llm_prompt: "# Results\nA policy. [1]",
 	...overrides,
 });
@@ -34,7 +34,6 @@ for (const forceful of [false, true]) {
 		assert.equal(kept.context_id, "source-1");
 		assert.equal(kept.chunk_id, "chunk-1");
 		assert.equal(kept.score, 0.9);
-		assert.equal(kept.enrichment_kind, "decision_trace");
 		assert.equal(kept.temporal![0]!.start_date, "2026-06-01");
 		assert.equal(kept.temporal![0]!.end_date, null);
 		assert.equal(kept.temporal![0]!.content_truncated, true);
