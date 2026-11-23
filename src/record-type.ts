@@ -69,7 +69,9 @@ export const tableQuerySchema = z.object({
 }).passthrough();
 
 export function renderTableQuery(table: z.infer<typeof tableQuerySchema>): string {
-	const lines = ["Table query", `${table.records.length} result rows.`];
+	const rows = z.array(jsonValue).safeParse(table.rows);
+	const count = Math.max(table.records.length, rows.success ? rows.data.length : 0);
+	const lines = ["Table query", `${count} result rows.`];
 
 	if (table.extraction_status != null) {
 		lines.push(table.extraction_status === "partial"
@@ -77,28 +79,37 @@ export function renderTableQuery(table: z.infer<typeof tableQuerySchema>): strin
 			: "PDF table coverage is unverified. This result covers imported rows.");
 	}
 
-	let shortened = table.records.length > 10;
+	let length = lines.join("\n").length;
+	const append = (line: string) => {
+		if (length + line.length + 1 > 11800) return false;
+		lines.push(line);
+		length += line.length + 1;
+		return true;
+	};
+	let shown = 0;
 
-	for (const [index, record] of table.records.slice(0, 10).entries()) {
+	for (let index = 0; index < Math.min(count, 10); index++) {
+		const record = rows.success ? { row: rows.data[index], record: table.records[index] } : table.records[index];
 		const line = JSON.stringify(record);
 		const reference = table.answer_type === "exact" ? table.citations?.rows[index] : undefined;
 		const citation = reference?.row == null ? "" : ` [source ${reference.source_id}, row ${reference.row}]`;
 
-		shortened ||= line.length > 800;
-		lines.push(`${line.length <= 800 ? line : `${line.slice(0, 800)}…`}${citation}`);
+		if (line.length <= 800 && append(`Row ${index + 1}: ${line}${citation}`)) shown++;
 	}
 
-	if (shortened) {
+	if (shown < count) {
+		lines.push(`(${count - shown} rows omitted)`);
 		lines.push("The text preview is shortened. Use structured: true for the full returned records.");
 	}
 
 	if (table.truncated) lines.push("The API omitted additional result rows.");
 
+	let shownSources = 0;
 	for (const source of table.sources?.slice(0, 8) ?? []) {
-		lines.push(`Source ${JSON.stringify(source.title ?? source.id)} [id: ${source.id}, collection: ${source.collection}]`);
+		if (append(`Source ${JSON.stringify(source.title ?? source.id)} [id: ${source.id}, collection: ${source.collection}]`)) shownSources++;
 	}
 
-	if ((table.sources?.length ?? 0) > 8) lines.push("Use structured: true for the full source list.");
+	if ((table.sources?.length ?? 0) > shownSources) lines.push("Use structured: true for the full source list.");
 
 	return lines.join("\n");
 }

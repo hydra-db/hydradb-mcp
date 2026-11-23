@@ -1203,7 +1203,7 @@ export function createHydraDBServer(
 			feedbackLine;
 
 		const scopeLine = scopeText(resolvedScope);
-		const headerAllowance = 120 + scopeLine.length + (scopeWarning?.length ?? 0) + 20 + warningText().length + tableText.length;
+		const headerAllowance = 120 + scopeLine.length + (scopeWarning?.length ?? 0) + 20 + warningText().length;
 		const sourceRefs = new Map<string, Record<string, unknown>>();
 
 		const singleCollection = "collection" in resolvedScope
