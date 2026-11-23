@@ -1818,8 +1818,9 @@ export function createHydraDBServer(
 			}, { signal });
 		} catch (error) {
 			if (error instanceof Error && /CORPUS_TYPE_UNSUPPORTED/.test(error.message)) {
-				throw new Error(
+				throw new RewrittenFailure(
 					`${error.message} app_knowledge works only on split databases. This database is unified.`,
+					error,
 				);
 			}
 
@@ -2982,10 +2983,11 @@ export function createHydraDBServer(
 			return await run();
 		} catch (error) {
 			if (error instanceof HydraWrapperError && error.status === 403) {
-				throw new Error(
+				throw new RewrittenFailure(
 					`${error.message}. This operation requires database write permission. ` +
 					"Read-only credentials cannot perform it; verify this credential's permissions " +
 					"or reconnect with write permission.",
+					error,
 				);
 			}
 

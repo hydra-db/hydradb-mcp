@@ -10,7 +10,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
 import { resolveHttpServerConfig } from "../src/http-config.js";
-import { HydraDB } from "../src/hydra/index.js";
+import { HydraDB, HydraWrapperError } from "../src/hydra/index.js";
 import { formatMessage, LogLevel, resolveLogFormat } from "../src/logger.js";
 import { __resetMetrics, recordToolCall, renderMetrics, startMetricsServer } from "../src/metrics.js";
 import { createHydraDBServer } from "../src/server.js";
@@ -179,4 +179,27 @@ test("a call that runs out of its deadline is counted as a timeout", async () =>
 	const lines = await captureLogs(() => client.callTool({ name: "hydradb_query", arguments: { query: "q" } }));
 	assert.equal(count("hydradb_query", "timeout"), 1);
 	assert.equal(failureLogs(lines)[0]?.error_type, "DEADLINE_EXCEEDED");
+});
+
+test("a reworded database 403 is rejected with its status", async () => {
+	const { client, hydra } = await connect({ query: async () => ({ success: true, chunks: [] }), context: {} });
+	hydra.databases.create = () =>
+		Promise.reject(new HydraWrapperError("Hydra DB /databases → 403: policy denied this request", "/databases", { status: 403 }));
+	const lines = await captureLogs(() => client.callTool({ name: "hydradb_database_create", arguments: { database: "new" } }));
+	assert.equal(count("hydradb_database_create", "rejected"), 1);
+	assert.equal(failureLogs(lines)[0]?.error_type, "HYDRADB_HTTP_403");
+});
+
+test("a reworded unified-database ingest error is rejected with its status", async () => {
+	const fail = () => Promise.reject(new HydraDBError({
+		statusCode: 400,
+		body: { error: { code: "CORPUS_TYPE_UNSUPPORTED", message: "app_knowledge is not supported for this corpus" } },
+	}));
+	const { client } = await connect({ query: async () => ({ success: true, chunks: [] }), context: { ingest: fail } }, { maxRetries: 0 });
+	const lines = await captureLogs(() => client.callTool({
+		name: "hydradb_ingest",
+		arguments: { app_knowledge: [{ kind: "message", fields: { body: "hello" }, acl: ["bob"] }] },
+	}));
+	assert.equal(count("hydradb_ingest", "rejected"), 1);
+	assert.equal(failureLogs(lines)[0]?.error_type, "HYDRADB_HTTP_400");
 });
