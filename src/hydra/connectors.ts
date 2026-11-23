@@ -11,6 +11,23 @@ const nonEmpty = z.string().trim().min(1);
 /** A destination name, trimmed once here; blank means none, so callers never re-trim. */
 const destination = z.string().optional().transform((value) => value?.trim() || undefined);
 
+function withWireAliases<Shape extends z.ZodRawShape>(shape: Shape) {
+	return z.preprocess((value) => {
+		const parsed = z.record(z.unknown()).safeParse(value);
+		if (!parsed.success) return value;
+
+		const record = parsed.data;
+		const normalized = { ...record };
+		for (const key of Object.keys(shape)) {
+			const wireKey = key.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`);
+			if (!Object.prototype.hasOwnProperty.call(record, key) && Object.prototype.hasOwnProperty.call(record, wireKey)) {
+				normalized[key] = record[wireKey];
+			}
+		}
+		return normalized;
+	}, z.object(shape));
+}
+
 const providerCatalogEntrySchema = z.object({
 	provider: nonEmpty,
 	category: z.string().optional(),
@@ -56,6 +73,8 @@ const connectorSchema = z.object({
 	nextSyncAt: z.string().optional(),
 	paused: z.boolean().optional(),
 	pausedAt: z.string().optional(),
+	pausedReason: z.string().nullable().optional(),
+	paused_reason: z.string().nullable().optional(),
 	provider: z.string().optional(),
 	providerAccountScope: z.string().optional(),
 	resourcesPendingFirstSync: z.number().optional(),
@@ -73,9 +92,17 @@ const planCapSchema = z.object({
 	plan: z.string().optional(),
 });
 
-const connectorListSchema = z.object({
+const healthCountFields = {
+	resourcesFailing: z.number().int().nonnegative().optional(),
+	resourcesRetrying: z.number().int().nonnegative().optional(),
+};
+
+const healthCountsSchema = withWireAliases(healthCountFields);
+
+const connectorListSchema = withWireAliases({
 	connectors: z.array(connectorSchema),
 	health: z.record(z.string()).optional(),
+	healthCounts: z.record(healthCountsSchema).optional(),
 	connectorLimit: z
 		.object({
 			count: z.number().optional(),
@@ -87,17 +114,27 @@ const connectorListSchema = z.object({
 	planCap: planCapSchema.optional(),
 });
 
-const statusResourceSchema = z.object({
+const statusResourceSchema = withWireAliases({
 	aclWarning: z.string().optional(),
 	aclWarningAt: z.string().optional(),
 	action: z.string().optional(),
 	backfillError: z.string().optional(),
 	backfillErrorAt: z.string().optional(),
+	backfillLastError: z.string().optional(),
+	backfillNextChunkAt: z.string().optional(),
+	backfillOldest: z.string().optional(),
+	backfillRetrying: z.boolean().optional(),
+	backfillStatus: z.string().optional(),
 	checkedAt: z.string().optional(),
+	consecutiveFailures: z.number().int().nonnegative().optional(),
 	displayName: z.string().optional(),
+	failingSince: z.string().optional(),
 	httpStatus: z.number().optional(),
+	lastProgressAt: z.string().optional(),
 	lastRowCount: z.number().optional(),
+	lastSuccessfulSyncAt: z.string().optional(),
 	message: z.string().optional(),
+	nextAttemptAt: z.string().optional(),
 	pageAclWarning: z.string().optional(),
 	pageAclWarningAt: z.string().optional(),
 	resourceId: z.string().optional(),
@@ -106,9 +143,11 @@ const statusResourceSchema = z.object({
 	syncBlocked: z.boolean().optional(),
 	syncBlockedAt: z.string().optional(),
 	syncBlockedReason: z.string().optional(),
+	syncState: z.string().optional(),
 });
 
-const connectorStatusSchema = z.object({
+const connectorStatusSchema = withWireAliases({
+	...healthCountFields,
 	connectorId: nonEmpty,
 	error: z
 		.object({
