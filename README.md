@@ -520,6 +520,7 @@ Checks whether ingested sources have finished indexing.
 | `HYDRADB_COLLECTION` | Collection (sub-tenant) for partitioning | *none* — unset means the workspace's own collection; the model can also name one per call via `collection`/`collections` (see `hydradb_list_collections`) |
 | `HYDRADB_BASE_URL`   | Base URL override                    | `https://api.hydradb.com` |
 | `HYDRADB_LOG_LEVEL`  | Log level: DEBUG, INFO, WARN, ERROR  | `ERROR`                   |
+| `HYDRADB_LOG_FORMAT` | `json` writes one JSON object per stderr line, for a log pipeline | `text` |
 | `HYDRADB_TIMEOUT_SECONDS` | Deadline for a whole tool call, every attempt and retry wait included | `45` |
 | `HYDRADB_MAX_RETRIES` | Retries per request, inside that deadline (0 disables) | `2`                       |
 | `HYDRADB_MCP_LEGACY_TOOLS` | Register the deprecated `hydra_db_*` tools | *off* |
@@ -786,6 +787,7 @@ also apply — as the single-tenant default and as operator settings.
 | `ALLOWED_HOSTS` | Extra `Host` headers to accept (comma-separated); loopback always allowed | *(loopback only)* |
 | `ALLOWED_ORIGINS` | CORS origins for browser clients (comma-separated; `*` allows any) | *(none)* |
 | `TRUST_PROXY` | Express `trust proxy` when behind a reverse proxy: a hop count, `true`, or a subnet preset (`loopback`) | *off* |
+| `HYDRADB_METRICS_PORT` | Serve Prometheus `GET /metrics` (tool calls by tool and result: ok, rejected, error, timeout, cancelled; call durations) on this separate port; never on `PORT` | *off* |
 
 ### Security
 

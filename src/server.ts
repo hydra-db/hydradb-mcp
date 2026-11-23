@@ -38,6 +38,7 @@ import type {
 	UpdateContextParams,
 } from "./hydra/index.js";
 import { logger } from "./logger.js";
+import { recordToolCall, type ToolResultLabel } from "./metrics.js";
 import { type TableInspectionReports, recordTypeReportSchema, recordTypeSchema, renderTableQuery, tableExtractionSchema, tableQuerySchema } from "./record-type.js";
 import { ALIAS_REPLACEMENTS, CONNECTOR_TOOL_NAMES, type DATABASE_TOOL_NAMES, DEPRECATED_TOOL_NAMES, TOOL_NAMES } from "./tool-names.js";
 import type { IngestItemOutcome, IngestOutcome, IngestRejectedItem, MemoryResultItem } from "./types.js";
@@ -286,6 +287,39 @@ export function beginShutdown(): void {
 /** Test-only: allow a fresh server in the same process after a shutdown test. */
 export function __resetShutdown(): void {
 	shuttingDown = false;
+}
+
+/** A connector failure reworded for the model; keeps what HydraDB answered for the error_type. */
+class RewrittenFailure extends Error {
+	constructor(message: string, readonly cause: unknown) {
+		super(message);
+	}
+}
+
+/**
+ * A bounded error_type for a tool call that threw: the HTTP status HydraDB
+ * answered with, or that it could not be reached. Never the message, which can
+ * carry provider text.
+ */
+export function toolErrorType(error: Error): string {
+	const answered = error instanceof RewrittenFailure ? error.cause : error;
+
+	if (answered instanceof HydraWrapperError) {
+		return answered.status != null ? `HYDRADB_HTTP_${answered.status}` : "HYDRADB_UNREACHABLE";
+	}
+
+	return "INTERNAL";
+}
+
+/** One line per failed tool call; arguments and credentials never go in it. */
+function logToolFailure(tool: string, result: ToolResultLabel, errorType: string, started: number, keyId: string): void {
+	if (result === "ok") return;
+
+	const meta = { tool, result, error_type: errorType, duration_ms: Math.round(performance.now() - started), key_id: keyId };
+
+	if (result === "cancelled") logger.info("tool call cancelled", meta);
+	else if (result === "rejected") logger.info("tool call rejected", meta);
+	else logger.warn("tool call failed", meta);
 }
 
 function trackInFlight<T>(work: () => Promise<T>): Promise<T> {
@@ -3627,34 +3661,34 @@ export function createHydraDBServer(
 					? `The connector request got ${signal.reason.message}.`
 					: "The connector request was cancelled.";
 
-				throw new Error(`${stopped} A change may or may not have applied; check connector health before repeating it.`);
+				throw new RewrittenFailure(`${stopped} A change may or may not have applied; check connector health before repeating it.`, error);
 			}
 
 			if (error.status === 400 || error.status === 422) {
-				throw new Error("HydraDB rejected the request as invalid. Change the arguments; the same call will fail again.");
+				throw new RewrittenFailure("HydraDB rejected the request as invalid. Change the arguments; the same call will fail again.", error);
 			}
 
 			if (error.status === 401 || error.status === 403) {
-				throw new Error("HydraDB refused this connection's credentials for the request. Reconnecting the connector will not change that.");
+				throw new RewrittenFailure("HydraDB refused this connection's credentials for the request. Reconnecting the connector will not change that.", error);
 			}
 
 			if (error.status === 404) {
-				throw new Error("The connector or resource was not found.");
+				throw new RewrittenFailure("The connector or resource was not found.", error);
 			}
 
 			if (error.status === 409) {
-				throw new Error("The connector state changed before this request completed. Read it again before retrying.");
+				throw new RewrittenFailure("The connector state changed before this request completed. Read it again before retrying.", error);
 			}
 
 			if (error.status === 429) {
-				throw new Error("HydraDB rate-limited the connector request. Retry later.");
+				throw new RewrittenFailure("HydraDB rate-limited the connector request. Retry later.", error);
 			}
 
 			if (error.status != null && error.status >= 500) {
-				throw new Error("The connector service is temporarily unavailable. Retry later.");
+				throw new RewrittenFailure("The connector service is temporarily unavailable. Retry later.", error);
 			}
 
-			throw new Error("The connector request failed. Review connector health and retry.");
+			throw new RewrittenFailure("The connector request failed. Review connector health and retry.", error);
 		}
 	}
 
@@ -3730,17 +3764,52 @@ export function createHydraDBServer(
 		const desc = TOOL_DESCRIPTIONS[name];
 		const isDeprecated = (DEPRECATED_TOOL_NAMES as readonly string[]).includes(name);
 
-		const counted = (
+		const counted = async (
 			args: Record<string, unknown>,
 			extra?: ToolExtra,
 		) => {
 			const isConnector = CONNECTOR_TOOL_NAMES.some((toolName) => toolName === name);
+			const started = performance.now();
+			let budget: AbortSignal | undefined;
+			let result: ToolResultLabel = "ok";
+			let errorType = "";
 
-			return trackInFlight(() => redactFailure(() => withCallBudget(extra, (signal) => {
-				const run = () => handler(args, { ...extra, signal });
+			try {
+				const answer = await trackInFlight(() => redactFailure(() => withCallBudget(extra, (signal) => {
+					budget = signal;
+					const run = () => handler(args, { ...extra, signal });
 
-				return isConnector ? hideConnectorFailure(run, signal) : run();
-			})));
+					return isConnector ? hideConnectorFailure(run, signal) : run();
+				})));
+
+				if (answer.isError) {
+					result = "error";
+					errorType = "TOOL_ERROR";
+				}
+
+				return answer;
+			} catch (error) {
+				result = "error";
+				errorType = budget == null && shuttingDown
+					? "SHUTTING_DOWN"
+					: error instanceof Error ? toolErrorType(error) : "INTERNAL";
+
+				if (/^HYDRADB_HTTP_4\d\d$/.test(errorType) && errorType !== "HYDRADB_HTTP_408" && errorType !== "HYDRADB_HTTP_429") {
+					result = "rejected";
+				}
+
+				throw error;
+			} finally {
+				if (result !== "ok" && budget?.aborted) {
+					const timedOut = budget.reason instanceof DeadlineExceeded;
+
+					result = timedOut ? "timeout" : "cancelled";
+					errorType = timedOut ? "DEADLINE_EXCEEDED" : "CANCELLED";
+				}
+
+				recordToolCall(name, result, (performance.now() - started) / 1000);
+				logToolFailure(name, result, errorType, started, hydra.keyId);
+			}
 		};
 
 		const wrapped = isDeprecated

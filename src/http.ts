@@ -41,6 +41,7 @@ import {
 	type ResolvedIdentity,
 } from "./http-config.js";
 import { logger } from "./logger.js";
+import { startMetricsServer } from "./metrics.js";
 import {
 	introspect,
 	isAccessToken,
@@ -595,6 +596,14 @@ function main(): void {
 			logger.error("HTTP server error", { error: error.message });
 			process.exit(1);
 		});
+
+	if (config.metricsPort != null) {
+		const metricsPort = config.metricsPort;
+		// Metrics are optional: a port clash must not take the MCP server down.
+		startMetricsServer(metricsPort, config.bindAddress)
+			.on("listening", () => banner(`metrics on http://${config.bindAddress}:${metricsPort}/metrics`))
+			.on("error", (error) => logger.error("metrics server error", { error: error.message }));
+	}
 
 	installLifecycle(httpServer);
 }
