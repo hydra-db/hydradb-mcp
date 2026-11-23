@@ -51,10 +51,14 @@ export interface TableInspectionReports {
 	table_extraction?: z.infer<typeof tableExtractionSchema>;
 }
 
+const tableRecordSchema = z.record(jsonValue);
+const tableRecord = z.custom<z.infer<typeof tableRecordSchema>>((value) => tableRecordSchema.safeParse(value).success);
+const tableValue = z.custom<z.infer<typeof jsonValue>>((value) => jsonValue.safeParse(value).success);
+
 export const tableQuerySchema = z.object({
 	status: z.literal("ok"),
 	answer_type: z.enum(["exact", "computed"]).optional(),
-	records: z.array(z.record(jsonValue)),
+	records: z.array(tableRecord),
 	truncated: z.boolean().optional(),
 	extraction_status: tableExtractionSchema.shape.status.optional(),
 	sources: z.array(z.object({
@@ -69,7 +73,7 @@ export const tableQuerySchema = z.object({
 }).passthrough();
 
 export function renderTableQuery(table: z.infer<typeof tableQuerySchema>): string {
-	const rows = z.array(jsonValue).safeParse(table.rows);
+	const rows = z.array(tableValue).safeParse(table.rows);
 	const count = Math.max(table.records.length, rows.success ? rows.data.length : 0);
 	const lines = ["Table query", `${count} result rows.`];
 

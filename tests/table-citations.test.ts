@@ -32,3 +32,10 @@ test("table source references share the bounded text preview budget", () => {
 	assert.match(text, /full source list/);
 	assert.equal(table.sources?.[0]?.title?.length, 20000);
 });
+
+test("validated table records retain opaque property names in complete previews", () => {
+	const record = JSON.parse('{"__proto__":"literal","customerID":1,"customer_id":2,"nested":{"__proto__":"nested"}}');
+	const table = tableQuerySchema.parse({ status: "ok", records: [record] });
+	assert.deepEqual(table.records[0], record);
+	assert.ok(renderTableQuery(table).includes(JSON.stringify(record)));
+});
