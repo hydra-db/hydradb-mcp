@@ -40,6 +40,7 @@ import type {
 	UpdateContextParams,
 } from "./hydra/index.js";
 import { logger } from "./logger.js";
+import { type TableInspectionReports, recordTypeReportSchema, recordTypeSchema, renderTableQuery, tableExtractionSchema, tableQuerySchema } from "./record-type.js";
 import { ALIAS_REPLACEMENTS, CONNECTOR_TOOL_NAMES, type DATABASE_TOOL_NAMES, DEPRECATED_TOOL_NAMES, TOOL_NAMES } from "./tool-names.js";
 import type { IngestItemOutcome, IngestOutcome, IngestRejectedItem, MemoryResultItem } from "./types.js";
 import { SERVER_VERSION } from "./version.js";
@@ -1106,10 +1107,11 @@ export function createHydraDBServer(
 			tabular_data: z.unknown().optional(), tabularData: z.unknown().optional(),
 			graph: z.unknown().optional(), forceful_relations: z.unknown().optional(),
 		}).parse(raw);
-		const table = extras.tabular_data ?? extras.tabularData;
-		const tableText = table == null ? "" : formatTabularData(table);
+		const rawTable = extras.tabular_data ?? extras.tabularData;
+		const table = tableQuerySchema.safeParse(rawTable);
+		const tableText = table.success ? renderTableQuery(table.data) : rawTable == null ? "" : formatTabularData(rawTable).trimStart();
 		const retrievalFields = {
-			...(table == null ? {} : { tabular_data: table }),
+			...(rawTable == null ? {} : { tabular_data: rawTable }),
 			...(extras.graph == null ? {} : { graph: extras.graph }),
 			...(extras.forceful_relations == null ? {} : { forceful_relations: extras.forceful_relations }),
 		};
@@ -1125,10 +1127,10 @@ export function createHydraDBServer(
 			res.chunks = res.chunks.slice(0, maxResults);
 		}
 
-		if ((!res.chunks || res.chunks.length === 0) && table != null) {
+		if ((!res.chunks || res.chunks.length === 0) && rawTable != null) {
 			const feedback = feedbackLine ? `\n\n---${feedbackLine}` : "";
 
-			return queryResult(`${scopeText(resolvedScope)}${tableText}${feedback}`, retrievalFields);
+			return queryResult(`${scopeText(resolvedScope)}\n\n${tableText}${feedback}`, retrievalFields);
 		}
 		if (!res.chunks || res.chunks.length === 0) {
 			// Name WHERE nothing was found. "No results" is ambiguous the moment a
@@ -1239,13 +1241,13 @@ export function createHydraDBServer(
 			...(compact
 				? { maxChunkChars: COMPACT_CHUNK_CHARS, includeExtraContext: false }
 				: {}),
-			maxTotalChars: QUERY_CHAR_BUDGET - legend.length - headerAllowance,
+			maxTotalChars: QUERY_CHAR_BUDGET - legend.length - headerAllowance - tableText.length - 2,
 		});
 
-		return queryResult(
-			`Found ${shown} ${resultNoun(kind, shown)}:\n${scopeLine}\n\n${contextStr}${tableText}${legend}`,
-			{ sources: [...sourceRefs.values()], ...retrievalFields },
-		);
+		const sources = [...sourceRefs.values()];
+		const message = `Found ${shown} ${resultNoun(kind, shown)}:\n${scopeLine}\n\n${tableText ? `${tableText}\n\n` : ""}${contextStr}${legend}`;
+
+		return queryResult(message, { sources, ...retrievalFields });
 	}
 
 	/**
@@ -1412,6 +1414,7 @@ export function createHydraDBServer(
 			text?: string;
 			turns?: ConversationTurn[];
 			user_name?: string;
+			record_type?: IngestToolArguments["record_type"];
 		},
 		file: FileArg,
 		signal?: AbortSignal,
@@ -1492,6 +1495,7 @@ export function createHydraDBServer(
 			database: args.database,
 			collection: args.collection,
 			upsert: args.overwrite ?? true,
+			recordType: args.record_type,
 		}, { signal });
 
 		const res = toAddMemoryResponse(raw);
@@ -1507,6 +1511,9 @@ export function createHydraDBServer(
 		const result = structuredResult(
 			summary +
 			(outcome.indexing_pending ? indexingNote(res) : "") +
+			(outcome.indexing_pending && args.record_type != null
+				? "\n\nAfter indexing, use hydradb_inspect on this source to check the imported rows and extraction coverage."
+				: "") +
 			ingestIssues(res),
 			outcome,
 		);
@@ -2763,6 +2770,26 @@ export function createHydraDBServer(
 		const resolvedScope = singleScope(args);
 		const parts: string[] = [`Source: ${args.source_id}`, scopeText(resolvedScope)];
 
+		const recordTypeReport = recordTypeReportSchema.safeParse("record_type_report" in res ? res.record_type_report : undefined);
+		const extraction = tableExtractionSchema.safeParse("table_extraction" in res ? res.table_extraction : undefined);
+		const reportFields: TableInspectionReports = {};
+
+		if (recordTypeReport.success) {
+			const report = recordTypeReport.data;
+			reportFields.record_type_report = report;
+			parts.push(`Record type ${report.record_type}: ${report.records} imported, ${report.rejected} rejected.`);
+		}
+
+		if (extraction.success) {
+			const report = extraction.data;
+			reportFields.table_extraction = report;
+			parts.push(report.status === "partial"
+				? "Table import was partial. Query totals may omit rows."
+				: "PDF table coverage is unverified. Query totals cover the rows HydraDB imported.");
+
+			if (report.reason != null) parts.push(report.reason);
+		}
+
 		// `presignedUrl` was never read, so `mode: "url"` — documented in the
 		// schema and the README — returned "(no text content)" and nothing else.
 		// The one mode whose entire purpose is the link never emitted the link.
@@ -2791,6 +2818,7 @@ export function createHydraDBServer(
 
 		return structuredResult(parts.join("\n\n"), {
 			id: args.source_id, resolved_scope: resolvedScope,
+			...reportFields,
 			...(mode !== "content" && res.presignedUrl ? { download_url: res.presignedUrl } : {}),
 			...(readsText ? {
 				content: content?.slice(offset, end) ?? null,
@@ -2838,18 +2866,21 @@ export function createHydraDBServer(
 			return `  - ${s.id ?? "(unknown id)"}: ${state}${reason}`;
 		});
 
-		// `completed` and `failed` are terminal; everything else means keep
-		// waiting. Deliberately not switched over the SDK's status enum
-		// (queued/processing/completed/failed) — a live run returned
-		// `graph_creation`, which that enum does not declare.
-		const pending = statuses.filter(
-			(s) => !["completed", "failed"].includes(String(s.indexingStatus).toLowerCase()),
-		);
+		// `completed` and `errored` are the API's final indexing statuses; a
+		// failure is always `errored` (ENG-3906). Everything else, including
+		// `graph_creation`, means keep waiting. Compared as strings: the SDK
+		// types the field as a plain string.
+		const statusOf = (s: { indexingStatus?: string | null }) => String(s.indexingStatus).toLowerCase();
+		const errored = statuses.filter((s) => statusOf(s) === "errored");
+		const pending = statuses.filter((s) => !["completed", "errored"].includes(statusOf(s)));
 
 		const note =
 			pending.length > 0
 				? `\n\n${pending.length} still indexing — not yet searchable. Check again in a few seconds.`
-				: `\n\nAll sources have reached a terminal state.`;
+				: errored.length > 0
+					? `\n\nAll sources have reached a terminal state; ${errored.length} reported errored. ` +
+						"Read each error above before acting: it may be an indexing failure or a failed status lookup."
+					: `\n\nAll sources have reached a terminal state.`;
 
 		return textResult(`Indexing status:\n${lines.join("\n")}${note}`);
 	}
@@ -4336,6 +4367,7 @@ export function createHydraDBServer(
 			})
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.file),
+		record_type: recordTypeSchema.optional().describe(TOOL_DESCRIPTIONS[TOOL_NAMES.INGEST].params.record_type),
 	};
 
 	type IngestToolItem = z.infer<typeof ingestItemSchema>;
@@ -4355,6 +4387,7 @@ export function createHydraDBServer(
 		items?: IngestToolItem[];
 		app_knowledge?: AppKnowledgeItem[];
 		file?: FileArg;
+		record_type?: z.infer<typeof recordTypeSchema>;
 		relations?: IngestParams["relations"];
 		evidence_kind?: IngestParams["evidenceKind"];
 		evidence_subject?: string;
@@ -4857,6 +4890,7 @@ export function createHydraDBServer(
 			const a = args as IngestToolArguments;
 
 			if (a.file == null) {
+				if (a.record_type != null) throw new Error("record_type requires an uploaded file. Pass file, or remove record_type.");
 				assertIngestPayloadSize(a);
 			} else {
 				const combinedModes = [a.text, a.turns, a.items, a.app_knowledge]

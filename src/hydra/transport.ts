@@ -123,22 +123,23 @@ async function attemptRaw<T>(
 	onResponse?: <T>(value: T) => void,
 ): Promise<T> {
 	const doFetch = t.fetchFn ?? fetch;
+	const multipart = body instanceof FormData;
+
+	const headers = {
+		Authorization: `Bearer ${t.token}`,
+		// Match the SDK's v2 wire contract for requests that use this path.
+		"API-Version": "2",
+		...(t.headers ?? SOURCE_HEADERS),
+	};
+
+	if (!multipart) Object.assign(headers, { "Content-Type": "application/json" });
 
 	try {
-		const response = await doFetch(`${t.baseUrl}${path}`, {
-			method,
-			headers: {
-				Authorization: `Bearer ${t.token}`,
-				"Content-Type": "application/json",
-				// CONTRACT §2 rule 6. The SDK sends this on every call; a
-				// hand-rolled path that omitted it would silently get v1
-				// behaviour from the same endpoints.
-				"API-Version": "2",
-				...(t.headers ?? SOURCE_HEADERS),
-			},
-			...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-			signal,
-		});
+		const init: RequestInit = { method, headers, signal };
+
+		if (body !== undefined) init.body = multipart ? body : JSON.stringify(body);
+
+		const response = await doFetch(`${t.baseUrl}${path}`, init);
 
 		const text = await response.text();
 		let parsed: unknown;

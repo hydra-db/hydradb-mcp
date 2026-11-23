@@ -20,6 +20,7 @@ import type { HydraDB as SDK } from "@hydradb/sdk";
 import { z } from "zod";
 
 import type { JsonValue } from "../adapters.js";
+import { type IngestRecordType, serializeRecordType } from "../record-type.js";
 import { ConnectorsResource } from "./connectors.js";
 import { unwrap } from "./envelope.js";
 import { HydraWrapperError, scrub, translateError } from "./errors.js";
@@ -498,6 +499,7 @@ export interface IngestParams extends IngestItem {
 	 * place of all other ingest modes. Its title is its filename.
 	 */
 	file?: IngestDocument;
+	recordType?: IngestRecordType;
 	upsert?: boolean;
 	collection?: string;
 	/** Per-call database override. */
@@ -1165,6 +1167,10 @@ export class ContextResource extends Resource {
 			request.upsert = String(params.upsert);
 		}
 
+		if (params.recordType != null && params.file == null) {
+			throw new Error("recordType requires an uploaded file.");
+		}
+
 		const flatItemFields = [
 			params.text,
 			params.pairs,
@@ -1235,6 +1241,30 @@ export class ContextResource extends Resource {
 			request.documents = [{ data, filename, contentType }];
 
 			if (id != null) request.documentMetadata = JSON.stringify([{ id }]);
+
+			// The pinned SDK does not send this preview field. Use the existing
+			// authenticated transport until its generated request supports it.
+			if (params.recordType != null) {
+				if (this.raw == null) throw new Error("File ingestion with recordType requires HTTP transport.");
+
+				const form = new FormData();
+				form.set("database", request.database);
+				form.set("type", "knowledge");
+				form.set("documents", new Blob([Uint8Array.from(data)], { type: contentType }), filename);
+				form.set("record_type", serializeRecordType(params.recordType));
+
+				if (request.collection != null) form.set("collection", request.collection);
+
+				if (request.upsert != null) form.set("upsert", request.upsert);
+
+				if (request.documentMetadata != null) form.set("document_metadata", request.documentMetadata);
+
+				const response = await sendRaw<unknown>(this.raw, "/context/ingest", "POST", form, opts);
+
+				return serialization.IngestionV2IngestResponse.parseOrThrow(response, {
+					unrecognizedObjectKeys: "passthrough",
+				});
+			}
 
 			return this.call("/context/ingest", "unsafe", opts, (o) =>
 				this.sdk.context.ingest(request, o),
