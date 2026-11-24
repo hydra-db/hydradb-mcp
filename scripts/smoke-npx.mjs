@@ -47,6 +47,22 @@ const packed = JSON.parse(
 const tarball = `./${packed[0].filename}`;
 
 /**
+ * Stop npx and everything it started.
+ *
+ * npx runs the binary as a grandchild. Signalling npx alone leaves the server
+ * running with this script's pipes still open, and on Linux that keeps the
+ * script alive after its last check has passed. Each npx is started as the
+ * leader of its own process group so the whole group can be signalled.
+ */
+function stop(child, signal) {
+	try {
+		process.kill(-child.pid, signal);
+	} catch {
+		child.kill(signal);
+	}
+}
+
+/**
  * Run one npx command line and resolve once it answers `initialize` as this
  * server at this version. Anything else (npm refusing to pick a binary, a
  * crash on startup, silence) fails the run with what npm printed.
@@ -58,6 +74,7 @@ function startsServer(args) {
 		const child = spawn("npx", args, {
 			cwd: work,
 			stdio: ["pipe", "pipe", "pipe"],
+			detached: true,
 			env: {
 				...process.env,
 				HYDRADB_API_KEY: "smoke-test-key",
@@ -75,7 +92,7 @@ function startsServer(args) {
 		});
 
 		const timer = setTimeout(() => {
-			child.kill("SIGKILL");
+			stop(child, "SIGKILL");
 			fail(`${label}: no answer within ${TIMEOUT_MS}ms.\nstderr:\n${stderr}`);
 		}, TIMEOUT_MS);
 
@@ -109,7 +126,7 @@ function startsServer(args) {
 
 				answered = true;
 				clearTimeout(timer);
-				child.kill("SIGTERM");
+				stop(child, "SIGTERM");
 				console.error(`[smoke-npx] OK: ${label}`);
 				done();
 
@@ -157,6 +174,7 @@ async function startsHttpServer(args) {
 		const child = spawn("npx", args, {
 			cwd: work,
 			stdio: ["ignore", "ignore", "pipe"],
+			detached: true,
 			env: { ...process.env, PORT: String(port) },
 		});
 
@@ -165,7 +183,7 @@ async function startsHttpServer(args) {
 		child.stderr.setEncoding("utf8");
 
 		const timer = setTimeout(() => {
-			child.kill("SIGKILL");
+			stop(child, "SIGKILL");
 			fail(`${label}: not listening within ${TIMEOUT_MS}ms.\nstderr:\n${stderr}`);
 		}, TIMEOUT_MS);
 
@@ -181,7 +199,7 @@ async function startsHttpServer(args) {
 			if (listening || !stderr.includes(`:${port}`)) return;
 			listening = true;
 			clearTimeout(timer);
-			child.kill("SIGTERM");
+			stop(child, "SIGTERM");
 			console.error(`[smoke-npx] OK: ${label}`);
 			done();
 		});
@@ -195,3 +213,7 @@ await startsServer(["-y", tarball]);
 await startsServer(["-y", "-p", tarball, "hydradb-mcp"]);
 
 await startsHttpServer(["-y", "-p", tarball, "hydradb-mcp-http"]);
+
+// Every check passed. Exit here instead of waiting for the children's pipes to
+// close, which is what a hang would look like in CI.
+process.exit(0);
