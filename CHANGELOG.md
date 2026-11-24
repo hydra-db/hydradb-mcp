@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — `npx @hydradb/mcp` starts the server again
+
+`npx -y @hydradb/mcp@latest`, the command in every client config in this
+README, failed with "could not determine executable to run" on 1.2.2 through
+1.8.0: the package had two binaries and neither was named `mcp`, so npx had
+no way to pick one. The package has a `mcp` binary that starts the stdio
+server. `hydradb-mcp` and `hydradb-mcp-http` are unchanged, so
+`npx -y -p @hydradb/mcp hydradb-mcp` keeps working.
+
+`hydradb-mcp-http` exited 0 without binding a port when run through the
+binary npm installs (`npx -p @hydradb/mcp hydradb-mcp-http`, or a global
+install), because it did not recognise the symlink as its own entry point.
+`node dist/http.js` and the Docker image were not affected.
+
+CI packs the package and runs all three through `npx` (`npm run smoke:npx`).
+
+### Fixed — a plan-limit 403 is no longer explained as a read-only key
+
+The database write tools added "Read-only credentials cannot perform it" to
+every 403. The API also answers 403 when the plan allows no further
+database, so that case told the user to fix a key that was fine. A 403 that
+carries a reason is reported as the API worded it; the write-permission
+guidance is added only when the API says the key's scope does not permit the
+operation, and offered as a possibility when a 403 carries no reason.
+
+### Fixed — `hydradb_databases` lists only databases that exist
+
+When the connection's default database was not among those the API returned,
+it was added to the list and marked as the default, as if it existed. It is
+left out, the result says the default is not in the list, and
+`structuredContent` carries `default_missing: true`.
+
 ### Fixed — `hydradb_status` stops waiting on errored sources
 
 `hydradb_status` treated only `completed` and `failed` as final, but the API

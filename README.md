@@ -167,9 +167,10 @@ settings are `max_length`, `enable_match`, `enable_dense_embedding`, and
 
 After `hydradb_database_create` accepts a request, call
 `hydradb_database_readiness` until the database is ready. A 403 from a write
-tool can indicate missing write permission. Read-only credentials cannot perform
-database writes; verify the credential's permissions or reconnect with write
-permission.
+tool is reported with the API's own code and message. A plan that allows no
+further database says so; a key whose scope does not cover the operation is
+read-only, and the fix is to verify the credential's permissions or reconnect
+with write permission.
 
 To turn the database management tools off entirely:
 

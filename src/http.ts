@@ -23,6 +23,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { realpathSync } from "node:fs";
 
 import cors from "cors";
 import express, { type Express } from "express";
@@ -599,13 +600,34 @@ function main(): void {
 	installLifecycle(httpServer);
 }
 
+/**
+ * The script path node was started with, with symlinks resolved.
+ *
+ * npm installs a `bin` entry as a symlink named after the binary
+ * (`node_modules/.bin/hydradb-mcp-http`), and that link is what node reports
+ * in `argv[1]`. Compared as-is it never looks like this file, so the installed
+ * binary exited 0 without binding a port.
+ */
+function entryScript(): string | undefined {
+	const entry = process.argv[1];
+
+	if (entry == null) return undefined;
+
+	try {
+		return realpathSync(entry);
+	} catch {
+		return entry;
+	}
+}
+
 // Only auto-start when run as a script, so tests can import `createHttpApp`
-// without binding a port. Covers `node dist/http.js`, `tsx src/http.ts`, and
-// the Docker entrypoint.
+// without binding a port. Covers `node dist/http.js`, `tsx src/http.ts`, the
+// Docker entrypoint, and the `hydradb-mcp-http` binary npm links.
+const entry = entryScript();
 const invokedAsScript =
-	import.meta.url === `file://${process.argv[1]}` ||
-	process.argv[1]?.endsWith("/http.js") ||
-	process.argv[1]?.endsWith("/http.ts");
+	import.meta.url === `file://${entry}` ||
+	entry?.endsWith("/http.js") ||
+	entry?.endsWith("/http.ts");
 
 if (invokedAsScript) {
 	try {

@@ -9,7 +9,7 @@ import { z } from "zod";
 
 import { jsonValue } from "../src/adapters.js";
 import type { JsonValue, ListedFields } from "../src/adapters.js";
-import { HydraDB, HydraWrapperError } from "../src/hydra/index.js";
+import { HydraDB, HydraWrapperError, responseError } from "../src/hydra/index.js";
 import {
 	__resetAliasWarnings,
 	__resetShutdown,
@@ -358,15 +358,90 @@ test("database tools preserve 403s and qualify write-permission guidance", async
 
 		assert.match(text, /403/, name);
 
+		// These 403s carry no reason from the API, so a write tool may suggest
+		// the credential, as a possibility and not as the diagnosis.
 		if (writeTools.has(name)) {
-			assert.match(text, /requires database write permission/i, name);
-			assert.match(text, /read-only credentials cannot/i, name);
+			assert.match(text, /the API gave no reason/i, name);
+			assert.match(text, /if this credential is read-only/i, name);
 			assert.doesNotMatch(text, /this credential does not have write access/i, name);
 		} else {
-			assert.doesNotMatch(text, /read-only credentials cannot/i, name);
+			assert.doesNotMatch(text, /read-only/i, name);
 		}
 	}
 
+	await client.close();
+});
+
+test("a plan-limit 403 on a database write is reported as the API worded it", async () => {
+	const { hydra } = mockHydra();
+
+	// Verbatim from POST /databases on a plan that allows one database.
+	const planLimit = "Plan limit reached: your plan allows up to 1 isolated database(s). " +
+		"Upgrade your plan to create more databases.";
+
+	hydra.databases.create = () => Promise.reject(responseError(
+		"/databases",
+		403,
+		{ success: false, error: { code: "FORBIDDEN", message: planLimit }, meta: { request_id: "req_1" } },
+	));
+	const client = await connect(hydra);
+	const result = await client.callTool({ name: "hydradb_database_create", arguments: { database: "second" } });
+	const text = toolText(result);
+
+	assert.equal(result.isError, true);
+	assert.match(text, /403: FORBIDDEN: Plan limit reached: your plan allows up to 1 isolated database\(s\)/);
+	assert.match(text, /request_id: req_1/);
+	assert.doesNotMatch(text, /read-only|write permission|credential/i);
+	assert.doesNotMatch(text, /\.\./);
+	await client.close();
+});
+
+test("a scope-denied 403 on a database write names the write permission it needs", async () => {
+	const { hydra } = mockHydra();
+
+	hydra.databases.delete = () => Promise.reject(responseError(
+		"/databases",
+		403,
+		{ success: false, error: { code: "FORBIDDEN", message: "API key scope does not permit this operation" } },
+	));
+	const client = await connect(hydra);
+	const result = await client.callTool({ name: "hydradb_database_delete", arguments: { database: "old" } });
+	const text = toolText(result);
+
+	assert.equal(result.isError, true);
+	assert.match(text, /403: FORBIDDEN: API key scope does not permit this operation\. This operation requires database write permission/);
+	assert.match(text, /read-only credentials cannot perform it/i);
+	await client.close();
+});
+
+test("hydradb_databases does not list a default database the API did not return", async () => {
+	const { hydra } = mockHydra({ databases: { databases: ["analytics"] } });
+	const client = await connect(hydra);
+	const result = await client.callTool({ name: "hydradb_databases", arguments: {} });
+	const text = toolText(result);
+
+	assert.notEqual(result.isError, true);
+	assert.match(text, /^1 database\(s\):\n {2}- analytics\n/);
+	assert.doesNotMatch(text, /- db_test/);
+	assert.match(text, /Warning: this connection's default database is "db_test", and it is not in the list above/);
+	assert.deepEqual(result.structuredContent, {
+		databases: ["analytics"],
+		default: "db_test",
+		confined: false,
+		default_missing: true,
+	});
+	await client.close();
+});
+
+test("hydradb_databases marks the default when the API returned it", async () => {
+	const { hydra } = mockHydra();
+	const client = await connect(hydra);
+	const result = await client.callTool({ name: "hydradb_databases", arguments: {} });
+	const text = toolText(result);
+
+	assert.match(text, /- db_test {2}\(default for this connection\)/);
+	assert.doesNotMatch(text, /Warning/);
+	assert.deepEqual(result.structuredContent, { databases: ["db_test", "analytics"], default: "db_test", confined: false });
 	await client.close();
 });
 
