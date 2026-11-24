@@ -23,6 +23,15 @@ both prefix-preserving and prefix-stripping proxies, including the RFC 9728
 path-inserted alias. Unsupported `HYDRADB_MCP_PUBLIC_URL` layouts now fail at
 startup with a clear error instead of silently disabling OAuth.
 
+### Fixed — saving text as knowledge
+
+`hydradb_ingest` with `kind: "knowledge"` and `text` failed every time with
+`400 INVALID_INPUT` "unsupported key(s) [title]". The server sent the title
+inside `document_metadata`, where the API accepts no such key. The API takes a
+document's title from its filename, which the server already sets to
+`<title>.md`, so the extra key is gone and the save goes through. Files and
+memories were not affected.
+
 ## [1.8.0] - 2026-11-11
 
 ### Added — `hydradb_update`

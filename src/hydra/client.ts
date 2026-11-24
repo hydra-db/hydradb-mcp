@@ -1309,9 +1309,10 @@ export class ContextResource extends Resource {
 				const filename = input.filename ?? (/\.md$/i.test(title) ? title : `${title}.md`);
 				const metadataItem: Record<string, JsonValue> = {};
 
+				// The title travels as the upload's filename, which the API stores as
+				// the document's title. `document_metadata` takes no `title` key and
+				// the API rejects the whole request when it sees one.
 				if (input.sourceId != null) metadataItem.id = input.sourceId;
-
-				if (input.title != null) metadataItem.title = input.title;
 
 				if (input.metadata != null) metadataItem.metadata = input.metadata;
 
