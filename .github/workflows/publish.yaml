@@ -40,6 +40,10 @@ jobs:
       - name: Assert the tarball contents
         run: npm run check-pack
 
+      # The command users are told to run, against the tarball about to ship.
+      - name: Run the documented npx command against the packed tarball
+        run: npm run smoke:npx
+
       # The registry answers an unauthorised write to a scoped package with 404,
       # not 401 — it will not confirm the package exists to someone who cannot
       # write it. So a stale NPM_TOKEN surfaces as "404 Not Found - PUT

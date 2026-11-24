@@ -6,6 +6,7 @@
   "type": "module",
   "main": "dist/index.js",
   "bin": {
+    "mcp": "dist/index.js",
     "hydradb-mcp": "dist/index.js",
     "hydradb-mcp-http": "dist/http.js"
   },
@@ -28,6 +29,7 @@
     "test:all": "npm run test:unit && npm run test:integration",
     "smoke": "node scripts/smoke-dist.mjs",
     "smoke:http": "node scripts/smoke-http.mjs",
+    "smoke:npx": "node scripts/smoke-npx.mjs",
     "check-pack": "node scripts/assert-pack-contents.mjs",
     "lint": "biome lint src tests conformance scripts",
     "lint:anti-slop": "node scripts/lint-anti-slop-changed.mjs",

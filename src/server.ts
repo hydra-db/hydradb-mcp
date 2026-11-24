@@ -617,6 +617,19 @@ function collectionNamesOf(res: unknown): string[] | null {
 	return listed as string[];
 }
 
+/** The API's wording when a key's scope does not cover the route it called. */
+const SCOPE_DENIED = /scope does not permit/i;
+
+/** The part of a v2 error envelope that says why the request was refused. */
+const errorEnvelopeSchema = z.object({ error: z.object({ message: z.string().min(1) }) });
+
+/** End `text` with one full stop, so a sentence can follow it. */
+function sentence(text: string): string {
+	const trimmed = text.trimEnd();
+
+	return /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`;
+}
+
 export function createHydraDBServer(
 	hydraOverride?: HydraDB,
 	/**
@@ -2890,7 +2903,10 @@ export function createHydraDBServer(
 			databases = (listed.databases ?? listed.tenantIds ?? []).filter(Boolean);
 		}
 
-		if (!databases.includes(defaultDatabase)) databases.unshift(defaultDatabase);
+		// Only what the API (or the grant) returned is listed. The default used
+		// to be added to the list when it was absent, which showed a database
+		// that does not exist as if it did.
+		const defaultMissing = !databases.includes(defaultDatabase);
 
 		const lines = databases.map(
 			(d) => `  - ${d}${d === defaultDatabase ? "  (default for this connection)" : ""}`,
@@ -2901,10 +2917,22 @@ export function createHydraDBServer(
 				"The user chose this when approving the connection."
 			: "\nPass `database` on any tool to work in another one.";
 
-		return structuredResult(
-			`${databases.length} database(s):\n${lines.join("\n")}${note}`,
-			{ databases, default: defaultDatabase, confined },
-		);
+		const warning = defaultMissing
+			? `\nWarning: this connection's default database is "${defaultDatabase}", and it is not in ` +
+				"the list above. Calls that do not pass `database` use that name and will fail until " +
+				"the connection's default names a database listed here, or that database is created."
+			: "";
+
+		const heading =
+			databases.length === 0 ? "No databases were returned." : `${databases.length} database(s):\n${lines.join("\n")}`;
+
+		const text = `${heading}${note}${warning}`;
+
+		if (defaultMissing) {
+			return structuredResult(text, { databases, default: defaultDatabase, confined, default_missing: true });
+		}
+
+		return structuredResult(text, { databases, default: defaultDatabase, confined });
 	}
 
 	type MetadataFieldInput = z.infer<typeof metadataFieldSchema>;
@@ -2943,19 +2971,37 @@ export function createHydraDBServer(
 		};
 	}
 
+	/**
+	 * Run a database write, adding write-permission guidance to a 403 only
+	 * when the API's own answer does not rule it out.
+	 *
+	 * The API answers 403 FORBIDDEN for more than one reason: a key whose scope
+	 * does not cover the route, and a plan that allows no further database.
+	 * Every 403 used to be explained as a read-only credential, which sent a
+	 * plan-limited user to reissue a key that was fine. The API's code and
+	 * message are already in `error.message`; when they explain the refusal
+	 * they are the whole answer.
+	 */
 	async function databaseWrite<T>(run: () => Promise<T>): Promise<T> {
 		try {
 			return await run();
 		} catch (error) {
-			if (error instanceof HydraWrapperError && error.status === 403) {
+			if (!(error instanceof HydraWrapperError) || error.status !== 403) throw error;
+
+			if (SCOPE_DENIED.test(error.message)) {
 				throw new Error(
-					`${error.message}. This operation requires database write permission. ` +
+					`${sentence(error.message)} This operation requires database write permission. ` +
 					"Read-only credentials cannot perform it; verify this credential's permissions " +
 					"or reconnect with write permission.",
 				);
 			}
 
-			throw error;
+			if (errorEnvelopeSchema.safeParse(error.body).success) throw error;
+
+			throw new Error(
+				`${sentence(error.message)} The API gave no reason. If this credential is read-only, ` +
+				"it cannot perform database writes; verify its permissions or reconnect with write permission.",
+			);
 		}
 	}
 
