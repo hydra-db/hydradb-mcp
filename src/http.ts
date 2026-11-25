@@ -423,6 +423,14 @@ export function createHttpApp(config: HttpServerConfig): Express {
 				transport.close().catch(() => {});
 				server.close().catch(() => {});
 			});
+			// The SDK answers its own 400s (protocol version, malformed JSON-RPC)
+			// and reports them only here; set before connect, which keeps it.
+			transport.onerror = (error) => {
+				logger.warn("mcp transport error", {
+					error: error.message.slice(0, 300),
+					user_agent: (req.header("user-agent") ?? "").slice(0, 200),
+				});
+			};
 
 			await server.connect(transport);
 			await transport.handleRequest(req, res, req.body);

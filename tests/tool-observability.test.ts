@@ -206,3 +206,29 @@ test("a reworded unified-database ingest error is rejected with its status", asy
 	assert.equal(count("hydradb_ingest", "rejected"), 1);
 	assert.equal(failureLogs(lines)[0]?.error_type, "HYDRADB_HTTP_400");
 });
+
+test("an argument mistake is counted as rejected with INVALID_ARGUMENTS, at INFO", async () => {
+	const { client } = await connect({ query: async () => ({ success: true, chunks: [] }), context: {} });
+
+	const calls: [string, Record<string, unknown>][] = [
+		["hydradb_inspect", {}],
+		["hydradb_delete", {}],
+		["hydradb_update", { id: "x" }],
+	];
+
+	for (const [name, args] of calls) {
+		const lines = await captureLogs(() => client.callTool({ name, arguments: args }));
+		assert.equal(count(name, "rejected"), 1, name);
+		assert.equal(count(name, "error"), 0, name);
+		const [line] = failureLogs(lines);
+		assert.equal(line?.error_type, "INVALID_ARGUMENTS", name);
+		assert.ok(lines.some((l) => /INFO/.test(l) && /tool call rejected/.test(l)), name);
+	}
+});
+
+test("a failed or timed-out call logs at ERROR, so SigNoz error rules see it", async () => {
+	const fail = () => Promise.reject(new HydraDBError({ statusCode: 500, body: { error: { code: "E", message: "boom" } } }));
+	const { client } = await connect({ query: fail, context: {} }, { maxRetries: 0 });
+	const lines = await captureLogs(() => client.callTool({ name: "hydradb_query", arguments: { query: "q" } }));
+	assert.ok(lines.some((l) => /ERROR/.test(l) && /tool call failed/.test(l)), lines.join("\n"));
+});
