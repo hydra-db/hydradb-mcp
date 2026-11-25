@@ -50,15 +50,39 @@ export function resolveLogLevel(
 	}
 }
 
+export type LogFormat = "text" | "json";
+
+/**
+ * `HYDRADB_LOG_FORMAT=json` writes one JSON object per line, which the hosted
+ * deployment's log pipeline parses into fields. Anything else keeps the text
+ * lines a person reads in a local stdio session.
+ */
+export function resolveLogFormat(env: EnvSource = process.env): LogFormat {
+	return env.HYDRADB_LOG_FORMAT?.trim().toLowerCase() === "json" ? "json" : "text";
+}
+
 const currentLogLevel = resolveLogLevel();
 
-function formatMessage(
+const currentLogFormat = resolveLogFormat();
+
+export function formatMessage(
 	level: LogLevel,
 	message: string,
 	meta?: Record<string, unknown>,
+	format: LogFormat = currentLogFormat,
 ): string {
 	const timestamp = new Date().toISOString();
 	const levelName = LOG_LEVEL_NAMES[level];
+
+	if (format === "json") {
+		const line = { ...meta, timestamp, level: levelName, service_name: "hydradb-mcp", message };
+
+		try {
+			return JSON.stringify(line);
+		} catch {
+			return JSON.stringify({ timestamp, level: levelName, service_name: "hydradb-mcp", message, meta: "[unstringifiable]" });
+		}
+	}
 	if (meta && Object.keys(meta).length > 0) {
 		try {
 			return `[${timestamp}] [hydradb-mcp] ${levelName}: ${message} ${JSON.stringify(meta)}`;

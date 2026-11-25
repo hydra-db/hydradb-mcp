@@ -38,6 +38,7 @@ import type {
 	UpdateContextParams,
 } from "./hydra/index.js";
 import { logger } from "./logger.js";
+import { recordToolCall, type ToolResultLabel } from "./metrics.js";
 import { type TableInspectionReports, recordTypeReportSchema, recordTypeSchema, renderTableQuery, tableExtractionSchema, tableQuerySchema } from "./record-type.js";
 import { ALIAS_REPLACEMENTS, CONNECTOR_TOOL_NAMES, type DATABASE_TOOL_NAMES, DEPRECATED_TOOL_NAMES, TOOL_NAMES } from "./tool-names.js";
 import type { IngestItemOutcome, IngestOutcome, IngestRejectedItem, MemoryResultItem } from "./types.js";
@@ -286,6 +287,44 @@ export function beginShutdown(): void {
 /** Test-only: allow a fresh server in the same process after a shutdown test. */
 export function __resetShutdown(): void {
 	shuttingDown = false;
+}
+
+/** A connector failure reworded for the model; keeps what HydraDB answered for the error_type. */
+class RewrittenFailure extends Error {
+	constructor(message: string, readonly cause: unknown) {
+		super(message);
+	}
+}
+
+/** The caller's arguments were wrong: counted as rejected, not as a server failure. */
+class InvalidArguments extends Error {}
+
+/**
+ * A bounded error_type for a tool call that threw: the HTTP status HydraDB
+ * answered with, or that it could not be reached. Never the message, which can
+ * carry provider text.
+ */
+export function toolErrorType(error: Error): string {
+	if (error instanceof InvalidArguments) return "INVALID_ARGUMENTS";
+
+	const answered = error instanceof RewrittenFailure ? error.cause : error;
+
+	if (answered instanceof HydraWrapperError) {
+		return answered.status != null ? `HYDRADB_HTTP_${answered.status}` : "HYDRADB_UNREACHABLE";
+	}
+
+	return "INTERNAL";
+}
+
+/** One line per failed tool call; arguments and credentials never go in it. */
+function logToolFailure(tool: string, result: ToolResultLabel, errorType: string, started: number, keyId: string): void {
+	if (result === "ok") return;
+
+	const meta = { tool, result, error_type: errorType, duration_ms: Math.round(performance.now() - started), key_id: keyId };
+
+	if (result === "cancelled") logger.info("tool call cancelled", meta);
+	else if (result === "rejected") logger.info("tool call rejected", meta);
+	else logger.error("tool call failed", meta);
 }
 
 function trackInFlight<T>(work: () => Promise<T>): Promise<T> {
@@ -1209,13 +1248,13 @@ export function createHydraDBServer(
 		signal?: AbortSignal,
 	): Promise<ToolResult> {
 		if (args.text != null || args.turns != null) {
-			throw new Error(
+			throw new InvalidArguments(
 				`${TOOL_NAMES.INGEST} takes exactly one of \`text\`, \`turns\` or \`file\`, not several.`,
 			);
 		}
 
 		if (args.kind === "memory") {
-			throw new Error(
+			throw new InvalidArguments(
 				`${TOOL_NAMES.INGEST} ingests a \`file\` as knowledge, not memory. Drop \`kind\`, or extract ` +
 				"the facts worth remembering and send them as `text`.",
 			);
@@ -1238,20 +1277,20 @@ export function createHydraDBServer(
 		).flatMap(([name, value]) => (value != null ? [name] : []));
 
 		if (unsupported.length > 0) {
-			throw new Error(
+			throw new InvalidArguments(
 				`${TOOL_NAMES.INGEST} does not support ${unsupported.join(", ")} with \`file\`.`,
 			);
 		}
 
 		if ((file.content_base64 != null) === (file.path != null)) {
-			throw new Error("`file` needs exactly one of `content_base64` (the bytes) or `path` (a local file).");
+			throw new InvalidArguments("`file` needs exactly one of `content_base64` (the bytes) or `path` (a local file).");
 		}
 
 		let upload: IngestFile;
 
 		if (file.path != null) {
 			if (!options.localFiles) {
-				throw new Error(
+				throw new InvalidArguments(
 					"`file.path` works only on the local (stdio) Hydra DB MCP server. This server cannot " +
 					"read your machine's files: send the file's bytes as `file.content_base64` (up to 8 MB) " +
 					"with its `filename`.",
@@ -1261,7 +1300,7 @@ export function createHydraDBServer(
 			upload = await readLocal(file.path, file.filename, signal);
 		} else {
 			if (file.filename == null) {
-				throw new Error("`file.filename` is required with `content_base64`, including its extension (e.g. \"plan.pdf\").");
+				throw new InvalidArguments("`file.filename` is required with `content_base64`, including its extension (e.g. \"plan.pdf\").");
 			}
 
 			upload = decodeInline(file.filename, file.content_base64 ?? "");
@@ -1419,7 +1458,7 @@ export function createHydraDBServer(
 			args.additional_metadata != null && Object.keys(args.additional_metadata).length > 0;
 
 		if (!databaseMetadataPresent && !additionalMetadataPresent && args.acl === undefined) {
-			return errorResult(
+			throw new InvalidArguments(
 				`${TOOL_NAMES.UPDATE} requires database_metadata, additional_metadata, or acl. ` +
 				"No request was sent.",
 			);
@@ -1585,7 +1624,7 @@ export function createHydraDBServer(
 		const totalBytes = Buffer.byteLength(JSON.stringify(value), "utf8");
 
 		if (totalBytes > MAX_INGEST_BYTES) {
-			throw new Error(
+			throw new InvalidArguments(
 				`hydradb_ingest payload contains ${totalBytes} UTF-8 bytes; the maximum is ` +
 				`${MAX_INGEST_BYTES}. Split the call.`,
 			);
@@ -1650,21 +1689,21 @@ export function createHydraDBServer(
 			const hasTurns = item.turns != null && item.turns.length > 0;
 
 			if (hasText === hasTurns) {
-				throw new Error(`items[${index}] requires exactly one of text or turns.`);
+				throw new InvalidArguments(`items[${index}] requires exactly one of text or turns.`);
 			}
 
 			if (kind === "knowledge" && hasTurns) {
-				throw new Error(`items[${index}] cannot use turns with kind "knowledge".`);
+				throw new InvalidArguments(`items[${index}] cannot use turns with kind "knowledge".`);
 			}
 
 			const callerInstructions = item.custom_instructions ?? args.custom_instructions;
 
 			if (kind === "knowledge" && callerInstructions != null) {
-				throw new Error("custom_instructions applies to memory ingestion only.");
+				throw new InvalidArguments("custom_instructions applies to memory ingestion only.");
 			}
 
 			if (item.infer === false && callerInstructions != null) {
-				throw new Error(`items[${index}] cannot use custom_instructions when infer is false.`);
+				throw new InvalidArguments(`items[${index}] cannot use custom_instructions when infer is false.`);
 			}
 
 			const sourceId = item.source_id || generatedSourceId();
@@ -1697,7 +1736,7 @@ export function createHydraDBServer(
 		const ids = items.map((item) => item.sourceId ?? "");
 
 		if (new Set(ids).size !== ids.length) {
-			throw new Error("hydradb_ingest item ids must be unique within one batch.");
+			throw new InvalidArguments("hydradb_ingest item ids must be unique within one batch.");
 		}
 
 		const raw = await hydra.context.ingest({
@@ -1769,7 +1808,7 @@ export function createHydraDBServer(
 		const explicitIds = args.items.flatMap((item) => item.id ? [item.id] : []);
 
 		if (new Set(explicitIds).size !== explicitIds.length) {
-			throw new Error("hydradb_ingest app_knowledge ids must be unique within one batch.");
+			throw new InvalidArguments("hydradb_ingest app_knowledge ids must be unique within one batch.");
 		}
 
 		let raw: Awaited<ReturnType<typeof hydra.context.ingest>>;
@@ -1784,8 +1823,9 @@ export function createHydraDBServer(
 			}, { signal });
 		} catch (error) {
 			if (error instanceof Error && /CORPUS_TYPE_UNSUPPORTED/.test(error.message)) {
-				throw new Error(
+				throw new RewrittenFailure(
 					`${error.message} app_knowledge works only on split databases. This database is unified.`,
+					error,
 				);
 			}
 
@@ -2120,7 +2160,7 @@ export function createHydraDBServer(
 		// A blank id would otherwise read as "omitted" and return the whole
 		// collection's relations for what was meant as one item.
 		if (args.id != null && args.id.trim() === "") {
-			throw new Error(
+			throw new InvalidArguments(
 				`${TOOL_NAMES.RELATIONS}: \`id\` must not be blank. Omit it for the whole collection's relations.`,
 			);
 		}
@@ -2305,7 +2345,7 @@ export function createHydraDBServer(
 		const budget = Math.min(limit ?? INSPECT_CHAR_BUDGET, INSPECT_CHAR_BUDGET);
 		const total = res.content.length;
 
-		if (start > total) throw new Error(`Inspect offset ${start} exceeds source length ${total}; restart at offset 0 if the source changed.`);
+		if (start > total) throw new InvalidArguments(`Inspect offset ${start} exceeds source length ${total}; restart at offset 0 if the source changed.`);
 
 		if (start === 0 && total <= budget) return res.content;
 
@@ -2341,7 +2381,7 @@ export function createHydraDBServer(
 		// values the caller deliberately supplied means acting on a target they
 		// did not ask for, and here that target can be a DELETE.
 		if (a.id != null && a.source_id != null && a.id !== a.source_id) {
-			throw new Error(
+			throw new InvalidArguments(
 				`${TOOL_NAMES.INSPECT} received different values for \`id\` (${a.id}) and its ` +
 				`deprecated alias \`source_id\` (${a.source_id}). Pass only \`id\`.`,
 			);
@@ -2350,7 +2390,7 @@ export function createHydraDBServer(
 		const id = a.id ?? a.source_id;
 
 		if (!id) {
-			throw new Error(
+			throw new InvalidArguments(
 				`${TOOL_NAMES.INSPECT} requires \`id\` — the value shown as [id: …] in ` +
 				`${TOOL_NAMES.QUERY} results or in [brackets] in ${TOOL_NAMES.LIST} output.`,
 			);
@@ -2387,7 +2427,7 @@ export function createHydraDBServer(
 		const id = args.id ?? "";
 
 		if (id.trim() === "") {
-			throw new Error(
+			throw new InvalidArguments(
 				`${TOOL_NAMES.SUBGRAPH} requires \`id\` — the value shown as [id: …] in ` +
 					`${TOOL_NAMES.QUERY} results or in [brackets] in ${TOOL_NAMES.LIST} output.`,
 			);
@@ -2807,7 +2847,7 @@ export function createHydraDBServer(
 		const ids = a.ids ?? (a.id != null ? [a.id] : []);
 
 		if (ids.length === 0) {
-			throw new Error(
+			throw new InvalidArguments(
 				`${TOOL_NAMES.DELETE} requires \`ids\` (or \`id\`). Ids come from ` +
 				`${TOOL_NAMES.QUERY} or ${TOOL_NAMES.LIST} — do not guess one.`,
 			);
@@ -2948,10 +2988,11 @@ export function createHydraDBServer(
 			return await run();
 		} catch (error) {
 			if (error instanceof HydraWrapperError && error.status === 403) {
-				throw new Error(
+				throw new RewrittenFailure(
 					`${error.message}. This operation requires database write permission. ` +
 					"Read-only credentials cannot perform it; verify this credential's permissions " +
 					"or reconnect with write permission.",
+					error,
 				);
 			}
 
@@ -3076,7 +3117,7 @@ export function createHydraDBServer(
 		const collection = args.collection?.trim() ?? "";
 
 		if (!collection) {
-			throw new Error(
+			throw new InvalidArguments(
 				`${TOOL_NAMES.DELETE_COLLECTION} requires \`collection\`. ` +
 					`Take it from ${TOOL_NAMES.LIST_COLLECTIONS} — do not guess one.`,
 			);
@@ -3150,7 +3191,7 @@ export function createHydraDBServer(
 		if (!hydra.allowedDatabases) return;
 
 		if (hydra.allowedCollections || hydra.collection) return;
-		throw new Error(
+		throw new InvalidArguments(
 			`This connection is confined to database ${hydra.allowedDatabases
 				.map((d) => `"${d}"`)
 				.join(", ")} and names no collection of its own, so "${action}" has no ` +
@@ -3185,7 +3226,7 @@ export function createHydraDBServer(
 		}
 
 		if (!COLLECTION_PATTERN.test(collection)) {
-			throw new Error(
+			throw new InvalidArguments(
 				`Invalid graph collection name "${collection}". Collection names must match ` +
 				"[A-Za-z0-9][A-Za-z0-9_-]{0,63} — start with a letter or digit, then letters, " +
 				"digits, underscores or hyphens, up to 64 characters.",
@@ -3220,14 +3261,14 @@ export function createHydraDBServer(
 			// uploaded, which is the outcome this check exists to avoid.
 			bytes = Buffer.byteLength(JSON.stringify(body) ?? "", "utf8");
 		} catch {
-			throw new Error(
+			throw new InvalidArguments(
 				"`params` could not be serialised to JSON — it must contain only plain " +
 				"values (strings, numbers, booleans, null, arrays, objects).",
 			);
 		}
 
 		if (bytes > MAX_BODY_BYTES) {
-			throw new Error(
+			throw new InvalidArguments(
 				`This request is ${Math.round(bytes / 1024)} KiB, over Hydra DB's ` +
 				`${MAX_BODY_BYTES / 1024} KiB limit. Split it into batches — send rows in ` +
 				"chunks with `UNWIND $rows AS row ...` (about 500 rows per call is a good start).",
@@ -3359,7 +3400,7 @@ export function createHydraDBServer(
 			const collection = args.collection?.trim();
 
 			if (!collection) {
-				throw new Error(
+				throw new InvalidArguments(
 					`${TOOL_NAMES.GRAPH_ADMIN} action "drop_collection" requires \`collection\` — ` +
 					"the name of the graph to drop. Nothing was deleted.",
 				);
@@ -3398,7 +3439,7 @@ export function createHydraDBServer(
 			assertDestructiveScopeExists("drop_database");
 
 			if (hydra.allowedCollections) {
-				throw new Error(
+				throw new InvalidArguments(
 					`This connection is confined to collection ${hydra.allowedCollections
 						.map((c) => `"${c}"`)
 						.join(", ")}, and "drop_database" removes every collection in ` +
@@ -3453,7 +3494,7 @@ export function createHydraDBServer(
 			});
 		}
 
-		throw new Error(
+		throw new InvalidArguments(
 			`${TOOL_NAMES.GRAPH_ADMIN} received an unknown action "${args.action}". ` +
 			'Valid actions are "create_database", "drop_collection" and "drop_database".',
 		);
@@ -3479,7 +3520,7 @@ export function createHydraDBServer(
 		const requestId = args.request_id?.trim() ?? "";
 
 		if (requestId === "") {
-			throw new Error(
+			throw new InvalidArguments(
 				`${TOOL_NAMES.FEEDBACK} requires \`request_id\` — the value ` +
 				`${TOOL_NAMES.QUERY} prints at the end of its results. It cannot be ` +
 				`guessed or reconstructed: run the query again and copy it.`,
@@ -3627,34 +3668,34 @@ export function createHydraDBServer(
 					? `The connector request got ${signal.reason.message}.`
 					: "The connector request was cancelled.";
 
-				throw new Error(`${stopped} A change may or may not have applied; check connector health before repeating it.`);
+				throw new RewrittenFailure(`${stopped} A change may or may not have applied; check connector health before repeating it.`, error);
 			}
 
 			if (error.status === 400 || error.status === 422) {
-				throw new Error("HydraDB rejected the request as invalid. Change the arguments; the same call will fail again.");
+				throw new RewrittenFailure("HydraDB rejected the request as invalid. Change the arguments; the same call will fail again.", error);
 			}
 
 			if (error.status === 401 || error.status === 403) {
-				throw new Error("HydraDB refused this connection's credentials for the request. Reconnecting the connector will not change that.");
+				throw new RewrittenFailure("HydraDB refused this connection's credentials for the request. Reconnecting the connector will not change that.", error);
 			}
 
 			if (error.status === 404) {
-				throw new Error("The connector or resource was not found.");
+				throw new RewrittenFailure("The connector or resource was not found.", error);
 			}
 
 			if (error.status === 409) {
-				throw new Error("The connector state changed before this request completed. Read it again before retrying.");
+				throw new RewrittenFailure("The connector state changed before this request completed. Read it again before retrying.", error);
 			}
 
 			if (error.status === 429) {
-				throw new Error("HydraDB rate-limited the connector request. Retry later.");
+				throw new RewrittenFailure("HydraDB rate-limited the connector request. Retry later.", error);
 			}
 
 			if (error.status != null && error.status >= 500) {
-				throw new Error("The connector service is temporarily unavailable. Retry later.");
+				throw new RewrittenFailure("The connector service is temporarily unavailable. Retry later.", error);
 			}
 
-			throw new Error("The connector request failed. Review connector health and retry.");
+			throw new RewrittenFailure("The connector request failed. Review connector health and retry.", error);
 		}
 	}
 
@@ -3730,17 +3771,53 @@ export function createHydraDBServer(
 		const desc = TOOL_DESCRIPTIONS[name];
 		const isDeprecated = (DEPRECATED_TOOL_NAMES as readonly string[]).includes(name);
 
-		const counted = (
+		const counted = async (
 			args: Record<string, unknown>,
 			extra?: ToolExtra,
 		) => {
 			const isConnector = CONNECTOR_TOOL_NAMES.some((toolName) => toolName === name);
+			const started = performance.now();
+			let budget: AbortSignal | undefined;
+			let result: ToolResultLabel = "ok";
+			let errorType = "";
 
-			return trackInFlight(() => redactFailure(() => withCallBudget(extra, (signal) => {
-				const run = () => handler(args, { ...extra, signal });
+			try {
+				const answer = await trackInFlight(() => redactFailure(() => withCallBudget(extra, (signal) => {
+					budget = signal;
+					const run = () => handler(args, { ...extra, signal });
 
-				return isConnector ? hideConnectorFailure(run, signal) : run();
-			})));
+					return isConnector ? hideConnectorFailure(run, signal) : run();
+				})));
+
+				if (answer.isError) {
+					result = "error";
+					errorType = "TOOL_ERROR";
+				}
+
+				return answer;
+			} catch (error) {
+				result = "error";
+				errorType = budget == null && shuttingDown
+					? "SHUTTING_DOWN"
+					: error instanceof Error ? toolErrorType(error) : "INTERNAL";
+
+				if (errorType === "INVALID_ARGUMENTS"
+					|| (/^HYDRADB_HTTP_4\d\d$/.test(errorType) && errorType !== "HYDRADB_HTTP_408" && errorType !== "HYDRADB_HTTP_429")) {
+					result = "rejected";
+				}
+
+				throw error;
+			} finally {
+				if (result !== "ok" && budget?.aborted) {
+					const timedOut = budget.reason instanceof DeadlineExceeded;
+
+					result = timedOut ? "timeout" : "cancelled";
+					errorType = timedOut ? "DEADLINE_EXCEEDED" : "CANCELLED";
+				}
+
+				recordToolCall(name, result, (performance.now() - started) / 1000);
+				logToolFailure(name, result, errorType, started, hydra.keyId);
+			}
 		};
 
 		const wrapped = isDeprecated
@@ -4658,14 +4735,14 @@ export function createHydraDBServer(
 			const a = args as IngestToolArguments;
 
 			if (a.file == null) {
-				if (a.record_type != null) throw new Error("record_type requires an uploaded file. Pass file, or remove record_type.");
+				if (a.record_type != null) throw new InvalidArguments("record_type requires an uploaded file. Pass file, or remove record_type.");
 				assertIngestPayloadSize(a);
 			} else {
 				const combinedModes = [a.text, a.turns, a.items, a.app_knowledge]
 					.filter((value) => value != null).length;
 
 				if (combinedModes > 0) {
-					throw new Error(
+					throw new InvalidArguments(
 						`${TOOL_NAMES.INGEST} takes exactly one of \`text\`, \`turns\`, \`items\`, ` +
 						"`app_knowledge`, or `file`, not several.",
 					);
@@ -4696,11 +4773,11 @@ export function createHydraDBServer(
 
 		if (a.app_knowledge != null) {
 			if (a.kind === "memory") {
-				throw new Error("app_knowledge requires kind knowledge; omit kind or set it to knowledge.");
+				throw new InvalidArguments("app_knowledge requires kind knowledge; omit kind or set it to knowledge.");
 			}
 
 			if (a.items != null || hasFlatItem || hasOtherFlatFields || a.custom_instructions != null) {
-				throw new Error(
+				throw new InvalidArguments(
 					`${TOOL_NAMES.INGEST} accepts app_knowledge or memory/document item fields, not both.`,
 				);
 			}
@@ -4725,14 +4802,14 @@ export function createHydraDBServer(
 		).flatMap(([name, value]) => value == null ? [] : [name]);
 
 		if ((a.kind ?? "memory") === "memory" && memoryOnlyKnowledgeFields.length > 0) {
-			throw new Error(
+			throw new InvalidArguments(
 				`${TOOL_NAMES.INGEST} does not support ${memoryOnlyKnowledgeFields.join(", ")} for ` +
 				"memory ingestion — those apply to knowledge ingestion only.",
 			);
 		}
 
 		if (a.items != null && (hasFlatItem || hasOtherFlatFields)) {
-			throw new Error(
+			throw new InvalidArguments(
 				`${TOOL_NAMES.INGEST} accepts either \`items\` or the single-item fields, not both.`,
 			);
 		}
@@ -4755,7 +4832,7 @@ export function createHydraDBServer(
 		// made of user/assistant pairs. Reject rather than quietly ingesting it as
 		// the wrong family.
 		if (hasTurns && a.kind === "knowledge") {
-			throw new Error(
+			throw new InvalidArguments(
 				`${TOOL_NAMES.INGEST} cannot ingest \`turns\` as knowledge — conversations are memories. ` +
 				`Use \`text\` for a knowledge document, or drop \`kind\`.`,
 			);
@@ -4778,7 +4855,7 @@ export function createHydraDBServer(
 				.map(([name]) => name);
 
 			if (memoryOnlyGiven.length > 0) {
-				throw new Error(
+				throw new InvalidArguments(
 					`${TOOL_NAMES.INGEST} does not support ${memoryOnlyGiven.join(", ")} for ` +
 					`kind "knowledge" — those apply to memory ingestion only. Drop them, or ` +
 					`ingest this as a memory.`,
@@ -4787,13 +4864,13 @@ export function createHydraDBServer(
 		}
 
 		if (a.infer === false && a.custom_instructions != null) {
-			throw new Error("custom_instructions cannot be used when infer is false.");
+			throw new InvalidArguments("custom_instructions cannot be used when infer is false.");
 		}
 
 		// `text` and `turns` are mutually exclusive — reject rather than silently
 		// dropping one (the documented "exactly one" contract).
 		if (hasTurns && a.text != null) {
-			throw new Error(
+			throw new InvalidArguments(
 				`${TOOL_NAMES.INGEST} accepts either \`text\` (a note) or \`turns\` (a conversation), not both.`,
 			);
 		}
@@ -4849,7 +4926,7 @@ export function createHydraDBServer(
 			);
 		}
 
-			throw new Error(
+			throw new InvalidArguments(
 				`${TOOL_NAMES.INGEST} requires one of \`text\`, \`turns\`, \`items\`, ` +
 				"`app_knowledge`, or `file`.",
 			);
@@ -4916,7 +4993,7 @@ export function createHydraDBServer(
 				a.source_ids != null &&
 				!sameIds(a.ids, a.source_ids)
 			) {
-				throw new Error(
+				throw new InvalidArguments(
 					`${TOOL_NAMES.LIST} received different values for \`ids\` and its deprecated ` +
 					`alias \`source_ids\`. Pass only \`ids\`.`,
 				);
@@ -4939,15 +5016,15 @@ export function createHydraDBServer(
 			].filter((s): s is string => s != null);
 
 			if (a.parent_external_id != null && a.provider == null) {
-				throw new Error(`${TOOL_NAMES.LIST}: parent_external_id requires provider; parent IDs are not unique across providers.`);
+				throw new InvalidArguments(`${TOOL_NAMES.LIST}: parent_external_id requires provider; parent IDs are not unique across providers.`);
 			}
 
 			if (a.parent_external_id != null && a.connector_id == null) {
-				throw new Error(`${TOOL_NAMES.LIST}: parent_external_id requires connector_id; provider alone does not identify a site/account. Resolve the parent with external_id first and copy its stored connector_id; never guess it.`);
+				throw new InvalidArguments(`${TOOL_NAMES.LIST}: parent_external_id requires connector_id; provider alone does not identify a site/account. Resolve the parent with external_id first and copy its stored connector_id; never guess it.`);
 			}
 
 			if (a.kind !== "knowledge" && sourceSelectors.length > 0) {
-				throw new Error(
+				throw new InvalidArguments(
 					`${TOOL_NAMES.LIST}: ${sourceSelectors.join(", ")} ` +
 					`${sourceSelectors.length === 1 ? "is" : "are"} only valid with ` +
 					`kind: "knowledge" — memories carry no provider identity. ` +
@@ -4964,7 +5041,7 @@ export function createHydraDBServer(
 			].filter((s): s is string => s != null);
 
 			if (a.kind === "memory" && sourceRowOptions.length > 0) {
-				throw new Error(
+				throw new InvalidArguments(
 					`${TOOL_NAMES.LIST}: ${sourceRowOptions.join(" and ")} ${sourceRowOptions.length === 1 ? "applies" : "apply"} ` +
 					`to kind: "knowledge" or "all", not to memories.`,
 				);
@@ -4975,7 +5052,7 @@ export function createHydraDBServer(
 			const filterConnector = a.additional_metadata?.connector_id;
 
 			if (a.connector_id != null && filterConnector !== undefined && filterConnector !== a.connector_id) {
-				throw new Error(
+				throw new InvalidArguments(
 					`${TOOL_NAMES.LIST} received connector_id ${JSON.stringify(a.connector_id)} and ` +
 					`additional_metadata.connector_id ${JSON.stringify(filterConnector)}. Pass one of them.`,
 				);
@@ -5323,7 +5400,7 @@ export function createHydraDBServer(
 					const input = parser.safeParse(args);
 
 					// The rule's own words, not zod's issue dump, so the model knows what to change.
-					if (!input.success) throw new Error(input.error.issues.map((issue) => issue.message).join(" "));
+					if (!input.success) throw new InvalidArguments(input.error.issues.map((issue) => issue.message).join(" "));
 
 					const result = await run(input.data, extra?.signal);
 

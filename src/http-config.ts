@@ -55,6 +55,12 @@ export interface HttpServerConfig {
 	 */
 	trustProxy: boolean | number | string;
 	/**
+	 * Port for GET /metrics (tool calls by tool and result), from
+	 * `HYDRADB_METRICS_PORT`. Absent, or not a usable port: no metrics server.
+	 * Its own port, so the public MCP port never serves it.
+	 */
+	metricsPort?: number;
+	/**
 	 * OAuth resource-server settings, or absent when OAuth is off. Resolved
 	 * from the environment by {@link resolveHttpServerConfig}; tests pass it
 	 * directly.
@@ -137,7 +143,14 @@ export function resolveHttpServerConfig(env: EnvSource = process.env): HttpServe
 		allowedHosts: buildAllowedHosts(port, parseList(env.ALLOWED_HOSTS)),
 		trustProxy: parseTrustProxy(env.TRUST_PROXY),
 		oauth: resolveOAuthConfig(env),
+		...metricsPortFrom(env, port),
 	};
+}
+
+function metricsPortFrom(env: EnvSource, port: number): { metricsPort?: number } {
+	const metricsPort = parsePort(env.HYDRADB_METRICS_PORT, 0);
+
+	return metricsPort !== 0 && metricsPort !== port ? { metricsPort } : {};
 }
 
 // --- Per-request tenant credentials ---

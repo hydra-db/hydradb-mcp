@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — tool-call logs and metrics for hosted deployments
+
+A failed tool call answers inside a JSON-RPC 200, so nothing outside the
+server could see it. Each failed call now writes one log line (tool, result,
+a bounded `error_type` such as `HYDRADB_HTTP_500` or `DEADLINE_EXCEEDED`,
+duration and the key's public id; never arguments or credentials).
+`HYDRADB_LOG_FORMAT=json` writes log lines as JSON, and `HYDRADB_METRICS_PORT`
+serves `hydradb_mcp_tool_calls_total{tool,result}` (`rejected` is a 4xx refusal
+of the caller's request, apart from `error`) and a duration histogram
+on a separate port. Both are off by default, so a local stdio session is
+unchanged (ENG-4670).
+
 ### Fixed — `hydradb_status` stops waiting on errored sources
 
 `hydradb_status` treated only `completed` and `failed` as final, but the API

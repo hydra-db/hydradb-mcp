@@ -32,7 +32,7 @@ import {
 	type RetrySafety,
 	withRetries,
 } from "./retry.js";
-import { type RawTransport, mcpHeaders, newRawTransport, sendRaw } from "./transport.js";
+import { type RawTransport, apiKeyId, mcpHeaders, newRawTransport, sendRaw } from "./transport.js";
 
 export type ContextKind = "memory" | "knowledge";
 
@@ -2101,6 +2101,11 @@ export class HydraDB {
 	private readonly token: string;
 	/** Deadline for one whole tool call, every request and wait inside it. */
 	readonly deadlineMs: number;
+
+	/** The key's public id (or a hash), safe to log. */
+	get keyId(): string {
+		return apiKeyId(this.token);
+	}
 
 	constructor(config: HydraConfig, sdk?: HydraDBClient, rawOverride?: RawTransport) {
 		const client =

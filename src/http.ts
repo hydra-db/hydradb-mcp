@@ -41,6 +41,7 @@ import {
 	type ResolvedIdentity,
 } from "./http-config.js";
 import { logger } from "./logger.js";
+import { startMetricsServer } from "./metrics.js";
 import {
 	introspect,
 	isAccessToken,
@@ -422,6 +423,14 @@ export function createHttpApp(config: HttpServerConfig): Express {
 				transport.close().catch(() => {});
 				server.close().catch(() => {});
 			});
+			// The SDK answers its own 400s (protocol version, malformed JSON-RPC)
+			// and reports them only here; set before connect, which keeps it.
+			transport.onerror = (error) => {
+				logger.warn("mcp transport error", {
+					error: error.message.slice(0, 300),
+					user_agent: (req.header("user-agent") ?? "").slice(0, 200),
+				});
+			};
 
 			await server.connect(transport);
 			await transport.handleRequest(req, res, req.body);
@@ -595,6 +604,14 @@ function main(): void {
 			logger.error("HTTP server error", { error: error.message });
 			process.exit(1);
 		});
+
+	if (config.metricsPort != null) {
+		const metricsPort = config.metricsPort;
+		// Metrics are optional: a port clash must not take the MCP server down.
+		startMetricsServer(metricsPort, config.bindAddress)
+			.on("listening", () => banner(`metrics on http://${config.bindAddress}:${metricsPort}/metrics`))
+			.on("error", (error) => logger.error("metrics server error", { error: error.message }));
+	}
 
 	installLifecycle(httpServer);
 }

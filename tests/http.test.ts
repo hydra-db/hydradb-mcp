@@ -1,3 +1,4 @@
+import "./support/log-level-info.js";
 import assert from "node:assert/strict";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
@@ -311,4 +312,40 @@ test("hosted OAuth calls without a subject stay tagged as OAuth, by key id", asy
 		assert.equal(h.get("x-hydradb-mcp-user"), "mcp:oauth:key-hk_live_abc");
 		assert.ok(!h.get("x-hydradb-mcp-user")?.includes("SECRET"));
 	}
+});
+
+test("a request the SDK refuses with a 400 leaves a WARN line naming why and the client", async () => {
+	const lines: string[] = [];
+	const original = console.error;
+	console.error = (...args: unknown[]) => {
+		lines.push(args.map(String).join(" "));
+	};
+
+	let res: Res;
+
+	try {
+		res = await request(
+			"POST",
+			"/mcp",
+			{
+				host: `127.0.0.1:${port}`,
+				"content-type": "application/json",
+				accept: "application/json, text/event-stream",
+				authorization: "Bearer k",
+				"x-hydradb-database": "db",
+				"mcp-protocol-version": "1999-01-01",
+				"user-agent": "codex-test/1.0",
+			},
+			JSON.stringify({ jsonrpc: "2.0", method: "tools/list", id: 1 }),
+		);
+	} finally {
+		console.error = original;
+	}
+
+	assert.equal(res.status, 400);
+	const line = lines.find((l) => /mcp transport error/.test(l));
+	assert.ok(line, lines.join("\n"));
+	assert.match(line, /WARN/);
+	assert.match(line, /Unsupported protocol version: 1999-01-01/);
+	assert.match(line, /codex-test\/1\.0/);
 });
