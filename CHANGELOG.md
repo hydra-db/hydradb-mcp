@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.9.0] - 2026-11-26
+
 ### Added — `include_table_sql` and `table_limit` on `hydradb_query`
 
 `hydradb_query` refused both table options because its input schema did not
