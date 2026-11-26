@@ -207,6 +207,8 @@ chunks with their source id, a relevance score, and knowledge-graph context.
 | `query_by` | string | No | `hybrid` (default) or `text` (keyword only). Setting `operator` implies `text` |
 | `query_forceful_relations` | boolean | No | In thinking mode, also follow relations declared at ingest and return their chunks |
 | `temporal_reasoning` | boolean | No | Resolve time-based questions using dated facts (Hydra DB default: true) |
+| `include_table_sql` | boolean | No | When a structured table answers the question, also return the SQL that produced the rows: shown under `SQL executed` and in `tabular_data.sql` (default: false) |
+| `table_limit` | integer | No | Maximum rows in a table answer, 1-100 (default: 100), applied after aggregation and ordering |
 | `response_format` | string | No | `structured` (the default rendering, with source ids) or `markdown` (Hydra DB's own Markdown rendering, returned as-is, without per-chunk ids) |
 
 Results are text only by default: each chunk carries its source id and

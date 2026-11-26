@@ -334,6 +334,13 @@ export interface QueryParams {
 	/** Resolve time-based questions using dated facts. The API defaults it on. */
 	temporalReasoning?: boolean;
 	/**
+	 * Return the SQL statement behind a table answer in `tabular_data.sql`.
+	 * Sent by `queryClient`: the pinned SDK has no field for it.
+	 */
+	includeTableSql?: boolean;
+	/** Maximum table rows in `tabular_data.records`, 1 to 100 (API default 100). */
+	tableLimit?: number;
+	/**
 	 * `structured` asks the API to leave out its `llm_prompt` rendering. The
 	 * Markdown form is a different response shape; see `queryMarkdown`.
 	 */
@@ -1045,6 +1052,45 @@ export class ContextResource extends Resource {
 	}
 
 	/**
+	 * The SDK client that sends one `/query` call.
+	 *
+	 * The pinned SDK (2.1.8) has no `include_table_sql` or `table_limit` field,
+	 * and its serializer drops keys it does not know. When a call sets either,
+	 * this client adds them to the JSON body after the SDK has serialized it,
+	 * so the SDK still parses the response and the shared retry and
+	 * cancellation policy still applies. Remove this once a released SDK
+	 * serializes both fields itself.
+	 */
+	private queryClient(params: QueryParams): HydraDBClient {
+		if (params.includeTableSql == null && params.tableLimit == null) return this.sdk;
+
+		if (!this.raw) throw new Error("include_table_sql and table_limit need an HTTP transport.");
+		const raw = this.raw;
+
+		const fetchFn: typeof fetch = (input, init) => {
+			const body = z.record(z.string(), z.unknown()).parse(JSON.parse(String(init?.body)));
+
+			if (params.includeTableSql != null) body.include_table_sql = params.includeTableSql;
+
+			if (params.tableLimit != null) body.table_limit = params.tableLimit;
+
+			return (raw.fetchFn ?? fetch)(input, { ...init, body: JSON.stringify(body) });
+		};
+
+		return new HydraDBClient({
+			token: raw.token,
+			baseUrl: raw.baseUrl,
+			fetch: fetchFn,
+			headers: raw.headers,
+			// Same settings as the connection's own client: one attempt, a timer
+			// past the deadline the retry loop enforces, logs to stderr.
+			timeoutInSeconds: raw.timeoutMs / 1000 + 5,
+			maxRetries: 0,
+			logging: { logger: STDERR_LOGGER },
+		});
+	}
+
+	/**
 	 * The single retrieval entry point (SDK `client.query`).
 	 *
 	 * `async` so the operator/retrieval validation surfaces as a rejection,
@@ -1055,10 +1101,10 @@ export class ContextResource extends Resource {
 		opts?: RequestOptions,
 	): Promise<SDK.SearchV2RetrievalResult> {
 		const request = this.queryRequest(params);
-
+		const client = this.queryClient(params);
 
 		return this.call("/query", "idempotent", opts, async (o) => {
-			const response = await this.sdk.query(request, o);
+			const response = await client.query(request, o);
 			validateQueryResponse(response);
 			return response;
 		});
@@ -1073,9 +1119,10 @@ export class ContextResource extends Resource {
 		opts?: RequestOptions,
 	): Promise<string> {
 		const request: SDK.SearchQueryRequest = { ...this.queryRequest(params), responseFormat: "markdown" };
+		const client = this.queryClient(params);
 
 		return this.call("/query", "idempotent", opts, async (o) => {
-			const response = await this.sdk.query(request, o);
+			const response = await client.query(request, o);
 
 			// The SDK types `data` as the result object and passes the string
 			// through unparsed. Anything else is not a successful Markdown answer.

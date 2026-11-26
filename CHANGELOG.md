@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — `include_table_sql` and `table_limit` on `hydradb_query`
+
+`hydradb_query` refused both table options because its input schema did not
+list them. An agent that queries structured tables (CSV, Excel, PDF tables)
+can now pass `include_table_sql: true` to get the SQL statement behind a table
+answer, shown verbatim under `SQL executed` and returned in
+`tabular_data.sql` with `structured: true`, and `table_limit` (1-100) to cap
+the rows returned. Both also apply with `response_format: "markdown"`, where
+Hydra DB's own rendering prints the SQL. The pinned SDK (2.1.8) has no field
+for either, so the server adds them to the `/query` body itself (ENG-4641).
+
 ### Fixed — `hydradb_status` stops waiting on errored sources
 
 `hydradb_status` treated only `completed` and `failed` as final, but the API

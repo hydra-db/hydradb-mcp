@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { z } from "zod";
 
 import { MAX_FILE_BYTES, MAX_INLINE_FILE_BYTES, readLocal } from "../src/files.js";
 import { HydraDB } from "../src/hydra/index.js";
@@ -223,6 +224,130 @@ test("a query with no text chunks preserves table totals and PDF coverage", asyn
 	assert.deepEqual(result.structuredContent?.tabular_data, table);
 	assert.match(JSON.stringify(result.content), /PDF table coverage is unverified/);
 	assert.match(JSON.stringify(result.content), /12\.00/);
+});
+
+/** The /query body fields these tests check; any other field passes through. */
+const queryBody = z.object({
+	query: z.string(),
+	collection: z.string().optional(),
+	include_table_sql: z.boolean().optional(),
+	table_limit: z.number().optional(),
+	response_format: z.string().optional(),
+}).passthrough();
+
+/** The text of a tool result's first content block. */
+function firstText(result: { content?: unknown }): string {
+	return z.array(z.object({ text: z.string() })).parse(result.content)[0]?.text ?? "";
+}
+
+/** A /query `data` payload: a table answer, or the Markdown rendering. */
+type QueryData = string | {
+	chunks: [];
+	tabular_data?: { status: "ok"; answer_type?: string; sql?: string; records: Record<string, string | number>[] };
+};
+
+/** Mocks /query, answering with `data`, and records each request body sent. */
+function captureQueries(
+	t: { mock: { method: typeof import("node:test").mock.method } },
+	data: QueryData,
+): z.infer<typeof queryBody>[] {
+	const bodies: z.infer<typeof queryBody>[] = [];
+
+	t.mock.method(globalThis, "fetch", async (_input: Request | string | URL, init?: RequestInit) => {
+		bodies.push(queryBody.parse(JSON.parse(String(init?.body))));
+
+		return Response.json({ success: true, data, meta: { request_id: "r-table" } });
+	});
+
+	return bodies;
+}
+
+test("include_table_sql and table_limit reach /query and the SQL is shown", async (t) => {
+	const sql = "SELECT sum(\"Debit\") AS total FROM t_abc WHERE \"Date\" >= DATE '2024-10-01'";
+	const table = { status: "ok", answer_type: "computed", sql, records: [{ total: 2575000 }] };
+	const bodies = captureQueries(t, { chunks: [], tabular_data: table });
+	const client = await connect();
+
+	const result = await client.callTool({
+		name: "hydradb_query",
+		arguments: {
+			query: "October outflows", collection: "statements", include_table_sql: true, table_limit: 5, structured: true,
+		},
+	});
+
+	assert.equal(result.isError, undefined, JSON.stringify(result.content));
+	assert.equal(bodies.length, 1);
+	assert.equal(bodies[0]?.include_table_sql, true);
+	assert.equal(bodies[0]?.table_limit, 5);
+	// The SDK's own fields still go out as before.
+	assert.equal(bodies[0]?.query, "October outflows");
+	assert.equal(bodies[0]?.collection, "statements");
+	assert.deepEqual(result.structuredContent?.tabular_data, table);
+	const text = firstText(result);
+	assert.ok(text.includes(`SQL executed:\n\`\`\`sql\n${sql}\n\`\`\``), text);
+});
+
+test("a query without the table options sends neither field", async (t) => {
+	const bodies = captureQueries(t, { chunks: [], tabular_data: { status: "ok", records: [{ n: 1 }] } });
+	const client = await connect();
+
+	await client.callTool({ name: "hydradb_query", arguments: { query: "how many", collection: "statements" } });
+
+	assert.equal(bodies.length, 1);
+	assert.equal("include_table_sql" in (bodies[0] ?? {}), false);
+	assert.equal("table_limit" in (bodies[0] ?? {}), false);
+});
+
+test("include_table_sql is forwarded on a Markdown query", async (t) => {
+	const bodies = captureQueries(t, "## Table query\n\nQuery executed:\n```sql\nSELECT 1\n```\n");
+	const client = await connect();
+
+	const result = await client.callTool({
+		name: "hydradb_query",
+		arguments: { query: "q", collection: "statements", include_table_sql: true, response_format: "markdown" },
+	});
+
+	assert.equal(bodies[0]?.include_table_sql, true);
+	assert.equal(bodies[0]?.response_format, "markdown");
+	assert.match(JSON.stringify(result.content), /SELECT 1/);
+});
+
+test("a code fence inside the SQL cannot close the SQL block early", async (t) => {
+	const table = { status: "ok", sql: "SELECT '```' AS x", records: [] };
+	captureQueries(t, { chunks: [], tabular_data: table });
+	const client = await connect();
+
+	const result = await client.callTool({
+		name: "hydradb_query",
+		arguments: { query: "q", collection: "statements", include_table_sql: true },
+	});
+
+	const text = firstText(result);
+	assert.ok(text.includes("SELECT '' ' '' AS x"), text);
+	assert.equal(text.split("```").length, 3, text);
+});
+
+test("hydradb_query advertises the table options and bounds table_limit", async (t) => {
+	const bodies = captureQueries(t, { chunks: [] });
+	const client = await connect();
+	const { tools } = await client.listTools();
+	const props = tools.find((tool) => tool.name === "hydradb_query")?.inputSchema.properties ?? {};
+
+	const typed = z.object({ type: z.string() });
+
+	assert.equal(typed.parse(props.include_table_sql).type, "boolean");
+	assert.equal(typed.parse(props.table_limit).type, "integer");
+
+	for (const tableLimit of [0, 101, 2.5]) {
+		const result = await client.callTool({
+			name: "hydradb_query",
+			arguments: { query: "q", collection: "statements", table_limit: tableLimit },
+		});
+
+		assert.equal(result.isError, true, `table_limit ${tableLimit}`);
+	}
+
+	assert.equal(bodies.length, 0);
 });
 
 test("on the stdio server a DOCX can be ingested by path", async (t) => {

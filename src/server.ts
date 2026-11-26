@@ -754,6 +754,8 @@ export function createHydraDBServer(
 		query_by?: "hybrid" | "text";
 		query_forceful_relations?: boolean;
 		temporal_reasoning?: boolean;
+		include_table_sql?: boolean;
+		table_limit?: number;
 		response_format?: "structured" | "markdown";
 	}, signal?: AbortSignal): Promise<ToolResult> {
 		// Host-owned default (CONTRACT §2 rule 5): search BOTH families. This tool
@@ -848,6 +850,8 @@ export function createHydraDBServer(
 			additionalContext: args.additional_context,
 			queryForcefulRelations: args.query_forceful_relations,
 			temporalReasoning: args.temporal_reasoning,
+			includeTableSql: args.include_table_sql,
+			tableLimit: args.table_limit,
 		};
 
 		const requestOptions = {
@@ -3883,6 +3887,17 @@ export function createHydraDBServer(
 			.boolean()
 			.optional()
 			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.temporal_reasoning),
+		include_table_sql: z
+			.boolean()
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.include_table_sql),
+		table_limit: z
+			.number()
+			.int()
+			.min(1)
+			.max(100)
+			.optional()
+			.describe(TOOL_DESCRIPTIONS[TOOL_NAMES.QUERY].params.table_limit),
 		response_format: z
 			.enum(["structured", "markdown"])
 			.optional()
