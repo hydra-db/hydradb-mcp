@@ -91,6 +91,13 @@ const PARAM = {
 	temporal_reasoning:
 		"Resolve time-based questions ('when', 'how long', 'as of') using dated facts " +
 		"(default: true). Set false to skip it.",
+	include_table_sql:
+		"When a structured table answers the question, also return the SQL statement " +
+		"that produced the rows. It is shown under 'SQL executed' and in " +
+		"tabular_data.sql. Default: false.",
+	table_limit:
+		"Maximum rows in a table answer, 1 to 100 (default: 100). Applied after " +
+		"aggregation and ordering.",
 	response_format:
 		"'structured' (default rendering) shows each chunk with its source id for " +
 		"follow-up calls; 'markdown' returns Hydra DB's own Markdown rendering of the " +
@@ -597,6 +604,8 @@ export const TOOL_DESCRIPTIONS = {
 			query_by: PARAM.query_by,
 			query_forceful_relations: PARAM.query_forceful_relations,
 			temporal_reasoning: PARAM.temporal_reasoning,
+			include_table_sql: PARAM.include_table_sql,
+			table_limit: PARAM.table_limit,
 			response_format: PARAM.response_format,
 			database: PARAM.database,
 			collection: PARAM.collection,

@@ -56,6 +56,8 @@ export const tableQuerySchema = z.object({
 	answer_type: z.enum(["exact", "computed"]).optional(),
 	records: z.array(z.record(jsonValue)),
 	truncated: z.boolean().optional(),
+	/** Present only when the query set `include_table_sql`. */
+	sql: z.string().optional(),
 	extraction_status: tableExtractionSchema.shape.status.optional(),
 	sources: z.array(z.object({
 		id: z.string(),
@@ -99,6 +101,13 @@ export function renderTableQuery(table: z.infer<typeof tableQuerySchema>): strin
 	}
 
 	if ((table.sources?.length ?? 0) > 8) lines.push("Use structured: true for the full source list.");
+
+	// Verbatim and never shortened: a caller asks for it to re-run or audit the
+	// answer. A fence inside the statement would end the block early, so it is
+	// broken up the same way the API's own Markdown rendering does.
+	if (table.sql != null && table.sql !== "") {
+		lines.push("SQL executed:", "```sql", table.sql.split("```").join("' ' '"), "```");
+	}
 
 	return lines.join("\n");
 }
