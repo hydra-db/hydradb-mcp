@@ -1922,6 +1922,10 @@ export function createHydraDBServer(
 		}
 
 		const lines = memories.map((m, i) => {
+			// The list API returns a title and no text, and a title shown where the
+			// text goes reads as the memory itself, so it is labelled.
+			if (m.memory_content == null) return `${i + 1}. [${m.memory_id}]${m.title != null ? ` title: ${m.title}` : ""}`;
+
 			// The query path appends "..." when it truncates; this one did not, so a
 			// half sentence read as a complete fact.
 			const content = m.memory_content;
@@ -1944,7 +1948,8 @@ export function createHydraDBServer(
 				// encoding of the same answer, not a bypass of its limits.
 				items: memories.map((m) => ({
 					id: m.memory_id,
-					content: clampPreview(m.memory_content),
+					...(m.title != null ? { title: m.title } : {}),
+					...(m.memory_content != null ? { content: clampPreview(m.memory_content) } : {}),
 				})),
 				shown: memories.length,
 				total: page.total ?? memories.length,

@@ -5319,6 +5319,16 @@ test("an empty bare listing says where it looked and points at collections", asy
 	await client.close();
 });
 
+test("a memory listed with a title and no text shows the title labelled as one", async () => {
+	const { hydra } = mockHydra({ list: { user_memories: [{ memory_id: "m1", title: "Weekend running" }], total: 1 } });
+	const client = await connect(hydra);
+	const result = await client.callTool({ name: "hydradb_list", arguments: { kind: "memory" } });
+
+	assert.deepEqual((result.structuredContent as { items: unknown[] }).items, [{ id: "m1", title: "Weekend running" }]);
+	assert.match(toolText(result), /^1\. \[m1\] title: Weekend running$/m);
+	await client.close();
+});
+
 test("an empty listing by id names the id and the scope, not an empty database", async () => {
 	const { hydra } = mockHydra({ list: { user_memories: [], sources: [], total: 0 } }, { collection: null });
 	const client = await connect(hydra);

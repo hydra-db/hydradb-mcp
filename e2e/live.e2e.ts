@@ -586,19 +586,22 @@ const SCENARIOS: Scenario[] = [
 	{
 		id: "list.memory.content",
 		tools: ["hydradb_list"],
-		knownIssue: "F-mcp-6",
-		async run({ call, expectFixed }) {
+		async run({ call }) {
 			requireIndexed("e2e-m-text", "e2e-m-item-2");
 			const answer = await call("hydradb_list", { kind: "memory", ids: ["e2e-m-text", "e2e-m-item-2"] });
 			const byId = new Map(items(ok(answer, "hydradb_list memory")).map((item) => [String(item.id), item]));
 
 			assert.equal(byId.size, 2, "precondition: both memories are listed");
-			await expectFixed(() => {
-				for (const id of ["e2e-m-text", "e2e-m-item-2"] as const) {
-					assert.equal(byId.get(id)?.content, TEXT[id], `${id}: structuredContent.items[].content is not the stored text`);
-					assert.ok(answer.text.includes(`[${id}] ${TEXT[id]}`), `${id}: the listing does not print the stored text`);
-				}
-			});
+			assert.equal(byId.get("e2e-m-item-2")?.title, "Weekend running", "the title it was saved with is listed as its title");
+
+			// A row shows the stored text, or a title labelled as one: never a title presented as the text.
+			for (const id of ["e2e-m-text", "e2e-m-item-2"] as const) {
+				const item = byId.get(id);
+				const line = item?.content == null ? `[${id}] title: ${item?.title}` : `[${id}] ${TEXT[id]}`;
+
+				assert.ok(item?.content == null || item.content === TEXT[id], `${id}: structuredContent.items[].content is not the stored text`);
+				assert.ok(answer.text.includes(line), `${id}: the listing does not print ${JSON.stringify(line)}:\n${answer.text}`);
+			}
 		},
 	},
 	{

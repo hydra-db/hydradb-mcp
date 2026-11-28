@@ -97,6 +97,21 @@ test("toMemoryList reads memory rows defensively", () => {
 	]);
 });
 
+// The list API returns a memory's title and not its text; the title is not the text.
+test("toMemoryList keeps a memory's title apart from its content", () => {
+	const { memories } = toMemoryList({
+		user_memories: [
+			{ memory_id: "m1", title: "Weekend running" },
+			{ memory_id: "m2", memory_content: "likes tea", title: "Tea" },
+		],
+	});
+
+	assert.deepEqual(memories, [
+		{ memory_id: "m1", title: "Weekend running" },
+		{ memory_id: "m2", memory_content: "likes tea", title: "Tea" },
+	]);
+});
+
 test("toMemoryList reads the camelCase rows returned by SDK 2.1.8", () => {
 	// SAFETY: this fixture intentionally uses the SDK's runtime camelCase shape,
 	// which the generated ListV2ListResponse type does not declare accurately.
