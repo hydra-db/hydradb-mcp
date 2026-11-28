@@ -332,16 +332,20 @@ const PARAM = {
 /** Parameter blurbs for the BYOG graph tools. */
 const GRAPH_PARAM = {
 	query:
-		"The Cypher to run — a read (MATCH/RETURN, traversal, aggregation) or a write " +
-		"(CREATE, MERGE, SET, DELETE, REMOVE, FOREACH, index statements). Write data as " +
-		"$parameters, not as string-concatenated literals, and alias every returned " +
-		"expression (`RETURN n.name AS name`). Prefer MERGE on a key you own over bare " +
-		"CREATE so a retry cannot duplicate. Deletes are irreversible.",
+		"The Cypher to run: a read (MATCH/RETURN, traversal, aggregation) or a write in " +
+		"the shapes this tool's description lists. Nodes carry an INTEGER `id` and go in " +
+		"through `UNWIND $rows AS row MERGE (n {id: row.id}) SET n:Label, ...`; edges carry " +
+		"an INTEGER `id` and go in through `UNWIND $edges AS e MATCH (a:Label {id: e.src}) " +
+		"MATCH (b:Label {id: e.dst}) MERGE (a)-[:TYPE {id: e.id}]->(b)`; both are safe to " +
+		"re-run. Then SET, REMOVE, DETACH DELETE and DELETE of a typed edge on matched " +
+		"items. Write data as $parameters, not as string-concatenated literals, and alias " +
+		"every returned expression (`RETURN n.name AS name`). Deletes are irreversible.",
 	params:
 		"Values referenced by $name in the query, as {name: value}. Always pass user data " +
 		"this way rather than building it into the query text: parameters are bound safely " +
-		"and keep query plans cacheable. Lists work too — `UNWIND $rows AS row` with " +
-		'{"rows": [...]} is the supported way to write many nodes in one call.',
+		"and keep query plans cacheable. Lists work too: `UNWIND $rows AS row` with " +
+		'{"rows": [...]} is the supported way to write many nodes or edges in one call. ' +
+		"Every `id` must be an integer.",
 	database:
 		"Graph database to run against. Defaults to the server's configured graph " +
 		"database. This is a DIFFERENT namespace from the memory/knowledge database — a " +
@@ -458,31 +462,44 @@ Keep the returned database, collection and caller ACL on every follow-up; scope 
 /**
  * The dialect notes every graph tool needs to state.
  *
- * These are not general Cypher advice — each one is a construct that a model
- * trained on Neo4j will reach for and that HydraDB REJECTS before running
- * anything. A rejected query fails identically on retry, so the only way out is
- * knowing the rule beforehand.
+ * Graph collections run on one of two engines while HydraDB moves them to the
+ * newer one (ENG-3448). The newer engine refuses most general Cypher with a 400;
+ * the older one runs it, with Neo4j semantics where the newer one keys nodes by
+ * their `id`. Every shape listed here was probed on both and answers the same.
  */
-const CYPHER_DIALECT = `HydraDB runs your Cypher verbatim and never rewrites it. Near-complete openCypher, with these differences from Neo4j:
-  - Procedure calls are rejected — no \`CALL db.*\`, no \`CALL apoc.*\`. \`CALL { ... }\` subqueries ARE supported. To learn a collection's structure, query it: \`MATCH (n) UNWIND labels(n) AS l RETURN l, count(*) AS c ORDER BY l\`.
-  - \`LOAD CSV\` is rejected. Pass data through \`params\`: \`UNWIND $rows AS row MERGE (n:Thing {id: row.id}) SET n += row\`.
-  - Existence checks are bare pattern predicates — \`WHERE (p)-[:KNOWS]->()\`. The \`EXISTS { ... }\` block and the \`exists()\` function are not accepted.
-  - \`shortestPath\` goes in RETURN or WITH (not \`MATCH p = ...\`) and the traversal must be directed.
-  - Do NOT use \`EXPLAIN\`/\`PROFILE\` to preview a query: they EXECUTE it rather than planning it.`;
+const CYPHER_DIALECT = `HydraDB runs your Cypher verbatim and never rewrites it. Graph collections run on one of two engines, and HydraDB is moving them to the newer one. The shapes below give the same result on both. Outside them, a query can fail with a 400 on one engine (that changes nothing) and run with different results on the other.
 
-const GRAPH_SCOPE = `Queries run against exactly ONE collection — collections never see each other's data, so \`MATCH (n) RETURN n\` returns that collection's nodes and nothing else. \`database\` and \`collection\` default to the server's configured graph scope; pass them to target another.`;
+WRITES:
+  - Every node has a non-negative INTEGER \`id\`.
+  - Nodes, created or updated: \`UNWIND $rows AS row MERGE (n {id: row.id}) SET n:Person, n.name = row.name\` with \`{"rows": [{"id": 1, "name": "Ada"}]}\`. Set exactly one label, in SET, not in the MERGE pattern. Safe to re-run. Running it for an existing \`id\` with another label adds that label.
+  - One new node: \`CREATE (:Person {id: 1, name: 'Ada'})\`, only for an \`id\` that does not exist yet. An existing \`id\` fails on one engine and becomes a second node on the other.
+  - Edges, one or many: \`UNWIND $edges AS e MATCH (a:Person {id: e.src}) MATCH (b:Person {id: e.dst}) MERGE (a)-[r:KNOWS {id: e.id}]->(b) SET r.since = e.since\` with \`{"edges": [{"id": 1, "src": 1, "dst": 2, "since": 2020}]}\`. Give every edge a non-negative INTEGER \`id\`: a re-run then adds nothing. Write the nodes first: when an endpoint is missing, one engine fails the whole batch and the other skips that row.
+  - Updates on matched items: \`MATCH (n:Person {id: 1}) SET n.age = 31\`, \`REMOVE n.age\`, \`SET n:Engineer\`, or on an edge \`MATCH (:Person {id: 1})-[r:KNOWS]->(:Person {id: 2}) SET r.since = 2021\`.
+  - Deletes: \`MATCH (n:Person {id: 3}) DETACH DELETE n\`, many nodes with \`UNWIND $rows AS row MATCH (n {id: row.id}) DETACH DELETE n\`, one edge with \`MATCH (:Person {id: 1})-[r:KNOWS]->(:Person {id: 2}) DELETE r\`, many with \`UNWIND $edges AS e MATCH (a {id: e.src})-[r:KNOWS]->(b {id: e.dst}) DELETE r\`. Always DETACH DELETE a node.
+  Never write an edge together with its nodes, as in \`CREATE (:Person {id: 1})-[:KNOWS]->(:Person {id: 2})\`, \`MERGE (a:Person {id: 1})-[:KNOWS]->(b:Person {id: 2})\` or \`UNWIND $edges AS e CREATE (a {id: e.src})-[:KNOWS]->(b {id: e.dst})\`: one engine links the existing nodes, the other creates new nodes with the same \`id\`.
+  Fail with a 400 on the newer engine: a node without an INTEGER \`id\`, a label in a batch MERGE pattern, \`MERGE\` of a lone node, \`CREATE ... RETURN ...\`, several patterns in one CREATE, a MATCH then CREATE or MERGE outside an UNWIND, \`SET n = $map\`, \`SET n += ...\`, \`FOREACH\`, writes inside \`CALL { ... }\`, and UNWIND of plain values in a write (send row maps). Do not send index or constraint statements: HydraDB does not need them.
+
+READS that work on both: MATCH with labels and properties, typed traversal in either direction, variable-length paths (\`-[:KNOWS*1..3]->\`), several types (\`-[:KNOWS|MENTORS]->\`), WHERE (also \`IN\`, \`STARTS WITH\`, \`CONTAINS\`, \`IS NOT NULL\`), OPTIONAL MATCH, WITH, DISTINCT, ORDER BY/SKIP/LIMIT, UNION, count/sum/avg/min/max/collect, CASE, coalesce, \`type()\`, \`labels()\`, \`keys()\`, \`properties()\`, toUpper, toLower, parameters, map and list literals, \`CALL { WITH p ... }\` subqueries, and UNWIND of plain values (\`UNWIND $ids AS i MATCH (p:Person {id: i}) RETURN p.name AS name\` with \`{"ids": [1, 2]}\`).
+  Has a relationship: \`MATCH (p:Person)-[:KNOWS]->() RETURN DISTINCT p.name AS name\`. Has none: \`MATCH (p:Person) OPTIONAL MATCH (p)-[r:KNOWS]->() WITH p, count(r) AS k WHERE k = 0 RETURN p.name AS name\`.
+  Return properties, not whole nodes or edges (\`RETURN n.id AS id, n.name AS name\`). On the older engine a returned node's \`id\`, an edge's endpoints and \`id(n)\` are internal numbers, not your \`id\`. \`labels()\` lists a node's labels in a different order on each engine.
+  Fail with a 400 on one engine: \`EXISTS { ... }\`, bare pattern predicates (\`WHERE (p)-[:KNOWS]->()\`), pattern comprehensions, \`exists()\`, \`shortestPath\`, \`length()\`, \`nodes()\`, \`relationships()\`, \`startNode()\`, \`endNode()\`, untyped relationships (\`(a)--(b)\`, \`()-[r]->()\`), UNWIND of maps in a read, and sum, avg or toString of \`id\`.
+
+Rejected on both: procedure calls (\`CALL db.*\`, \`CALL apoc.*\`) and \`LOAD CSV\`. Pass data through \`params\`.
+Do NOT use \`EXPLAIN\` or \`PROFILE\`: the newer engine refuses them, and the older one RUNS the query, writes included.`;
+
+const GRAPH_SCOPE = `Queries run against exactly ONE collection — collections never see each other's data, so \`MATCH (n) RETURN count(n) AS c\` counts that collection's nodes and nothing else. \`database\` and \`collection\` default to the server's configured graph scope; pass them to target another.`;
 
 const GRAPH_QUERY_BODY = `Run Cypher against a HydraDB graph collection — reads and writes alike. This is the graph database product: property graphs you model and own end to end, entirely separate from the memory/knowledge corpora that ${TOOL_NAMES.QUERY} searches.
 
-Reads are what a graph is for — multi-hop traversal, variable-length paths, neighbourhood expansion, shortest paths, aggregation over relationships:
+Reads are what a graph is for — multi-hop traversal, variable-length paths, neighbourhood expansion, aggregation over relationships:
   MATCH (a:Person {name:$n})-[:KNOWS*1..4]->(reach) RETURN DISTINCT reach.name AS name
-  MATCH (p:Person {name:$n})-[r]-(nbr) RETURN type(r) AS rel, nbr.name AS neighbor
-  MATCH (a:Person {name:$x}),(b:Person {name:$y}) RETURN shortestPath((a)-[:KNOWS*..8]->(b)) AS path
+  MATCH (p:Person {name:$n})-[:KNOWS]->(nbr) RETURN nbr.name AS neighbor, count(*) AS c
 
-Writes go through this same tool — CREATE, MERGE, SET, DELETE, REMOVE, FOREACH, and index management:
-  UNWIND $rows AS row MERGE (p:Person {ext_id: row.ext_id}) SET p += row
+Writes go through this same tool, in the shapes listed below:
+  UNWIND $rows AS row MERGE (n {id: row.id}) SET n:Person, n.name = row.name
+  UNWIND $edges AS e MATCH (a:Person {id: e.src}) MATCH (b:Person {id: e.dst}) MERGE (a)-[:KNOWS {id: e.id}]->(b)
 
-THIS TOOL CAN DESTROY DATA. \`MATCH (n:Person) DELETE n\` empties a label and \`DETACH DELETE\` also removes its relationships; neither can be undone and there is no trash. Confirm with the user before running anything destructive they did not explicitly ask for, and prefer MERGE on a key you own over bare CREATE — a retried CREATE duplicates nodes where a MERGE does not.
+THIS TOOL CAN DESTROY DATA. \`MATCH (n:Person) DETACH DELETE n\` empties a label and removes its relationships; it cannot be undone and there is no trash. Confirm with the user before running anything destructive they did not explicitly ask for, and write through the two batches above: a retried batch changes nothing, while a retried CREATE can duplicate.
 
 Always pass user data through \`params\` rather than building it into the query string: parameters are bound safely and keep query plans cacheable.
 
@@ -503,7 +520,7 @@ Use it to discover what exists before querying, or to confirm a write created th
 const GRAPH_ADMIN_BODY = `Manage graph databases and collections. Pick one \`action\`:
 
   "create_database"  — create a graph database. Ready immediately, no provisioning wait. Fails if the name already exists.
-  "drop_collection"  — drop ONE collection and all its data. Idempotent: dropping a collection that does not exist succeeds.
+  "drop_collection"  — drop ONE collection and all its data. Idempotent: dropping a collection that does not exist succeeds. The collection leaves the listing when the drop succeeds. A very large collection can need a retry: the call returns an error, and the next call resumes the drop. The storage is retained. Do not write to a collection while it is being dropped: a write that lands during the drop can survive it.
   "drop_database"    — drop EVERY collection in the database, and the database itself if it was created as a graph database.
 
 The two drops are IRREVERSIBLE and there is no trash. Confirm with the user before either, and never infer one from a vague instruction — "clean up my graph" authorises nothing until the user has seen ${TOOL_NAMES.GRAPH_COLLECTIONS} output and named what should go.
@@ -1206,6 +1223,6 @@ Hydra DB also runs property graphs the user models and owns end to end, queried 
 
 Choose by the question, not the vocabulary: "what has the user told me about X" is ${TOOL_NAMES.QUERY}; "how is X connected to Y in my graph" is ${TOOL_NAMES.GRAPH_QUERY}. If the user has written Cypher, or speaks of nodes, labels, relationships and traversals they themselves created, they mean the graph tools.
 
-Working against an unfamiliar collection, discover its structure by querying it — \`MATCH (n) UNWIND labels(n) AS l RETURN l, count(*) AS c ORDER BY l\` — rather than guessing labels, which yields empty results that look like missing data.
+Working against an unfamiliar collection, discover its structure by querying it (\`MATCH (n) UNWIND labels(n) AS l RETURN l, count(*) AS c ORDER BY l\`) rather than guessing labels, which yields empty results that look like missing data.
 
 All tools require HYDRADB_API_KEY and HYDRADB_DATABASE in the environment. The graph tools additionally read HYDRADB_GRAPH_DATABASE and HYDRADB_GRAPH_COLLECTION for their default scope, and can be disabled with HYDRADB_MCP_GRAPH_TOOLS=0. The database management tools (create, delete, readiness, stats and the two metadata schema tools) can be disabled with HYDRADB_MCP_DATABASE_TOOLS=0; ${TOOL_NAMES.DATABASES} stays.`;

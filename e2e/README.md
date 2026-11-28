@@ -14,7 +14,7 @@ Runs the server against a real HydraDB API (staging in CI) and skips unless `HYD
 - Each scenario reads back what was written, whole: stored content, every metadata key and value, the ids, in both the text and `structuredContent`.
 - `completeness.tools` fails when a tool in `tools/list` has no scenario.
 - Connector tools that change things outside the test database run only against a connector id that does not exist.
-- The `acl.*` scenarios seed three app items: one with no access list, one restricted to `user_email:alice@e2e.hydradb.test`, one `__private__`. Every read that takes `acl` (list, query, inspect, subgraph, relations) runs as Alice, as Alice's bare email, as Bob, as `__public__` and with no `acl`, and asserts by id which items come back and that no hidden title or body appears in the text or `structuredContent`. A fourth item restricted to Alice is made public with `hydradb_update`, read as Bob, then put back. `acl.http.list` repeats the list over the HTTP transport. The server has no default principal list in its environment or in an HTTP header, so every scenario passes `acl` per call.
+- The `acl.*` scenarios seed three app items in a collection of their own (`e2e-acl`), so one read of that collection's relations holds all of them: one with no access list, one restricted to `user_email:alice@e2e.hydradb.test`, one `__private__`. Every read that takes `acl` (list, query, inspect, subgraph, relations) runs as Alice, as Alice's bare email, as Bob, as `__public__` and with no `acl`, and asserts by id which items come back and that no hidden title or body appears in the text or `structuredContent`. A fourth item restricted to Alice is made public with `hydradb_update`, read as Bob, then put back. `acl.http.list` repeats the list over the HTTP transport. The server has no default principal list in its environment or in an HTTP header, so every scenario passes `acl` per call.
 
 Run it:
 
@@ -49,6 +49,8 @@ Run it alone with `npx tsx --test e2e/simulated.test.ts`.
 ## Known issues
 
 A scenario or cell that fails today because of a product bug asserts the correct behaviour and names its finding: `knownIssue` on a live scenario, an entry in `KNOWN` for a simulated cell. Node reports it as a todo, so the suite stays green. When the bug is fixed the assertion passes, and the suite turns red until the marker is removed.
+
+A live scenario whose failure is an API behaviour the owner has accepted for now carries `skip` as well. It does not run, it is reported as `skip` with the reason, and `completeness.tools` does not count its tools as covered. Delete the `skip` line to run it again.
 
 ## Adding a scenario
 

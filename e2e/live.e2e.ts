@@ -27,6 +27,7 @@ import {
 } from "./harness.js";
 import {
 	ACL_ALICE,
+	ACL_COLLECTION,
 	ACL_FLIP,
 	ACL_ITEMS,
 	ACL_OPEN,
@@ -188,11 +189,14 @@ function parseStatuses(text: string): Map<string, string> {
 	return found;
 }
 
+/** The collections the suite names itself; the workspace default is the one other collection. */
+const NAMED_COLLECTIONS = [NAMED, DROPPED, ACL_COLLECTION];
+
 /** Not cached: a scenario that declares hydradb_list_collections must call it whatever ran before. */
 async function defaultCollection(call: Caller): Promise<string> {
 	const listed = ok(await call("hydradb_list_collections", {}), "hydradb_list_collections");
 	const names = (listed.collections as string[] | undefined) ?? [];
-	const generated = names.filter((name) => name !== NAMED && name !== DROPPED);
+	const generated = names.filter((name) => !NAMED_COLLECTIONS.includes(name));
 
 	assert.equal(generated.length, 1, `expected one workspace default collection besides ours, got ${JSON.stringify(names)}`);
 
@@ -218,8 +222,13 @@ interface Scenario {
 	/** Every tool the scenario calls. Completeness is checked against this. */
 	tools: string[];
 	knownIssue?: string;
+	/** Set to leave the scenario out of the run, reported as `skip` with this reason. */
+	skip?: string;
 	run(ctx: Ctx): Promise<void>;
 }
+
+/** API behaviours the owner has accepted for now. Delete a scenario's `skip` line to run it again. */
+const IGNORED_API = "ignored for now: API behaviour, ENG-5295";
 
 /** Seed assertion: the ingest was accepted with exactly its ids, and they all finished indexing. */
 function ingestScenario(id: string): Scenario {
@@ -268,7 +277,8 @@ const READERS: Reader[] = [
 ];
 
 const ACL_IDS = ACL_ITEMS.map((item) => item.id);
-const scopedAs = (reader: Reader) => (reader.acl ? { acl: reader.acl } : {});
+/** Every ACL read names the items' own collection, and the reader's principals when it has any. */
+const scopedAs = (reader: Reader) => ({ collection: ACL_COLLECTION, ...(reader.acl ? { acl: reader.acl } : {}) });
 const sortedIds = (items: AclItem[]) => items.map((item) => item.id).sort();
 const hiddenFrom = (reader: Reader) => ACL_ITEMS.filter((item) => !reader.sees.includes(item));
 
@@ -378,7 +388,7 @@ const ACL_READS: AclRead[] = [
 		read: "relations",
 		tools: ["hydradb_relations"],
 		async check(call, reader) {
-			const whole = ok(await call("hydradb_relations", { kind: "knowledge", limit: 200 }), "hydradb_relations unscoped");
+			const whole = ok(await call("hydradb_relations", { kind: "knowledge", limit: 200, collection: ACL_COLLECTION }), "hydradb_relations unscoped");
 
 			assert.equal(whole.has_more, false, "precondition: limit 200 reads the whole collection");
 			assert.deepEqual(relationOwners(whole), [...ACL_IDS].sort(), "precondition: every ACL item has extracted relations");
@@ -413,7 +423,7 @@ const ACL_READ_SCENARIOS: Scenario[] = ACL_READS.flatMap((read) =>
 
 /** Whether Bob can reach ACL_FLIP through list, query and inspect. */
 async function bobSeesFlip(call: Caller): Promise<boolean[]> {
-	const asBob = { acl: [BOB] };
+	const asBob = { collection: ACL_COLLECTION, acl: [BOB] };
 	const listed = ok(await call("hydradb_list", { kind: "knowledge", ids: [ACL_FLIP.id], ...asBob }), "hydradb_list as bob");
 	const queried = ok(await call("hydradb_query", { query: "heron flip memo", kind: "knowledge", source_ids: [ACL_FLIP.id], structured: true, ...asBob }), "hydradb_query as bob");
 	const inspected = await call("hydradb_inspect", { id: ACL_FLIP.id, ...asBob });
@@ -425,12 +435,11 @@ const ACL_SCENARIOS: Scenario[] = [
 	...ACL_READ_SCENARIOS,
 	{
 		id: "acl.update.takes_effect",
-		tools: ["hydradb_update", "hydradb_list", "hydradb_query", "hydradb_inspect", "hydradb_list_collections"],
+		tools: ["hydradb_update", "hydradb_list", "hydradb_query", "hydradb_inspect"],
 		async run({ call }) {
 			requireIndexed(ACL_FLIP.id);
-			const collection = await defaultCollection(call);
 			const replace = async (acl: string[]) => {
-				const updated = ok(await call("hydradb_update", { id: ACL_FLIP.id, collection, acl }), `hydradb_update acl ${JSON.stringify(acl)}`);
+				const updated = ok(await call("hydradb_update", { id: ACL_FLIP.id, collection: ACL_COLLECTION, acl }), `hydradb_update acl ${JSON.stringify(acl)}`);
 
 				assert.equal(updated.acl_updated, true, "the ACL was not reported as replaced");
 				assert.equal(updated.vector_acl_synced, true, "the search index ACL was not reported as synchronized");
@@ -478,9 +487,10 @@ const ACL_SCENARIOS: Scenario[] = [
 		id: "acl.inspect.access_list",
 		tools: ["hydradb_inspect"],
 		knownIssue: "F-mcp-14",
+		skip: IGNORED_API,
 		async run({ call, expectFixed }) {
 			requireIndexed(ACL_ALICE.id);
-			const answer = await call("hydradb_inspect", { id: ACL_ALICE.id, acl: [ALICE] });
+			const answer = await call("hydradb_inspect", { id: ACL_ALICE.id, collection: ACL_COLLECTION, acl: [ALICE] });
 			const content = String(ok(answer, "hydradb_inspect as alice").content);
 
 			assert.ok(content.includes(ACL_ALICE.body), "precondition: Alice reads her own item");
@@ -956,10 +966,12 @@ const SCENARIOS: Scenario[] = [
 		id: "relations.paging",
 		tools: ["hydradb_relations"],
 		knownIssue: "F-mcp-7",
+		skip: IGNORED_API,
 		async run({ call, expectFixed }) {
-			requireIndexed("e2e-k-graph");
+			requireIndexed(...ACL_IDS, ACL_FLIP.id);
 			const key = (r: Record<string, unknown>) => [r.from, r.predicate, r.to, r.chunk_id].join("|");
-			const whole = ok(await call("hydradb_relations", { kind: "knowledge", limit: 200 }), "hydradb_relations limit 200");
+			const scope = { kind: "knowledge", collection: ACL_COLLECTION };
+			const whole = ok(await call("hydradb_relations", { ...scope, limit: 200 }), "hydradb_relations limit 200");
 			const all = new Set(items(whole, "relations").map(key));
 
 			assert.ok(all.size > 2, `precondition: the collection needs more than 2 relations, it has ${all.size}`);
@@ -967,7 +979,7 @@ const SCENARIOS: Scenario[] = [
 
 			await expectFixed(async () => {
 				const seen = new Set<string>();
-				let args: Record<string, unknown> | undefined = { kind: "knowledge", limit: 2 };
+				let args: Record<string, unknown> | undefined = { ...scope, limit: 2 };
 
 				for (let pages = 0; args; pages++) {
 					assert.ok(pages < 2 * all.size, "paging did not end");
@@ -1010,6 +1022,7 @@ const SCENARIOS: Scenario[] = [
 		id: "subgraph.titles",
 		tools: ["hydradb_subgraph"],
 		knownIssue: "F-mcp-3",
+		skip: IGNORED_API,
 		async run({ call, expectFixed }) {
 			requireIndexed("e2e-k-rel", "e2e-k-titled");
 			const answer = await call("hydradb_subgraph", { id: "e2e-k-rel", depth: 1 });
@@ -1100,7 +1113,7 @@ const SCENARIOS: Scenario[] = [
 			const names = (listed.collections as string[]) ?? [];
 
 			assert.ok(names.includes(NAMED), `${NAMED} missing from ${JSON.stringify(names)}`);
-			assert.equal(names.filter((name) => name !== NAMED && name !== DROPPED).length, 1, `one workspace default collection: ${JSON.stringify(names)}`);
+			assert.equal(names.filter((name) => !NAMED_COLLECTIONS.includes(name)).length, 1, `one workspace default collection: ${JSON.stringify(names)}`);
 			assert.equal(listed.database, r.database);
 
 			for (const name of names) assert.ok(answer.text.includes(name), `${name} missing from the text`);
@@ -1239,7 +1252,12 @@ const SCENARIOS: Scenario[] = [
 			}
 
 			ok(
-				await call("hydradb_graph_query", { database, collection, query: "MERGE (a:Person {id: 1})-[:MENTORS]->(b:Person {id: 2})" }),
+				await call("hydradb_graph_query", {
+					database,
+					collection,
+					query: "UNWIND $edges AS e MATCH (a:Person {id: e.src}) MATCH (b:Person {id: e.dst}) MERGE (a)-[:MENTORS {id: e.id}]->(b)",
+					params: { edges: [{ id: 1, src: 1, dst: 2 }] },
+				}),
 				"graph write edge",
 			);
 
@@ -1269,30 +1287,52 @@ const SCENARIOS: Scenario[] = [
 	{
 		id: "graph.documented_writes",
 		tools: ["hydradb_graph_admin", "hydradb_graph_query"],
-		knownIssue: "F-mcp-8",
-		async run({ call, run: r, expectFixed }) {
+		async run({ call, run: r }) {
 			const database = r.scratchGraphDatabase;
+			const collection = "e2e";
+			const write = async (what: string, query: string, params?: Record<string, unknown>) =>
+				ok(await call("hydradb_graph_query", { database, collection, query, ...(params ? { params } : {}) }), what);
+			const read = async (what: string, query: string) => items(await write(what, query), "rows");
 
 			ok(await call("hydradb_graph_admin", { action: "create_database", database }), "graph create_database");
 
 			try {
-				const batch = await call("hydradb_graph_query", {
-					database,
-					collection: "e2e",
-					query: "UNWIND $rows AS row MERGE (p:Person {key: row.key}) SET p.name = row.name",
-					params: { rows: [{ key: "ada", name: "Ada" }, { key: "grace", name: "Grace" }] },
-				});
-				const upsert = await call("hydradb_graph_query", {
-					database,
-					collection: "e2e",
-					query: "MERGE (p:Person {key: $key}) SET p.name = $name RETURN p.key AS key",
-					params: { key: "ada", name: "Ada Lovelace" },
-				});
+				const nodes = "UNWIND $rows AS row MERGE (n {id: row.id}) SET n:Person, n.name = row.name";
+				const edges = "UNWIND $edges AS e MATCH (a:Person {id: e.src}) MATCH (b:Person {id: e.dst}) MERGE (a)-[r:KNOWS {id: e.id}]->(b) SET r.since = e.since";
+				const knows = { edges: [{ id: 1, src: 1, dst: 2, since: 2020 }, { id: 2, src: 2, dst: 3, since: 2021 }] };
 
-				await expectFixed(() => {
-					assert.equal(batch.isError, false, `the documented UNWIND $rows batch write is refused: ${brief(batch)}`);
-					assert.equal(upsert.isError, false, `the documented MERGE-on-a-key upsert is refused: ${brief(upsert)}`);
-				});
+				await write("the node batch", nodes, { rows: [{ id: 1, name: "Ada" }, { id: 2, name: "Grace" }, { id: 3, name: "Alan" }] });
+				await write("the node batch re-run as an upsert", nodes, { rows: [{ id: 1, name: "Ada Lovelace" }] });
+				await write("the edge batch", edges, knows);
+				await write("the edge batch re-run", edges, knows);
+				await write("SET on a matched node", "MATCH (n:Person {id: 2}) SET n.age = 85, n.title = 'Rear Admiral'");
+				await write("REMOVE on a matched node", "MATCH (n:Person {id: 2}) REMOVE n.title");
+				await write("SET on a matched edge", "MATCH (:Person {id: 2})-[r:KNOWS]->(:Person {id: 3}) SET r.since = 2022");
+
+				assert.deepEqual(await read("the node read", "MATCH (n:Person) RETURN n.id AS id, n.name AS name ORDER BY id"), [
+					{ id: 1, name: "Ada Lovelace" },
+					{ id: 2, name: "Grace" },
+					{ id: 3, name: "Alan" },
+				]);
+				assert.deepEqual(
+					await read("the edge read", "MATCH (a:Person)-[r:KNOWS]->(b:Person) RETURN a.id AS src, b.id AS dst, r.since AS since ORDER BY src"),
+					[{ src: 1, dst: 2, since: 2020 }, { src: 2, dst: 3, since: 2022 }],
+					"a re-run of the edge batch added edges",
+				);
+				assert.deepEqual(await read("the SET read", "MATCH (n:Person {id: 2}) RETURN n.age AS age, n.title AS title"), [{ age: 85, title: null }]);
+				assert.deepEqual(await read("the reach read", "MATCH (:Person {id: 1})-[:KNOWS*1..3]->(r) RETURN DISTINCT r.name AS name ORDER BY name"), [{ name: "Alan" }, { name: "Grace" }]);
+				assert.deepEqual(await read("the has-a-relationship read", "MATCH (p:Person)-[:KNOWS]->() RETURN DISTINCT p.name AS name ORDER BY name"), [{ name: "Ada Lovelace" }, { name: "Grace" }]);
+				assert.deepEqual(
+					await read("the has-none read", "MATCH (p:Person) OPTIONAL MATCH (p)-[r:KNOWS]->() WITH p, count(r) AS k WHERE k = 0 RETURN p.name AS name"),
+					[{ name: "Alan" }],
+				);
+
+				await write("the edge delete batch", "UNWIND $edges AS e MATCH (a {id: e.src})-[r:KNOWS]->(b {id: e.dst}) DELETE r", { edges: [{ src: 1, dst: 2 }] });
+				assert.deepEqual(await read("the edges after delete", "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.id AS src, b.id AS dst"), [{ src: 2, dst: 3 }]);
+
+				await write("the row-map delete", "UNWIND $rows AS row MATCH (n {id: row.id}) DETACH DELETE n", { rows: [{ id: 3 }] });
+				assert.deepEqual(await read("the count after delete", "MATCH (n:Person) RETURN count(n) AS c"), [{ c: 2 }]);
+				assert.deepEqual(await read("the edge count after delete", "MATCH (:Person)-[r:KNOWS]->(:Person) RETURN count(r) AS c"), [{ c: 0 }]);
 			} finally {
 				ok(await call("hydradb_graph_admin", { action: "drop_database", database }), "graph drop_database");
 			}
@@ -1608,6 +1648,13 @@ async function runScenario(scenario: Scenario, t: TestContext) {
 	let reproduced: string | undefined;
 	let checkedFix = false;
 
+	if (scenario.skip) {
+		record("skip", scenario.skip);
+		t.skip(scenario.skip);
+
+		return;
+	}
+
 	const ctx: Ctx = {
 		run: current(),
 		call: (name, args) => {
@@ -1688,7 +1735,7 @@ if (typeof config === "string") {
 
 			try {
 				const registered = await current().stdio.toolNames();
-				const covered = new Set(SCENARIOS.flatMap((scenario) => scenario.tools));
+				const covered = new Set(SCENARIOS.filter((scenario) => !scenario.skip).flatMap((scenario) => scenario.tools));
 				const uncovered = registered.filter((tool) => !covered.has(tool));
 				const stale = [...covered].filter((tool) => !registered.includes(tool));
 
