@@ -6,6 +6,8 @@ import { connectorMetadata } from "./data.js";
 
 export const NAMED = "e2e-named";
 export const DROPPED = "e2e-drop";
+/** The access-control items live alone here, so one limit-200 read of its relations holds all of them. */
+export const ACL_COLLECTION = "e2e-acl";
 export const MISSING_CONNECTOR = "conn_e2e_missing_000000000000";
 export const PAGE_ROWS = 50;
 export const LARGE_DOCS = 6;
@@ -242,8 +244,10 @@ export const SEEDS: Seed[] = [
 				{ ...appItem(ACL_PRIVATE), acl: ["__private__"], relations: { ids: [ACL_OPEN.id] } },
 				{ ...appItem(ACL_FLIP), acl: [ALICE] },
 			],
+			collection: ACL_COLLECTION,
 		},
 		ids: [ACL_OPEN.id, ACL_ALICE.id, ACL_PRIVATE.id, ACL_FLIP.id],
+		collection: ACL_COLLECTION,
 	},
 	{
 		scenario: "ingest.knowledge.collection",

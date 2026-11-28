@@ -27,6 +27,7 @@ import {
 } from "./harness.js";
 import {
 	ACL_ALICE,
+	ACL_COLLECTION,
 	ACL_FLIP,
 	ACL_ITEMS,
 	ACL_OPEN,
@@ -188,11 +189,14 @@ function parseStatuses(text: string): Map<string, string> {
 	return found;
 }
 
+/** The collections the suite names itself; the workspace default is the one other collection. */
+const NAMED_COLLECTIONS = [NAMED, DROPPED, ACL_COLLECTION];
+
 /** Not cached: a scenario that declares hydradb_list_collections must call it whatever ran before. */
 async function defaultCollection(call: Caller): Promise<string> {
 	const listed = ok(await call("hydradb_list_collections", {}), "hydradb_list_collections");
 	const names = (listed.collections as string[] | undefined) ?? [];
-	const generated = names.filter((name) => name !== NAMED && name !== DROPPED);
+	const generated = names.filter((name) => !NAMED_COLLECTIONS.includes(name));
 
 	assert.equal(generated.length, 1, `expected one workspace default collection besides ours, got ${JSON.stringify(names)}`);
 
@@ -273,7 +277,8 @@ const READERS: Reader[] = [
 ];
 
 const ACL_IDS = ACL_ITEMS.map((item) => item.id);
-const scopedAs = (reader: Reader) => (reader.acl ? { acl: reader.acl } : {});
+/** Every ACL read names the items' own collection, and the reader's principals when it has any. */
+const scopedAs = (reader: Reader) => ({ collection: ACL_COLLECTION, ...(reader.acl ? { acl: reader.acl } : {}) });
 const sortedIds = (items: AclItem[]) => items.map((item) => item.id).sort();
 const hiddenFrom = (reader: Reader) => ACL_ITEMS.filter((item) => !reader.sees.includes(item));
 
@@ -383,7 +388,7 @@ const ACL_READS: AclRead[] = [
 		read: "relations",
 		tools: ["hydradb_relations"],
 		async check(call, reader) {
-			const whole = ok(await call("hydradb_relations", { kind: "knowledge", limit: 200 }), "hydradb_relations unscoped");
+			const whole = ok(await call("hydradb_relations", { kind: "knowledge", limit: 200, collection: ACL_COLLECTION }), "hydradb_relations unscoped");
 
 			assert.equal(whole.has_more, false, "precondition: limit 200 reads the whole collection");
 			assert.deepEqual(relationOwners(whole), [...ACL_IDS].sort(), "precondition: every ACL item has extracted relations");
@@ -418,7 +423,7 @@ const ACL_READ_SCENARIOS: Scenario[] = ACL_READS.flatMap((read) =>
 
 /** Whether Bob can reach ACL_FLIP through list, query and inspect. */
 async function bobSeesFlip(call: Caller): Promise<boolean[]> {
-	const asBob = { acl: [BOB] };
+	const asBob = { collection: ACL_COLLECTION, acl: [BOB] };
 	const listed = ok(await call("hydradb_list", { kind: "knowledge", ids: [ACL_FLIP.id], ...asBob }), "hydradb_list as bob");
 	const queried = ok(await call("hydradb_query", { query: "heron flip memo", kind: "knowledge", source_ids: [ACL_FLIP.id], structured: true, ...asBob }), "hydradb_query as bob");
 	const inspected = await call("hydradb_inspect", { id: ACL_FLIP.id, ...asBob });
@@ -430,12 +435,11 @@ const ACL_SCENARIOS: Scenario[] = [
 	...ACL_READ_SCENARIOS,
 	{
 		id: "acl.update.takes_effect",
-		tools: ["hydradb_update", "hydradb_list", "hydradb_query", "hydradb_inspect", "hydradb_list_collections"],
+		tools: ["hydradb_update", "hydradb_list", "hydradb_query", "hydradb_inspect"],
 		async run({ call }) {
 			requireIndexed(ACL_FLIP.id);
-			const collection = await defaultCollection(call);
 			const replace = async (acl: string[]) => {
-				const updated = ok(await call("hydradb_update", { id: ACL_FLIP.id, collection, acl }), `hydradb_update acl ${JSON.stringify(acl)}`);
+				const updated = ok(await call("hydradb_update", { id: ACL_FLIP.id, collection: ACL_COLLECTION, acl }), `hydradb_update acl ${JSON.stringify(acl)}`);
 
 				assert.equal(updated.acl_updated, true, "the ACL was not reported as replaced");
 				assert.equal(updated.vector_acl_synced, true, "the search index ACL was not reported as synchronized");
@@ -486,7 +490,7 @@ const ACL_SCENARIOS: Scenario[] = [
 		skip: IGNORED_API,
 		async run({ call, expectFixed }) {
 			requireIndexed(ACL_ALICE.id);
-			const answer = await call("hydradb_inspect", { id: ACL_ALICE.id, acl: [ALICE] });
+			const answer = await call("hydradb_inspect", { id: ACL_ALICE.id, collection: ACL_COLLECTION, acl: [ALICE] });
 			const content = String(ok(answer, "hydradb_inspect as alice").content);
 
 			assert.ok(content.includes(ACL_ALICE.body), "precondition: Alice reads her own item");
@@ -964,9 +968,10 @@ const SCENARIOS: Scenario[] = [
 		knownIssue: "F-mcp-7",
 		skip: IGNORED_API,
 		async run({ call, expectFixed }) {
-			requireIndexed("e2e-k-graph");
+			requireIndexed(...ACL_IDS, ACL_FLIP.id);
 			const key = (r: Record<string, unknown>) => [r.from, r.predicate, r.to, r.chunk_id].join("|");
-			const whole = ok(await call("hydradb_relations", { kind: "knowledge", limit: 200 }), "hydradb_relations limit 200");
+			const scope = { kind: "knowledge", collection: ACL_COLLECTION };
+			const whole = ok(await call("hydradb_relations", { ...scope, limit: 200 }), "hydradb_relations limit 200");
 			const all = new Set(items(whole, "relations").map(key));
 
 			assert.ok(all.size > 2, `precondition: the collection needs more than 2 relations, it has ${all.size}`);
@@ -974,7 +979,7 @@ const SCENARIOS: Scenario[] = [
 
 			await expectFixed(async () => {
 				const seen = new Set<string>();
-				let args: Record<string, unknown> | undefined = { kind: "knowledge", limit: 2 };
+				let args: Record<string, unknown> | undefined = { ...scope, limit: 2 };
 
 				for (let pages = 0; args; pages++) {
 					assert.ok(pages < 2 * all.size, "paging did not end");
@@ -1108,7 +1113,7 @@ const SCENARIOS: Scenario[] = [
 			const names = (listed.collections as string[]) ?? [];
 
 			assert.ok(names.includes(NAMED), `${NAMED} missing from ${JSON.stringify(names)}`);
-			assert.equal(names.filter((name) => name !== NAMED && name !== DROPPED).length, 1, `one workspace default collection: ${JSON.stringify(names)}`);
+			assert.equal(names.filter((name) => !NAMED_COLLECTIONS.includes(name)).length, 1, `one workspace default collection: ${JSON.stringify(names)}`);
 			assert.equal(listed.database, r.database);
 
 			for (const name of names) assert.ok(answer.text.includes(name), `${name} missing from the text`);
