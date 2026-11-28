@@ -1015,9 +1015,9 @@ const SCENARIOS: Scenario[] = [
 			const answer = await call("hydradb_subgraph", { id: "e2e-k-rel", depth: 1 });
 			const members = new Map(items(ok(answer, "hydradb_subgraph"), "members").map((m) => [String(m.id), m]));
 
+			assert.doesNotMatch(answer.text, /\(untitled\)/, `titled members print as untitled:\n${answer.text}`);
 			await expectFixed(() => {
 				assert.equal(members.get("e2e-k-titled")?.title, "Ledger ownership.md");
-				assert.doesNotMatch(answer.text, /\(untitled\)/, `titled members print as untitled:\n${answer.text}`);
 			});
 		},
 	},

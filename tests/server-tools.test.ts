@@ -4879,6 +4879,18 @@ test("hydradb_subgraph lists members by depth with ids the other tools accept", 
 	assert.deepEqual(calls[0], { id: "thread-root", kind: "knowledge", depth: 3, maxSources: undefined, acl: undefined, database: undefined, collection: undefined });
 });
 
+// The API sends no title for an uploaded document's member; it has one all the same.
+test("hydradb_subgraph does not call a member without a title untitled", async () => {
+	const { text } = await subgraphText(
+		subgraphOf([{ source_id: "a", depth: 0 }, { source_id: "b", depth: 1, title: "Ledger ownership.md" }]),
+		{ id: "a" },
+	);
+
+	assert.doesNotMatch(text, /\(untitled\)/);
+	assert.match(text, /^- \[id: a\] \S depth 0/m);
+	assert.match(text, /^- \[id: b\] Ledger ownership\.md \S depth 1/m);
+});
+
 test("hydradb_subgraph says when max_sources clipped the traversal", async () => {
 	const { text, structured } = await subgraphText(
 		subgraphOf([{ source_id: "a", depth: 0 }, { source_id: "b", depth: 1 }], { is_truncated: true, max_depth_reached: 3 }),

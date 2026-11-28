@@ -2491,7 +2491,9 @@ export function createHydraDBServer(
 		const shortId = (id: string) => (id.length > 14 ? `${id.slice(0, 12)}…` : id);
 
 		for (const m of ordered) {
-			const title = m.title?.trim() || m.app_external_id || "(untitled)";
+			// The API leaves out an uploaded document's title, so a missing one is
+			// left out here too rather than reported as "untitled".
+			const title = m.title?.trim() || m.app_external_id;
 
 			const reached =
 				m.depth === 0
@@ -2499,7 +2501,7 @@ export function createHydraDBServer(
 					: `${m.discovered_relation || "linked"}${m.discovered_via ? ` from ${shortId(m.discovered_via)}` : ""}`;
 
 			const kind = [m.app_provider, m.app_kind].filter(Boolean).join(" ");
-			lines.push(`- [id: ${m.source_id}] ${title}${kind ? ` (${kind})` : ""} — depth ${m.depth}, ${reached}`);
+			lines.push(`- [id: ${m.source_id}]${title ? ` ${title}` : ""}${kind ? ` (${kind})` : ""} — depth ${m.depth}, ${reached}`);
 		}
 
 		lines.push(
