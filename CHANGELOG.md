@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.9.3] - 2026-11-28
+
 ### Changed
 
 - The `hydradb_graph_query` description and the README "Supported Cypher"
