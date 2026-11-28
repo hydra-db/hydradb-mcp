@@ -1087,19 +1087,16 @@ const SCENARIOS: Scenario[] = [
 	{
 		id: "feedback.rating_only",
 		tools: ["hydradb_query", "hydradb_feedback"],
-		knownIssue: "F-mcp-9",
-		async run({ call, expectFixed }) {
+		async run({ call }) {
 			requireIndexed("e2e-k-titled");
 			const queried = ok(await call("hydradb_query", { query: "Who owns the ledger service?", kind: "knowledge", structured: true }), "hydradb_query");
 			const answer = await call("hydradb_feedback", { request_id: String(queried.request_id), rating: "negative" });
 
-			await expectFixed(() => {
-				assert.doesNotMatch(answer.text, /Cannot set property|\[object Object\]/, `a rating-only submission crashes: ${answer.text}`);
-				assert.ok(
-					answer.isError ? /feedback text|ground_truth/.test(answer.text) : /Feedback recorded/.test(answer.text),
-					`neither recorded nor refused with a reason: ${answer.text}`,
-				);
-			});
+			assert.doesNotMatch(answer.text, /Cannot set property|\[object Object\]/, `a rating-only submission crashes: ${answer.text}`);
+			assert.ok(
+				answer.isError ? /feedback text|ground_truth/.test(answer.text) : /Feedback recorded/.test(answer.text),
+				`neither recorded nor refused with a reason: ${answer.text}`,
+			);
 		},
 	},
 	{

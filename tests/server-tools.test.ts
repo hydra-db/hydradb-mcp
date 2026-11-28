@@ -5321,10 +5321,11 @@ test("feedback: a submission carrying neither text nor ground truth is refused l
 
 	const res = await client.callTool({
 		name: "hydradb_feedback",
-		arguments: { request_id: "8f1c0e8a-0000-4000-8000-000000000003" },
+		arguments: { request_id: "8f1c0e8a-0000-4000-8000-000000000003", rating: "negative" },
 	});
 
 	assert.equal(isError(res), true);
+	assert.match(toolText(res), /^send feedback text, ground_truth, or both\b/, "the validator's own refusal reaches the caller");
 	// Refused before the wire: the server would 400 on this too, and saying so
 	// without a round trip puts the message where the caller can still act.
 	assert.equal(calls.filter((c) => c.method === "feedback").length, 0);

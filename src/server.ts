@@ -3567,12 +3567,9 @@ export function createHydraDBServer(
 		try {
 			result = await run();
 		} catch (err) {
-			if (err instanceof Error) {
-				err.message = hydra.redact(err.message);
-				throw err;
-			}
-
-			throw new Error(hydra.redact(String(err)));
+			// A new error, not the caught one: some errors (ZodError) define
+			// `message` as a getter, and assigning to it throws over the real one.
+			throw new Error(hydra.redact(err instanceof Error ? err.message : String(err)));
 		}
 
 		if (!result.isError) return result;

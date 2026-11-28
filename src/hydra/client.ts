@@ -2136,7 +2136,13 @@ export class FeedbackResource extends Resource {
 	}
 
 	async submit(params: FeedbackParams, opts?: RequestOptions): Promise<FeedbackResult> {
-		const validated = feedbackParamsSchema.parse(params);
+		const parsed = feedbackParamsSchema.safeParse(params);
+
+		// The schema's own messages say what to fix; a ZodError's message is
+		// its issues as JSON.
+		if (!parsed.success) throw new Error(parsed.error.issues.map((issue) => issue.message).join(" "));
+
+		const validated = parsed.data;
 
 		// Scope is optional on /feedback, but a collection cannot be resolved
 		// without its database (the server 400s on collection-alone), so this goes
