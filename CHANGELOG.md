@@ -7,22 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed — graph tools describe the supported Cypher dialect (ENG-3448)
+### Changed
 
-HydraDB graph collections now run on an engine with a narrow Cypher dialect.
-The `hydradb_graph_query` description and the README "Supported Cypher" section
-now list the exact rules. Written nodes need an integer `id`. Writes are one-hop
-edges, batched node upserts (`UNWIND ... MERGE (n {id: row.id}) SET n:Label`),
-`SET` on a matched node, `DETACH DELETE` and typed-edge `DELETE`. Reads reject
-`type()`, `id()`, `labels()`, `keys()`, `properties()`, `shortestPath` and
-untyped relationships. `RETURN n` gives the node's integer id; the renderer shows
-it as a number. The text no longer mentions index management or
-`SET n += row`. Edge batches use `UNWIND $edges AS e CREATE (a {id: e.src})-[:KNOWS]->(b {id: e.dst})`.
-A read that starts with `UNWIND` has one shape only (`UNWIND … MATCH … RETURN`).
-The server instructions no longer suggest `labels(n)` to discover a collection.
-`drop_collection` notes that a collection leaves the listing when the drop
-succeeds, that a very large collection can need a retry, that storage is
-retained, and that a write during a drop can survive it.
+- The `hydradb_graph_query` description and the README "Supported Cypher"
+  section list the Cypher dialect HydraDB graph collections accept, as probed on
+  staging. Written nodes need an integer `id`. Writes are single nodes, one-hop
+  edges, node batches (`UNWIND $rows AS row MERGE (n {id: row.id}) SET n:Label`),
+  edge batches (`UNWIND $edges AS e CREATE (a {id: e.src})-[:KNOWS]->(b {id: e.dst})`),
+  `SET` and `REMOVE` on a matched node, `DETACH DELETE` and typed-edge `DELETE`.
+  Reads reject `shortestPath`, `nodes()`, `relationships()`, `startNode()`,
+  `endNode()`, bare pattern predicates and untyped relationships. The text no
+  longer suggests `SET n += row`, a labelled `MERGE` in a batch, or index
+  management (ENG-3448).
+- `drop_collection` notes that a collection leaves the listing when the drop
+  succeeds, that a very large collection can need a retry, that storage is
+  retained, and that a write during a drop can survive it (ENG-3448).
 
 ## [1.9.2] - 2026-11-28
 

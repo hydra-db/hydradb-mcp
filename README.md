@@ -118,23 +118,23 @@ Hydra DB also runs **property graphs you model and own end to end**, queried in 
 Writes:
 
 - Every node you write has an **integer** `id` property. String ids are rejected.
-- One-hop edges: `CREATE (:Person {id: 1})-[:KNOWS]->(:Person {id: 2})` or `MERGE (a:Person {id: 1})-[:KNOWS]->(b:Person {id: 2})`.
+- One node: `CREATE (:Person {id: 1, name: 'Ada'})`. Creating an `id` that already exists fails; use the node batch to upsert.
+- One-hop edges: `CREATE (:Person {id: 1})-[:KNOWS]->(:Person {id: 2})` or `MERGE (a:Person {id: 1})-[:KNOWS]->(b:Person {id: 2})`. A one-hop edge can carry properties: `-[:KNOWS {since: 2020}]->`.
 - Node upserts in a batch: `UNWIND $rows AS row MERGE (n {id: row.id}) SET n:Person, n.name = row.name`. Use exactly one label per node, and set it with `SET`.
 - Edges in a batch: `UNWIND $edges AS e CREATE (a {id: e.src})-[:KNOWS]->(b {id: e.dst})`. No labels or properties in the pattern. A re-run of the same batch does not add edges. A single `CREATE` of an edge adds a new edge each time it runs.
-- Property updates: `MATCH (n:Person {id: 1}) SET n.age = 31`.
+- Property updates: `MATCH (n:Person {id: 1}) SET n.age = 31`, or `REMOVE n.age` to drop one.
 - Deletes: `MATCH (n:Person) DETACH DELETE n`, `DELETE r` on a typed edge, or many nodes with `UNWIND $rows AS row MATCH (n {id: row.id}) DETACH DELETE n` and `{"rows": [{"id": 4}]}`.
 - An edge to an `id` that does not exist creates a node with that `id` and no label. Load nodes before their edges.
 - If you write an existing `id` with a second label, the node gets both labels.
-- Rejected: a node without an edge (`CREATE (:Person {name: 'a'})`), `CREATE ... RETURN ...`, `MATCH (a),(b) CREATE (a)-[:R]->(b)`, `SET n = $map`, `SET n += row.props`, `FOREACH`, writes inside `CALL { ... }`, `UNWIND $ids AS id MATCH (n {id: id}) ...` (send row maps instead), and `CREATE INDEX`.
+- Rejected: a node without an integer `id` (`CREATE (:Person {name: 'a'})`), `MERGE` of a lone node (`MERGE (n:Person {id: 1})`), `CREATE ... RETURN ...`, `MATCH (a),(b) CREATE (a)-[:R]->(b)`, `SET n = $map`, `SET n += row.props`, `FOREACH`, writes inside `CALL { ... }`, and `UNWIND $ids AS id MATCH (n {id: id}) ...` (send row maps instead). Do not send index statements: HydraDB does not need them and rejects most forms.
 
 Reads:
 
-- Supported: `MATCH` with labels and properties, typed traversal (also bounded variable-length paths such as `-[:KNOWS*1..3]->`), `WHERE` (also `IN`), `OPTIONAL MATCH`, `WITH`, `ORDER BY`/`SKIP`/`LIMIT`, `count`/`sum`/`avg`/`collect`/`min`/`max`, `CASE`, `EXISTS { ... }`, string functions (`toUpper`, `toLower`, `STARTS WITH`, ...), parameters, map and list literals, and read-only `CALL { ... }` subqueries.
-- Rejected: `type()`, `id()`, `labels()`, `keys()`, `properties()`, `nodes()`, `relationships()`, `startNode()`, `endNode()`, `elementId()`, `shortestPath`, and untyped relationships such as `(a)--(b)` or `()-[r]->()`.
-- A read that starts with `UNWIND` has one shape only: one `UNWIND` over a list of plain values (not maps), one `MATCH` and a final `RETURN`, such as `UNWIND $ids AS i MATCH (p:Person {id: i}) RETURN p.name AS name`. It cannot have `WHERE`, `WITH`, `OPTIONAL MATCH`, `ORDER BY`, `SKIP`, `LIMIT` or `UNION`. Use `MATCH (p:Person) WHERE p.id IN $ids ...` for those.
-- `RETURN n` returns the node's integer id, not a node object. Return properties instead: `RETURN n.name AS name`.
+- Supported: `MATCH` with labels and properties, typed traversal in either direction (also bounded variable-length paths such as `-[:KNOWS*1..3]->`), `WHERE` (also `IN`), `OPTIONAL MATCH`, `WITH`, `ORDER BY`/`SKIP`/`LIMIT`, `UNION`, `count`/`sum`/`avg`/`collect`/`min`/`max`, `CASE`, `EXISTS { ... }`, `type()`, `id()`, `labels()`, `keys()`, `properties()`, string functions (`toUpper`, `toLower`, `STARTS WITH`, ...), parameters, map and list literals, and read-only `CALL { ... }` subqueries.
+- Rejected: `nodes()`, `relationships()`, `startNode()`, `endNode()`, `shortestPath`, bare pattern predicates such as `WHERE (p)-[:KNOWS]->()` (use `EXISTS { ... }`), and untyped relationships such as `(a)--(b)` or `()-[r]->()`.
+- `UNWIND` in a read takes a list of plain values, not maps: `UNWIND $ids AS i MATCH (p:Person {id: i}) RETURN p.name AS name` with `{"ids": [1, 2]}`.
 
-Also rejected: procedure calls (`CALL db.*`, `CALL apoc.*`) and `LOAD CSV`. Pass data through `params`. There is no schema tool.
+Also rejected: procedure calls (`CALL db.*`, `CALL apoc.*`) and `LOAD CSV`. Pass data through `params`. There is no schema tool; to learn a collection's structure, query it: `MATCH (n) UNWIND labels(n) AS l RETURN l, count(*) AS c ORDER BY l`.
 
 Do not use `EXPLAIN`/`PROFILE` to preview a query: do not rely on them to plan a query without running it.
 

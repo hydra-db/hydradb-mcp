@@ -565,14 +565,19 @@ test(
 				query: "MERGE (a:Person {id: 1})-[:KNOWS {since: 2020}]->(b:Person {id: 2})",
 			});
 
-			// `RETURN p` gives the node's integer id, not a node object. The
-			// renderer in src/cypher.ts shows it as a number.
+			// A node comes back flat: properties merged with the renderer-added
+			// `id` and `labels`. The renderer in src/cypher.ts depends on exactly
+			// this shape, so assert it rather than assuming it holds.
 			const nodes = await hydra.graph.query({
 				...scope,
 				query: "MATCH (p:Person {ext_id: 'a'}) RETURN p",
 			});
+			const node = nodes[0]?.p as Record<string, unknown>;
 
-			assert.equal(nodes[0]?.p, 1, `expected the node id, got ${JSON.stringify(nodes)}`);
+			assert.ok(node, `expected a node row, got ${JSON.stringify(nodes)}`);
+			assert.deepEqual(node.labels, ["Person"]);
+			assert.equal(node.id, 1);
+			assert.equal(node.name, "Alice");
 
 			// A typed variable-length traversal and a relationship property.
 			const reach = await hydra.graph.query({
@@ -589,15 +594,15 @@ test(
 
 			assert.deepEqual(since, [{ since: 2020 }]);
 
-			// labels() is rejected, so a caller checks a label it was told about
-			// with a count. This is the discovery query the server instructions
-			// recommend, so it must keep working.
-			const count = await hydra.graph.query({
+			// Aggregating over labels is how a caller discovers a collection's
+			// structure without a schema procedure. The server instructions
+			// recommend this query, so it must keep working.
+			const labels = await hydra.graph.query({
 				...scope,
-				query: "MATCH (n:Person) RETURN count(n) AS count",
+				query: "MATCH (n) UNWIND labels(n) AS l RETURN l, count(*) AS c ORDER BY l",
 			});
 
-			assert.equal(count[0]?.count, 2, `unexpected label count: ${JSON.stringify(count)}`);
+			assert.deepEqual(labels, [{ l: "Person", c: 2 }], `unexpected labels: ${JSON.stringify(labels)}`);
 
 			// The documented edge batch is safe to retry: running it twice
 			// leaves one edge per row.
