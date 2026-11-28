@@ -696,37 +696,54 @@ const SCENARIOS: Scenario[] = [
 		tools: ["hydradb_relations"],
 		async run({ call }) {
 			requireIndexed("e2e-k-graph");
-			const answer = await call("hydradb_relations", { kind: "knowledge", limit: 2 });
-			const first = ok(answer, "hydradb_relations page 1");
+			const answer = await call("hydradb_relations", { kind: "knowledge", limit: 50 });
+			const page = ok(answer, "hydradb_relations collection");
+			const shown = items(page, "relations").length;
 
-			assert.ok(items(first, "relations").length > 0, "the seeded collection has relations");
-			assert.equal(typeof first.has_more, "boolean");
+			assert.ok(shown > 0, "the seeded collection has relations");
+			assert.equal(page.shown, shown);
+			assert.match(answer.text, new RegExp(`^${shown} relations? for this collection:`));
 
-			if (first.has_more !== true) {
-				assert.match(answer.text, /That is all of them/, "the text and structuredContent disagree about more pages");
+			const tail = page.has_more === true ? /More relations exist: pass cursor=/ : /That is all of them|returned no cursor/;
 
-				return;
-			}
-
-			assert.notEqual(first.next_cursor, null, "has_more without a cursor");
-			assert.match(answer.text, /cursor/, "the text does not say how to read the next page");
-
-			const second = ok(await call("hydradb_relations", { kind: "knowledge", limit: 2, cursor: first.next_cursor }), "hydradb_relations page 2");
-
-			assert.notDeepEqual(second.relations, first.relations, "the cursor returned the same page");
+			assert.match(answer.text, tail, "the text and structuredContent disagree about more pages");
 		},
 	},
 	{
-		id: "relations.limit",
+		id: "relations.paging",
 		tools: ["hydradb_relations"],
 		knownIssue: "F-mcp-7",
 		async run({ call, expectFixed }) {
 			requireIndexed("e2e-k-graph");
-			const answer = await call("hydradb_relations", { kind: "knowledge", limit: 2 });
-			const shown = items(ok(answer, "hydradb_relations"), "relations").length;
+			const key = (r: Record<string, unknown>) => [r.from, r.predicate, r.to, r.chunk_id].join("|");
+			const whole = ok(await call("hydradb_relations", { kind: "knowledge", limit: 200 }), "hydradb_relations limit 200");
+			const all = new Set(items(whole, "relations").map(key));
 
-			await expectFixed(() => {
-				assert.ok(shown <= 2, `limit 2 returned ${shown} relations`);
+			assert.ok(all.size > 2, `precondition: the collection needs more than 2 relations, it has ${all.size}`);
+			assert.equal(whole.has_more, false, "precondition: limit 200 reads the whole collection");
+
+			await expectFixed(async () => {
+				const seen = new Set<string>();
+				let args: Record<string, unknown> | undefined = { kind: "knowledge", limit: 2 };
+
+				for (let pages = 0; args; pages++) {
+					assert.ok(pages < 2 * all.size, "paging did not end");
+
+					const answer = await call("hydradb_relations", args);
+					const page = ok(answer, `hydradb_relations page ${pages + 1}`);
+					const relations = items(page, "relations");
+					const tail = answer.text.match(/(That is all of them|More relations exist[^.]*)/)?.[1] ?? "no tail";
+
+					assert.ok(relations.length <= 2, `page ${pages + 1}: limit 2 returned ${relations.length} relations (${tail}, ${all.size} in all)`);
+					for (const relation of relations) seen.add(key(relation));
+
+					if (page.has_more !== true) {
+						assert.equal(seen.size, all.size, `paging stopped after ${seen.size} of ${all.size} relations (${tail})`);
+						args = undefined;
+					} else {
+						args = page.next_args as Record<string, unknown>;
+					}
+				}
 			});
 		},
 	},
