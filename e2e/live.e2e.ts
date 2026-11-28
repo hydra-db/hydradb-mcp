@@ -536,15 +536,12 @@ const SCENARIOS: Scenario[] = [
 	{
 		id: "ingest.knowledge.default_title",
 		tools: ["hydradb_list"],
-		knownIssue: "F-mcp-4",
-		async run({ call, expectFixed }) {
+		async run({ call }) {
 			requireIndexed("e2e-k-plain");
 			const listed = ok(await call("hydradb_list", { kind: "knowledge", ids: ["e2e-k-plain"] }), "hydradb_list");
 			const title = String(items(listed)[0]?.title);
 
-			await expectFixed(() => {
-				assert.doesNotMatch(title, /\.\.md$/, `a title derived from text ending in "." is stored as ${JSON.stringify(title)}`);
-			});
+			assert.doesNotMatch(title, /\.\.md$/, `a title derived from text ending in "." is stored as ${JSON.stringify(title)}`);
 		},
 	},
 	{

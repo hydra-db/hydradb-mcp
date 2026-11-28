@@ -1397,7 +1397,9 @@ export class ContextResource extends Resource {
 				if (input.text == null) throw new Error("A knowledge item requires text.");
 
 				const title = input.title ?? "document";
-				const filename = input.filename ?? (/\.md$/i.test(title) ? title : `${title}.md`);
+				// A title ending in a full stop ("...failover.") would otherwise be
+				// stored as "...failover..md".
+				const filename = input.filename ?? (/\.md$/i.test(title) ? title : `${title.replace(/\.+$/, "")}.md`);
 				const metadataItem: Record<string, JsonValue> = {};
 
 				// The title travels as the upload's filename, which the API stores as

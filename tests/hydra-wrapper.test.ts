@@ -138,6 +138,20 @@ test("knowledge ingest still accepts the params it can carry", async () => {
 	assert.equal(calls.length, 1, "knowledge ingest should still reach the SDK");
 });
 
+// The upload's filename is what the API stores as the title.
+test("a knowledge title ending in a full stop is uploaded as title.md, not title..md", async () => {
+	const { sdk, calls } = ingestSdk();
+	const hydra = new HydraDB({ token: "t", database: "db_test" }, sdk);
+
+	for (const title of ["The ledger runbook covers regional failover.", "Ledger ownership", "Plan.md"]) {
+		await hydra.context.ingest({ kind: "knowledge", text: "body", title });
+	}
+
+	const filenames = calls.map((call) => z.object({ documents: z.array(z.object({ filename: z.string() })) }).parse(call).documents[0]?.filename);
+
+	assert.deepEqual(filenames, ["The ledger runbook covers regional failover.md", "Ledger ownership.md", "Plan.md"]);
+});
+
 test("knowledge ingest serializes every supported per-document field", async () => {
 	const { sdk, calls } = ingestSdk();
 	const hydra = new HydraDB({ token: "t", database: "db_test" }, sdk);
