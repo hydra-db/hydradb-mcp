@@ -26,7 +26,15 @@ import {
 	type ToolAnswer,
 } from "./harness.js";
 import {
+	ACL_ALICE,
+	ACL_FLIP,
+	ACL_ITEMS,
+	ACL_OPEN,
+	ALICE,
+	ALICE_EMAIL,
+	type AclItem,
 	APP_METADATA,
+	BOB,
 	DROPPED,
 	FILE_TEXT,
 	KEPT_KNOWLEDGE,
@@ -103,7 +111,6 @@ interface Run {
 	/** Tools each scenario's seed calls used, so its declared tools count as called. */
 	seedCalls: Map<string, Set<string>>;
 	statuses: Map<string, string>;
-	defaultCollection?: string;
 	startedAt: Date;
 }
 
@@ -181,17 +188,13 @@ function parseStatuses(text: string): Map<string, string> {
 	return found;
 }
 
+/** Not cached: a scenario that declares hydradb_list_collections must call it whatever ran before. */
 async function defaultCollection(call: Caller): Promise<string> {
-	const r = current();
-
-	if (r.defaultCollection) return r.defaultCollection;
-
 	const listed = ok(await call("hydradb_list_collections", {}), "hydradb_list_collections");
 	const names = (listed.collections as string[] | undefined) ?? [];
 	const generated = names.filter((name) => name !== NAMED && name !== DROPPED);
 
 	assert.equal(generated.length, 1, `expected one workspace default collection besides ours, got ${JSON.stringify(names)}`);
-	r.defaultCollection = generated[0];
 
 	return generated[0];
 }
@@ -246,6 +249,250 @@ function connectorMissing(tool: string, args: Record<string, unknown>): Scenario
 	};
 }
 
+// --- Access control ----------------------------------------------------------
+
+/** One identity the read scenarios answer as, and which of ACL_ITEMS it must see. */
+interface Reader {
+	name: string;
+	/** Undefined sends no `acl`: the API key's own unscoped read. */
+	acl?: string[];
+	sees: AclItem[];
+}
+
+const READERS: Reader[] = [
+	{ name: "alice", acl: [ALICE], sees: [ACL_OPEN, ACL_ALICE] },
+	{ name: "alice_bare_email", acl: [ALICE_EMAIL], sees: [ACL_OPEN, ACL_ALICE] },
+	{ name: "bob", acl: [BOB], sees: [ACL_OPEN] },
+	{ name: "public", acl: ["__public__"], sees: [ACL_OPEN] },
+	{ name: "unscoped", sees: ACL_ITEMS },
+];
+
+const ACL_IDS = ACL_ITEMS.map((item) => item.id);
+const scopedAs = (reader: Reader) => (reader.acl ? { acl: reader.acl } : {});
+const sortedIds = (items: AclItem[]) => items.map((item) => item.id).sort();
+const hiddenFrom = (reader: Reader) => ACL_ITEMS.filter((item) => !reader.sees.includes(item));
+
+/**
+ * No title or body of an item the reader may not see, in the text or the
+ * structured output. A denied inspect may echo the id it was asked for, so ids
+ * are checked only where the caller never named them.
+ */
+function assertHides(what: string, answer: ToolAnswer, hidden: AclItem[], checkIds: boolean) {
+	const shown = `${answer.text}\n${JSON.stringify(answer.structured ?? null)}`;
+
+	for (const item of hidden) {
+		const leaked = [item.title, item.body, ...(checkIds ? [item.id] : [])].filter((secret) => shown.includes(secret));
+
+		assert.deepEqual(leaked, [], `${what} leaked ${item.id}`);
+	}
+}
+
+/** Follow-up args the server hands back must keep the caller's principals, or the next call reads unscoped. */
+function assertFollowUpsKeep(what: string, rows: Record<string, unknown>[], reader: Reader) {
+	for (const row of rows) {
+		assert.deepEqual((row.inspect_args as Record<string, unknown> | undefined)?.acl, reader.acl, `${what}: inspect_args of ${row.id} lost the caller's acl`);
+	}
+}
+
+/** Which ACL item each relation was extracted from, by its chunk id. */
+function relationOwners(page: Record<string, unknown>): string[] {
+	const owners = items(page, "relations").map((r) => String(r.chunk_id).replace(/_chunk_\d+$/, ""));
+
+	return [...new Set(owners.filter((owner) => ACL_IDS.includes(owner)))].sort();
+}
+
+interface AclRead {
+	read: string;
+	tools: string[];
+	check(call: Caller, reader: Reader): Promise<void>;
+}
+
+const ACL_READS: AclRead[] = [
+	{
+		read: "list",
+		tools: ["hydradb_list"],
+		async check(call, reader) {
+			const answer = await call("hydradb_list", { kind: "knowledge", ids: ACL_IDS, ...scopedAs(reader) });
+			const listed = ok(answer, `hydradb_list as ${reader.name}`);
+
+			assert.deepEqual(idsOf(listed).sort(), sortedIds(reader.sees), "structuredContent.items");
+			assert.deepEqual([...listedRows(answer.text).keys()].sort(), sortedIds(reader.sees), "the text listing");
+			assertFollowUpsKeep("hydradb_list", items(listed), reader);
+			assertHides(`hydradb_list as ${reader.name}`, answer, hiddenFrom(reader), true);
+		},
+	},
+	{
+		read: "query",
+		tools: ["hydradb_query"],
+		async check(call, reader) {
+			const answer = await call("hydradb_query", { query: "heron migration", kind: "knowledge", source_ids: ACL_IDS, structured: true, ...scopedAs(reader) });
+			const structured = ok(answer, `hydradb_query as ${reader.name}`);
+			const inText = new Set([...answer.text.matchAll(/^Chunk \d+\s+\[id: ([^\]]+)\]/gm)].map((m) => m[1]));
+
+			assert.deepEqual([...new Set(idsOf(structured, "sources"))].sort(), sortedIds(reader.sees), "structuredContent.sources");
+			assert.deepEqual([...inText].sort(), sortedIds(reader.sees), "the ids in the text");
+			for (const item of reader.sees) assert.ok(answer.text.includes(item.body), `${item.id}: its stored text is missing from the answer`);
+			assertFollowUpsKeep("hydradb_query", items(structured, "sources"), reader);
+			assertHides(`hydradb_query as ${reader.name}`, answer, hiddenFrom(reader), true);
+		},
+	},
+	{
+		read: "inspect",
+		tools: ["hydradb_inspect"],
+		async check(call, reader) {
+			for (const item of ACL_ITEMS) {
+				const answer = await call("hydradb_inspect", { id: item.id, ...scopedAs(reader) });
+				const what = `hydradb_inspect ${item.id} as ${reader.name}`;
+
+				if (reader.sees.includes(item)) {
+					assert.ok(String(ok(answer, what).content).includes(item.body), `${what}: the stored text is missing`);
+					continue;
+				}
+
+				failed(answer, what, /\b404\b.*not found/i);
+				assert.ok(answer.text.includes(item.id), `${what}: the refusal does not name the id it looked for: ${brief(answer)}`);
+				assertHides(what, answer, [item], false);
+			}
+		},
+	},
+	{
+		read: "subgraph",
+		tools: ["hydradb_subgraph"],
+		async check(call, reader) {
+			const answer = await call("hydradb_subgraph", { id: ACL_OPEN.id, depth: 1, ...scopedAs(reader) });
+			const members = idsOf(ok(answer, `hydradb_subgraph of ${ACL_OPEN.id} as ${reader.name}`), "members");
+
+			assert.deepEqual(members.sort(), sortedIds(reader.sees), "the members reached from the open item");
+			assertHides(`hydradb_subgraph as ${reader.name}`, answer, hiddenFrom(reader), true);
+
+			for (const item of hiddenFrom(reader)) {
+				const denied = await call("hydradb_subgraph", { id: item.id, depth: 1, ...scopedAs(reader) });
+				const what = `hydradb_subgraph of ${item.id} as ${reader.name}`;
+
+				assert.deepEqual(idsOf(ok(denied, what), "members"), [], `${what} has members`);
+				assertHides(what, denied, [item], false);
+			}
+		},
+	},
+	{
+		read: "relations",
+		tools: ["hydradb_relations"],
+		async check(call, reader) {
+			const whole = ok(await call("hydradb_relations", { kind: "knowledge", limit: 200 }), "hydradb_relations unscoped");
+
+			assert.equal(whole.has_more, false, "precondition: limit 200 reads the whole collection");
+			assert.deepEqual(relationOwners(whole), [...ACL_IDS].sort(), "precondition: every ACL item has extracted relations");
+
+			const answer = await call("hydradb_relations", { kind: "knowledge", limit: 200, ...scopedAs(reader) });
+
+			assert.deepEqual(relationOwners(ok(answer, `hydradb_relations as ${reader.name}`)), sortedIds(reader.sees), "the items the collection's relations came from");
+			assertHides(`hydradb_relations as ${reader.name}`, answer, hiddenFrom(reader), true);
+
+			for (const item of hiddenFrom(reader)) {
+				const denied = await call("hydradb_relations", { id: item.id, kind: "knowledge", ...scopedAs(reader) });
+				const what = `hydradb_relations of ${item.id} as ${reader.name}`;
+
+				assert.deepEqual(items(ok(denied, what), "relations"), [], `${what} returned relations`);
+				assertHides(what, denied, [item], false);
+			}
+		},
+	},
+];
+
+/** Every read that takes `acl`, as every reader. */
+const ACL_READ_SCENARIOS: Scenario[] = ACL_READS.flatMap((read) =>
+	READERS.map((reader) => ({
+		id: `acl.${read.read}.${reader.name}`,
+		tools: read.tools,
+		async run({ call }: Ctx) {
+			requireIndexed(...ACL_IDS);
+			await read.check(call, reader);
+		},
+	})),
+);
+
+/** Whether Bob can reach ACL_FLIP through list, query and inspect. */
+async function bobSeesFlip(call: Caller): Promise<boolean[]> {
+	const asBob = { acl: [BOB] };
+	const listed = ok(await call("hydradb_list", { kind: "knowledge", ids: [ACL_FLIP.id], ...asBob }), "hydradb_list as bob");
+	const queried = ok(await call("hydradb_query", { query: "heron flip memo", kind: "knowledge", source_ids: [ACL_FLIP.id], structured: true, ...asBob }), "hydradb_query as bob");
+	const inspected = await call("hydradb_inspect", { id: ACL_FLIP.id, ...asBob });
+
+	return [idsOf(listed).includes(ACL_FLIP.id), idsOf(queried, "sources").includes(ACL_FLIP.id), !inspected.isError];
+}
+
+const ACL_SCENARIOS: Scenario[] = [
+	...ACL_READ_SCENARIOS,
+	{
+		id: "acl.update.takes_effect",
+		tools: ["hydradb_update", "hydradb_list", "hydradb_query", "hydradb_inspect", "hydradb_list_collections"],
+		async run({ call }) {
+			requireIndexed(ACL_FLIP.id);
+			const collection = await defaultCollection(call);
+			const replace = async (acl: string[]) => {
+				const updated = ok(await call("hydradb_update", { id: ACL_FLIP.id, collection, acl }), `hydradb_update acl ${JSON.stringify(acl)}`);
+
+				assert.equal(updated.acl_updated, true, "the ACL was not reported as replaced");
+				assert.equal(updated.vector_acl_synced, true, "the search index ACL was not reported as synchronized");
+			};
+
+			assert.deepEqual(await bobSeesFlip(call), [false, false, false], "precondition: Bob cannot see Alice's item");
+
+			try {
+				await replace(["__public__"]);
+				await eventually("Bob to see the item made public", 60_000, async () => (await bobSeesFlip(call)).every(Boolean));
+			} finally {
+				await replace([ALICE]);
+			}
+
+			await eventually("Bob to lose the item put back to Alice", 60_000, async () => !(await bobSeesFlip(call)).some(Boolean));
+		},
+	},
+	{
+		id: "acl.http.list",
+		tools: ["hydradb_list"],
+		async run({ call, run: r }) {
+			requireIndexed(...ACL_IDS);
+			const server = await startHttp(r.cfg.entry, { HYDRADB_BASE_URL: r.cfg.baseUrl });
+
+			try {
+				const http = await connectHttp(server.url, { Authorization: `Bearer ${r.cfg.apiKey}`, "X-HydraDB-Database": r.database });
+
+				try {
+					for (const reader of READERS.filter((each) => each.name === "alice" || each.name === "bob")) {
+						const args = { kind: "knowledge", ids: ACL_IDS, ...scopedAs(reader) };
+						const viaHttp = await http.call("hydradb_list", args);
+
+						assert.deepEqual(idsOf(ok(viaHttp, `hydradb_list over HTTP as ${reader.name}`)).sort(), sortedIds(reader.sees));
+						assert.equal(comparable(viaHttp), comparable(await call("hydradb_list", args)), `hydradb_list as ${reader.name} answered differently over HTTP`);
+					}
+				} finally {
+					await http.close();
+				}
+			} finally {
+				await server.stop();
+			}
+		},
+	},
+	{
+		id: "acl.inspect.access_list",
+		tools: ["hydradb_inspect"],
+		knownIssue: "F-mcp-14",
+		async run({ call, expectFixed }) {
+			requireIndexed(ACL_ALICE.id);
+			const answer = await call("hydradb_inspect", { id: ACL_ALICE.id, acl: [ALICE] });
+			const content = String(ok(answer, "hydradb_inspect as alice").content);
+
+			assert.ok(content.includes(ACL_ALICE.body), "precondition: Alice reads her own item");
+			await expectFixed(() => {
+				const internal = [...content.matchAll(/"(acl[a-z0-9_]*)"\s*:/g)].map((m) => m[1]);
+
+				assert.deepEqual(internal, [], "an app item's inspected content carries its access list and the API's ACL bookkeeping");
+			});
+		},
+	},
+];
+
 const SCENARIOS: Scenario[] = [
 	...[
 		"ingest.memory.text",
@@ -263,8 +510,10 @@ const SCENARIOS: Scenario[] = [
 		"ingest.knowledge.large",
 		"ingest.knowledge.file_base64",
 		"ingest.knowledge.app",
+		"ingest.knowledge.acl",
 		"ingest.knowledge.collection",
 	].map(ingestScenario),
+	...ACL_SCENARIOS,
 	{
 		id: "status.terminal",
 		tools: ["hydradb_status"],
