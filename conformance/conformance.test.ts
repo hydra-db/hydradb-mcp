@@ -112,6 +112,7 @@ const CONNECTOR_RESPONSES = {
 	discover: { provider: "slack", resources: [] },
 	listResources: { resources: [] },
 	write: { connectorId: "conn_1" },
+	sync: { workflowId: "wf_1" },
 	resourceWrite: { connectorId: "conn_1", resourceId: "C1" },
 };
 
@@ -122,10 +123,19 @@ const vectorResources = z.array(z.object({ resource_id: z.string(), display_name
 // so the database SDK methods answer with one body that carries all of them.
 const DATABASE_RESPONSE = { database: "db_test", status: "ok", fields: [], addedFields: [] };
 
+// A write counts as done only when its answer confirms it, and a fetch answer
+// carries its success flag, so these answer with the fields that prove it.
+const CONTEXT_RESPONSES = {
+	ingest: { successCount: 1, failedCount: 0, results: [] },
+	inspect: { success: true },
+	delete: { deletedCount: 1, results: [] },
+};
+
 // What a recorded SDK call answers with: a connector or database body, the query body, or empty.
 type RecordedBody =
 	| (typeof CONNECTOR_RESPONSES)[keyof typeof CONNECTOR_RESPONSES]
 	| typeof DATABASE_RESPONSE
+	| (typeof CONTEXT_RESPONSES)[keyof typeof CONTEXT_RESPONSES]
 	| { chunks: [] }
 	| { userMemories: [] }
 	| { statuses: [] }
@@ -146,10 +156,10 @@ function makeRecorder(): { sdk: HydraDBClient; calls: RecordedCall[] } {
 	const sdk = {
 		query: record("query", "application/json"),
 		context: {
-			ingest: record("ingest", "multipart/form-data"),
+			ingest: record("ingest", "multipart/form-data", CONTEXT_RESPONSES.ingest),
 			list: record("list", "application/json", { userMemories: [] }),
-			inspect: record("inspect", "application/json"),
-			delete: record("delete", "application/json"),
+			inspect: record("inspect", "application/json", CONTEXT_RESPONSES.inspect),
+			delete: record("delete", "application/json", CONTEXT_RESPONSES.delete),
 			relations: record("relations", "application/json"),
 			status: record("status", "application/json", { statuses: [] }),
 		},
@@ -177,7 +187,7 @@ function makeRecorder(): { sdk: HydraDBClient; calls: RecordedCall[] } {
 			listResources: record("listResources", json, CONNECTOR_RESPONSES.listResources),
 			update: record("update", json, CONNECTOR_RESPONSES.write),
 			delete: record("delete", json, CONNECTOR_RESPONSES.write),
-			sync: record("sync", json),
+			sync: record("sync", json, CONNECTOR_RESPONSES.sync),
 			pause: record("pause", json, CONNECTOR_RESPONSES.write),
 			resume: record("resume", json, CONNECTOR_RESPONSES.write),
 			configure: record("configure", json, CONNECTOR_RESPONSES.write),

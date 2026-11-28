@@ -23,7 +23,7 @@ import type { JsonValue } from "../adapters.js";
 import { type IngestRecordType, serializeRecordType } from "../record-type.js";
 import { ConnectorsResource } from "./connectors.js";
 import { unwrap } from "./envelope.js";
-import { HydraWrapperError, scrub, translateError } from "./errors.js";
+import { HydraWrapperError, scrub, translateError, UNCONFIRMED_WRITE, unexpectedShape } from "./errors.js";
 import { type GraphConfig, GraphResource } from "./graph.js";
 import {
 	type CallBudget,
@@ -271,6 +271,37 @@ function validateDatabasesResponse(response: DatabasesResponse): void {
 }
 
 const markdownQueryResponse = z.object({ success: z.literal(true).optional(), data: z.string() });
+
+/**
+ * A write's answer, when it carries what proves the write happened. A body that
+ * is not JSON, or one without that proof, leaves the outcome unknown, and the
+ * error shows what came back instead of reporting a write nobody saw.
+ */
+function confirmed<Response, Proof extends z.ZodTypeAny>(
+	path: string,
+	proof: Proof,
+	expected: string,
+	response: Response,
+	known: readonly string[],
+): Response & z.infer<Proof> {
+	if (proof.safeParse(response).success) return response as Response & z.infer<Proof>;
+
+	throw unexpectedShape(path, expected, response, known, UNCONFIRMED_WRITE);
+}
+
+/** Every ingest answer counts its items; without the counts, nothing says what was stored. */
+const ingestProof = z.object({ successCount: z.number(), failedCount: z.number() });
+
+/** A delete answer counts what it removed, as v2's deleted_count or the memory handler's user_memory_deleted. */
+const deleteProof = z.union([
+	z.object({ deletedCount: z.number() }),
+	z.object({ userMemoryDeleted: z.union([z.number(), z.boolean()]) }),
+]);
+
+const collectionDeleteProof = z.object({ status: z.string().min(1) });
+
+/** A fetch answer says whether it succeeded; anything else is not one. */
+const inspectAnswer = z.object({ success: z.boolean(), error: z.string().nullish() }).passthrough();
 
 export interface HydraConfig {
 	/** Bearer token (the HydraDB API key). */
@@ -1148,6 +1179,19 @@ export class ContextResource extends Resource {
 		params: IngestParams,
 		opts?: RequestOptions,
 	): Promise<SDK.IngestionV2IngestResponse> {
+		return confirmed(
+			"/context/ingest",
+			ingestProof,
+			"an ingest result with success_count and failed_count",
+			await this.sendIngest(params, opts),
+			[this.raw?.token ?? ""],
+		);
+	}
+
+	private async sendIngest(
+		params: IngestParams,
+		opts?: RequestOptions,
+	): Promise<SDK.IngestionV2IngestResponse> {
 		const request: SDK.IngestContextRequest = {
 			...this.scope(params.collection, params.database),
 			type: params.kind,
@@ -1578,11 +1622,11 @@ export class ContextResource extends Resource {
 	}
 
 	/** Fetch a source's content (SDK `context.inspect`; was "fetch content"). */
-	inspect(
+	async inspect(
 		params: InspectParams,
 		opts?: RequestOptions,
 	): Promise<SDK.FetchV2SourceFetchResponse> {
-		return this.call("/context/inspect", "idempotent", opts, (o) =>
+		const response = await this.call<SDK.FetchV2SourceFetchResponse, unknown>("/context/inspect", "idempotent", opts, (o) =>
 			this.sdk.context.inspect({
 				...this.scope(params.collection, params.database),
 				id: params.id,
@@ -1591,6 +1635,12 @@ export class ContextResource extends Resource {
 				acl: params.acl,
 			}, o),
 		);
+
+		if (!inspectAnswer.safeParse(response).success) {
+			throw unexpectedShape("/context/inspect", "a fetch result with a success flag", response, [this.raw?.token ?? ""]);
+		}
+
+		return response;
 	}
 
 	/** Per-source indexing progress (SDK `context.status`). */
@@ -1678,19 +1728,21 @@ export class ContextResource extends Resource {
 	}
 
 	/** Delete memories or knowledge sources (SDK `context.delete`). */
-	delete(
+	async delete(
 		params: DeleteParams,
 		opts?: RequestOptions,
 	): Promise<SDK.SourcesMemoryDeleteResponse> {
 		// Not safe to send twice: a repeat after the first one applied answers
 		// "not found", which reports a deletion that happened as one that failed.
-		return this.call("/context", "unsafe", opts, (o) =>
+		const response = await this.call<SDK.SourcesMemoryDeleteResponse, unknown>("/context", "unsafe", opts, (o) =>
 			this.sdk.context.delete({
 				...this.scope(params.collection, params.database),
 				ids: params.ids,
 				type: params.kind,
 			}, o),
 		);
+
+		return confirmed("/context", deleteProof, "a delete result with deleted_count or user_memory_deleted", response, [this.raw?.token ?? ""]);
 	}
 }
 
@@ -1913,11 +1965,19 @@ export class DatabasesResource extends Resource {
 
 		// A repeat after the first succeeded answers "not found", which would
 		// report a deletion that happened as one that failed.
-		return this.call("/databases/collections", "unsafe", opts, (o) =>
+		const response = await this.call<SDK.TenantsSubTenantDeleteResponse, unknown>("/databases/collections", "unsafe", opts, (o) =>
 			this.sdk.databases.deleteCollection(
 				{ database, collection: collection ?? params.collection.trim() },
 				o,
 			),
+		);
+
+		return confirmed(
+			"/databases/collections",
+			collectionDeleteProof,
+			"a collection delete result with a status",
+			response,
+			[this.raw?.token ?? ""],
 		);
 	}
 }
@@ -2033,7 +2093,7 @@ export type FeedbackParams = z.input<typeof feedbackParamsSchema>;
  * same reason.
  */
 const feedbackResultSchema = z.object({
-	recorded: z.boolean().optional(),
+	recorded: z.boolean(),
 	feedback_id: z.string().optional(),
 	request_id: z.string().optional(),
 	message: z.string().optional(),
@@ -2125,7 +2185,7 @@ export class FeedbackResource extends Resource {
 			opts,
 		);
 
-		return feedbackResultSchema.parse(result);
+		return confirmed("/feedback", feedbackResultSchema, "a feedback result with `recorded`", result, [this.raw.token]);
 	}
 }
 

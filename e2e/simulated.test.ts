@@ -113,19 +113,6 @@ const PROBES: Probe[] = [
  * behaviour; the marker must come off when the finding is fixed.
  */
 const KNOWN: Record<string, string> = {
-	"ingest.non_json": "F-mcp-11",
-	"ingest.empty_object": "F-mcp-11",
-	"delete.non_json": "F-mcp-11",
-	"delete.empty_object": "F-mcp-11",
-	"feedback.empty_object": "F-mcp-11",
-	"collections.delete.non_json": "F-mcp-11",
-	"collections.delete.empty_object": "F-mcp-11",
-	"connectors.sync.non_json": "F-mcp-11",
-	"connectors.sync.empty_object": "F-mcp-11",
-	"graph.create.non_json": "F-mcp-11",
-	"graph.create.empty_object": "F-mcp-11",
-	"inspect.non_json": "F-mcp-12",
-	"feedback.non_json": "F-mcp-9",
 	"databases.list.empty_list": "F-mcp-13",
 };
 

@@ -3107,7 +3107,7 @@ export function createHydraDBServer(
 			{
 				database,
 				collection,
-				status: res.status ?? "deletion_scheduled",
+				status: res.status,
 				deleted: true,
 			},
 		);
@@ -3361,9 +3361,9 @@ export function createHydraDBServer(
 			const res = await hydra.graph.createDatabase(database, { signal });
 
 			return structuredResult(
-				`Created graph database "${database}" (status: ${res.status ?? "ready"}). ` +
+				`Created graph database "${database}" (status: ${res.status}). ` +
 				"Collections are created by their first write; there is no create-collection step.",
-				{ action: args.action, database, status: res.status ?? "ready", created: true },
+				{ action: args.action, database, status: res.status, created: true },
 			);
 		}
 

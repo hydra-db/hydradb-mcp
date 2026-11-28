@@ -36,7 +36,7 @@ function scriptFetch(t: { mock: { method: typeof import("node:test").mock.method
 }
 
 
-const OK_INGEST = { status: 200, body: { success: true, data: { success: 1, failed: 0, results: [] } } };
+const OK_INGEST = { status: 200, body: { success: true, data: { success: true, success_count: 1, failed_count: 0, results: [] } } };
 
 const OK_UPDATE = {
 	status: 200,
@@ -95,6 +95,30 @@ test("feedback and Cypher writes are not retried after a 5xx either", async (t) 
 	const graph = new GraphResource({ token: "t" });
 	await assert.rejects(graph.query({ database: "g", collection: "c", query: "CREATE (n)" }), /Outcome unknown/);
 	assert.equal(calls.length, 1);
+});
+
+// A 200 that does not say what happened is not a write that happened.
+test("a write whose answer does not confirm it is an error, sent once", async (t) => {
+	const hydra = new HydraDB({ token: "t", database: "db", collection: "notes" });
+	const graph = new GraphResource({ token: "t" });
+	const writes: [string, () => Promise<unknown>][] = [
+		["ingest", () => hydra.context.ingest({ kind: "memory", text: "note" })],
+		["delete", () => hydra.context.delete({ ids: ["doc-1"], kind: "knowledge" })],
+		["collection delete", () => hydra.databases.deleteCollection({ collection: "notes" })],
+		["feedback", () => hydra.feedback.submit({ requestId: "r1", feedback: "missing" })],
+		["graph create", () => graph.createDatabase("g")],
+	];
+
+	for (const [name, write] of writes) {
+		const calls = scriptFetch(t, [{ status: 200, body: { success: true, data: {} } }]);
+
+		await assert.rejects(write(), /got \{\}\. The answer does not confirm the write, so it may or may not have been applied/, name);
+		assert.equal(calls.length, 1, `${name}: sent once`);
+		t.mock.restoreAll();
+	}
+
+	scriptFetch(t, [{ status: 200, body: { success: true, data: {} } }]);
+	await assert.rejects(hydra.context.inspect({ id: "doc-1" }), /expected a fetch result with a success flag, got \{\}/);
 });
 
 // 429 and a refused connection prove the server did not act on the request,

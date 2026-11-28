@@ -95,7 +95,7 @@ function ingestSdk(): { sdk: HydraDBClient; calls: unknown[] } {
 		context: {
 			ingest(request: unknown) {
 				calls.push(request);
-				return Promise.resolve({ data: { success: true }, success: true });
+				return Promise.resolve({ data: { success: true, successCount: 1, failedCount: 0 }, success: true });
 			},
 		},
 	} as unknown as HydraDBClient;
@@ -1500,7 +1500,7 @@ test("context.subgraph carries acl principals to the wire", async () => {
 function captureSdk(seen: Record<string, unknown>) {
 	const grab = (key: string) => (req: unknown) => {
 		seen[key] = req;
-		const data = key === "query" ? { chunks: [] } : key === "list" ? { sources: [] } : {};
+		const data = key === "query" ? { chunks: [] } : key === "list" ? { sources: [] } : key === "inspect" ? { success: true } : {};
 
 		return Promise.resolve({ success: true, data });
 	};

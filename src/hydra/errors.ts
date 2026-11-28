@@ -212,6 +212,47 @@ export function responseError(
 	);
 }
 
+/** What an unreadable answer to a write leaves the caller with. */
+export const UNCONFIRMED_WRITE =
+	"The answer does not confirm the write, so it may or may not have been applied. " +
+	"Check whether it took effect before sending it again.";
+
+/**
+ * A 2xx whose body is not the shape this endpoint promises.
+ *
+ * Raised rather than coerced to an empty result. An empty array is a perfectly
+ * ordinary answer here (a query that matched nothing, a database with no
+ * graphs), so silently substituting one for a malformed response makes a broken
+ * integration indistinguishable from a true negative, which is the one case a
+ * caller cannot debug. The `path` and a bounded preview of what actually
+ * arrived are carried through so the failure is actionable. A write passes
+ * `UNCONFIRMED_WRITE` as `consequence`, since its outcome is then unknown.
+ */
+export function unexpectedShape(
+	path: string,
+	expected: string,
+	got: unknown,
+	known: readonly string[],
+	consequence = "This is a response-shape mismatch, not an empty result.",
+): HydraWrapperError {
+	let preview: string;
+	try {
+		preview = JSON.stringify(got) ?? String(got);
+	} catch {
+		preview = String(got);
+	}
+
+	// Before the cut, so a credential crossing it is still whole when matched.
+	preview = scrub(preview, known);
+
+	if (preview.length > 200) preview = `${preview.slice(0, 200)}…`;
+	return new HydraWrapperError(
+		`Hydra DB ${path} → ERR: expected ${expected}, got ${preview}. ${consequence}`,
+		path,
+		{ body: got },
+	);
+}
+
 /**
  * Translate any error thrown by an SDK call into a `HydraWrapperError` carrying
  * the byte-identical `Hydra DB ${path} → ${status}: ${body}` message.
