@@ -5761,9 +5761,78 @@ test("hydradb_list bounds projected fields in structured output and says so", as
 
 	const projectedBytes = JSON.stringify(items.map((item) => item.fields ?? {})).length;
 
-	assert.ok(projectedBytes < 25_000, `the page's projected data stays bounded, got ${projectedBytes}`);
+	assert.ok(projectedBytes < 100_000, `the page's projected data stays bounded, got ${projectedBytes}`);
 	assert.equal(items.length, 30, "rows past the budget are still listed, by id");
 	assert.equal(items[29]?.fields_truncated, true);
+});
+
+// The additional_metadata a connector stores on one row: 600 to 760 characters
+// of JSON on the staging Asana, Linear and Sentry connectors.
+const connectorMetadata = (n: number) => ({
+	app_provider: "slack",
+	author_name: "Ada Lovelace",
+	channel_id: "C0123456789",
+	channel_name: "payments-oncall",
+	connector_id: "conn_01HZXABCDEFGHJKMNPQRSTVWXY",
+	github_issue_number: 4242 + n,
+	github_repo: "hydra-db/hydradb-application",
+	lance_id: `slack:T0123456789:C0123456789:1732780000.${String(n).padStart(6, "0")}`,
+	permalink: `https://example.slack.com/archives/C0123456789/p1732780000${String(n).padStart(6, "0")}`,
+	resource_id: "res_01HZXABCDEFGHJKMNPQRSTVWXY",
+	slack_ts: `1732780000.${String(n).padStart(6, "0")}`,
+	thread_ts: "1732779000.000050",
+	workspace: "T0123456789",
+});
+
+test("hydradb_list text shows every projected key of a connector row", async () => {
+	const metadata = connectorMetadata(1);
+
+	const { text, structured } = await listCall(
+		{ kind: "knowledge", include_fields: ["additional_metadata"] },
+		{ sources: [{ id: "s1", additional_metadata: metadata }], total: 1 },
+	);
+
+	assert.ok(
+		text.includes(`additional_metadata: ${JSON.stringify(metadata)}`),
+		`the text view must carry the whole field, got:\n${text}`,
+	);
+	assert.deepEqual(listedItems.parse(structured.items)[0]?.fields, { additional_metadata: metadata });
+});
+
+test("hydradb_list keeps the projected fields of every row on a full page of connector rows", async () => {
+	const rows = Array.from({ length: 100 }, (_, i) => ({ id: `s${i}`, additional_metadata: connectorMetadata(i) }));
+
+	const { text, structured } = await listCall(
+		{ kind: "knowledge", page_size: 100, include_fields: ["additional_metadata"] },
+		{ sources: rows, total: rows.length },
+	);
+
+	const items = listedItems.parse(structured.items);
+
+	assert.deepEqual(items.filter((item) => item.fields_truncated === true), [], "no row may lose fields");
+	assert.deepEqual(items[99]?.fields, { additional_metadata: connectorMetadata(99) });
+	assert.ok(text.includes(`"slack_ts":"1732780000.000099"`), "the last row is whole in the text view too");
+});
+
+test("hydradb_list says in the text which rows had fields cut", async () => {
+	const { text, structured } = await listCall(
+		{ kind: "knowledge", include_fields: ["additional_metadata"] },
+		{
+			sources: [
+				{ id: "big", additional_metadata: { note: "x".repeat(5_000) } },
+				{ id: "small", additional_metadata: { team: "infra" } },
+			],
+			total: 2,
+		},
+	);
+
+	const items = listedItems.parse(structured.items);
+	const lines = text.split("\n");
+	const cutNotice = /fields cut/;
+
+	assert.equal(items[0]?.fields_truncated, true);
+	assert.match(lines[lines.findIndex((line) => line.includes("[big]")) + 2] ?? "", cutNotice);
+	assert.equal(lines.filter((line) => cutNotice.test(line)).length, 1, "only the cut row carries the notice");
 });
 
 test("hydradb_list leaves small projected fields whole and unmarked", async () => {
