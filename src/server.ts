@@ -2902,16 +2902,24 @@ export function createHydraDBServer(
 			databases = (listed.databases ?? listed.tenantIds ?? []).filter(Boolean);
 		}
 
-		if (!databases.includes(defaultDatabase)) databases.unshift(defaultDatabase);
+		// A confined connection may always use its default, so it belongs in the
+		// list. Otherwise the list is the API's, and a default it does not name
+		// is reported as missing rather than listed as if it existed.
+		if (confined && !databases.includes(defaultDatabase)) databases.unshift(defaultDatabase);
 
 		const lines = databases.map(
 			(d) => `  - ${d}${d === defaultDatabase ? "  (default for this connection)" : ""}`,
 		);
 
+		const missingDefault = databases.includes(defaultDatabase)
+			? ""
+			: `\nThe default database for this connection, "${defaultDatabase}", is not among them: ` +
+				"it does not exist, or this key cannot reach it.";
+
 		const note = confined
 			? "\nThis connection is confined to the database(s) above; any other name is refused. " +
 				"The user chose this when approving the connection."
-			: "\nPass `database` on any tool to work in another one.";
+			: `${missingDefault}\nPass \`database\` on any tool to work in another one.`;
 
 		return structuredResult(
 			`${databases.length} database(s):\n${lines.join("\n")}${note}`,

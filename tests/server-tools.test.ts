@@ -385,6 +385,20 @@ test("hydradb_databases surfaces an API error on an unconfined connection", asyn
 	await client.close();
 });
 
+test("hydradb_databases lists only what the API listed, and says when the default is missing", async () => {
+	const { hydra } = mockHydra({ databases: { databases: ["analytics"] } });
+	const client = await connect(hydra);
+	const result = await client.callTool({ name: "hydradb_databases", arguments: {} });
+	const text = toolText(result);
+
+	assert.notEqual(result.isError, true);
+	assert.deepEqual((result.structuredContent as { databases: string[] }).databases, ["analytics"]);
+	assert.match(text, /^1 database\(s\):\n {2}- analytics\n/);
+	assert.doesNotMatch(text, /db_test {2}\(default for this connection\)/);
+	assert.match(text, /default database for this connection, "db_test", is not among them/);
+	await client.close();
+});
+
 test("hydradb_ingest accepts turns-only input (no text)", async () => {
 	const { hydra, calls } = mockHydra();
 	const client = await connect(hydra);

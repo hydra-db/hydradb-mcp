@@ -113,7 +113,6 @@ const PROBES: Probe[] = [
  * behaviour; the marker must come off when the finding is fixed.
  */
 const KNOWN: Record<string, string> = {
-	"databases.list.empty_list": "F-mcp-13",
 };
 
 const AMBIGUOUS: Outcome[] = ["500", "reset", "slow"];
