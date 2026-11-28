@@ -1,0 +1,73 @@
+name: E2E
+
+# The live tier: the built server against a real HydraDB API. The simulated
+# tier needs no network and runs inside `npm test` in ci.yml.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * *"
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  live:
+    # Pull requests from forks get no secrets.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      HYDRADB_E2E_API_KEY: ${{ secrets.HYDRADB_E2E_API_KEY }}
+      HYDRADB_E2E_BASE_URL: ${{ vars.HYDRADB_E2E_BASE_URL }}
+      HYDRADB_E2E_RESULTS: ${{ github.workspace }}/e2e-results.json
+    steps:
+      - name: Check for the API key
+        id: gate
+        run: |
+          if [ -z "$HYDRADB_E2E_API_KEY" ]; then
+            echo "::notice title=Live e2e did not run::The HYDRADB_E2E_API_KEY secret is not set, so the live tier was skipped."
+            echo "- Live e2e did not run: the HYDRADB_E2E_API_KEY secret is not set." >> "$GITHUB_STEP_SUMMARY"
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.gate.outputs.run == 'true'
+
+      - uses: actions/setup-node@v4
+        if: steps.gate.outputs.run == 'true'
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        if: steps.gate.outputs.run == 'true'
+        run: npm ci
+
+      # The live tier drives dist/, which is what npm ships.
+      - name: Build package
+        if: steps.gate.outputs.run == 'true'
+        run: npm run build
+
+      - name: Run the live tier
+        if: steps.gate.outputs.run == 'true'
+        env:
+          HYDRADB_E2E: "1"
+          HYDRADB_E2E_SERVER: dist
+        run: npm run test:e2e
+
+      - name: Note a missing results file
+        if: always() && steps.gate.outputs.run == 'true'
+        run: |
+          if [ ! -f "$HYDRADB_E2E_RESULTS" ]; then
+            echo "- Live e2e wrote no results file; see the job log." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.gate.outputs.run == 'true'
+        with:
+          name: mcp-e2e-results
+          path: ${{ env.HYDRADB_E2E_RESULTS }}
+          if-no-files-found: warn
