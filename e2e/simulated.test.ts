@@ -113,10 +113,6 @@ const PROBES: Probe[] = [
  * behaviour; the marker must come off when the finding is fixed.
  */
 const KNOWN: Record<string, string> = {
-	"update.500": "F-mcp-10",
-	"update.reset": "F-mcp-10",
-	"delete.500": "F-mcp-10",
-	"delete.reset": "F-mcp-10",
 	"ingest.non_json": "F-mcp-11",
 	"ingest.empty_object": "F-mcp-11",
 	"delete.non_json": "F-mcp-11",

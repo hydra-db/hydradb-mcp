@@ -1439,7 +1439,9 @@ export class ContextResource extends Resource {
 
 		if (params.acl !== undefined) request.acl = params.acl;
 
-		return this.call("/context/{id}/metadata", "idempotent", opts, (o) =>
+		// Not retried after an unclear failure: a repeat cannot tell the caller
+		// whether the first attempt applied, and that is what they need to know.
+		return this.call("/context/{id}/metadata", "unsafe", opts, (o) =>
 			this.sdk.context.updateSourceMetadata(request, o),
 		);
 	}
@@ -1680,7 +1682,9 @@ export class ContextResource extends Resource {
 		params: DeleteParams,
 		opts?: RequestOptions,
 	): Promise<SDK.SourcesMemoryDeleteResponse> {
-		return this.call("/context", "idempotent", opts, (o) =>
+		// Not safe to send twice: a repeat after the first one applied answers
+		// "not found", which reports a deletion that happened as one that failed.
+		return this.call("/context", "unsafe", opts, (o) =>
 			this.sdk.context.delete({
 				...this.scope(params.collection, params.database),
 				ids: params.ids,

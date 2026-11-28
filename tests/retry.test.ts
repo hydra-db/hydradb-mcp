@@ -118,25 +118,27 @@ test("a read is retried after a 5xx", async (t) => {
 	assert.equal(calls.length, 2);
 });
 
-test("a metadata update retries the identical PATCH after a 503", async (t) => {
-	const calls = scriptFetch(t, [{ status: 503 }, OK_UPDATE]);
-	const hydra = new HydraDB({ token: "t", database: "db", collection: "notes" });
+// A repeat could not tell the caller whether the first update or delete applied.
+test("a metadata update or a delete is not retried after an unclear failure", async (t) => {
+	const hydra = new HydraDB({ token: "t", database: "db", collection: "notes", timeoutSeconds: 3 });
+	const writes: [string, () => Promise<unknown>][] = [
+		["update", () => hydra.context.update({ id: "doc-1", additionalMetadata: { owner: "platform" } })],
+		["delete", () => hydra.context.delete({ ids: ["doc-1"], kind: "knowledge" })],
+	];
 
-	await hydra.context.update({
-		id: "doc-1",
-		databaseMetadata: { title: "Runbook" },
-		additionalMetadata: { owner: "platform" },
-		acl: ["group:google:eng@example.com"],
-	});
+	for (const [name, write] of writes) {
+		for (const failure of [{ status: 503 }, reset()] satisfies Reply[]) {
+			const calls = scriptFetch(t, [failure, OK_UPDATE]);
 
-	assert.equal(calls.length, 2);
-	assert.equal(calls[0]?.method, "PATCH");
-	assert.equal(calls[1]?.method, "PATCH");
-	assert.equal(calls[0]?.body, calls[1]?.body, "the retry sends the identical PATCH payload");
+			await assert.rejects(write(), /Outcome unknown/, name);
+			assert.equal(calls.length, 1, `${name}: one attempt only`);
+			t.mock.restoreAll();
+		}
+	}
 });
 
 test("a cancelled metadata update sends no request after Retry-After", async (t) => {
-	const calls = scriptFetch(t, [{ status: 503, headers: { "retry-after": "1" } }, OK_UPDATE]);
+	const calls = scriptFetch(t, [{ status: 429, headers: { "retry-after": "1" } }, OK_UPDATE]);
 	const hydra = new HydraDB({ token: "t", database: "db", collection: "notes" });
 	const controller = new AbortController();
 
