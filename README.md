@@ -108,35 +108,34 @@ Hydra DB also runs **property graphs you model and own end to end**, queried in 
 {"query": "UNWIND $rows AS row MERGE (n {id: row.id}) SET n:Person, n.name = row.name",
  "params": {"rows": [{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}]}}
 
-// Edges between those nodes
-{"query": "UNWIND $edges AS e CREATE (a {id: e.src})-[:KNOWS]->(b {id: e.dst})",
- "params": {"edges": [{"src": 1, "dst": 2}]}}
+// Edges between those nodes (integer edge ids, re-runnable after a failure)
+{"query": "UNWIND $edges AS e MATCH (a:Person {id: e.src}) MATCH (b:Person {id: e.dst}) MERGE (a)-[r:KNOWS {id: e.id}]->(b) SET r.since = e.since",
+ "params": {"edges": [{"id": 1, "src": 1, "dst": 2, "since": 2020}]}}
 ```
 
-**Supported Cypher.** HydraDB graph collections accept a narrow Cypher dialect. A query outside it fails with a 400 *before* execution, so a rejected query changes nothing and fails identically on retry.
+**Supported Cypher.** Graph collections run on one of two engines, and HydraDB is moving them to the newer one. The shapes below give the same result on both. Outside them, a query can fail with a 400 on one engine, which changes nothing and fails identically on retry, and run with different results on the other.
 
 Writes:
 
-- Every node you write has an **integer** `id` property. String ids are rejected.
-- One node: `CREATE (:Person {id: 1, name: 'Ada'})`. Creating an `id` that already exists fails; use the node batch to upsert.
-- One-hop edges: `CREATE (:Person {id: 1})-[:KNOWS]->(:Person {id: 2})` or `MERGE (a:Person {id: 1})-[:KNOWS]->(b:Person {id: 2})`. A one-hop edge can carry properties: `-[:KNOWS {since: 2020}]->`.
-- Node upserts in a batch: `UNWIND $rows AS row MERGE (n {id: row.id}) SET n:Person, n.name = row.name`. Use exactly one label per node, and set it with `SET`.
-- Edges in a batch: `UNWIND $edges AS e CREATE (a {id: e.src})-[:KNOWS]->(b {id: e.dst})`. No labels or properties in the pattern. A re-run of the same batch does not add edges. A single `CREATE` of an edge adds a new edge each time it runs.
-- Property updates: `MATCH (n:Person {id: 1}) SET n.age = 31`, or `REMOVE n.age` to drop one.
-- Deletes: `MATCH (n:Person) DETACH DELETE n`, `DELETE r` on a typed edge, or many nodes with `UNWIND $rows AS row MATCH (n {id: row.id}) DETACH DELETE n` and `{"rows": [{"id": 4}]}`.
-- An edge to an `id` that does not exist creates a node with that `id` and no label. Load nodes before their edges.
-- If you write an existing `id` with a second label, the node gets both labels.
-- Rejected: a node without an integer `id` (`CREATE (:Person {name: 'a'})`), `MERGE` of a lone node (`MERGE (n:Person {id: 1})`), `CREATE ... RETURN ...`, `MATCH (a),(b) CREATE (a)-[:R]->(b)`, `SET n = $map`, `SET n += row.props`, `FOREACH`, writes inside `CALL { ... }`, and `UNWIND $ids AS id MATCH (n {id: id}) ...` (send row maps instead). Do not send index statements: HydraDB does not need them and rejects most forms.
+- Every node has a non-negative **integer** `id`.
+- Nodes, created or updated: `UNWIND $rows AS row MERGE (n {id: row.id}) SET n:Person, n.name = row.name`. Set exactly one label, in `SET`, not in the `MERGE` pattern. Safe to re-run. Running it for an existing `id` with another label adds that label.
+- One new node: `CREATE (:Person {id: 1, name: 'Ada'})`, only for an `id` that does not exist yet. An existing `id` fails on one engine and becomes a second node on the other.
+- Edges, one or many: `UNWIND $edges AS e MATCH (a:Person {id: e.src}) MATCH (b:Person {id: e.dst}) MERGE (a)-[r:KNOWS {id: e.id}]->(b) SET r.since = e.since`. Give every edge a non-negative **integer** `id`: a re-run then adds nothing. Write the nodes first: when an endpoint is missing, one engine fails the whole batch and the other skips that row.
+- Updates on matched items: `MATCH (n:Person {id: 1}) SET n.age = 31`, `REMOVE n.age`, `SET n:Engineer`, or on an edge `MATCH (:Person {id: 1})-[r:KNOWS]->(:Person {id: 2}) SET r.since = 2021`.
+- Deletes: `MATCH (n:Person {id: 3}) DETACH DELETE n`, many nodes with `UNWIND $rows AS row MATCH (n {id: row.id}) DETACH DELETE n`, one edge with `MATCH (:Person {id: 1})-[r:KNOWS]->(:Person {id: 2}) DELETE r`, many with `UNWIND $edges AS e MATCH (a {id: e.src})-[r:KNOWS]->(b {id: e.dst}) DELETE r`. Always `DETACH DELETE` a node.
+- Never write an edge together with its nodes, as in `CREATE (:Person {id: 1})-[:KNOWS]->(:Person {id: 2})`, `MERGE (a:Person {id: 1})-[:KNOWS]->(b:Person {id: 2})` or `UNWIND $edges AS e CREATE (a {id: e.src})-[:KNOWS]->(b {id: e.dst})`: one engine links the existing nodes, the other creates new nodes with the same `id`.
+- Fail with a 400 on the newer engine: a node without an integer `id`, a label in a batch `MERGE` pattern, `MERGE` of a lone node, `CREATE ... RETURN ...`, several patterns in one `CREATE`, a `MATCH` then `CREATE` or `MERGE` outside an `UNWIND`, `SET n = $map`, `SET n += ...`, `FOREACH`, writes inside `CALL { ... }`, and `UNWIND` of plain values in a write (send row maps). Do not send index or constraint statements: HydraDB does not need them.
 
 Reads:
 
-- Supported: `MATCH` with labels and properties, typed traversal in either direction (also bounded variable-length paths such as `-[:KNOWS*1..3]->`), `WHERE` (also `IN`), `OPTIONAL MATCH`, `WITH`, `ORDER BY`/`SKIP`/`LIMIT`, `UNION`, `count`/`sum`/`avg`/`collect`/`min`/`max`, `CASE`, `EXISTS { ... }`, `type()`, `id()`, `labels()`, `keys()`, `properties()`, string functions (`toUpper`, `toLower`, `STARTS WITH`, ...), parameters, map and list literals, and read-only `CALL { ... }` subqueries.
-- Rejected: `nodes()`, `relationships()`, `startNode()`, `endNode()`, `shortestPath`, bare pattern predicates such as `WHERE (p)-[:KNOWS]->()` (use `EXISTS { ... }`), and untyped relationships such as `(a)--(b)` or `()-[r]->()`.
-- `UNWIND` in a read takes a list of plain values, not maps: `UNWIND $ids AS i MATCH (p:Person {id: i}) RETURN p.name AS name` with `{"ids": [1, 2]}`.
+- Work on both: `MATCH` with labels and properties, typed traversal in either direction, variable-length paths (`-[:KNOWS*1..3]->`), several types (`-[:KNOWS|MENTORS]->`), `WHERE` (also `IN`, `STARTS WITH`, `CONTAINS`, `IS NOT NULL`), `OPTIONAL MATCH`, `WITH`, `DISTINCT`, `ORDER BY`/`SKIP`/`LIMIT`, `UNION`, `count`/`sum`/`avg`/`min`/`max`/`collect`, `CASE`, `coalesce`, `type()`, `labels()`, `keys()`, `properties()`, `toUpper`, `toLower`, parameters, map and list literals, `CALL { WITH p ... }` subqueries, and `UNWIND` of plain values (`UNWIND $ids AS i MATCH (p:Person {id: i}) RETURN p.name AS name` with `{"ids": [1, 2]}`).
+- Has a relationship: `MATCH (p:Person)-[:KNOWS]->() RETURN DISTINCT p.name AS name`. Has none: `MATCH (p:Person) OPTIONAL MATCH (p)-[r:KNOWS]->() WITH p, count(r) AS k WHERE k = 0 RETURN p.name AS name`.
+- Return properties, not whole nodes or edges (`RETURN n.id AS id, n.name AS name`). On the older engine a returned node's `id`, an edge's endpoints and `id(n)` are internal numbers, not your `id`. `labels()` lists a node's labels in a different order on each engine.
+- Fail with a 400 on one engine: `EXISTS { ... }`, bare pattern predicates (`WHERE (p)-[:KNOWS]->()`), pattern comprehensions, `exists()`, `shortestPath`, `length()`, `nodes()`, `relationships()`, `startNode()`, `endNode()`, untyped relationships (`(a)--(b)`, `()-[r]->()`), `UNWIND` of maps in a read, and `sum`, `avg` or `toString` of `id`.
 
-Also rejected: procedure calls (`CALL db.*`, `CALL apoc.*`) and `LOAD CSV`. Pass data through `params`. There is no schema tool; to learn a collection's structure, query it: `MATCH (n) UNWIND labels(n) AS l RETURN l, count(*) AS c ORDER BY l`.
+Rejected on both: procedure calls (`CALL db.*`, `CALL apoc.*`) and `LOAD CSV`. Pass data through `params`. There is no schema tool; to learn a collection's structure, query it: `MATCH (n) UNWIND labels(n) AS l RETURN l, count(*) AS c ORDER BY l`.
 
-Do not use `EXPLAIN`/`PROFILE` to preview a query: do not rely on them to plan a query without running it.
+Do not use `EXPLAIN` or `PROFILE`: the newer engine refuses them, and the older one runs the query, writes included.
 
 A collection leaves the listing when its drop succeeds. A very large collection can need a retry: the call returns an error, and the next call resumes the drop. The storage is retained. Do not write to a collection while it is being dropped: a write that lands during the drop can survive it.
 

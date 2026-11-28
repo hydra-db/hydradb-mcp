@@ -12,15 +12,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - The `hydradb_graph_query` description and the README "Supported Cypher"
-  section list the Cypher dialect HydraDB graph collections accept, as probed on
-  staging. Written nodes need an integer `id`. Writes are single nodes, one-hop
-  edges, node batches (`UNWIND $rows AS row MERGE (n {id: row.id}) SET n:Label`),
-  edge batches (`UNWIND $edges AS e CREATE (a {id: e.src})-[:KNOWS]->(b {id: e.dst})`),
-  `SET` and `REMOVE` on a matched node, `DETACH DELETE` and typed-edge `DELETE`.
-  Reads reject `shortestPath`, `nodes()`, `relationships()`, `startNode()`,
-  `endNode()`, bare pattern predicates and untyped relationships. The text no
-  longer suggests `SET n += row`, a labelled `MERGE` in a batch, or index
-  management (ENG-3448).
+  section say that graph collections run on one of two engines while HydraDB
+  moves them to the newer one, and list the Cypher both answer alike, as probed
+  on production and staging. Nodes carry an integer `id` and go in through
+  `UNWIND $rows AS row MERGE (n {id: row.id}) SET n:Label, ...`. Edges carry an
+  integer `id` and go in through
+  `UNWIND $edges AS e MATCH (a:Label {id: e.src}) MATCH (b:Label {id: e.dst}) MERGE (a)-[r:TYPE {id: e.id}]->(b)`;
+  both batches are safe to re-run. `SET`, `REMOVE`, `DETACH DELETE` and typed
+  edge `DELETE` work on matched items. The text warns against writing an edge
+  together with its nodes (one engine links the existing nodes, the other
+  creates new ones), names what the newer engine refuses, names the reads that
+  fail on one engine (`EXISTS { ... }`, bare pattern predicates, `shortestPath`,
+  `length()`, `nodes()`, untyped relationships and others), gives portable
+  forms for "has a relationship" and "has none", says to return properties
+  rather than whole nodes because the older engine reports its own internal
+  ids, and says `EXPLAIN`/`PROFILE` are refused on one engine and run the query
+  on the other. It no longer suggests `SET n += row`, a labelled `MERGE` in a
+  batch, `CREATE (a {id: e.src})-[:KNOWS]->(b {id: e.dst})` edge batches,
+  one-hop edge writes with inline nodes, or index management (ENG-3448).
 - `drop_collection` notes that a collection leaves the listing when the drop
   succeeds, that a very large collection can need a retry, that storage is
   retained, and that a write during a drop can survive it (ENG-3448).
