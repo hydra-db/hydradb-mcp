@@ -47,6 +47,7 @@ function listFiles(dir, prefix = "") {
 const EXPECTED = [
 	{ dir: "tests", suffix: ".test.ts", min: 5 },
 	{ dir: "conformance", suffix: ".test.ts", min: 1 },
+	{ dir: "e2e", suffix: ".test.ts", min: 1 },
 ];
 
 let failed = false;
