@@ -5279,6 +5279,21 @@ test("an empty bare listing says where it looked and points at collections", asy
 	await client.close();
 });
 
+test("an empty listing by id names the id and the scope, not an empty database", async () => {
+	const { hydra } = mockHydra({ list: { user_memories: [], sources: [], total: 0 } }, { collection: null });
+	const client = await connect(hydra);
+
+	for (const [kind, ids] of [["knowledge", ["k-missing"]], ["memory", ["m-missing"]]] as const) {
+		const text = firstText(await client.callTool({ name: "hydradb_list", arguments: { kind, ids } }));
+
+		assert.match(text, new RegExp(`with id "${ids[0]}"`), `${kind}: ${text}`);
+		assert.match(text, /in database "db_test", workspace default/, `${kind}: ${text}`);
+		assert.doesNotMatch(text, /found in the workspace default/, `${kind}: ${text}`);
+	}
+
+	await client.close();
+});
+
 test("widened empty-result message names the trimmed database, not the raw argument", async () => {
 	const { hydra } = mockHydra({}, { collection: null });
 	const client = await connect(hydra);

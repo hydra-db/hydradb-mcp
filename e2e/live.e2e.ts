@@ -711,16 +711,13 @@ const SCENARIOS: Scenario[] = [
 	{
 		id: "list.ids.missing",
 		tools: ["hydradb_list"],
-		knownIssue: "F-mcp-1",
-		async run({ call, expectFixed }) {
+		async run({ call }) {
 			requireIndexed("e2e-k-titled");
 			const answer = await call("hydradb_list", { kind: "knowledge", ids: ["e2e-k-does-not-exist"] });
 
 			assert.deepEqual(idsOf(ok(answer, "hydradb_list of a missing id")), []);
-			await expectFixed(() => {
-				assert.match(answer.text, /e2e-k-does-not-exist/, `the answer does not name the id it looked for: ${answer.text}`);
-				assert.doesNotMatch(answer.text, /No sources found in the workspace default/, `the answer reads as an empty database: ${answer.text}`);
-			});
+			assert.match(answer.text, /e2e-k-does-not-exist/, `the answer does not name the id it looked for: ${answer.text}`);
+			assert.doesNotMatch(answer.text, /No sources found in the workspace default/, `the answer reads as an empty database: ${answer.text}`);
 		},
 	},
 	{

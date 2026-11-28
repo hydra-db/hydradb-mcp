@@ -1896,13 +1896,17 @@ export function createHydraDBServer(
 			// content, including this one — a caller branching on `items` should not
 			// have to special-case the empty result.
 			const filtered = hasEntries(args.metadata) || hasEntries(args.additional_metadata);
+			const lookedFor = idsLookedFor(args.source_ids);
 
 			return structuredResult(
 				args.page != null && args.page > 1
 					? `No memories on page ${args.page}.`
-					: filtered
-						? "No memories match the supplied metadata filters."
-						: emptyListText("memories", args.database, args.collection),
+					: lookedFor !== ""
+						? `No memories${lookedFor} ${filtered ? "match the supplied metadata filters" : "were found"} ` +
+							`in ${searchedScope(args.database, args.collection)}.`
+						: filtered
+							? "No memories match the supplied metadata filters."
+							: emptyListText("memories", args.database, args.collection),
 				{
 					kind: "memory",
 					resolved_scope: resolvedScope,
@@ -1953,6 +1957,19 @@ export function createHydraDBServer(
 	 * default partition is empty whenever data lives in named collections, so
 	 * a bare "none found" there read as "this database is empty".
 	 */
+	/** The partition a listing searched, as the empty answers name it. */
+	function searchedScope(database?: string, collection?: string): string {
+		const named = collection?.trim() || hydra.collection;
+
+		return `database ${JSON.stringify(database?.trim() || hydra.database)}, ` +
+			(named == null ? "workspace default" : `collection ${JSON.stringify(named)}`);
+	}
+
+	/** ` with id "a", "b"` for a listing that looked up ids, so its empty answer names them. */
+	function idsLookedFor(ids?: string[]): string {
+		return ids != null && ids.length > 0 ? ` with id ${ids.map((id) => JSON.stringify(id)).join(", ")}` : "";
+	}
+
 	function emptyListText(noun: "sources" | "memories", database?: string, collection?: string): string {
 		const base = noun === "sources" ? "No sources found." : "No memories stored yet.";
 
@@ -2016,16 +2033,14 @@ export function createHydraDBServer(
 		const followScope = { database: resolvedScope.database, ...(resolvedScope.collection != null ? { collection: resolvedScope.collection } : {}), ...(args.acl != null ? { acl: args.acl } : {}) };
 
 		if (sources.length === 0) {
-			const collection = args.collection?.trim() || hydra.collection;
+			const lookupScope = searchedScope(args.database, args.collection);
+			const lookedFor = idsLookedFor(args.source_ids);
 
-			const lookupScope = `database ${JSON.stringify(args.database?.trim() || hydra.database)}, ` +
-				(collection == null ? "workspace default" : `collection ${JSON.stringify(collection)}`);
-
-			const filtered = Object.keys(sourceFields).length > 0 || args.connector_id != null ||
+			const filtered = lookedFor !== "" || Object.keys(sourceFields).length > 0 || args.connector_id != null ||
 				hasEntries(args.metadata) || hasEntries(args.additional_metadata);
 
 			const emptyText = filtered
-				? `No visible ${args.kind === "all" ? "items" : "sources"} match the supplied filters on page ${page.page ?? args.page ?? 1} in ${lookupScope}. ` +
+				? `No visible ${args.kind === "all" ? "items" : "sources"}${lookedFor} match the supplied filters on page ${page.page ?? args.page ?? 1} in ${lookupScope}. ` +
 					"This does not prove the document was never ingested. Check the scope, page and exact stored identity; keep the caller's ACL unchanged."
 				: args.page != null && args.page > 1
 					? `No sources on page ${args.page}.`
