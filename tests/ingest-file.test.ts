@@ -106,7 +106,7 @@ interface IngestArgs {
 	file?: { filename?: string; content_base64?: string; path?: string };
 	text?: string;
 	turns?: { user: string; assistant: string }[];
-	items?: Array<{ text: string }>;
+	items?: Array<{ text: string; title?: string }>;
 	app_knowledge?: Array<{ kind: "message"; fields: { body: string } }>;
 	kind?: string;
 	title?: string;
@@ -513,6 +513,124 @@ test("a title becomes the uploaded filename, keeping the extension", async (t) =
 		assert.equal(result.isError, false, result.text);
 		assert.equal(uploads.at(-1)?.files[0]?.name, expected);
 	}
+});
+
+// The per-document keys POST /context/ingest accepts in `document_metadata`.
+// Any other key fails the whole request with 400 INVALID_INPUT.
+const DOCUMENT_METADATA_KEYS = new Set([
+	"additional_metadata",
+	"document_metadata",
+	"evidence_kind",
+	"evidence_subject",
+	"file_id",
+	"id",
+	"infer",
+	"metadata",
+	"relations",
+	"source_id",
+]);
+
+/** One `document_metadata` entry: an optional id plus whatever else was sent. */
+const documentMetadata = z.array(z.object({ id: z.string().optional() }).passthrough());
+
+/** A fake API that refuses unknown `document_metadata` keys the way the real one does. */
+function strictUploads(t: { mock: { method: typeof import("node:test").mock.method } }): Upload[] {
+	const uploads: Upload[] = [];
+
+	t.mock.method(globalThis, "fetch", async (input: Request | string | URL, init?: RequestInit) => {
+		// SAFETY: `duplex` is a valid RequestInit key that Node's lib types omit.
+		const form = await new Request(String(input), { ...init, duplex: "half" } as RequestInit).formData();
+		const fields = new Map<string, string>();
+		const files: File[] = [];
+
+		for (const [name, value] of form) {
+			if (value instanceof Blob) {
+				if (name === "documents") files.push(value);
+			} else {
+				fields.set(name, value);
+			}
+		}
+
+		uploads.push({ fields, files });
+
+		const items = documentMetadata.parse(JSON.parse(fields.get("document_metadata") ?? "[]"));
+
+		const unknown = [...new Set(items.flatMap((item) => Object.keys(item)))]
+			.filter((key) => !DOCUMENT_METADATA_KEYS.has(key))
+			.sort();
+
+		if (unknown.length > 0) {
+			return new Response(
+				JSON.stringify({
+					success: false,
+					error: {
+						code: "INVALID_INPUT",
+						message: `Invalid document_metadata: unsupported key(s) [${unknown.join(" ")}]`,
+					},
+				}),
+				{ status: 400, headers: { "content-type": "application/json" } },
+			);
+		}
+
+		return new Response(
+			JSON.stringify({
+				success: true,
+				data: {
+					success: true,
+					message: "Upload completed; files are queued for asynchronous processing.",
+					results: files.map((file, index) => ({
+						id: items[index]?.id ?? `gen-${index + 1}`,
+						filename: file.name,
+						status: "queued",
+					})),
+					success_count: files.length,
+					failed_count: 0,
+				},
+			}),
+			{ status: 202, headers: { "content-type": "application/json" } },
+		);
+	});
+
+	return uploads;
+}
+
+// Text saved as knowledge is uploaded as a Markdown file. The API reads the
+// document's title from the filename and rejects a `title` key in
+// `document_metadata`, so the title must travel as the filename only.
+test("text saved as knowledge passes an API that rejects unknown document_metadata keys", async (t) => {
+	const uploads = strictUploads(t);
+	const client = await connect();
+
+	const titled = await ingest(client, {
+		kind: "knowledge",
+		text: "Harbor pilots board at the outer buoy.",
+		title: "Harbor pilot notes",
+		source_id: "harbor-notes",
+	});
+
+	assert.equal(titled.isError, false, titled.text);
+	assert.equal(uploads[0]?.files[0]?.name, "Harbor pilot notes.md");
+	assert.equal(await uploads[0]?.files[0]?.text(), "Harbor pilots board at the outer buoy.");
+	assert.deepEqual(JSON.parse(uploads[0]?.fields.get("document_metadata") ?? "null"), [{ id: "harbor-notes" }]);
+
+	const untitled = await ingest(client, { kind: "knowledge", text: "Tide tables are posted weekly." });
+
+	assert.equal(untitled.isError, false, untitled.text);
+	assert.equal(uploads[1]?.files[0]?.name, "Tide tables are posted weekly..md");
+	assert.deepEqual(JSON.parse(uploads[1]?.fields.get("document_metadata") ?? "null"), [{}]);
+
+	const batch = await ingest(client, {
+		kind: "knowledge",
+		items: [{ text: "First entry.", title: "First" }, { text: "Second entry.", title: "Second.md" }],
+	});
+
+	assert.equal(batch.isError, false, batch.text);
+	assert.deepEqual(uploads[2]?.files.map((file) => file.name), ["First.md", "Second.md"]);
+
+	// A batch gets generated ids; nothing but `id` may ride along with them.
+	const batchItems = documentMetadata.parse(JSON.parse(uploads[2]?.fields.get("document_metadata") ?? "[]"));
+
+	assert.deepEqual(batchItems.map((item) => Object.keys(item)), [["id"], ["id"]]);
 });
 
 test("a local file that changes while it is read is refused, never sent in part", async (t) => {

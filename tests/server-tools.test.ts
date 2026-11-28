@@ -946,7 +946,7 @@ test("hydradb_ingest does not append a second markdown extension", async () => {
 	await client.close();
 });
 
-test("hydradb_ingest preserves a supplied knowledge title separately from the filename", async () => {
+test("hydradb_ingest sends a knowledge title as the filename and never as a metadata key", async () => {
 	const { hydra, calls } = mockHydra();
 	const client = await connect(hydra);
 
@@ -961,7 +961,7 @@ test("hydradb_ingest preserves a supplied knowledge title separately from the fi
 	}).parse(calls.find((call) => call.method === "ingest")?.args);
 
 	assert.equal(request.documents[0]?.filename, "Runbook.md");
-	assert.deepEqual(JSON.parse(request.documentMetadata), [{ title: "Runbook" }]);
+	assert.deepEqual(JSON.parse(request.documentMetadata), [{}]);
 
 	await client.close();
 });
@@ -998,7 +998,6 @@ test("hydradb_ingest forwards every knowledge document field", async () => {
 	assert.equal(request.documents[0]?.filename, "Q3.md");
 	assert.deepEqual(JSON.parse(request.documentMetadata), [{
 		id: "report-q3",
-		title: "Q3.md",
 		metadata: { department: "finance" },
 		additional_metadata: { author: "Ada" },
 		relations: { ids: ["budget-2026"], properties: { type: "supports" } },
@@ -1110,7 +1109,7 @@ test("hydradb_ingest batches knowledge documents and keys their graphs by id", a
 		graphPayload: z.string(),
 	}).parse(calls.find((call) => call.method === "ingest")?.args);
 
-	const metadata = z.array(z.object({ id: z.string(), title: z.string() })).parse(
+	const metadata = z.array(z.object({ id: z.string() }).strict()).parse(
 		JSON.parse(request.documentMetadata),
 	);
 
@@ -1118,7 +1117,6 @@ test("hydradb_ingest batches knowledge documents and keys their graphs by id", a
 
 	assert.deepEqual(request.documents.map((document) => document.filename), ["First.md", "Second.md"]);
 	assert.deepEqual(metadata.map((item) => item.id), ["k1", "k2"]);
-	assert.deepEqual(metadata.map((item) => item.title), ["First", "Second.md"]);
 	assert.deepEqual(Object.keys(graphPayload), ["k2"]);
 	assert.equal(calls.filter((call) => call.method === "ingest").length, 1);
 

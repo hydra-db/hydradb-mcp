@@ -159,7 +159,6 @@ test("knowledge ingest serializes every supported per-document field", async () 
 
 	assert.deepEqual(JSON.parse(request.documentMetadata), [{
 		id: "report-q3",
-		title: "Q3",
 		metadata: { department: "finance" },
 		additional_metadata: { author: "Ada" },
 		relations: { ids: ["budget-2026"], properties: { type: "supports" } },
