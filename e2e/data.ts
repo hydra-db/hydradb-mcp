@@ -89,3 +89,9 @@ export const MEMORY_ITEM_KEYS = new Set([
 	"metadata",
 	"additional_metadata",
 ]);
+
+/** Body keys of `PATCH /context/{id}/metadata` (`contextMetadataUpdateRequest`), deprecated aliases left out. */
+export const UPDATE_BODY_KEYS = new Set(["database", "collection", "database_metadata", "additional_metadata", "acl", "acl_inherit"]);
+
+/** Body keys of `POST /feedback` (`feedback.Request`), deprecated aliases left out. */
+export const FEEDBACK_BODY_KEYS = new Set(["request_id", "feedback", "rating", "source", "ground_truth", "database", "collection", "metadata"]);

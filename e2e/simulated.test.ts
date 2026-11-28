@@ -10,7 +10,16 @@ import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { after, before, describe, it, type TestContext } from "node:test";
 
-import { connectorMetadata, DOCUMENT_METADATA_KEYS, listedRows, MEMORY_ITEM_KEYS, missingInObject, missingInText } from "./data.js";
+import {
+	connectorMetadata,
+	DOCUMENT_METADATA_KEYS,
+	FEEDBACK_BODY_KEYS,
+	listedRows,
+	MEMORY_ITEM_KEYS,
+	missingInObject,
+	missingInText,
+	UPDATE_BODY_KEYS,
+} from "./data.js";
 import { startStdio, type StdioServer, type ToolAnswer } from "./harness.js";
 import { type Exchange, loadFixtures, type Outcome, OUTCOMES, ROUTES, SIMULATED_ERRORS, Simulator } from "./simulator.js";
 
@@ -433,6 +442,38 @@ describe("request bodies", { concurrency: true }, () => {
 			testCase.check(sent);
 		});
 	}
+
+	it("update sends only keys the API accepts, with the caller's values", async () => {
+		const edit = { database_metadata: { team: "payments" }, additional_metadata: WIDE, acl: ["ada@example.com"] };
+
+		await server.call("hydradb_update", { id: "k-12", collection: "c", database: "sim-body-update", ...edit });
+		const [sent] = simulator.requests("update", "sim-body-update");
+
+		assert.ok(sent, "no update request was sent");
+		assert.equal(sent.path, "/context/k-12/metadata");
+		onlyKeys([sent.body as Record<string, unknown>], UPDATE_BODY_KEYS, "update body");
+		assert.deepEqual(missingInObject(sent.body, { collection: "c", ...edit }), []);
+	});
+
+	it("feedback sends only keys the API accepts, with the caller's values", async () => {
+		await server.call("hydradb_feedback", {
+			request_id: "0c82d439-ebc9-4bf2-bc3b-0d64d149cac1",
+			rating: "negative",
+			feedback: "the owner was missing",
+			ground_truth_source_ids: ["k-2"],
+			metadata: { run: "e2e" },
+			database: "sim-body-feedback",
+		});
+		const [sent] = simulator.requests("feedback", "sim-body-feedback");
+
+		assert.ok(sent, "no feedback request was sent");
+		onlyKeys([sent.body as Record<string, unknown>], FEEDBACK_BODY_KEYS, "feedback body");
+		assert.deepEqual(
+			missingInObject(sent.body, { request_id: "0c82d439-ebc9-4bf2-bc3b-0d64d149cac1", rating: "negative", feedback: "the owner was missing", metadata: { run: "e2e" } }),
+			[],
+		);
+		assert.deepEqual((sent.body as { ground_truth?: { source_ids?: string[] } }).ground_truth?.source_ids, ["k-2"]);
+	});
 });
 
 // --- Round trip ----------------------------------------------------------------
