@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.9.1] - 2026-11-28
+
+### Fixed — `hydradb_list` shows the fields a caller asked for
+
+`hydradb_list` with `include_fields` printed each field as JSON cut at 150
+characters. A connector row carries 600 to 760 characters of
+`additional_metadata`, so every connector row lost its later keys in the text
+(`slack_ts`, `github_issue_number`) while `structuredContent` kept them, and a
+host that shows only the text saw less than a host that reads the structured
+output. The text now prints the same bounded copy the structured output
+carries, and a row whose fields were cut says so. The page allowance for
+projected fields is 80,000 characters instead of 20,000, which holds a full
+page of 100 connector rows whole; before, the last rows of a 50-row page lost
+their fields (ENG-5283).
+
+### Fixed — saving text as knowledge
+
+`hydradb_ingest` with `kind: "knowledge"` and `text` failed every time with
+`400 INVALID_INPUT` "unsupported key(s) [title]". The server sent the title
+inside `document_metadata`, where the API accepts no such key. The API takes a
+document's title from its filename, which the server already sets to
+`<title>.md`, so the extra key is gone and the save goes through. Files and
+memories were not affected.
+
 ## [1.9.0] - 2026-11-26
 
 ### Added — `include_table_sql` and `table_limit` on `hydradb_query`
@@ -35,28 +59,6 @@ Path-prefixed MCP deployments now serve protected-resource metadata through
 both prefix-preserving and prefix-stripping proxies, including the RFC 9728
 path-inserted alias. Unsupported `HYDRADB_MCP_PUBLIC_URL` layouts now fail at
 startup with a clear error instead of silently disabling OAuth.
-
-### Fixed — `hydradb_list` shows the fields a caller asked for
-
-`hydradb_list` with `include_fields` printed each field as JSON cut at 150
-characters. A connector row carries 600 to 760 characters of
-`additional_metadata`, so every connector row lost its later keys in the text
-(`slack_ts`, `github_issue_number`) while `structuredContent` kept them, and a
-host that shows only the text saw less than a host that reads the structured
-output. The text now prints the same bounded copy the structured output
-carries, and a row whose fields were cut says so. The page allowance for
-projected fields is 80,000 characters instead of 20,000, which holds a full
-page of 100 connector rows whole; before, the last rows of a 50-row page lost
-their fields (ENG-5283).
-
-### Fixed — saving text as knowledge
-
-`hydradb_ingest` with `kind: "knowledge"` and `text` failed every time with
-`400 INVALID_INPUT` "unsupported key(s) [title]". The server sent the title
-inside `document_metadata`, where the API accepts no such key. The API takes a
-document's title from its filename, which the server already sets to
-`<title>.md`, so the extra key is gone and the save goes through. Files and
-memories were not affected.
 
 ## [1.8.0] - 2026-11-11
 
