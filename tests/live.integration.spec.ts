@@ -528,9 +528,9 @@ test(
 
 		try {
 			// Collections auto-create on first write; there is no create call.
-			// Graph collections accept a narrow Cypher dialect (ENG-3448): every
-			// node has an integer `id`, the node batch sets one label with SET,
-			// and a write returns no rows.
+			// Only the documented shapes answer alike on both graph engines
+			// (ENG-3448): every node and edge has an integer `id`, the node batch
+			// sets one label with SET, and a write returns no rows.
 			const written = await hydra.graph.query({
 				...scope,
 				query:
@@ -562,12 +562,16 @@ test(
 
 			await hydra.graph.query({
 				...scope,
-				query: "MERGE (a:Person {id: 1})-[:KNOWS {since: 2020}]->(b:Person {id: 2})",
+				query:
+					"UNWIND $edges AS e MATCH (a:Person {id: e.src}) MATCH (b:Person {id: e.dst}) " +
+					"MERGE (a)-[r:KNOWS {id: e.id}]->(b) SET r.since = e.since",
+				params: { edges: [{ id: 1, src: 1, dst: 2, since: 2020 }] },
 			});
 
 			// A node comes back flat: properties merged with the renderer-added
 			// `id` and `labels`. The renderer in src/cypher.ts depends on exactly
-			// this shape, so assert it rather than assuming it holds.
+			// this shape, so assert it rather than assuming it holds. That `id`
+			// is the engine's, which on the older engine is not the stored one.
 			const nodes = await hydra.graph.query({
 				...scope,
 				query: "MATCH (p:Person {ext_id: 'a'}) RETURN p",
@@ -576,7 +580,7 @@ test(
 
 			assert.ok(node, `expected a node row, got ${JSON.stringify(nodes)}`);
 			assert.deepEqual(node.labels, ["Person"]);
-			assert.equal(node.id, 1);
+			assert.equal(typeof node.id, "number");
 			assert.equal(node.name, "Alice");
 
 			// A typed variable-length traversal and a relationship property.
@@ -608,8 +612,8 @@ test(
 			// leaves one edge per row.
 			const edgeBatch = {
 				...scope,
-				query: "UNWIND $edges AS e CREATE (a {id: e.src})-[:FOLLOWS]->(b {id: e.dst})",
-				params: { edges: [{ src: 1, dst: 2 }] },
+				query: "UNWIND $edges AS e MATCH (a:Person {id: e.src}) MATCH (b:Person {id: e.dst}) MERGE (a)-[:FOLLOWS {id: e.id}]->(b)",
+				params: { edges: [{ id: 1, src: 1, dst: 2 }] },
 			};
 			await hydra.graph.query(edgeBatch);
 			await hydra.graph.query(edgeBatch);
