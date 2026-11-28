@@ -50,6 +50,8 @@ Run it alone with `npx tsx --test e2e/simulated.test.ts`.
 
 A scenario or cell that fails today because of a product bug asserts the correct behaviour and names its finding: `knownIssue` on a live scenario, an entry in `KNOWN` for a simulated cell. Node reports it as a todo, so the suite stays green. When the bug is fixed the assertion passes, and the suite turns red until the marker is removed.
 
+A live scenario whose failure is an API behaviour the owner has accepted for now carries `skip` as well. It does not run, it is reported as `skip` with the reason, and `completeness.tools` does not count its tools as covered. Delete the `skip` line to run it again.
+
 ## Adding a scenario
 
 - A new tool needs a live scenario in `SCENARIOS` in `live.e2e.ts` that lists the tool in `tools` and calls it, or `completeness.tools` fails.

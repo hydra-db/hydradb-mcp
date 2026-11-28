@@ -218,8 +218,13 @@ interface Scenario {
 	/** Every tool the scenario calls. Completeness is checked against this. */
 	tools: string[];
 	knownIssue?: string;
+	/** Set to leave the scenario out of the run, reported as `skip` with this reason. */
+	skip?: string;
 	run(ctx: Ctx): Promise<void>;
 }
+
+/** API behaviours the owner has accepted for now. Delete a scenario's `skip` line to run it again. */
+const IGNORED_API = "ignored for now: API behaviour, ENG-5295";
 
 /** Seed assertion: the ingest was accepted with exactly its ids, and they all finished indexing. */
 function ingestScenario(id: string): Scenario {
@@ -478,6 +483,7 @@ const ACL_SCENARIOS: Scenario[] = [
 		id: "acl.inspect.access_list",
 		tools: ["hydradb_inspect"],
 		knownIssue: "F-mcp-14",
+		skip: IGNORED_API,
 		async run({ call, expectFixed }) {
 			requireIndexed(ACL_ALICE.id);
 			const answer = await call("hydradb_inspect", { id: ACL_ALICE.id, acl: [ALICE] });
@@ -956,6 +962,7 @@ const SCENARIOS: Scenario[] = [
 		id: "relations.paging",
 		tools: ["hydradb_relations"],
 		knownIssue: "F-mcp-7",
+		skip: IGNORED_API,
 		async run({ call, expectFixed }) {
 			requireIndexed("e2e-k-graph");
 			const key = (r: Record<string, unknown>) => [r.from, r.predicate, r.to, r.chunk_id].join("|");
@@ -1010,6 +1017,7 @@ const SCENARIOS: Scenario[] = [
 		id: "subgraph.titles",
 		tools: ["hydradb_subgraph"],
 		knownIssue: "F-mcp-3",
+		skip: IGNORED_API,
 		async run({ call, expectFixed }) {
 			requireIndexed("e2e-k-rel", "e2e-k-titled");
 			const answer = await call("hydradb_subgraph", { id: "e2e-k-rel", depth: 1 });
@@ -1619,6 +1627,13 @@ async function runScenario(scenario: Scenario, t: TestContext) {
 	let reproduced: string | undefined;
 	let checkedFix = false;
 
+	if (scenario.skip) {
+		record("skip", scenario.skip);
+		t.skip(scenario.skip);
+
+		return;
+	}
+
 	const ctx: Ctx = {
 		run: current(),
 		call: (name, args) => {
@@ -1699,7 +1714,7 @@ if (typeof config === "string") {
 
 			try {
 				const registered = await current().stdio.toolNames();
-				const covered = new Set(SCENARIOS.flatMap((scenario) => scenario.tools));
+				const covered = new Set(SCENARIOS.filter((scenario) => !scenario.skip).flatMap((scenario) => scenario.tools));
 				const uncovered = registered.filter((tool) => !covered.has(tool));
 				const stale = [...covered].filter((tool) => !registered.includes(tool));
 
