@@ -476,6 +476,78 @@ describe("request bodies", { concurrency: true }, () => {
 	});
 });
 
+// --- Access control ----------------------------------------------------------
+
+/** Every principal form the API reads, plus characters a query string must escape. */
+const PRINCIPALS = ["user_email:alice@e2e.hydradb.test", "bob@e2e.hydradb.test", "domain:e2e.hydradb.test", "group:okta:00g/e2e+ops&1", "__public__"];
+
+interface AclReadCase {
+	name: string;
+	route: string;
+	tool: string;
+	args: Record<string, unknown>;
+	/** The principals as the API reads them from the recorded request. */
+	sent(ex: Exchange): unknown;
+}
+
+const fromBody = (ex: Exchange) => (ex.body as Record<string, unknown> | undefined)?.acl;
+const fromQuery = (ex: Exchange) => ex.query.getAll("acl");
+
+const ACL_READ_CASES: AclReadCase[] = [
+	{ name: "list", route: "list", tool: "hydradb_list", args: { kind: "knowledge" }, sent: fromBody },
+	{ name: "list with projected fields", route: "list", tool: "hydradb_list", args: { kind: "knowledge", include_fields: ["title"] }, sent: fromBody },
+	{ name: "query", route: "query", tool: "hydradb_query", args: { query: "ledger", collection: "c" }, sent: fromBody },
+	{ name: "inspect", route: "inspect", tool: "hydradb_inspect", args: { id: "sim-1" }, sent: fromQuery },
+	{ name: "relations of an item", route: "relations", tool: "hydradb_relations", args: { id: "sim-1" }, sent: fromQuery },
+	{ name: "relations of a collection", route: "relations", tool: "hydradb_relations", args: {}, sent: fromQuery },
+	{ name: "subgraph", route: "subgraph", tool: "hydradb_subgraph", args: { id: "sim-1" }, sent: fromQuery },
+];
+
+describe("acl on the wire", { concurrency: true }, () => {
+	for (const [index, testCase] of ACL_READ_CASES.entries()) {
+		it(`${testCase.name} sends the caller's principals exactly`, async () => {
+			const marker = `sim-acl-read-${index}`;
+			const answer = await server.call(testCase.tool, { ...testCase.args, acl: PRINCIPALS, database: marker });
+			const sent = simulator.requests(testCase.route, marker);
+
+			assert.ok(sent.length >= 1, `no ${testCase.route} request was sent: ${answer.text}`);
+			for (const ex of sent) assert.deepEqual(testCase.sent(ex), PRINCIPALS, `${testCase.route} request ${ex.path}`);
+		});
+	}
+
+	it("update sends the complete replacement acl, once", async () => {
+		await server.call("hydradb_update", { id: "k-acl", collection: "c", acl: PRINCIPALS, database: "sim-acl-update" });
+		const sent = simulator.requests("update", "sim-acl-update");
+
+		assert.equal(sent.length, 1, `the update was sent ${sent.length} times`);
+		assert.deepEqual(fromBody(sent[0]), PRINCIPALS);
+	});
+
+	it("update with acl null sends an empty acl, the API's private", async () => {
+		await server.call("hydradb_update", { id: "k-acl", collection: "c", acl: null, database: "sim-acl-update-null" });
+		const sent = simulator.requests("update", "sim-acl-update-null");
+
+		assert.equal(sent.length, 1, `the update was sent ${sent.length} times`);
+		assert.deepEqual(fromBody(sent[0]), []);
+	});
+
+	it("app knowledge ingest sends each item's acl, once", async () => {
+		await server.call("hydradb_ingest", {
+			kind: "knowledge",
+			app_knowledge: [
+				{ id: "k-acl-1", kind: "custom", fields: { body: "restricted" }, acl: PRINCIPALS },
+				{ id: "k-acl-2", kind: "custom", fields: { body: "private" }, acl: ["__private__"] },
+				{ id: "k-acl-3", kind: "custom", fields: { body: "open" } },
+			],
+			database: "sim-acl-ingest",
+		});
+		const sent = simulator.requests("ingest", "sim-acl-ingest");
+
+		assert.equal(sent.length, 1, `the ingest was sent ${sent.length} times`);
+		assert.deepEqual(jsonField(sent[0], "app_knowledge").map((item) => item.acl), [PRINCIPALS, ["__private__"], undefined]);
+	});
+});
+
 // --- Round trip ----------------------------------------------------------------
 
 describe("round trip", () => {
