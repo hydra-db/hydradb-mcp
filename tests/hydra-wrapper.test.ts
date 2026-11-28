@@ -1598,18 +1598,9 @@ test("context.update omits acl when the caller leaves it unchanged", async () =>
 	assert.equal("acl" in seen.update, false);
 });
 
-test("context.update requires a collection and rejects empty edits before the network", async () => {
+test("context.update rejects empty edits before the network", async () => {
 	const seen: Parameters<typeof captureSdk>[0] = {};
 
-	const unscoped = new HydraDB(
-		{ token: "t", database: "db_test" },
-		captureSdk(seen),
-	);
-
-	await assert.rejects(
-		() => unscoped.context.update({ id: "doc-1", additionalMetadata: { reviewed: true } }),
-		/collection.*required/i,
-	);
 	await assert.rejects(
 		() => wrapperFor(seen).context.update({ id: "doc-1" }),
 		/metadata.*acl|nothing to update/i,

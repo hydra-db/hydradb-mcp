@@ -3203,6 +3203,32 @@ for (const [label, acl, expected] of [
 	});
 }
 
+test("hydradb_update with no collection edits the item in the collection it is stored in", async () => {
+	const { hydra, calls } = mockHydra({ list: { sources: [{ id: "doc-1", collection: "ws-default" }], total: 1 } }, { collection: null });
+	const client = await connect(hydra);
+	const result = await client.callTool({ name: "hydradb_update", arguments: { id: "doc-1", additional_metadata: { stage: "approved" } } });
+
+	assert.notEqual(result.isError, true, toolText(result));
+
+	const lookup = calls.find((call) => call.method === "list-fetch");
+
+	assert.deepEqual(lookup?.args.ids, ["doc-1"]);
+	assert.equal(lookup?.args.collection, undefined, "the lookup runs in the workspace default");
+	assert.equal(calls.find((call) => call.method === "update")?.args.collection, "ws-default");
+	await client.close();
+});
+
+test("hydradb_update with no collection names the id when the workspace default does not hold it", async () => {
+	const { hydra, calls } = mockHydra({ list: { sources: [], total: 0 } }, { collection: null });
+	const client = await connect(hydra);
+	const result = await client.callTool({ name: "hydradb_update", arguments: { id: "doc-9", additional_metadata: { stage: "approved" } } });
+
+	assert.equal(result.isError, true);
+	assert.match(toolText(result), /"doc-9" is not in the workspace default of database "db_test"/);
+	assert.equal(calls.some((call) => call.method === "update"), false, "nothing was sent");
+	await client.close();
+});
+
 test("hydradb_update omits ACL when it was not supplied", async () => {
 	const { hydra, calls } = mockHydra();
 	const client = await connect(hydra);

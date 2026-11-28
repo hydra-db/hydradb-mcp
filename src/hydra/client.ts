@@ -300,6 +300,9 @@ const deleteProof = z.union([
 
 const collectionDeleteProof = z.object({ status: z.string().min(1) });
 
+/** Listed rows with the collection each is stored in. */
+const storedRows = z.object({ sources: z.array(z.object({ id: z.string(), collection: z.string().optional() }).passthrough()) });
+
 /** A fetch answer says whether it succeeded; anything else is not one. */
 const inspectAnswer = z.object({ success: z.boolean(), error: z.string().nullish() }).passthrough();
 
@@ -1468,14 +1471,14 @@ export class ContextResource extends Resource {
 
 		const scope = this.scope(params.collection, params.database);
 
-		if (scope.collection == null) {
-			throw new Error(
-				"A collection is required to update context metadata. List collections, then pass one explicitly.",
-			);
-		}
+		// The API needs the collection named on an edit, where every other route
+		// falls back to the workspace default, so the default is resolved here:
+		// the item's own row says which collection it is stored in.
+		const collection = scope.collection ?? await this.storedCollection(params.id, scope.database, opts);
 
 		const request: SDK.HandlerContextMetadataUpdateRequest = {
 			...scope,
+			collection,
 			id: params.id,
 		};
 
@@ -1490,6 +1493,21 @@ export class ContextResource extends Resource {
 		return this.call("/context/{id}/metadata", "unsafe", opts, (o) =>
 			this.sdk.context.updateSourceMetadata(request, o),
 		);
+	}
+
+	/** The collection the workspace default stores `id` in, from that item's listed row. */
+	private async storedCollection(id: string, database: string, opts?: RequestOptions): Promise<string> {
+		const listed = storedRows.safeParse(await this.list({ kind: "all", ids: [id], database }, opts));
+		const collection = listed.success ? listed.data.sources.find((row) => row.id === id)?.collection : undefined;
+
+		if (collection == null || collection === "") {
+			throw new Error(
+				`"${id}" is not in the workspace default of database "${database}", so its collection is unknown. ` +
+				"List collections, then pass the one that holds it.",
+			);
+		}
+
+		return collection;
 	}
 
 	/** List memories or knowledge sources (SDK `context.list`). */

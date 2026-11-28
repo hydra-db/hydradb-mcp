@@ -1046,14 +1046,11 @@ const SCENARIOS: Scenario[] = [
 	{
 		id: "update.default_collection",
 		tools: ["hydradb_update"],
-		knownIssue: "F-mcp-2",
-		async run({ call, expectFixed }) {
+		async run({ call }) {
 			requireIndexed("e2e-k-upd");
 			const answer = await call("hydradb_update", { id: "e2e-k-upd", additional_metadata: { touched: "default-collection" } });
 
-			await expectFixed(() => {
-				assert.equal(answer.isError, false, `an item in the workspace default collection cannot be updated without naming it: ${answer.text}`);
-			});
+			assert.equal(answer.isError, false, `an item in the workspace default collection cannot be updated without naming it: ${answer.text}`);
 		},
 	},
 	{
