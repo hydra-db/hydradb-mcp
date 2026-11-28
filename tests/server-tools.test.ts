@@ -3753,6 +3753,20 @@ test("hydradb_query caps the total response even in full detail", async () => {
 	assert.doesNotMatch(text, /\[id: [^\]]*$/, "a severed id must not be left danging");
 });
 
+test("a cut query lists only the sources its text shows, and says it was cut", async () => {
+	const { hydra } = mockHydra({ query: longChunks(50, 5000) });
+	const client = await connect(hydra);
+	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "q", detail: "full", max_results: 50, structured: true } });
+	const structured = result.structuredContent as { sources: { id: string }[]; shown?: number; total?: number; truncated?: boolean };
+	const inText = new Set([...toolText(result).matchAll(/\[id: (s\d+)\]/g)].map((match) => match[1]));
+
+	assert.equal(structured.truncated, true);
+	assert.equal(structured.total, 50);
+	assert.equal(structured.shown, inText.size);
+	assert.deepEqual(structured.sources.map((source) => source.id).filter((id) => !inText.has(id)), [], "sources the text left out");
+	await client.close();
+});
+
 // A live call with max_results=10 returned 15 chunks, and all 15 were rendered.
 test("max_results actually bounds what is rendered", async () => {
 	const text = await queryText({ query: "q", max_results: 3 }, longChunks(15, 200));

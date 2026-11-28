@@ -890,8 +890,7 @@ const SCENARIOS: Scenario[] = [
 	{
 		id: "query.structured.truncation",
 		tools: ["hydradb_query"],
-		knownIssue: "F-mcp-5",
-		async run({ call, expectFixed }) {
+		async run({ call }) {
 			requireIndexed(...Array.from({ length: LARGE_DOCS }, (_, d) => largeId(d)));
 			const answer = await call("hydradb_query", {
 				query: "ledger failover drill reconciliation of balances",
@@ -908,13 +907,11 @@ const SCENARIOS: Scenario[] = [
 			const shown = new Set([...answer.text.matchAll(/\[id: ([^\]]+)\]/g)].map((m) => m[1]));
 			const unshown = idsOf(structured, "sources").filter((id) => !shown.has(id));
 
-			await expectFixed(() => {
-				assert.ok(
-					Object.keys(structured).some((key) => /truncat|omitted|shown/.test(key)),
-					`structuredContent does not say the text was cut (keys: ${Object.keys(structured).join(", ")})`,
-				);
-				assert.deepEqual(unshown, [], "structuredContent.sources lists ids the text left out");
-			});
+			assert.ok(
+				Object.keys(structured).some((key) => /truncat|omitted|shown/.test(key)),
+				`structuredContent does not say the text was cut (keys: ${Object.keys(structured).join(", ")})`,
+			);
+			assert.deepEqual(unshown, [], "structuredContent.sources lists ids the text left out");
 		},
 	},
 	{

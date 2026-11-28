@@ -1028,7 +1028,7 @@ export function createHydraDBServer(
 
 		const scopeLine = scopeText(resolvedScope);
 		const headerAllowance = 120 + scopeLine.length + (scopeWarning?.length ?? 0) + 20;
-		const sourceRefs = new Map<string, Record<string, unknown>>();
+		const chunkRefs: [string, Record<string, unknown>][] = [];
 
 		const singleCollection = "collection" in resolvedScope
 			? resolvedScope.collection
@@ -1054,7 +1054,7 @@ export function createHydraDBServer(
 				} : { scope_unresolved: true }),
 			};
 
-			sourceRefs.set(JSON.stringify([collection, chunk.id]), ref);
+			chunkRefs.push([JSON.stringify([collection, chunk.id]), ref]);
 
 			return { ...chunk, ...(collection != null ? { collection } : {}) };
 		});
@@ -1068,10 +1068,12 @@ export function createHydraDBServer(
 			maxTotalChars: QUERY_CHAR_BUDGET - legend.length - headerAllowance - tableText.length - 2,
 		});
 
-		const sources = [...sourceRefs.values()];
+		// The renderer keeps the leading `shown` chunks, so only their sources are in the text.
+		const sources = [...new Map(chunkRefs.slice(0, shown)).values()];
+		const counts = { shown, total: scopedChunks.length, truncated: shown < scopedChunks.length };
 		const message = `Found ${shown} ${resultNoun(kind, shown)}:\n${scopeLine}\n\n${tableText ? `${tableText}\n\n` : ""}${contextStr}${legend}`;
 
-		return queryResult(message, table.success ? { sources, tabular_data: table.data } : { sources });
+		return queryResult(message, table.success ? { sources, ...counts, tabular_data: table.data } : { sources, ...counts });
 	}
 
 	/**
