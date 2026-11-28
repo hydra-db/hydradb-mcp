@@ -536,15 +536,12 @@ const SCENARIOS: Scenario[] = [
 	{
 		id: "ingest.knowledge.default_title",
 		tools: ["hydradb_list"],
-		knownIssue: "F-mcp-4",
-		async run({ call, expectFixed }) {
+		async run({ call }) {
 			requireIndexed("e2e-k-plain");
 			const listed = ok(await call("hydradb_list", { kind: "knowledge", ids: ["e2e-k-plain"] }), "hydradb_list");
 			const title = String(items(listed)[0]?.title);
 
-			await expectFixed(() => {
-				assert.doesNotMatch(title, /\.\.md$/, `a title derived from text ending in "." is stored as ${JSON.stringify(title)}`);
-			});
+			assert.doesNotMatch(title, /\.\.md$/, `a title derived from text ending in "." is stored as ${JSON.stringify(title)}`);
 		},
 	},
 	{
@@ -589,19 +586,22 @@ const SCENARIOS: Scenario[] = [
 	{
 		id: "list.memory.content",
 		tools: ["hydradb_list"],
-		knownIssue: "F-mcp-6",
-		async run({ call, expectFixed }) {
+		async run({ call }) {
 			requireIndexed("e2e-m-text", "e2e-m-item-2");
 			const answer = await call("hydradb_list", { kind: "memory", ids: ["e2e-m-text", "e2e-m-item-2"] });
 			const byId = new Map(items(ok(answer, "hydradb_list memory")).map((item) => [String(item.id), item]));
 
 			assert.equal(byId.size, 2, "precondition: both memories are listed");
-			await expectFixed(() => {
-				for (const id of ["e2e-m-text", "e2e-m-item-2"] as const) {
-					assert.equal(byId.get(id)?.content, TEXT[id], `${id}: structuredContent.items[].content is not the stored text`);
-					assert.ok(answer.text.includes(`[${id}] ${TEXT[id]}`), `${id}: the listing does not print the stored text`);
-				}
-			});
+			assert.equal(byId.get("e2e-m-item-2")?.title, "Weekend running", "the title it was saved with is listed as its title");
+
+			// A row shows the stored text, or a title labelled as one: never a title presented as the text.
+			for (const id of ["e2e-m-text", "e2e-m-item-2"] as const) {
+				const item = byId.get(id);
+				const line = item?.content == null ? `[${id}] title: ${item?.title}` : `[${id}] ${TEXT[id]}`;
+
+				assert.ok(item?.content == null || item.content === TEXT[id], `${id}: structuredContent.items[].content is not the stored text`);
+				assert.ok(answer.text.includes(line), `${id}: the listing does not print ${JSON.stringify(line)}:\n${answer.text}`);
+			}
 		},
 	},
 	{
@@ -714,16 +714,13 @@ const SCENARIOS: Scenario[] = [
 	{
 		id: "list.ids.missing",
 		tools: ["hydradb_list"],
-		knownIssue: "F-mcp-1",
-		async run({ call, expectFixed }) {
+		async run({ call }) {
 			requireIndexed("e2e-k-titled");
 			const answer = await call("hydradb_list", { kind: "knowledge", ids: ["e2e-k-does-not-exist"] });
 
 			assert.deepEqual(idsOf(ok(answer, "hydradb_list of a missing id")), []);
-			await expectFixed(() => {
-				assert.match(answer.text, /e2e-k-does-not-exist/, `the answer does not name the id it looked for: ${answer.text}`);
-				assert.doesNotMatch(answer.text, /No sources found in the workspace default/, `the answer reads as an empty database: ${answer.text}`);
-			});
+			assert.match(answer.text, /e2e-k-does-not-exist/, `the answer does not name the id it looked for: ${answer.text}`);
+			assert.doesNotMatch(answer.text, /No sources found in the workspace default/, `the answer reads as an empty database: ${answer.text}`);
 		},
 	},
 	{
@@ -896,8 +893,7 @@ const SCENARIOS: Scenario[] = [
 	{
 		id: "query.structured.truncation",
 		tools: ["hydradb_query"],
-		knownIssue: "F-mcp-5",
-		async run({ call, expectFixed }) {
+		async run({ call }) {
 			requireIndexed(...Array.from({ length: LARGE_DOCS }, (_, d) => largeId(d)));
 			const answer = await call("hydradb_query", {
 				query: "ledger failover drill reconciliation of balances",
@@ -914,13 +910,11 @@ const SCENARIOS: Scenario[] = [
 			const shown = new Set([...answer.text.matchAll(/\[id: ([^\]]+)\]/g)].map((m) => m[1]));
 			const unshown = idsOf(structured, "sources").filter((id) => !shown.has(id));
 
-			await expectFixed(() => {
-				assert.ok(
-					Object.keys(structured).some((key) => /truncat|omitted|shown/.test(key)),
-					`structuredContent does not say the text was cut (keys: ${Object.keys(structured).join(", ")})`,
-				);
-				assert.deepEqual(unshown, [], "structuredContent.sources lists ids the text left out");
-			});
+			assert.ok(
+				Object.keys(structured).some((key) => /truncat|omitted|shown/.test(key)),
+				`structuredContent does not say the text was cut (keys: ${Object.keys(structured).join(", ")})`,
+			);
+			assert.deepEqual(unshown, [], "structuredContent.sources lists ids the text left out");
 		},
 	},
 	{
@@ -1021,9 +1015,9 @@ const SCENARIOS: Scenario[] = [
 			const answer = await call("hydradb_subgraph", { id: "e2e-k-rel", depth: 1 });
 			const members = new Map(items(ok(answer, "hydradb_subgraph"), "members").map((m) => [String(m.id), m]));
 
+			assert.doesNotMatch(answer.text, /\(untitled\)/, `titled members print as untitled:\n${answer.text}`);
 			await expectFixed(() => {
 				assert.equal(members.get("e2e-k-titled")?.title, "Ledger ownership.md");
-				assert.doesNotMatch(answer.text, /\(untitled\)/, `titled members print as untitled:\n${answer.text}`);
 			});
 		},
 	},
@@ -1052,14 +1046,11 @@ const SCENARIOS: Scenario[] = [
 	{
 		id: "update.default_collection",
 		tools: ["hydradb_update"],
-		knownIssue: "F-mcp-2",
-		async run({ call, expectFixed }) {
+		async run({ call }) {
 			requireIndexed("e2e-k-upd");
 			const answer = await call("hydradb_update", { id: "e2e-k-upd", additional_metadata: { touched: "default-collection" } });
 
-			await expectFixed(() => {
-				assert.equal(answer.isError, false, `an item in the workspace default collection cannot be updated without naming it: ${answer.text}`);
-			});
+			assert.equal(answer.isError, false, `an item in the workspace default collection cannot be updated without naming it: ${answer.text}`);
 		},
 	},
 	{
@@ -1087,19 +1078,16 @@ const SCENARIOS: Scenario[] = [
 	{
 		id: "feedback.rating_only",
 		tools: ["hydradb_query", "hydradb_feedback"],
-		knownIssue: "F-mcp-9",
-		async run({ call, expectFixed }) {
+		async run({ call }) {
 			requireIndexed("e2e-k-titled");
 			const queried = ok(await call("hydradb_query", { query: "Who owns the ledger service?", kind: "knowledge", structured: true }), "hydradb_query");
 			const answer = await call("hydradb_feedback", { request_id: String(queried.request_id), rating: "negative" });
 
-			await expectFixed(() => {
-				assert.doesNotMatch(answer.text, /Cannot set property|\[object Object\]/, `a rating-only submission crashes: ${answer.text}`);
-				assert.ok(
-					answer.isError ? /feedback text|ground_truth/.test(answer.text) : /Feedback recorded/.test(answer.text),
-					`neither recorded nor refused with a reason: ${answer.text}`,
-				);
-			});
+			assert.doesNotMatch(answer.text, /Cannot set property|\[object Object\]/, `a rating-only submission crashes: ${answer.text}`);
+			assert.ok(
+				answer.isError ? /feedback text|ground_truth/.test(answer.text) : /Feedback recorded/.test(answer.text),
+				`neither recorded nor refused with a reason: ${answer.text}`,
+			);
 		},
 	},
 	{

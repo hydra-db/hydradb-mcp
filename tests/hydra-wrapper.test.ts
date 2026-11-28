@@ -95,7 +95,7 @@ function ingestSdk(): { sdk: HydraDBClient; calls: unknown[] } {
 		context: {
 			ingest(request: unknown) {
 				calls.push(request);
-				return Promise.resolve({ data: { success: true }, success: true });
+				return Promise.resolve({ data: { success: true, successCount: 1, failedCount: 0 }, success: true });
 			},
 		},
 	} as unknown as HydraDBClient;
@@ -136,6 +136,20 @@ test("knowledge ingest still accepts the params it can carry", async () => {
 	});
 
 	assert.equal(calls.length, 1, "knowledge ingest should still reach the SDK");
+});
+
+// The upload's filename is what the API stores as the title.
+test("a knowledge title ending in a full stop is uploaded as title.md, not title..md", async () => {
+	const { sdk, calls } = ingestSdk();
+	const hydra = new HydraDB({ token: "t", database: "db_test" }, sdk);
+
+	for (const title of ["The ledger runbook covers regional failover.", "Ledger ownership", "Plan.md"]) {
+		await hydra.context.ingest({ kind: "knowledge", text: "body", title });
+	}
+
+	const filenames = calls.map((call) => z.object({ documents: z.array(z.object({ filename: z.string() })) }).parse(call).documents[0]?.filename);
+
+	assert.deepEqual(filenames, ["The ledger runbook covers regional failover.md", "Ledger ownership.md", "Plan.md"]);
 });
 
 test("knowledge ingest serializes every supported per-document field", async () => {
@@ -1500,7 +1514,7 @@ test("context.subgraph carries acl principals to the wire", async () => {
 function captureSdk(seen: Record<string, unknown>) {
 	const grab = (key: string) => (req: unknown) => {
 		seen[key] = req;
-		const data = key === "query" ? { chunks: [] } : key === "list" ? { sources: [] } : {};
+		const data = key === "query" ? { chunks: [] } : key === "list" ? { sources: [] } : key === "inspect" ? { success: true } : {};
 
 		return Promise.resolve({ success: true, data });
 	};
@@ -1584,18 +1598,9 @@ test("context.update omits acl when the caller leaves it unchanged", async () =>
 	assert.equal("acl" in seen.update, false);
 });
 
-test("context.update requires a collection and rejects empty edits before the network", async () => {
+test("context.update rejects empty edits before the network", async () => {
 	const seen: Parameters<typeof captureSdk>[0] = {};
 
-	const unscoped = new HydraDB(
-		{ token: "t", database: "db_test" },
-		captureSdk(seen),
-	);
-
-	await assert.rejects(
-		() => unscoped.context.update({ id: "doc-1", additionalMetadata: { reviewed: true } }),
-		/collection.*required/i,
-	);
 	await assert.rejects(
 		() => wrapperFor(seen).context.update({ id: "doc-1" }),
 		/metadata.*acl|nothing to update/i,

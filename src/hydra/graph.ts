@@ -19,7 +19,7 @@
  * insulated from yet.
  */
 
-import { HydraWrapperError, scrub } from "./errors.js";
+import { UNCONFIRMED_WRITE, unexpectedShape } from "./errors.js";
 import { DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT_SECONDS, type RetrySafety } from "./retry.js";
 import { newRawTransport, type RawTransport, sendRaw } from "./transport.js";
 
@@ -48,41 +48,6 @@ export type GraphRow = Record<string, unknown>;
 
 export interface RequestOptions {
 	signal?: AbortSignal;
-}
-
-/**
- * A 2xx whose body is not the shape this endpoint promises.
- *
- * Raised rather than coerced to an empty result. An empty array is a perfectly
- * ordinary answer here — a query that matched nothing, a database with no
- * graphs — so silently substituting one for a malformed response makes a broken
- * integration indistinguishable from a true negative, which is the one case a
- * caller cannot debug. The `path` and a bounded preview of what actually
- * arrived are carried through so the failure is actionable.
- */
-function unexpectedShape(
-	path: string,
-	expected: string,
-	got: unknown,
-	known: readonly string[],
-): HydraWrapperError {
-	let preview: string;
-	try {
-		preview = JSON.stringify(got) ?? String(got);
-	} catch {
-		preview = String(got);
-	}
-
-	// Before the cut, so a credential crossing it is still whole when matched.
-	preview = scrub(preview, known);
-
-	if (preview.length > 200) preview = `${preview.slice(0, 200)}…`;
-	return new HydraWrapperError(
-		`Hydra DB ${path} → ERR: expected ${expected}, got ${preview}. ` +
-		"This is a response-shape mismatch, not an empty result.",
-		path,
-		{ body: got },
-	);
 }
 
 export class GraphResource {
@@ -140,11 +105,29 @@ export class GraphResource {
 	}
 
 	/** Create a graph database (`POST /byog/databases`). Ready immediately. */
-	createDatabase(
+	async createDatabase(
 		database: string,
 		opts?: RequestOptions,
-	): Promise<{ database?: string; status?: string; cluster?: string }> {
-		return this.send("/byog/databases", "POST", { database }, opts);
+	): Promise<{ database?: string; status: string; cluster?: string }> {
+		const res = await this.send<{ database?: string; status?: unknown; cluster?: string } | undefined>(
+			"/byog/databases",
+			"POST",
+			{ database },
+			opts,
+		);
+		const status = res?.status;
+
+		if (typeof status !== "string" || status === "") {
+			throw unexpectedShape(
+				"/byog/databases",
+				"an object with the new database's `status`",
+				res,
+				[this.transport.token],
+				UNCONFIRMED_WRITE,
+			);
+		}
+
+		return { ...res, status };
 	}
 
 	/** List the collections in a graph database (`GET /byog/collections`). */

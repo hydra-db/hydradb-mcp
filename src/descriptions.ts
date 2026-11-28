@@ -212,8 +212,8 @@ const PARAM = {
 	kind:
 		"Which family to list: 'memory' (stored memories), 'knowledge' (ingested " +
 		"sources), or 'all' (both in one page, rendered as source rows). REQUIRED. " +
-		"Use 'all' for a complete inventory in one pass; use 'memory' when you want " +
-		"memory text in the listing.",
+		"Use 'all' for a complete inventory in one pass; use 'memory' for memory ids and " +
+		"titles (hydradb_inspect reads a memory's text).",
 	source_ids:
 		"Optional array of specific source IDs to filter by. If omitted, lists all sources.",
 	list_external_id:

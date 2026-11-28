@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.9.2] - 2026-11-28
+
+### Fixed
+
+- `hydradb_update` and `hydradb_delete` are sent once after a 5xx or a dropped
+  connection, as `hydradb_ingest` already was, and the error says the outcome is
+  unknown. A repeated delete used to report a source it had just removed as
+  still there (ENG-5285).
+- A write counts as done only when its answer confirms it. A 200 with an HTML
+  page or with `{}` made `hydradb_ingest`, `hydradb_delete`, `hydradb_feedback`,
+  `hydradb_delete_collection`, `hydradb_connector_sync` and `hydradb_graph_admin`
+  `create_database` report success; they now fail, show what came back, and say
+  the write may or may not have applied (ENG-5286).
+- `hydradb_inspect` reports a 200 it cannot read as such, instead of
+  `Could not fetch source ...: [object Object]` (ENG-5286).
+- A rating-only `hydradb_feedback` call returns the validator's reason instead
+  of `Cannot set property message of [object Object] which has only a getter`.
+  No tool error is replaced by that TypeError any more (ENG-5287).
+- `hydradb_databases` lists only the databases the API returned, and says when
+  the connection's default database is not among them (ENG-5287).
+- A knowledge item whose title ends in a full stop is stored as `title.md`, not
+  `title..md` (ENG-5287).
+- `hydradb_list` by ids that match nothing names those ids and the scope it
+  searched, instead of reading as an empty workspace default (ENG-5287).
+- `hydradb_update` on a connection with no default collection edits an item in
+  the workspace default collection: it looks up the collection the item is
+  stored in, since the API needs one named on an edit (ENG-5287).
+- With `structured: true`, a `hydradb_query` whose text was cut lists in
+  `sources` only what the text shows, and carries `shown`, `total` and
+  `truncated` (ENG-5287).
+- `hydradb_list` with `kind: "memory"` shows a memory's title labelled as a
+  title instead of as the memory's text. The list API returns no memory text;
+  `hydradb_inspect` reads it (ENG-5287).
+- `hydradb_subgraph` no longer prints `(untitled)` for members the API sends
+  without a title (ENG-5287).
+
 ## [1.9.1] - 2026-11-28
 
 ### Fixed — `hydradb_list` shows the fields a caller asked for

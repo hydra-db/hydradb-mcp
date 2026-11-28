@@ -23,7 +23,7 @@ import type { JsonValue } from "../adapters.js";
 import { type IngestRecordType, serializeRecordType } from "../record-type.js";
 import { ConnectorsResource } from "./connectors.js";
 import { unwrap } from "./envelope.js";
-import { HydraWrapperError, scrub, translateError } from "./errors.js";
+import { HydraWrapperError, scrub, translateError, UNCONFIRMED_WRITE, unexpectedShape } from "./errors.js";
 import { type GraphConfig, GraphResource } from "./graph.js";
 import {
 	type CallBudget,
@@ -271,6 +271,40 @@ function validateDatabasesResponse(response: DatabasesResponse): void {
 }
 
 const markdownQueryResponse = z.object({ success: z.literal(true).optional(), data: z.string() });
+
+/**
+ * A write's answer, when it carries what proves the write happened. A body that
+ * is not JSON, or one without that proof, leaves the outcome unknown, and the
+ * error shows what came back instead of reporting a write nobody saw.
+ */
+function confirmed<Response, Proof extends z.ZodTypeAny>(
+	path: string,
+	proof: Proof,
+	expected: string,
+	response: Response,
+	known: readonly string[],
+): Response & z.infer<Proof> {
+	if (proof.safeParse(response).success) return response as Response & z.infer<Proof>;
+
+	throw unexpectedShape(path, expected, response, known, UNCONFIRMED_WRITE);
+}
+
+/** Every ingest answer counts its items; without the counts, nothing says what was stored. */
+const ingestProof = z.object({ successCount: z.number(), failedCount: z.number() });
+
+/** A delete answer counts what it removed, as v2's deleted_count or the memory handler's user_memory_deleted. */
+const deleteProof = z.union([
+	z.object({ deletedCount: z.number() }),
+	z.object({ userMemoryDeleted: z.union([z.number(), z.boolean()]) }),
+]);
+
+const collectionDeleteProof = z.object({ status: z.string().min(1) });
+
+/** Listed rows with the collection each is stored in. */
+const storedRows = z.object({ sources: z.array(z.object({ id: z.string(), collection: z.string().optional() }).passthrough()) });
+
+/** A fetch answer says whether it succeeded; anything else is not one. */
+const inspectAnswer = z.object({ success: z.boolean(), error: z.string().nullish() }).passthrough();
 
 export interface HydraConfig {
 	/** Bearer token (the HydraDB API key). */
@@ -1148,6 +1182,19 @@ export class ContextResource extends Resource {
 		params: IngestParams,
 		opts?: RequestOptions,
 	): Promise<SDK.IngestionV2IngestResponse> {
+		return confirmed(
+			"/context/ingest",
+			ingestProof,
+			"an ingest result with success_count and failed_count",
+			await this.sendIngest(params, opts),
+			[this.raw?.token ?? ""],
+		);
+	}
+
+	private async sendIngest(
+		params: IngestParams,
+		opts?: RequestOptions,
+	): Promise<SDK.IngestionV2IngestResponse> {
 		const request: SDK.IngestContextRequest = {
 			...this.scope(params.collection, params.database),
 			type: params.kind,
@@ -1353,7 +1400,9 @@ export class ContextResource extends Resource {
 				if (input.text == null) throw new Error("A knowledge item requires text.");
 
 				const title = input.title ?? "document";
-				const filename = input.filename ?? (/\.md$/i.test(title) ? title : `${title}.md`);
+				// A title ending in a full stop ("...failover.") would otherwise be
+				// stored as "...failover..md".
+				const filename = input.filename ?? (/\.md$/i.test(title) ? title : `${title.replace(/\.+$/, "")}.md`);
 				const metadataItem: Record<string, JsonValue> = {};
 
 				// The title travels as the upload's filename, which the API stores as
@@ -1422,14 +1471,14 @@ export class ContextResource extends Resource {
 
 		const scope = this.scope(params.collection, params.database);
 
-		if (scope.collection == null) {
-			throw new Error(
-				"A collection is required to update context metadata. List collections, then pass one explicitly.",
-			);
-		}
+		// The API needs the collection named on an edit, where every other route
+		// falls back to the workspace default, so the default is resolved here:
+		// the item's own row says which collection it is stored in.
+		const collection = scope.collection ?? await this.storedCollection(params.id, scope.database, opts);
 
 		const request: SDK.HandlerContextMetadataUpdateRequest = {
 			...scope,
+			collection,
 			id: params.id,
 		};
 
@@ -1439,9 +1488,26 @@ export class ContextResource extends Resource {
 
 		if (params.acl !== undefined) request.acl = params.acl;
 
-		return this.call("/context/{id}/metadata", "idempotent", opts, (o) =>
+		// Not retried after an unclear failure: a repeat cannot tell the caller
+		// whether the first attempt applied, and that is what they need to know.
+		return this.call("/context/{id}/metadata", "unsafe", opts, (o) =>
 			this.sdk.context.updateSourceMetadata(request, o),
 		);
+	}
+
+	/** The collection the workspace default stores `id` in, from that item's listed row. */
+	private async storedCollection(id: string, database: string, opts?: RequestOptions): Promise<string> {
+		const listed = storedRows.safeParse(await this.list({ kind: "all", ids: [id], database }, opts));
+		const collection = listed.success ? listed.data.sources.find((row) => row.id === id)?.collection : undefined;
+
+		if (collection == null || collection === "") {
+			throw new Error(
+				`"${id}" is not in the workspace default of database "${database}", so its collection is unknown. ` +
+				"List collections, then pass the one that holds it.",
+			);
+		}
+
+		return collection;
 	}
 
 	/** List memories or knowledge sources (SDK `context.list`). */
@@ -1576,11 +1642,11 @@ export class ContextResource extends Resource {
 	}
 
 	/** Fetch a source's content (SDK `context.inspect`; was "fetch content"). */
-	inspect(
+	async inspect(
 		params: InspectParams,
 		opts?: RequestOptions,
 	): Promise<SDK.FetchV2SourceFetchResponse> {
-		return this.call("/context/inspect", "idempotent", opts, (o) =>
+		const response = await this.call<SDK.FetchV2SourceFetchResponse, unknown>("/context/inspect", "idempotent", opts, (o) =>
 			this.sdk.context.inspect({
 				...this.scope(params.collection, params.database),
 				id: params.id,
@@ -1589,6 +1655,12 @@ export class ContextResource extends Resource {
 				acl: params.acl,
 			}, o),
 		);
+
+		if (!inspectAnswer.safeParse(response).success) {
+			throw unexpectedShape("/context/inspect", "a fetch result with a success flag", response, [this.raw?.token ?? ""]);
+		}
+
+		return response;
 	}
 
 	/** Per-source indexing progress (SDK `context.status`). */
@@ -1676,17 +1748,21 @@ export class ContextResource extends Resource {
 	}
 
 	/** Delete memories or knowledge sources (SDK `context.delete`). */
-	delete(
+	async delete(
 		params: DeleteParams,
 		opts?: RequestOptions,
 	): Promise<SDK.SourcesMemoryDeleteResponse> {
-		return this.call("/context", "idempotent", opts, (o) =>
+		// Not safe to send twice: a repeat after the first one applied answers
+		// "not found", which reports a deletion that happened as one that failed.
+		const response = await this.call<SDK.SourcesMemoryDeleteResponse, unknown>("/context", "unsafe", opts, (o) =>
 			this.sdk.context.delete({
 				...this.scope(params.collection, params.database),
 				ids: params.ids,
 				type: params.kind,
 			}, o),
 		);
+
+		return confirmed("/context", deleteProof, "a delete result with deleted_count or user_memory_deleted", response, [this.raw?.token ?? ""]);
 	}
 }
 
@@ -1909,11 +1985,19 @@ export class DatabasesResource extends Resource {
 
 		// A repeat after the first succeeded answers "not found", which would
 		// report a deletion that happened as one that failed.
-		return this.call("/databases/collections", "unsafe", opts, (o) =>
+		const response = await this.call<SDK.TenantsSubTenantDeleteResponse, unknown>("/databases/collections", "unsafe", opts, (o) =>
 			this.sdk.databases.deleteCollection(
 				{ database, collection: collection ?? params.collection.trim() },
 				o,
 			),
+		);
+
+		return confirmed(
+			"/databases/collections",
+			collectionDeleteProof,
+			"a collection delete result with a status",
+			response,
+			[this.raw?.token ?? ""],
 		);
 	}
 }
@@ -2029,7 +2113,7 @@ export type FeedbackParams = z.input<typeof feedbackParamsSchema>;
  * same reason.
  */
 const feedbackResultSchema = z.object({
-	recorded: z.boolean().optional(),
+	recorded: z.boolean(),
 	feedback_id: z.string().optional(),
 	request_id: z.string().optional(),
 	message: z.string().optional(),
@@ -2072,7 +2156,13 @@ export class FeedbackResource extends Resource {
 	}
 
 	async submit(params: FeedbackParams, opts?: RequestOptions): Promise<FeedbackResult> {
-		const validated = feedbackParamsSchema.parse(params);
+		const parsed = feedbackParamsSchema.safeParse(params);
+
+		// The schema's own messages say what to fix; a ZodError's message is
+		// its issues as JSON.
+		if (!parsed.success) throw new Error(parsed.error.issues.map((issue) => issue.message).join(" "));
+
+		const validated = parsed.data;
 
 		// Scope is optional on /feedback, but a collection cannot be resolved
 		// without its database (the server 400s on collection-alone), so this goes
@@ -2121,7 +2211,7 @@ export class FeedbackResource extends Resource {
 			opts,
 		);
 
-		return feedbackResultSchema.parse(result);
+		return confirmed("/feedback", feedbackResultSchema, "a feedback result with `recorded`", result, [this.raw.token]);
 	}
 }
 

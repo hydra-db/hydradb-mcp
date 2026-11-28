@@ -41,7 +41,7 @@ function fixture() {
 				customInstructionsUpdated: false,
 			}),
 			delete: response("delete", { connectorId: "c1", deleted: true }),
-			sync: response("sync", { runId: "" }),
+			sync: response("sync", { workflowId: "wf1", runId: "" }),
 			pause: response("pause", { connectorId: "c1", paused: true }),
 			resume: response("resume", { connectorId: "c1", paused: false }),
 			configure: response("configure", {
@@ -311,7 +311,7 @@ test("write responses unwrap envelopes and reject invalid field types", async ()
 	const valid = [
 		{ connectorId: "c1" },
 		{ connectorId: "c1", deleted: false },
-		{ runId: "" },
+		{ workflowId: "wf1", runId: "" },
 		{ connectorId: "c1", paused: false },
 		{ connectorId: "c1", paused: false },
 		{ connectorId: "c1", configured: 0 },

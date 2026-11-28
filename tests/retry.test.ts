@@ -36,7 +36,7 @@ function scriptFetch(t: { mock: { method: typeof import("node:test").mock.method
 }
 
 
-const OK_INGEST = { status: 200, body: { success: true, data: { success: 1, failed: 0, results: [] } } };
+const OK_INGEST = { status: 200, body: { success: true, data: { success: true, success_count: 1, failed_count: 0, results: [] } } };
 
 const OK_UPDATE = {
 	status: 200,
@@ -97,6 +97,30 @@ test("feedback and Cypher writes are not retried after a 5xx either", async (t) 
 	assert.equal(calls.length, 1);
 });
 
+// A 200 that does not say what happened is not a write that happened.
+test("a write whose answer does not confirm it is an error, sent once", async (t) => {
+	const hydra = new HydraDB({ token: "t", database: "db", collection: "notes" });
+	const graph = new GraphResource({ token: "t" });
+	const writes: [string, () => Promise<unknown>][] = [
+		["ingest", () => hydra.context.ingest({ kind: "memory", text: "note" })],
+		["delete", () => hydra.context.delete({ ids: ["doc-1"], kind: "knowledge" })],
+		["collection delete", () => hydra.databases.deleteCollection({ collection: "notes" })],
+		["feedback", () => hydra.feedback.submit({ requestId: "r1", feedback: "missing" })],
+		["graph create", () => graph.createDatabase("g")],
+	];
+
+	for (const [name, write] of writes) {
+		const calls = scriptFetch(t, [{ status: 200, body: { success: true, data: {} } }]);
+
+		await assert.rejects(write(), /got \{\}\. The answer does not confirm the write, so it may or may not have been applied/, name);
+		assert.equal(calls.length, 1, `${name}: sent once`);
+		t.mock.restoreAll();
+	}
+
+	scriptFetch(t, [{ status: 200, body: { success: true, data: {} } }]);
+	await assert.rejects(hydra.context.inspect({ id: "doc-1" }), /expected a fetch result with a success flag, got \{\}/);
+});
+
 // 429 and a refused connection prove the server did not act on the request,
 // so even a write is safe to send again.
 test("a write is retried when the failure proves it was not applied", async (t) => {
@@ -118,25 +142,27 @@ test("a read is retried after a 5xx", async (t) => {
 	assert.equal(calls.length, 2);
 });
 
-test("a metadata update retries the identical PATCH after a 503", async (t) => {
-	const calls = scriptFetch(t, [{ status: 503 }, OK_UPDATE]);
-	const hydra = new HydraDB({ token: "t", database: "db", collection: "notes" });
+// A repeat could not tell the caller whether the first update or delete applied.
+test("a metadata update or a delete is not retried after an unclear failure", async (t) => {
+	const hydra = new HydraDB({ token: "t", database: "db", collection: "notes", timeoutSeconds: 3 });
+	const writes: [string, () => Promise<unknown>][] = [
+		["update", () => hydra.context.update({ id: "doc-1", additionalMetadata: { owner: "platform" } })],
+		["delete", () => hydra.context.delete({ ids: ["doc-1"], kind: "knowledge" })],
+	];
 
-	await hydra.context.update({
-		id: "doc-1",
-		databaseMetadata: { title: "Runbook" },
-		additionalMetadata: { owner: "platform" },
-		acl: ["group:google:eng@example.com"],
-	});
+	for (const [name, write] of writes) {
+		for (const failure of [{ status: 503 }, reset()] satisfies Reply[]) {
+			const calls = scriptFetch(t, [failure, OK_UPDATE]);
 
-	assert.equal(calls.length, 2);
-	assert.equal(calls[0]?.method, "PATCH");
-	assert.equal(calls[1]?.method, "PATCH");
-	assert.equal(calls[0]?.body, calls[1]?.body, "the retry sends the identical PATCH payload");
+			await assert.rejects(write(), /Outcome unknown/, name);
+			assert.equal(calls.length, 1, `${name}: one attempt only`);
+			t.mock.restoreAll();
+		}
+	}
 });
 
 test("a cancelled metadata update sends no request after Retry-After", async (t) => {
-	const calls = scriptFetch(t, [{ status: 503, headers: { "retry-after": "1" } }, OK_UPDATE]);
+	const calls = scriptFetch(t, [{ status: 429, headers: { "retry-after": "1" } }, OK_UPDATE]);
 	const hydra = new HydraDB({ token: "t", database: "db", collection: "notes" });
 	const controller = new AbortController();
 

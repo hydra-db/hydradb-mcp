@@ -69,7 +69,9 @@ function asRecords(value: unknown): Record<string, unknown>[] | undefined {
 
 export interface MemoryListItem {
 	memory_id: string;
-	memory_content: string;
+	/** The memory's text, when the listing carried it. The v2 list returns only a title. */
+	memory_content?: string;
+	title?: string;
 }
 
 /**
@@ -139,11 +141,16 @@ export function toMemoryList(data: SDK.ListV2ListResponse): MemoryList {
 		asRecords(container.user_memories) ??
 		asRecords(container.userMemories) ??
 		[];
-	const memories = records.map((record) => ({
-		memory_id: str(record, "memoryId", "memory_id", "id", "source_id") ?? "",
-		memory_content:
-			str(record, "memoryContent", "memory_content", "content", "text", "memory", "title") ?? "",
-	}));
+	const memories = records.map((record): MemoryListItem => {
+		const content = str(record, "memoryContent", "memory_content", "content", "text", "memory");
+		const title = str(record, "title");
+
+		return {
+			memory_id: str(record, "memoryId", "memory_id", "id", "source_id") ?? "",
+			...(content != null ? { memory_content: content } : {}),
+			...(title != null ? { title } : {}),
+		};
+	});
 
 	return { memories, page: toPageInfo(container, memories.length) };
 }

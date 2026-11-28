@@ -616,7 +616,7 @@ test("text saved as knowledge passes an API that rejects unknown document_metada
 	const untitled = await ingest(client, { kind: "knowledge", text: "Tide tables are posted weekly." });
 
 	assert.equal(untitled.isError, false, untitled.text);
-	assert.equal(uploads[1]?.files[0]?.name, "Tide tables are posted weekly..md");
+	assert.equal(uploads[1]?.files[0]?.name, "Tide tables are posted weekly.md");
 	assert.deepEqual(JSON.parse(uploads[1]?.fields.get("document_metadata") ?? "null"), [{}]);
 
 	const batch = await ingest(client, {

@@ -1028,7 +1028,7 @@ export function createHydraDBServer(
 
 		const scopeLine = scopeText(resolvedScope);
 		const headerAllowance = 120 + scopeLine.length + (scopeWarning?.length ?? 0) + 20;
-		const sourceRefs = new Map<string, Record<string, unknown>>();
+		const chunkRefs: [string, Record<string, unknown>][] = [];
 
 		const singleCollection = "collection" in resolvedScope
 			? resolvedScope.collection
@@ -1054,7 +1054,7 @@ export function createHydraDBServer(
 				} : { scope_unresolved: true }),
 			};
 
-			sourceRefs.set(JSON.stringify([collection, chunk.id]), ref);
+			chunkRefs.push([JSON.stringify([collection, chunk.id]), ref]);
 
 			return { ...chunk, ...(collection != null ? { collection } : {}) };
 		});
@@ -1068,10 +1068,12 @@ export function createHydraDBServer(
 			maxTotalChars: QUERY_CHAR_BUDGET - legend.length - headerAllowance - tableText.length - 2,
 		});
 
-		const sources = [...sourceRefs.values()];
+		// The renderer keeps the leading `shown` chunks, so only their sources are in the text.
+		const sources = [...new Map(chunkRefs.slice(0, shown)).values()];
+		const counts = { shown, total: scopedChunks.length, truncated: shown < scopedChunks.length };
 		const message = `Found ${shown} ${resultNoun(kind, shown)}:\n${scopeLine}\n\n${tableText ? `${tableText}\n\n` : ""}${contextStr}${legend}`;
 
-		return queryResult(message, table.success ? { sources, tabular_data: table.data } : { sources });
+		return queryResult(message, table.success ? { sources, ...counts, tabular_data: table.data } : { sources, ...counts });
 	}
 
 	/**
@@ -1896,13 +1898,17 @@ export function createHydraDBServer(
 			// content, including this one — a caller branching on `items` should not
 			// have to special-case the empty result.
 			const filtered = hasEntries(args.metadata) || hasEntries(args.additional_metadata);
+			const lookedFor = idsLookedFor(args.source_ids);
 
 			return structuredResult(
 				args.page != null && args.page > 1
 					? `No memories on page ${args.page}.`
-					: filtered
-						? "No memories match the supplied metadata filters."
-						: emptyListText("memories", args.database, args.collection),
+					: lookedFor !== ""
+						? `No memories${lookedFor} ${filtered ? "match the supplied metadata filters" : "were found"} ` +
+							`in ${searchedScope(args.database, args.collection)}.`
+						: filtered
+							? "No memories match the supplied metadata filters."
+							: emptyListText("memories", args.database, args.collection),
 				{
 					kind: "memory",
 					resolved_scope: resolvedScope,
@@ -1916,6 +1922,10 @@ export function createHydraDBServer(
 		}
 
 		const lines = memories.map((m, i) => {
+			// The list API returns a title and no text, and a title shown where the
+			// text goes reads as the memory itself, so it is labelled.
+			if (m.memory_content == null) return `${i + 1}. [${m.memory_id}]${m.title != null ? ` title: ${m.title}` : ""}`;
+
 			// The query path appends "..." when it truncates; this one did not, so a
 			// half sentence read as a complete fact.
 			const content = m.memory_content;
@@ -1938,7 +1948,8 @@ export function createHydraDBServer(
 				// encoding of the same answer, not a bypass of its limits.
 				items: memories.map((m) => ({
 					id: m.memory_id,
-					content: clampPreview(m.memory_content),
+					...(m.title != null ? { title: m.title } : {}),
+					...(m.memory_content != null ? { content: clampPreview(m.memory_content) } : {}),
 				})),
 				shown: memories.length,
 				total: page.total ?? memories.length,
@@ -1953,6 +1964,19 @@ export function createHydraDBServer(
 	 * default partition is empty whenever data lives in named collections, so
 	 * a bare "none found" there read as "this database is empty".
 	 */
+	/** The partition a listing searched, as the empty answers name it. */
+	function searchedScope(database?: string, collection?: string): string {
+		const named = collection?.trim() || hydra.collection;
+
+		return `database ${JSON.stringify(database?.trim() || hydra.database)}, ` +
+			(named == null ? "workspace default" : `collection ${JSON.stringify(named)}`);
+	}
+
+	/** ` with id "a", "b"` for a listing that looked up ids, so its empty answer names them. */
+	function idsLookedFor(ids?: string[]): string {
+		return ids != null && ids.length > 0 ? ` with id ${ids.map((id) => JSON.stringify(id)).join(", ")}` : "";
+	}
+
 	function emptyListText(noun: "sources" | "memories", database?: string, collection?: string): string {
 		const base = noun === "sources" ? "No sources found." : "No memories stored yet.";
 
@@ -2016,16 +2040,14 @@ export function createHydraDBServer(
 		const followScope = { database: resolvedScope.database, ...(resolvedScope.collection != null ? { collection: resolvedScope.collection } : {}), ...(args.acl != null ? { acl: args.acl } : {}) };
 
 		if (sources.length === 0) {
-			const collection = args.collection?.trim() || hydra.collection;
+			const lookupScope = searchedScope(args.database, args.collection);
+			const lookedFor = idsLookedFor(args.source_ids);
 
-			const lookupScope = `database ${JSON.stringify(args.database?.trim() || hydra.database)}, ` +
-				(collection == null ? "workspace default" : `collection ${JSON.stringify(collection)}`);
-
-			const filtered = Object.keys(sourceFields).length > 0 || args.connector_id != null ||
+			const filtered = lookedFor !== "" || Object.keys(sourceFields).length > 0 || args.connector_id != null ||
 				hasEntries(args.metadata) || hasEntries(args.additional_metadata);
 
 			const emptyText = filtered
-				? `No visible ${args.kind === "all" ? "items" : "sources"} match the supplied filters on page ${page.page ?? args.page ?? 1} in ${lookupScope}. ` +
+				? `No visible ${args.kind === "all" ? "items" : "sources"}${lookedFor} match the supplied filters on page ${page.page ?? args.page ?? 1} in ${lookupScope}. ` +
 					"This does not prove the document was never ingested. Check the scope, page and exact stored identity; keep the caller's ACL unchanged."
 				: args.page != null && args.page > 1
 					? `No sources on page ${args.page}.`
@@ -2469,7 +2491,9 @@ export function createHydraDBServer(
 		const shortId = (id: string) => (id.length > 14 ? `${id.slice(0, 12)}…` : id);
 
 		for (const m of ordered) {
-			const title = m.title?.trim() || m.app_external_id || "(untitled)";
+			// The API leaves out an uploaded document's title, so a missing one is
+			// left out here too rather than reported as "untitled".
+			const title = m.title?.trim() || m.app_external_id;
 
 			const reached =
 				m.depth === 0
@@ -2477,7 +2501,7 @@ export function createHydraDBServer(
 					: `${m.discovered_relation || "linked"}${m.discovered_via ? ` from ${shortId(m.discovered_via)}` : ""}`;
 
 			const kind = [m.app_provider, m.app_kind].filter(Boolean).join(" ");
-			lines.push(`- [id: ${m.source_id}] ${title}${kind ? ` (${kind})` : ""} — depth ${m.depth}, ${reached}`);
+			lines.push(`- [id: ${m.source_id}]${title ? ` ${title}` : ""}${kind ? ` (${kind})` : ""} — depth ${m.depth}, ${reached}`);
 		}
 
 		lines.push(
@@ -2902,16 +2926,24 @@ export function createHydraDBServer(
 			databases = (listed.databases ?? listed.tenantIds ?? []).filter(Boolean);
 		}
 
-		if (!databases.includes(defaultDatabase)) databases.unshift(defaultDatabase);
+		// A confined connection may always use its default, so it belongs in the
+		// list. Otherwise the list is the API's, and a default it does not name
+		// is reported as missing rather than listed as if it existed.
+		if (confined && !databases.includes(defaultDatabase)) databases.unshift(defaultDatabase);
 
 		const lines = databases.map(
 			(d) => `  - ${d}${d === defaultDatabase ? "  (default for this connection)" : ""}`,
 		);
 
+		const missingDefault = databases.includes(defaultDatabase)
+			? ""
+			: `\nThe default database for this connection, "${defaultDatabase}", is not among them: ` +
+				"it does not exist, or this key cannot reach it.";
+
 		const note = confined
 			? "\nThis connection is confined to the database(s) above; any other name is refused. " +
 				"The user chose this when approving the connection."
-			: "\nPass `database` on any tool to work in another one.";
+			: `${missingDefault}\nPass \`database\` on any tool to work in another one.`;
 
 		return structuredResult(
 			`${databases.length} database(s):\n${lines.join("\n")}${note}`,
@@ -3107,7 +3139,7 @@ export function createHydraDBServer(
 			{
 				database,
 				collection,
-				status: res.status ?? "deletion_scheduled",
+				status: res.status,
 				deleted: true,
 			},
 		);
@@ -3361,9 +3393,9 @@ export function createHydraDBServer(
 			const res = await hydra.graph.createDatabase(database, { signal });
 
 			return structuredResult(
-				`Created graph database "${database}" (status: ${res.status ?? "ready"}). ` +
+				`Created graph database "${database}" (status: ${res.status}). ` +
 				"Collections are created by their first write; there is no create-collection step.",
-				{ action: args.action, database, status: res.status ?? "ready", created: true },
+				{ action: args.action, database, status: res.status, created: true },
 			);
 		}
 
@@ -3567,12 +3599,9 @@ export function createHydraDBServer(
 		try {
 			result = await run();
 		} catch (err) {
-			if (err instanceof Error) {
-				err.message = hydra.redact(err.message);
-				throw err;
-			}
-
-			throw new Error(hydra.redact(String(err)));
+			// A new error, not the caught one: some errors (ZodError) define
+			// `message` as a getter, and assigning to it throws over the real one.
+			throw new Error(hydra.redact(err instanceof Error ? err.message : String(err)));
 		}
 
 		if (!result.isError) return result;

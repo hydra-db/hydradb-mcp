@@ -187,9 +187,11 @@ const connectorDeleteSchema = z.object({
 	deleted: z.boolean().optional(),
 });
 
+// The API always names the sync workflow; the run id is empty when the
+// request joined a cycle already running.
 const connectorSyncSchema = z.object({
 	runId: z.string().optional(),
-	workflowId: z.string().optional(),
+	workflowId: nonEmpty,
 });
 
 const connectorPauseSchema = z.object({

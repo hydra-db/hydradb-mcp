@@ -385,6 +385,20 @@ test("hydradb_databases surfaces an API error on an unconfined connection", asyn
 	await client.close();
 });
 
+test("hydradb_databases lists only what the API listed, and says when the default is missing", async () => {
+	const { hydra } = mockHydra({ databases: { databases: ["analytics"] } });
+	const client = await connect(hydra);
+	const result = await client.callTool({ name: "hydradb_databases", arguments: {} });
+	const text = toolText(result);
+
+	assert.notEqual(result.isError, true);
+	assert.deepEqual((result.structuredContent as { databases: string[] }).databases, ["analytics"]);
+	assert.match(text, /^1 database\(s\):\n {2}- analytics\n/);
+	assert.doesNotMatch(text, /db_test {2}\(default for this connection\)/);
+	assert.match(text, /default database for this connection, "db_test", is not among them/);
+	await client.close();
+});
+
 test("hydradb_ingest accepts turns-only input (no text)", async () => {
 	const { hydra, calls } = mockHydra();
 	const client = await connect(hydra);
@@ -3189,6 +3203,32 @@ for (const [label, acl, expected] of [
 	});
 }
 
+test("hydradb_update with no collection edits the item in the collection it is stored in", async () => {
+	const { hydra, calls } = mockHydra({ list: { sources: [{ id: "doc-1", collection: "ws-default" }], total: 1 } }, { collection: null });
+	const client = await connect(hydra);
+	const result = await client.callTool({ name: "hydradb_update", arguments: { id: "doc-1", additional_metadata: { stage: "approved" } } });
+
+	assert.notEqual(result.isError, true, toolText(result));
+
+	const lookup = calls.find((call) => call.method === "list-fetch");
+
+	assert.deepEqual(lookup?.args.ids, ["doc-1"]);
+	assert.equal(lookup?.args.collection, undefined, "the lookup runs in the workspace default");
+	assert.equal(calls.find((call) => call.method === "update")?.args.collection, "ws-default");
+	await client.close();
+});
+
+test("hydradb_update with no collection names the id when the workspace default does not hold it", async () => {
+	const { hydra, calls } = mockHydra({ list: { sources: [], total: 0 } }, { collection: null });
+	const client = await connect(hydra);
+	const result = await client.callTool({ name: "hydradb_update", arguments: { id: "doc-9", additional_metadata: { stage: "approved" } } });
+
+	assert.equal(result.isError, true);
+	assert.match(toolText(result), /"doc-9" is not in the workspace default of database "db_test"/);
+	assert.equal(calls.some((call) => call.method === "update"), false, "nothing was sent");
+	await client.close();
+});
+
 test("hydradb_update omits ACL when it was not supplied", async () => {
 	const { hydra, calls } = mockHydra();
 	const client = await connect(hydra);
@@ -3711,6 +3751,20 @@ test("hydradb_query caps the total response even in full detail", async () => {
 
 	// And it must never cut a chunk header in half.
 	assert.doesNotMatch(text, /\[id: [^\]]*$/, "a severed id must not be left danging");
+});
+
+test("a cut query lists only the sources its text shows, and says it was cut", async () => {
+	const { hydra } = mockHydra({ query: longChunks(50, 5000) });
+	const client = await connect(hydra);
+	const result = await client.callTool({ name: "hydradb_query", arguments: { query: "q", detail: "full", max_results: 50, structured: true } });
+	const structured = result.structuredContent as { sources: { id: string }[]; shown?: number; total?: number; truncated?: boolean };
+	const inText = new Set([...toolText(result).matchAll(/\[id: (s\d+)\]/g)].map((match) => match[1]));
+
+	assert.equal(structured.truncated, true);
+	assert.equal(structured.total, 50);
+	assert.equal(structured.shown, inText.size);
+	assert.deepEqual(structured.sources.map((source) => source.id).filter((id) => !inText.has(id)), [], "sources the text left out");
+	await client.close();
 });
 
 // A live call with max_results=10 returned 15 chunks, and all 15 were rendered.
@@ -4825,6 +4879,18 @@ test("hydradb_subgraph lists members by depth with ids the other tools accept", 
 	assert.deepEqual(calls[0], { id: "thread-root", kind: "knowledge", depth: 3, maxSources: undefined, acl: undefined, database: undefined, collection: undefined });
 });
 
+// The API sends no title for an uploaded document's member; it has one all the same.
+test("hydradb_subgraph does not call a member without a title untitled", async () => {
+	const { text } = await subgraphText(
+		subgraphOf([{ source_id: "a", depth: 0 }, { source_id: "b", depth: 1, title: "Ledger ownership.md" }]),
+		{ id: "a" },
+	);
+
+	assert.doesNotMatch(text, /\(untitled\)/);
+	assert.match(text, /^- \[id: a\] \S depth 0/m);
+	assert.match(text, /^- \[id: b\] Ledger ownership\.md \S depth 1/m);
+});
+
 test("hydradb_subgraph says when max_sources clipped the traversal", async () => {
 	const { text, structured } = await subgraphText(
 		subgraphOf([{ source_id: "a", depth: 0 }, { source_id: "b", depth: 1 }], { is_truncated: true, max_depth_reached: 3 }),
@@ -5265,6 +5331,31 @@ test("an empty bare listing says where it looked and points at collections", asy
 	await client.close();
 });
 
+test("a memory listed with a title and no text shows the title labelled as one", async () => {
+	const { hydra } = mockHydra({ list: { user_memories: [{ memory_id: "m1", title: "Weekend running" }], total: 1 } });
+	const client = await connect(hydra);
+	const result = await client.callTool({ name: "hydradb_list", arguments: { kind: "memory" } });
+
+	assert.deepEqual((result.structuredContent as { items: unknown[] }).items, [{ id: "m1", title: "Weekend running" }]);
+	assert.match(toolText(result), /^1\. \[m1\] title: Weekend running$/m);
+	await client.close();
+});
+
+test("an empty listing by id names the id and the scope, not an empty database", async () => {
+	const { hydra } = mockHydra({ list: { user_memories: [], sources: [], total: 0 } }, { collection: null });
+	const client = await connect(hydra);
+
+	for (const [kind, ids] of [["knowledge", ["k-missing"]], ["memory", ["m-missing"]]] as const) {
+		const text = firstText(await client.callTool({ name: "hydradb_list", arguments: { kind, ids } }));
+
+		assert.match(text, new RegExp(`with id "${ids[0]}"`), `${kind}: ${text}`);
+		assert.match(text, /in database "db_test", workspace default/, `${kind}: ${text}`);
+		assert.doesNotMatch(text, /found in the workspace default/, `${kind}: ${text}`);
+	}
+
+	await client.close();
+});
+
 test("widened empty-result message names the trimmed database, not the raw argument", async () => {
 	const { hydra } = mockHydra({}, { collection: null });
 	const client = await connect(hydra);
@@ -5321,10 +5412,11 @@ test("feedback: a submission carrying neither text nor ground truth is refused l
 
 	const res = await client.callTool({
 		name: "hydradb_feedback",
-		arguments: { request_id: "8f1c0e8a-0000-4000-8000-000000000003" },
+		arguments: { request_id: "8f1c0e8a-0000-4000-8000-000000000003", rating: "negative" },
 	});
 
 	assert.equal(isError(res), true);
+	assert.match(toolText(res), /^send feedback text, ground_truth, or both\b/, "the validator's own refusal reaches the caller");
 	// Refused before the wire: the server would 400 on this too, and saying so
 	// without a round trip puts the message where the caller can still act.
 	assert.equal(calls.filter((c) => c.method === "feedback").length, 0);
