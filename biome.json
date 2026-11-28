@@ -1,7 +1,7 @@
 {
   "$schema": "https://biomejs.dev/schemas/1.9.4/schema.json",
   "files": {
-    "include": ["src/**/*.ts", "tests/**/*.ts", "conformance/**/*.ts", "scripts/**/*.mjs"],
+    "include": ["src/**/*.ts", "tests/**/*.ts", "conformance/**/*.ts", "e2e/**/*.ts", "scripts/**/*.mjs"],
     "ignore": ["dist/**", "node_modules/**", "ignore/**"]
   },
   "vcs": { "enabled": false, "clientKind": "git", "useIgnoreFile": false },
