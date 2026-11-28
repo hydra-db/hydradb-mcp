@@ -451,14 +451,16 @@ interface ListedRow {
 }
 
 /**
- * Characters of projected field data one row, and one listing page, may put
- * into structuredContent. The text view clamps each field to a preview; the
- * structured view keeps the JSON as returned, so it needs its own ceiling or
- * one `relations` or metadata blob could carry megabytes.
+ * Characters of projected field data one row, and one listing page, may carry.
+ * Both views print the same bounded copy, so one `relations` or metadata blob
+ * cannot carry megabytes and the text cannot say less than structuredContent.
+ *
+ * The page allowance holds a full page (100 rows) of connector rows whole: a
+ * connector stores 600 to 760 characters of `additional_metadata` on a row.
  */
 const LIST_FIELDS_ROW_CHARS = 2_000;
 
-const LIST_FIELDS_PAGE_CHARS = 20_000;
+const LIST_FIELDS_PAGE_CHARS = 80_000;
 
 /** What is left of the page's projected-field budget, and whether any was cut. */
 interface FieldBudget {
@@ -2052,30 +2054,36 @@ export function createHydraDBServer(
 			return `[${s.id}]${title}${type}${identity ? ` — ${identity}` : ""}`;
 		};
 
-		// Requested fields go on their own indented lines, each value bounded
-		// like every other listing preview: a `relations` or metadata blob
-		// must not turn one row into a page.
-		const fieldLines = (s: SourceListItem, indent: string) =>
-			Object.entries(s.fields ?? {})
-				.filter(([name]) => name !== "title" && name !== "type")
-				.map(([name, value]) => `${indent}${name}: ${clampPreview(JSON.stringify(value))}`);
+		const fieldBudget: FieldBudget = { left: LIST_FIELDS_PAGE_CHARS, truncated: false };
 
-		const commentLines = (s: SourceListItem, indent: string): string[] => [
-			...(s.comments ?? []).flatMap((c) => [
+		// The caller asked for these fields by name, so the text prints the same
+		// bounded copy structuredContent carries. A host that shows only the text
+		// then sees every key a host reading structuredContent sees.
+		const listed = sources.map((src) => toListedRow(src, fieldBudget));
+
+		const fieldLines = (row: ListedRow | undefined, indent: string) => [
+			...Object.entries(row?.fields ?? {})
+				.filter(([name]) => name !== "title" && name !== "type")
+				.map(([name, value]) => `${indent}${name}: ${JSON.stringify(value)}`),
+			...(row?.fields_truncated
+				? [`${indent}(fields cut to fit: list fewer rows, or this id alone with source_ids, to see more)`]
+				: []),
+		];
+
+		const commentLines = (s: SourceListItem, row: ListedRow | undefined, indent: string): string[] => [
+			...(s.comments ?? []).flatMap((c, i) => [
 				`${indent}↳ ${rowText(c)}`,
-				...fieldLines(c, `${indent}   `),
-				...commentLines(c, `${indent}   `),
+				...fieldLines(row?.comments?.[i], `${indent}   `),
+				...commentLines(c, row?.comments?.[i], `${indent}   `),
 			]),
 			...(s.comments_truncated ? [`${indent}↳ (the thread has more replies than shown here)`] : []),
 		];
 
 		const lines = sources.flatMap((s, i) => [
 			`${i + 1}. ${rowText(s)}`,
-			...fieldLines(s, "   "),
-			...commentLines(s, "   "),
+			...fieldLines(listed[i], "   "),
+			...commentLines(s, listed[i], "   "),
 		]);
-
-		const fieldBudget: FieldBudget = { left: LIST_FIELDS_PAGE_CHARS, truncated: false };
 
 		// Was `${total} sources:` — the corpus-wide total printed above a single
 		// page of rows, so "412 sources:" sat over 50 lines with no marker and no
@@ -2086,8 +2094,8 @@ export function createHydraDBServer(
 			{
 				kind: args.kind,
 				resolved_scope: resolvedScope,
-				items: sources.map((src) => ({
-					...toListedRow(src, fieldBudget),
+				items: sources.map((src, i) => ({
+					...listed[i],
 					...(src.external_id != null ? { external_id: src.external_id } : {}),
 					...(src.provider != null ? { provider: src.provider } : {}),
 					...(src.parent_external_id != null ? { parent_external_id: src.parent_external_id } : {}),
