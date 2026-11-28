@@ -1,0 +1,3840 @@
+{
+ "recorded_at": "2026-11-28T03:46:30.831Z",
+ "errors": {
+  "400": {
+   "status": 400,
+   "headers": {
+    "content-type": "application/json; charset=utf-8"
+   },
+   "body": {
+    "success": false,
+    "data": null,
+    "error": {
+     "code": "INVALID_INPUT",
+     "message": "query failed: run the query engine Cypher: Neo.ClientError.Statement.InvalidSyntax (OpenCypher query is not supported yet: CREATE of a standalone node requires an integer id)"
+    },
+    "meta": {
+     "request_id": "853f06ba-cd02-40de-b817-1f6f755dbc5e",
+     "api_version": "2.0.1",
+     "latency_ms": 21.3
+    },
+    "detail": {
+     "error_code": "INVALID_INPUT",
+     "message": "query failed: run the query engine Cypher: Neo.ClientError.Statement.InvalidSyntax (OpenCypher query is not supported yet: CREATE of a standalone node requires an integer id)",
+     "success": false
+    }
+   },
+   "call": "POST /byog/query"
+  },
+  "401": {
+   "status": 401,
+   "headers": {
+    "content-type": "application/json; charset=utf-8"
+   },
+   "body": {
+    "success": false,
+    "data": null,
+    "error": {
+     "code": "UNAUTHORIZED",
+     "message": "invalid API key"
+    },
+    "meta": {
+     "request_id": "92d09a23-766a-4e82-89c9-f5494bbf3910",
+     "api_version": "2.0.1",
+     "latency_ms": 5
+    },
+    "detail": {
+     "error_code": "UNAUTHORIZED",
+     "message": "invalid API key",
+     "success": false
+    }
+   },
+   "call": "GET /databases"
+  },
+  "404": {
+   "status": 404,
+   "headers": {
+    "content-type": "application/json; charset=utf-8"
+   },
+   "body": {
+    "success": false,
+    "data": null,
+    "error": {
+     "code": "NOT_FOUND",
+     "message": "Source 'rec-k-missing' not found. Verify the id is correct and the source has been ingested. See https://docs.hydradb.com/api-reference/v2/endpoint/fetch-content for usage details. "
+    },
+    "meta": {
+     "request_id": "8d4a6b91-62c3-4371-943e-12de71a7ba28",
+     "api_version": "2.0.1",
+     "latency_ms": 22.3
+    },
+    "detail": {
+     "error_code": "NOT_FOUND",
+     "message": "Source 'rec-k-missing' not found. Verify the id is correct and the source has been ingested. See https://docs.hydradb.com/api-reference/v2/endpoint/fetch-content for usage details. ",
+     "success": false
+    }
+   },
+   "call": "GET /context/inspect"
+  }
+ },
+ "routes": {
+  "databases.create": {
+   "status": 200,
+   "headers": {
+    "content-type": "application/json; charset=utf-8"
+   },
+   "body": {
+    "success": true,
+    "data": {
+     "status": "accepted",
+     "tenant_id": "e2e-mcp-recorded",
+     "database": "e2e-mcp-recorded",
+     "message": "Database creation started in the background. Use GET /databases/status?database=... to check progress."
+    },
+    "error": null,
+    "meta": {
+     "request_id": "c7173de9-a6d9-4cc2-841a-9de4e4d566c9",
+     "api_version": "2.0.1",
+     "latency_ms": 42.1
+    }
+   }
+  },
+  "databases.status": {
+   "status": 200,
+   "headers": {
+    "content-type": "application/json; charset=utf-8"
+   },
+   "body": {
+    "success": true,
+    "data": {
+     "tenant_id": "e2e-mcp-recorded",
+     "database": "e2e-mcp-recorded",
+     "org_id": "gpewcmb2jm",
+     "infra": {
+      "scheduler_status": true,
+      "graph_status": true,
+      "vectorstore_status": {
+       "knowledge": true,
+       "memories": true
+      },
+      "ready_for_ingestion": true
+     },
+     "message": "Deployed infrastructure status"
+    },
+    "error": null,
+    "meta": {
+     "request_id": "9c6e53a6-58eb-42c1-82d0-9dcd25811a3c",
+     "api_version": "2.0.1",
+     "latency_ms": 14.7
+    }
+   }
+  },
+  "ingest": {
+   "status": 202,
+   "headers": {
+    "content-type": "application/json; charset=utf-8"
+   },
+   "body": {
+    "success": true,
+    "data": {
+     "generation_started_at_ms": 1795837557816,
+     "success": true,
+     "message": "Memories queued for ingestion successfully. Ingestion is asynchronous: this 202 means the sources were accepted and queued, not indexed. Poll GET /context/status?database=<database>&id=<source_id> until each source's indexing_status reaches a terminal state (completed or errored) before querying. See https://docs.hydradb.com/api-reference/v2/endpoint/source-status for usage details. ",
+     "results": [
+      {
+       "id": "rec-m-text",
+       "title": "The user prefers stacked pull requests.",
+       "status": "queued",
+       "infer": true,
+       "error": null,
+       "error_code": null
+      }
+     ],
+     "success_count": 1,
+     "failed_count": 0
+    },
+    "error": null,
+    "meta": {
+     "request_id": "452e6c6f-4c64-4223-a6c2-18bf6b83cc4f",
+     "api_version": "2.0.1",
+     "latency_ms": 304.6,
+     "tenant_id": "e2e-mcp-recorded",
+     "database": "e2e-mcp-recorded",
+     "sub_tenant_id": "jfzcqcfkjy",
+     "collection": "jfzcqcfkjy",
+     "source_type": "memory"
+    }
+   }
+  },
+  "status": {
+   "status": 200,
+   "headers": {
+    "content-type": "application/json; charset=utf-8"
+   },
+   "body": {
+    "success": true,
+    "data": {
+     "statuses": [
+      {
+       "id": "rec-k-rel",
+       "indexing_status": "completed",
+       "error_code": "",
+       "error_message": "",
+       "success": true,
+       "message": "Processing status retrieved successfully"
+      },
+      {
+       "id": "rec-m-text",
+       "indexing_status": "completed",
+       "error_code": "",
+       "error_message": "",
+       "success": true,
+       "message": "Processing status retrieved successfully"
+      },
+      {
+       "id": "rec-k-page-0",
+       "indexing_status": "completed",
+       "error_code": "",
+       "error_message": "",
+       "success": true,
+       "message": "Processing status retrieved successfully"
+      },
+      {
+       "id": "rec-k-page-1",
+       "indexing_status": "completed",
+       "error_code": "",
+       "error_message": "",
+       "success": true,
+       "message": "Processing status retrieved successfully"
+      },
+      {
+       "id": "rec-k-page-2",
+       "indexing_status": "completed",
+       "error_code": "",
+       "error_message": "",
+       "success": true,
+       "message": "Processing status retrieved successfully"
+      },
+      {
+       "id": "rec-k-page-3",
+       "indexing_status": "completed",
+       "error_code": "",
+       "error_message": "",
+       "success": true,
+       "message": "Processing status retrieved successfully"
+      },
+      {
+       "id": "rec-k-page-4",
+       "indexing_status": "completed",
+       "error_code": "",
+       "error_message": "",
+       "success": true,
+       "message": "Processing status retrieved successfully"
+      },
+      {
+       "id": "rec-k-page-5",
+       "indexing_status": "completed",
+       "error_code": "",
+       "error_message": "",
+       "success": true,
+       "message": "Processing status retrieved successfully"
+      },
+      {
+       "id": "rec-k-page-6",
+       "indexing_status": "completed",
+       "error_code": "",
+       "error_message": "",
+       "success": true,
+       "message": "Processing status retrieved successfully"
+      },
+      {
+       "id": "rec-k-page-7",
+       "indexing_status": "completed",
+       "error_code": "",
+       "error_message": "",
+       "success": true,
+       "message": "Processing status retrieved successfully"
+      },
+      {
+       "id": "rec-k-page-8",
+       "indexing_status": "completed",
+       "error_code": "",
+       "error_message": "",
+       "success": true,
+       "message": "Processing status retrieved successfully"
+      },
+      {
+       "id": "rec-k-page-9",
+       "indexing_status": "completed",
+       "error_code": "",
+       "error_message": "",
+       "success": true,
+       "message": "Processing status retrieved successfully"
+      },
+      {
+       "id": "rec-k-page-10",
+       "indexing_status": "completed",
+       "error_code": "",
+       "error_message": "",
+       "success": true,
+       "message": "Processing status retrieved successfully"
+      },
+      {
+       "id": "rec-k-page-11",
+       "indexing_status": "completed",
+       "error_code": "",
+       "error_message": "",
+       "success": true,
+       "message": "Processing status retrieved successfully"
+      },
+      {
+       "id": "rec-k-page-12",
+       "indexing_status": "completed",
+       "error_code": "",
+       "error_message": "",
+       "success": true,
+       "message": "Processing status retrieved successfully"
+      },
+      {
+       "id": "rec-k-page-13",
+       "indexing_status": "completed",
+       "error_code": "",
+       "error_message": "",
+       "success": true,
+       "message": "Processing status retrieved successfully"
+      },
+      {
+       "id": "rec-k-page-14",
+       "indexing_status": "completed",
+       "error_code": "",
+       "error_message": "",
+       "success": true,
+       "message": "Processing status retrieved successfully"
+      },
+      {
+       "id": "rec-k-page-15",
+       "indexing_status": "completed",
+       "error_code": "",
+       "error_message": "",
+       "success": true,
+       "message": "Processing status retrieved successfully"
+      },
+      {
+       "id": "rec-k-page-16",
+       "indexing_status": "completed",
+       "error_code": "",
+       "error_message": "",
+       "success": true,
+       "message": "Processing status retrieved successfully"
+      },
+      {
+       "id": "rec-k-page-17",
+       "indexing_status": "completed",
+       "error_code": "",
+       "error_message": "",
+       "success": true,
+       "message": "Processing status retrieved successfully"
+      },
+      {
+       "id": "rec-k-page-18",
+       "indexing_status": "completed",
+       "error_code": "",
+       "error_message": "",
+       "success": true,
+       "message": "Processing status retrieved successfully"
+      },
+      {
+       "id": "rec-k-page-19",
+       "indexing_status": "completed",
+       "error_code": "",
+       "error_message": "",
+       "success": true,
+       "message": "Processing status retrieved successfully"
+      },
+      {
+       "id": "rec-k-page-20",
+       "indexing_status": "completed",
+       "error_code": "",
+       "error_message": "",
+       "success": true,
+       "message": "Processing status retrieved successfully"
+      },
+      {
+       "id": "rec-k-page-21",
+       "indexing_status": "completed",
+       "error_code": "",
+       "error_message": "",
+       "success": true,
+       "message": "Processing status retrieved successfully"
+      },
+      {
+       "id": "rec-k-page-22",
+       "indexing_status": "completed",
+       "error_code": "",
+       "error_message": "",
+       "success": true,
+       "message": "Processing status retrieved successfully"
+      },
+      {
+       "id": "rec-k-page-23",
+       "indexing_status": "completed",
+       "error_code": "",
+       "error_message": "",
+       "success": true,
+       "message": "Processing status retrieved successfully"
+      },
+      {
+       "id": "rec-k-page-24",
+       "indexing_status": "completed",
+       "error_code": "",
+       "error_message": "",
+       "success": true,
+       "message": "Processing status retrieved successfully"
+      },
+      {
+       "id": "rec-k-page-25",
+       "indexing_status": "completed",
+       "error_code": "",
+       "error_message": "",
+       "success": true,
+       "message": "Processing status retrieved successfully"
+      },
+      {
+       "id": "rec-k-page-26",
+       "indexing_status": "completed",
+       "error_code": "",
+       "error_message": "",
+       "success": true,
+       "message": "Processing status retrieved successfully"
+      },
+      {
+       "id": "rec-k-page-27",
+       "indexing_status": "completed",
+       "error_code": "",
+       "error_message": "",
+       "success": true,
+       "message": "Processing status retrieved successfully"
+      },
+      {
+       "id": "rec-k-page-28",
+       "indexing_status": "completed",
+       "error_code": "",
+       "error_message": "",
+       "success": true,
+       "message": "Processing status retrieved successfully"
+      },
+      {
+       "id": "rec-k-page-29",
+       "indexing_status": "completed",
+       "error_code": "",
+       "error_message": "",
+       "success": true,
+       "message": "Processing status retrieved successfully"
+      },
+      {
+       "id": "rec-k-page-30",
+       "indexing_status": "completed",
+       "error_code": "",
+       "error_message": "",
+       "success": true,
+       "message": "Processing status retrieved successfully"
+      },
+      {
+       "id": "rec-k-page-31",
+       "indexing_status": "completed",
+       "error_code": "",
+       "error_message": "",
+       "success": true,
+       "message": "Processing status retrieved successfully"
+      },
+      {
+       "id": "rec-k-page-32",
+       "indexing_status": "completed",
+       "error_code": "",
+       "error_message": "",
+       "success": true,
+       "message": "Processing status retrieved successfully"
+      },
+      {
+       "id": "rec-k-page-33",
+       "indexing_status": "completed",
+       "error_code": "",
+       "error_message": "",
+       "success": true,
+       "message": "Processing status retrieved successfully"
+      },
+      {
+       "id": "rec-k-page-34",
+       "indexing_status": "completed",
+       "error_code": "",
+       "error_message": "",
+       "success": true,
+       "message": "Processing status retrieved successfully"
+      },
+      {
+       "id": "rec-k-page-35",
+       "indexing_status": "completed",
+       "error_code": "",
+       "error_message": "",
+       "success": true,
+       "message": "Processing status retrieved successfully"
+      },
+      {
+       "id": "rec-k-page-36",
+       "indexing_status": "completed",
+       "error_code": "",
+       "error_message": "",
+       "success": true,
+       "message": "Processing status retrieved successfully"
+      },
+      {
+       "id": "rec-k-page-37",
+       "indexing_status": "completed",
+       "error_code": "",
+       "error_message": "",
+       "success": true,
+       "message": "Processing status retrieved successfully"
+      },
+      {
+       "id": "rec-k-page-38",
+       "indexing_status": "completed",
+       "error_code": "",
+       "error_message": "",
+       "success": true,
+       "message": "Processing status retrieved successfully"
+      },
+      {
+       "id": "rec-k-page-39",
+       "indexing_status": "completed",
+       "error_code": "",
+       "error_message": "",
+       "success": true,
+       "message": "Processing status retrieved successfully"
+      },
+      {
+       "id": "rec-k-page-40",
+       "indexing_status": "completed",
+       "error_code": "",
+       "error_message": "",
+       "success": true,
+       "message": "Processing status retrieved successfully"
+      },
+      {
+       "id": "rec-k-page-41",
+       "indexing_status": "completed",
+       "error_code": "",
+       "error_message": "",
+       "success": true,
+       "message": "Processing status retrieved successfully"
+      },
+      {
+       "id": "rec-k-page-42",
+       "indexing_status": "completed",
+       "error_code": "",
+       "error_message": "",
+       "success": true,
+       "message": "Processing status retrieved successfully"
+      },
+      {
+       "id": "rec-k-page-43",
+       "indexing_status": "completed",
+       "error_code": "",
+       "error_message": "",
+       "success": true,
+       "message": "Processing status retrieved successfully"
+      },
+      {
+       "id": "rec-k-page-44",
+       "indexing_status": "completed",
+       "error_code": "",
+       "error_message": "",
+       "success": true,
+       "message": "Processing status retrieved successfully"
+      },
+      {
+       "id": "rec-k-page-45",
+       "indexing_status": "completed",
+       "error_code": "",
+       "error_message": "",
+       "success": true,
+       "message": "Processing status retrieved successfully"
+      },
+      {
+       "id": "rec-k-page-46",
+       "indexing_status": "completed",
+       "error_code": "",
+       "error_message": "",
+       "success": true,
+       "message": "Processing status retrieved successfully"
+      },
+      {
+       "id": "rec-k-page-47",
+       "indexing_status": "completed",
+       "error_code": "",
+       "error_message": "",
+       "success": true,
+       "message": "Processing status retrieved successfully"
+      },
+      {
+       "id": "rec-k-page-48",
+       "indexing_status": "completed",
+       "error_code": "",
+       "error_message": "",
+       "success": true,
+       "message": "Processing status retrieved successfully"
+      },
+      {
+       "id": "rec-k-page-49",
+       "indexing_status": "completed",
+       "error_code": "",
+       "error_message": "",
+       "success": true,
+       "message": "Processing status retrieved successfully"
+      }
+     ]
+    },
+    "error": null,
+    "meta": {
+     "request_id": "59b349e8-278d-4a5c-985f-85fdded9b022",
+     "api_version": "2.0.1",
+     "latency_ms": 241.5,
+     "tenant_id": "e2e-mcp-recorded",
+     "database": "e2e-mcp-recorded",
+     "sub_tenant_id": "jfzcqcfkjy",
+     "collection": "jfzcqcfkjy"
+    }
+   }
+  },
+  "collections.list": {
+   "status": 200,
+   "headers": {
+    "content-type": "application/json; charset=utf-8"
+   },
+   "body": {
+    "success": true,
+    "data": {
+     "sub_tenant_ids": [
+      "jfzcqcfkjy",
+      "rec-drop"
+     ],
+     "collections": [
+      "jfzcqcfkjy",
+      "rec-drop"
+     ],
+     "message": "Successfully retrieved sub-tenant IDs"
+    },
+    "error": null,
+    "meta": {
+     "request_id": "8d46b395-b532-45f3-8507-a369326e115f",
+     "api_version": "2.0.1",
+     "latency_ms": 31.3
+    }
+   }
+  },
+  "databases.stats": {
+   "status": 200,
+   "headers": {
+    "content-type": "application/json; charset=utf-8"
+   },
+   "body": {
+    "success": true,
+    "data": {
+     "tenant_id": "e2e-mcp-recorded",
+     "database": "e2e-mcp-recorded",
+     "knowledge_collection": {
+      "row_count": 52
+     },
+     "memory_collection": {
+      "row_count": 1
+     },
+     "message": "Successfully retrieved tenant collection statistics"
+    },
+    "error": null,
+    "meta": {
+     "request_id": "9ac9c77c-7090-44df-ae10-280569d64507",
+     "api_version": "2.0.1",
+     "latency_ms": 18.8
+    }
+   }
+  },
+  "inspect": {
+   "status": 200,
+   "headers": {
+    "content-type": "application/json; charset=utf-8"
+   },
+   "body": {
+    "success": true,
+    "data": {
+     "success": true,
+     "id": "rec-k-rel",
+     "content": "Billing depends on the ledger service.",
+     "content_base64": null,
+     "inferred_content": null,
+     "presigned_url": null,
+     "content_type": "text/markdown",
+     "size_bytes": 38,
+     "message": "File fetched successfully",
+     "error": null
+    },
+    "error": null,
+    "meta": {
+     "request_id": "0d75583c-4c6c-4b0e-ac86-5743e527dd52",
+     "api_version": "2.0.1",
+     "latency_ms": 169.4,
+     "tenant_id": "e2e-mcp-recorded",
+     "database": "e2e-mcp-recorded",
+     "sub_tenant_id": "jfzcqcfkjy",
+     "collection": "jfzcqcfkjy"
+    }
+   }
+  },
+  "relations": {
+   "status": 200,
+   "headers": {
+    "content-type": "application/json; charset=utf-8"
+   },
+   "body": {
+    "success": true,
+    "data": {
+     "read_status": "complete",
+     "relations": [
+      {
+       "database": "jfzcqcfkjy",
+       "collection": "jfzcqcfkjy",
+       "source": {
+        "database": "jfzcqcfkjy",
+        "collection": "jfzcqcfkjy",
+        "name": "billing",
+        "type": "PRODUCT",
+        "namespace": "products",
+        "entity_id": "4b1264cac8f4e74f0b8bc0528d7547bb",
+        "identifier": null,
+        "provider": ""
+       },
+       "target": {
+        "database": "jfzcqcfkjy",
+        "collection": "jfzcqcfkjy",
+        "name": "ledger service",
+        "type": "PRODUCT",
+        "namespace": "products",
+        "entity_id": "bdf9798baa4c3a61f0d50db4135b94fa",
+        "identifier": null,
+        "provider": ""
+       },
+       "relations": [
+        {
+         "source_id": "rec-k-rel",
+         "database": "jfzcqcfkjy",
+         "collection": "jfzcqcfkjy",
+         "canonical_predicate": "depends on",
+         "raw_predicate": "depends on",
+         "context": "Billing depends on the ledger service.",
+         "confidence": 0.8,
+         "temporal_details": null,
+         "timestamp": "2026-11-28T03:46:10Z",
+         "relationship_id": "67a8ac243b680e372a3dff679074a66b",
+         "chunk_id": "rec-k-rel_chunk_0000",
+         "source_entity_id": "4b1264cac8f4e74f0b8bc0528d7547bb",
+         "target_entity_id": "bdf9798baa4c3a61f0d50db4135b94fa"
+        }
+       ],
+       "chunk_id": "rec-k-rel_chunk_0000"
+      }
+     ],
+     "auxiliary_relations": [
+      {
+       "database": "jfzcqcfkjy",
+       "collection": "jfzcqcfkjy",
+       "source": {
+        "database": "jfzcqcfkjy",
+        "collection": "jfzcqcfkjy",
+        "name": "billing",
+        "type": "PRODUCT",
+        "namespace": "products",
+        "entity_id": "4b1264cac8f4e74f0b8bc0528d7547bb",
+        "identifier": "4b1264cac8f4e74f0b8bc0528d7547bb",
+        "provider": ""
+       },
+       "target": {
+        "database": "jfzcqcfkjy",
+        "collection": "jfzcqcfkjy",
+        "name": "",
+        "type": "SOURCE",
+        "namespace": "sources",
+        "entity_id": "rec-k-rel",
+        "identifier": null,
+        "provider": "",
+        "hydration": "stub"
+       },
+       "relations": [
+        {
+         "source_id": "rec-k-rel",
+         "database": "jfzcqcfkjy",
+         "collection": "jfzcqcfkjy",
+         "canonical_predicate": "present_in",
+         "raw_predicate": "present_in",
+         "context": "",
+         "confidence": 1,
+         "temporal_details": null,
+         "timestamp": "2026-11-28T03:46:18Z",
+         "relationship_id": "syn:present_in:0bfd6e1104d32f8e",
+         "chunk_id": null,
+         "source_entity_id": "4b1264cac8f4e74f0b8bc0528d7547bb",
+         "target_entity_id": "rec-k-rel",
+         "synthesized": true
+        }
+       ],
+       "chunk_id": ""
+      },
+      {
+       "database": "jfzcqcfkjy",
+       "collection": "jfzcqcfkjy",
+       "source": {
+        "database": "jfzcqcfkjy",
+        "collection": "jfzcqcfkjy",
+        "name": "ledger service",
+        "type": "PRODUCT",
+        "namespace": "products",
+        "entity_id": "bdf9798baa4c3a61f0d50db4135b94fa",
+        "identifier": "bdf9798baa4c3a61f0d50db4135b94fa",
+        "provider": ""
+       },
+       "target": {
+        "database": "jfzcqcfkjy",
+        "collection": "jfzcqcfkjy",
+        "name": "",
+        "type": "SOURCE",
+        "namespace": "sources",
+        "entity_id": "rec-k-rel",
+        "identifier": null,
+        "provider": "",
+        "hydration": "stub"
+       },
+       "relations": [
+        {
+         "source_id": "rec-k-rel",
+         "database": "jfzcqcfkjy",
+         "collection": "jfzcqcfkjy",
+         "canonical_predicate": "present_in",
+         "raw_predicate": "present_in",
+         "context": "",
+         "confidence": 1,
+         "temporal_details": null,
+         "timestamp": "2026-11-28T03:46:18Z",
+         "relationship_id": "syn:present_in:bcb5646523239089",
+         "chunk_id": null,
+         "source_entity_id": "bdf9798baa4c3a61f0d50db4135b94fa",
+         "target_entity_id": "rec-k-rel",
+         "synthesized": true
+        }
+       ],
+       "chunk_id": ""
+      }
+     ],
+     "auxiliary_truncated": false,
+     "is_truncated": false,
+     "next_cursor": null,
+     "success": true,
+     "message": "Successfully fetched relations for source"
+    },
+    "error": null,
+    "meta": {
+     "request_id": "0712ceff-8c60-498e-ba87-bf567d6a01c0",
+     "api_version": "2.0.1",
+     "latency_ms": 481.8,
+     "tenant_id": "e2e-mcp-recorded",
+     "database": "e2e-mcp-recorded",
+     "sub_tenant_id": "jfzcqcfkjy",
+     "collection": "jfzcqcfkjy",
+     "source_type": "knowledge"
+    }
+   }
+  },
+  "subgraph": {
+   "status": 200,
+   "headers": {
+    "content-type": "application/json; charset=utf-8"
+   },
+   "body": {
+    "success": true,
+    "data": {
+     "seed_source_id": "rec-k-rel",
+     "sources": [
+      {
+       "database": "jfzcqcfkjy",
+       "collection": "jfzcqcfkjy",
+       "source_id": "rec-k-rel",
+       "depth": 0,
+       "hydration": "stub"
+      },
+      {
+       "database": "jfzcqcfkjy",
+       "collection": "jfzcqcfkjy",
+       "source_id": "rec-k-page-0",
+       "depth": 1,
+       "hydration": "stub",
+       "discovered_via": "rec-k-rel",
+       "discovered_relation": "forceful_relation"
+      }
+     ],
+     "relations": [
+      {
+       "database": "jfzcqcfkjy",
+       "collection": "jfzcqcfkjy",
+       "source": {
+        "database": "jfzcqcfkjy",
+        "collection": "jfzcqcfkjy",
+        "name": "",
+        "type": "SOURCE",
+        "namespace": "sources",
+        "entity_id": "rec-k-rel",
+        "identifier": null,
+        "provider": "",
+        "hydration": "stub",
+        "title": "",
+        "kind": ""
+       },
+       "target": {
+        "database": "jfzcqcfkjy",
+        "collection": "jfzcqcfkjy",
+        "name": "",
+        "type": "SOURCE",
+        "namespace": "sources",
+        "entity_id": "rec-k-page-0",
+        "identifier": null,
+        "provider": "",
+        "hydration": "stub",
+        "title": "",
+        "kind": ""
+       },
+       "relations": [
+        {
+         "source_id": "rec-k-rel",
+         "database": "jfzcqcfkjy",
+         "collection": "jfzcqcfkjy",
+         "canonical_predicate": "forceful_relation",
+         "raw_predicate": "forceful_relation",
+         "context": "",
+         "confidence": 1,
+         "temporal_details": null,
+         "timestamp": "2026-11-28T03:46:18Z",
+         "relationship_id": "rec-k-rel:forceful_relation:rec-k-page-0",
+         "chunk_id": null,
+         "source_entity_id": "rec-k-rel",
+         "target_entity_id": "rec-k-page-0"
+        }
+       ],
+       "chunk_id": ""
+      }
+     ],
+     "auxiliary_relations": [
+      {
+       "database": "jfzcqcfkjy",
+       "collection": "jfzcqcfkjy",
+       "source": {
+        "database": "jfzcqcfkjy",
+        "collection": "jfzcqcfkjy",
+        "name": "billing",
+        "type": "PRODUCT",
+        "namespace": "products",
+        "entity_id": "4b1264cac8f4e74f0b8bc0528d7547bb",
+        "identifier": "4b1264cac8f4e74f0b8bc0528d7547bb",
+        "provider": ""
+       },
+       "target": {
+        "database": "jfzcqcfkjy",
+        "collection": "jfzcqcfkjy",
+        "name": "",
+        "type": "SOURCE",
+        "namespace": "sources",
+        "entity_id": "rec-k-rel",
+        "identifier": null,
+        "provider": "",
+        "hydration": "stub"
+       },
+       "relations": [
+        {
+         "source_id": "rec-k-rel",
+         "database": "jfzcqcfkjy",
+         "collection": "jfzcqcfkjy",
+         "canonical_predicate": "present_in",
+         "raw_predicate": "present_in",
+         "context": "",
+         "confidence": 1,
+         "temporal_details": null,
+         "timestamp": "2026-11-28T03:46:18Z",
+         "relationship_id": "syn:present_in:0bfd6e1104d32f8e",
+         "chunk_id": null,
+         "source_entity_id": "4b1264cac8f4e74f0b8bc0528d7547bb",
+         "target_entity_id": "rec-k-rel",
+         "synthesized": true
+        }
+       ],
+       "chunk_id": ""
+      },
+      {
+       "database": "jfzcqcfkjy",
+       "collection": "jfzcqcfkjy",
+       "source": {
+        "database": "jfzcqcfkjy",
+        "collection": "jfzcqcfkjy",
+        "name": "ledger service",
+        "type": "PRODUCT",
+        "namespace": "products",
+        "entity_id": "bdf9798baa4c3a61f0d50db4135b94fa",
+        "identifier": "bdf9798baa4c3a61f0d50db4135b94fa",
+        "provider": ""
+       },
+       "target": {
+        "database": "jfzcqcfkjy",
+        "collection": "jfzcqcfkjy",
+        "name": "",
+        "type": "SOURCE",
+        "namespace": "sources",
+        "entity_id": "rec-k-rel",
+        "identifier": null,
+        "provider": "",
+        "hydration": "stub"
+       },
+       "relations": [
+        {
+         "source_id": "rec-k-rel",
+         "database": "jfzcqcfkjy",
+         "collection": "jfzcqcfkjy",
+         "canonical_predicate": "present_in",
+         "raw_predicate": "present_in",
+         "context": "",
+         "confidence": 1,
+         "temporal_details": null,
+         "timestamp": "2026-11-28T03:46:18Z",
+         "relationship_id": "syn:present_in:bcb5646523239089",
+         "chunk_id": null,
+         "source_entity_id": "bdf9798baa4c3a61f0d50db4135b94fa",
+         "target_entity_id": "rec-k-rel",
+         "synthesized": true
+        }
+       ],
+       "chunk_id": ""
+      }
+     ],
+     "auxiliary_truncated": false,
+     "is_truncated": false,
+     "max_depth_reached": 1,
+     "success": true,
+     "message": "Successfully fetched source subgraph"
+    },
+    "error": null,
+    "meta": {
+     "request_id": "65d94ea2-e18d-4eb8-9fc4-32c14fc69142",
+     "api_version": "2.0.1",
+     "latency_ms": 86,
+     "tenant_id": "e2e-mcp-recorded",
+     "database": "e2e-mcp-recorded",
+     "sub_tenant_id": "jfzcqcfkjy",
+     "collection": "jfzcqcfkjy",
+     "source_type": "knowledge"
+    }
+   }
+  },
+  "update": {
+   "status": 200,
+   "headers": {
+    "content-type": "application/json; charset=utf-8"
+   },
+   "body": {
+    "success": true,
+    "data": {
+     "id": "rec-k-rel",
+     "database": "e2e-mcp-recorded",
+     "collection": "jfzcqcfkjy",
+     "tenant_id": "e2e-mcp-recorded",
+     "sub_tenant_id": "jfzcqcfkjy",
+     "updated": true,
+     "database_metadata_keys": [],
+     "tenant_metadata_keys": [],
+     "additional_metadata_keys": [
+      "reviewed"
+     ],
+     "vector_sync_required": false,
+     "milvus_sync_required": false,
+     "chunk_rows_matched": 1,
+     "chunk_rows_modified": 1
+    },
+    "error": null,
+    "meta": {
+     "request_id": "35b1b33c-bb1c-4926-a098-b8046e88da9c",
+     "api_version": "2.0.1",
+     "latency_ms": 29,
+     "tenant_id": "e2e-mcp-recorded",
+     "database": "e2e-mcp-recorded",
+     "sub_tenant_id": "jfzcqcfkjy",
+     "collection": "jfzcqcfkjy"
+    }
+   }
+  },
+  "databases.schema_update": {
+   "status": 200,
+   "headers": {
+    "content-type": "application/json; charset=utf-8"
+   },
+   "body": {
+    "database": "e2e-mcp-recorded",
+    "tenant_id": "e2e-mcp-recorded",
+    "added_fields": [
+     "region"
+    ]
+   }
+  },
+  "databases.schema": {
+   "status": 200,
+   "headers": {
+    "content-type": "application/json; charset=utf-8"
+   },
+   "body": {
+    "success": true,
+    "data": {
+     "tenant_id": "e2e-mcp-recorded",
+     "database": "e2e-mcp-recorded",
+     "fields": [
+      {
+       "name": "team",
+       "data_type": "VARCHAR",
+       "max_length": 64,
+       "enable_match": true
+      },
+      {
+       "name": "region",
+       "data_type": "VARCHAR",
+       "max_length": 32
+      }
+     ]
+    },
+    "error": null,
+    "meta": {
+     "request_id": "c76e7ba5-9afb-4cac-9259-64f3f9a75b22",
+     "api_version": "2.0.1",
+     "latency_ms": 10.9
+    }
+   }
+  },
+  "databases.list": {
+   "status": 200,
+   "headers": {
+    "content-type": "application/json; charset=utf-8"
+   },
+   "body": {
+    "success": true,
+    "data": {
+     "tenant_ids": [
+      "e2e-mcp-recorded"
+     ],
+     "databases": [
+      "e2e-mcp-recorded"
+     ],
+     "details": [
+      {
+       "database": "e2e-mcp-recorded"
+      }
+     ],
+     "failed_tenant_ids": null,
+     "failed_databases": [],
+     "message": "Successfully retrieved tenant IDs"
+    },
+    "error": null,
+    "meta": {
+     "request_id": "4d6310ef-9180-4700-b458-75caaafe55d2",
+     "api_version": "2.0.1",
+     "latency_ms": 31.7
+    }
+   }
+  },
+  "connectors.providers": {
+   "status": 200,
+   "headers": {
+    "content-type": "application/json; charset=utf-8"
+   },
+   "body": {
+    "providers": [
+     {
+      "provider": "attio",
+      "category": "",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 1,
+      "acl_supported": true,
+      "acl_description": "Captures list-level access: a private list's entries are visible to its admins and the members it is shared with (resolved to member emails); team grants are not exposed by Attio's API, so team-only readers are not included. Records, notes, tasks and meetings are workspace-visible."
+     },
+     {
+      "provider": "avoma",
+      "category": "",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 1,
+      "acl_supported": false
+     },
+     {
+      "provider": "gmail",
+      "category": "email",
+      "supported": true,
+      "moveit_support": false,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 1,
+      "acl_supported": false
+     },
+     {
+      "provider": "supabase",
+      "category": "dev_tools",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": true,
+      "is_alpha": false,
+      "is_beta": true,
+      "rank": 1,
+      "acl_supported": false
+     },
+     {
+      "provider": "twitter",
+      "category": "",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 1,
+      "acl_supported": false
+     },
+     {
+      "provider": "slack",
+      "category": "messaging",
+      "supported": true,
+      "moveit_support": false,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 2,
+      "acl_supported": true,
+      "acl_description": "Captures channel-level access: public channels are visible to the whole workspace, private channels only to their members (resolved to member emails)."
+     },
+     {
+      "provider": "discord",
+      "category": "messaging",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 3,
+      "acl_supported": false
+     },
+     {
+      "provider": "notion",
+      "category": "docs",
+      "supported": true,
+      "moveit_support": false,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 3,
+      "acl_supported": false
+     },
+     {
+      "provider": "linear",
+      "category": "project_management",
+      "supported": true,
+      "moveit_support": false,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 4,
+      "acl_supported": true,
+      "acl_description": "Captures team-level access: a public team is readable by every caller in the tenant, a private team only by its members (resolved to member emails). Documents are governed by their owning team. Project resources make no claim and are not governed."
+     },
+     {
+      "provider": "github",
+      "category": "dev_tools",
+      "supported": true,
+      "moveit_support": false,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 5,
+      "acl_supported": true,
+      "acl_description": "Captures repo visibility; private repos additionally capture the collaborator list when every collaborator has a visible public email, otherwise a customer rule governs."
+     },
+     {
+      "provider": "salesforce",
+      "category": "crm",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 6,
+      "acl_supported": false
+     },
+     {
+      "provider": "google_drive",
+      "category": "storage",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 7,
+      "acl_supported": true,
+      "acl_description": "Captures per-file sharing (user, group, domain, and public grants) and detects permission-only changes between syncs via the Drive changes feed."
+     },
+     {
+      "provider": "hubspot",
+      "category": "crm",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 8,
+      "acl_supported": true,
+      "acl_description": "Captures the provider's own access permissions as document ACLs, enforced when a search request carries an acl list."
+     },
+     {
+      "provider": "zoom",
+      "category": "communications",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": true,
+      "rank": 9,
+      "acl_supported": false
+     },
+     {
+      "provider": "jira",
+      "category": "project_management",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 10,
+      "acl_supported": true,
+      "acl_description": "Captures who holds Browse access per project and per-issue security levels."
+     },
+     {
+      "provider": "confluence",
+      "category": "docs",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 11,
+      "acl_supported": true,
+      "acl_description": "Captures space-level view permissions (groups expanded to member emails) and per-page view restrictions."
+     },
+     {
+      "provider": "dropbox",
+      "category": "storage",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 12,
+      "acl_supported": true,
+      "acl_description": "Captures per-file sharing from the containing shared folder, resolved to member emails, including Dropbox team groups when the team scopes are granted. A folder whose group cannot be expanded is left unrestricted rather than hidden."
+     },
+     {
+      "provider": "stripe",
+      "category": "finance",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 13,
+      "acl_supported": false
+     },
+     {
+      "provider": "zendesk",
+      "category": "support",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": true,
+      "rank": 14,
+      "acl_supported": true,
+      "acl_description": "Captures per-ticket access from the group the ticket is assigned to, resolved to agent emails, plus its assignee, its requester and every admin. Comments and satisfaction ratings inherit their ticket's audience; an internal note additionally excludes the requester."
+     },
+     {
+      "provider": "dynamics",
+      "category": "crm",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 15,
+      "acl_supported": false
+     },
+     {
+      "provider": "okta",
+      "category": "security",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 16,
+      "acl_supported": false
+     },
+     {
+      "provider": "trello",
+      "category": "project_management",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 17,
+      "acl_supported": false
+     },
+     {
+      "provider": "asana",
+      "category": "project_management",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 18,
+      "acl_supported": true,
+      "acl_description": "Captures the provider's own access permissions as document ACLs, enforced when a search request carries an acl list."
+     },
+     {
+      "provider": "mailchimp",
+      "category": "marketing",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 19,
+      "acl_supported": false
+     },
+     {
+      "provider": "monday",
+      "category": "project_management",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 20,
+      "acl_supported": false
+     },
+     {
+      "provider": "clickup",
+      "category": "project_management",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 21,
+      "acl_supported": false
+     },
+     {
+      "provider": "quickbooks",
+      "category": "finance",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 22,
+      "acl_supported": false
+     },
+     {
+      "provider": "figma",
+      "category": "design",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 23,
+      "acl_supported": false
+     },
+     {
+      "provider": "xero",
+      "category": "finance",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 24,
+      "acl_supported": false
+     },
+     {
+      "provider": "datadog",
+      "category": "monitoring",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 25,
+      "acl_supported": true,
+      "acl_description": "Captures the provider's own access permissions as document ACLs, enforced when a search request carries an acl list."
+     },
+     {
+      "provider": "pagerduty",
+      "category": "monitoring",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 26,
+      "acl_supported": true,
+      "acl_description": "Captures who can read each service, schedule and escalation policy from PagerDuty's base roles: owners and admins see everything, everyone else sees a team-owned object only from inside one of its teams. Incidents follow their service."
+     },
+     {
+      "provider": "twilio",
+      "category": "communications",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 27,
+      "acl_supported": false
+     },
+     {
+      "provider": "servicenow",
+      "category": "support",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 28,
+      "acl_supported": true,
+      "acl_description": "Captures access rules where they can be read. A knowledge base comes from its user criteria, and is closed rather than opened when it specifies no Can Read list and the instance sets glide.knowman.block_access_with_no_user_criteria. A ticket or custom table comes from the roles on its read rules, resolved to member emails including a role held through a group. Catalog ITEMS carry their own audience per item, since a catalog has none of its own. Knowledge ARTICLES carry theirs too, but only on an instance that enables glide.knowman.apply_article_read_criteria, which is off by default and while off means ServiceNow ignores an article's Can Read list entirely; an article that does claim one is intersected with its knowledge base, because ServiceNow requires passing both. A rule carrying a condition or a script, and a script-based user criterion, have no audience that can be read from outside the instance, so that resource or record makes no claim and stays unrestricted with a warning. Most instances carry a scripted read rule on their ticket tables out of the box."
+     },
+     {
+      "provider": "workday",
+      "category": "hr",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 29,
+      "acl_supported": false
+     },
+     {
+      "provider": "gitlab",
+      "category": "dev_tools",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 30,
+      "acl_supported": true,
+      "acl_description": "Captures project visibility (public and internal projects are visible to everyone); private projects additionally capture every active member when each has a visible email, otherwise a customer rule governs."
+     },
+     {
+      "provider": "intercom",
+      "category": "support",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 31,
+      "acl_supported": true,
+      "acl_description": "Captures the provider's own access permissions as document ACLs, enforced when a search request carries an acl list."
+     },
+     {
+      "provider": "zoho_crm",
+      "category": "crm",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 32,
+      "acl_supported": false
+     },
+     {
+      "provider": "sendgrid",
+      "category": "email",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 33,
+      "acl_supported": false
+     },
+     {
+      "provider": "google_calendar",
+      "category": "calendar",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 34,
+      "acl_supported": false
+     },
+     {
+      "provider": "googleads",
+      "category": "marketing",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 35,
+      "acl_supported": false
+     },
+     {
+      "provider": "ga4",
+      "category": "analytics",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 36,
+      "acl_supported": false
+     },
+     {
+      "provider": "google_sheets",
+      "category": "productivity",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 37,
+      "acl_supported": false
+     },
+     {
+      "provider": "google_search_console",
+      "category": "analytics",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 38,
+      "acl_supported": false
+     },
+     {
+      "provider": "linkedin_ads",
+      "category": "marketing",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 39,
+      "acl_supported": false
+     },
+     {
+      "provider": "microsoft_teams",
+      "category": "productivity",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 40,
+      "acl_supported": true,
+      "acl_description": "Captures per-message access from Teams membership: a standard channel's messages are visible to the team's members, a private or shared channel's only to that channel's own members (including the members of every team a shared channel is shared with), and a chat message only to that chat's participants, all resolved to member emails. A roster that cannot be read in full leaves those messages unrestricted with a warning rather than stamping a partial allow-list."
+     },
+     {
+      "provider": "outlook",
+      "category": "productivity",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 40,
+      "acl_supported": true,
+      "acl_description": "Captures per-email access from the mailbox it was synced from: an email is visible to that mailbox's owner and nobody else. Recipients are indexed as searchable fields but are not granted access, because each recipient has their own copy in their own mailbox carrying its own audience; a recipient whose mailbox is not selected therefore does not see it at all. A mailbox whose address cannot be resolved leaves its mail unrestricted with a warning."
+     },
+     {
+      "provider": "tableau",
+      "category": "analytics",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 41,
+      "acl_supported": false
+     },
+     {
+      "provider": "box",
+      "category": "storage",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 42,
+      "acl_supported": false
+     },
+     {
+      "provider": "segment",
+      "category": "analytics",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 43,
+      "acl_supported": false
+     },
+     {
+      "provider": "mixpanel",
+      "category": "analytics",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 44,
+      "acl_supported": false
+     },
+     {
+      "provider": "sentry",
+      "category": "dev_tools",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 45,
+      "acl_supported": false
+     },
+     {
+      "provider": "launchdarkly",
+      "category": "dev_tools",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 46,
+      "acl_supported": true,
+      "acl_description": "Captures project-level view access by evaluating each member's base role, custom roles, team roles and permission grants. Flags, segments, environments and each audit entry about one project follow that project. Members, teams and account-level audit entries are not restricted."
+     },
+     {
+      "provider": "typeform",
+      "category": "forms",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": true,
+      "rank": 47,
+      "acl_supported": false
+     },
+     {
+      "provider": "surveymonkey",
+      "category": "forms",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 48,
+      "acl_supported": false
+     },
+     {
+      "provider": "smartsheet",
+      "category": "project_management",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 49,
+      "acl_supported": false
+     },
+     {
+      "provider": "airtable",
+      "category": "productivity",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 50,
+      "acl_supported": false
+     },
+     {
+      "provider": "wrike",
+      "category": "project_management",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 51,
+      "acl_supported": false
+     },
+     {
+      "provider": "contentful",
+      "category": "cms",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 52,
+      "acl_supported": false
+     },
+     {
+      "provider": "klaviyo",
+      "category": "marketing",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 53,
+      "acl_supported": false
+     },
+     {
+      "provider": "calendly",
+      "category": "scheduling",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 54,
+      "acl_supported": false
+     },
+     {
+      "provider": "netsuite",
+      "category": "finance",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 55,
+      "acl_supported": false
+     },
+     {
+      "provider": "marketo",
+      "category": "marketing",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 56,
+      "acl_supported": false
+     },
+     {
+      "provider": "pardot",
+      "category": "marketing",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 57,
+      "acl_supported": false
+     },
+     {
+      "provider": "greenhouse",
+      "category": "hr",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 58,
+      "acl_supported": false
+     },
+     {
+      "provider": "lever",
+      "category": "hr",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 59,
+      "acl_supported": false
+     },
+     {
+      "provider": "bamboohr",
+      "category": "hr",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 60,
+      "acl_supported": false
+     },
+     {
+      "provider": "pipedrive",
+      "category": "crm",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 61,
+      "acl_supported": false
+     },
+     {
+      "provider": "gong",
+      "category": "sales",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 62,
+      "acl_supported": false
+     },
+     {
+      "provider": "outreach",
+      "category": "sales",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 63,
+      "acl_supported": false
+     },
+     {
+      "provider": "freshdesk",
+      "category": "support",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 64,
+      "acl_supported": false
+     },
+     {
+      "provider": "helpscout",
+      "category": "support",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 65,
+      "acl_supported": false
+     },
+     {
+      "provider": "ringcentral",
+      "category": "communications",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 66,
+      "acl_supported": false
+     },
+     {
+      "provider": "amplitude",
+      "category": "analytics",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 68,
+      "acl_supported": false
+     },
+     {
+      "provider": "posthog",
+      "category": "analytics",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 69,
+      "acl_supported": false
+     },
+     {
+      "provider": "coda",
+      "category": "docs",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 70,
+      "acl_supported": false
+     },
+     {
+      "provider": "copper",
+      "category": "crm",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 71,
+      "acl_supported": false
+     },
+     {
+      "provider": "chargebee",
+      "category": "finance",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 72,
+      "acl_supported": false
+     },
+     {
+      "provider": "recurly",
+      "category": "finance",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 73,
+      "acl_supported": false
+     },
+     {
+      "provider": "zuora",
+      "category": "finance",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 74,
+      "acl_supported": false
+     },
+     {
+      "provider": "eloqua",
+      "category": "marketing",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 75,
+      "acl_supported": false
+     },
+     {
+      "provider": "crossbeam",
+      "category": "sales",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 76,
+      "acl_supported": false
+     },
+     {
+      "provider": "kustomer",
+      "category": "support",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 77,
+      "acl_supported": false
+     },
+     {
+      "provider": "gorgias",
+      "category": "support",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 78,
+      "acl_supported": false
+     },
+     {
+      "provider": "iterable",
+      "category": "marketing",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 79,
+      "acl_supported": false
+     },
+     {
+      "provider": "codat",
+      "category": "finance",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 80,
+      "acl_supported": false
+     },
+     {
+      "provider": "shortcut",
+      "category": "project_management",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 81,
+      "acl_supported": false
+     },
+     {
+      "provider": "affinity",
+      "category": "crm",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 82,
+      "acl_supported": false
+     },
+     {
+      "provider": "bookstack",
+      "category": "docs",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 83,
+      "acl_supported": false
+     },
+     {
+      "provider": "nextcloud",
+      "category": "storage",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 84,
+      "acl_supported": false
+     },
+     {
+      "provider": "uservoice",
+      "category": "support",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": 85,
+      "acl_supported": false
+     },
+     {
+      "provider": "bigquery",
+      "category": "analytics",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": null,
+      "acl_supported": false
+     },
+     {
+      "provider": "fireflies",
+      "category": "communications",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": null,
+      "acl_supported": false
+     },
+     {
+      "provider": "granola",
+      "category": "communications",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": null,
+      "acl_supported": false
+     },
+     {
+      "provider": "guru",
+      "category": "knowledge",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": true,
+      "rank": null,
+      "acl_supported": true,
+      "acl_description": "Captures the provider's own access permissions as document ACLs, enforced when a search request carries an acl list."
+     },
+     {
+      "provider": "loom",
+      "category": "communications",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": true,
+      "rank": null,
+      "acl_supported": false
+     },
+     {
+      "provider": "sharepoint",
+      "category": "productivity",
+      "supported": true,
+      "moveit_support": true,
+      "webhook_support": false,
+      "is_alpha": false,
+      "is_beta": false,
+      "rank": null,
+      "acl_supported": false
+     }
+    ]
+   }
+  },
+  "connectors.list": {
+   "status": 200,
+   "headers": {
+    "content-type": "application/json; charset=utf-8"
+   },
+   "body": {
+    "connectors": []
+   }
+  },
+  "graph.create": {
+   "status": 200,
+   "headers": {
+    "content-type": "application/json; charset=utf-8"
+   },
+   "body": {
+    "success": true,
+    "data": {
+     "cluster": "shared",
+     "database": "e2e-mcp-recorded-graph",
+     "status": "ready"
+    },
+    "error": null,
+    "meta": {
+     "request_id": "28edabbd-5b0c-440a-80b6-c4edea034889",
+     "api_version": "2.0.1",
+     "latency_ms": 46.9
+    }
+   }
+  },
+  "graph.query": {
+   "status": 200,
+   "headers": {
+    "content-type": "application/json; charset=utf-8"
+   },
+   "body": {
+    "success": true,
+    "data": [
+     {
+      "id": 1,
+      "name": "Ada"
+     }
+    ],
+    "error": null,
+    "meta": {
+     "request_id": "b08bf04d-171e-4e64-83d8-b561f806e0bf",
+     "api_version": "2.0.1",
+     "latency_ms": 82.2,
+     "tenant_id": "e2e-mcp-recorded-graph",
+     "database": "e2e-mcp-recorded-graph"
+    }
+   }
+  },
+  "graph.collections": {
+   "status": 200,
+   "headers": {
+    "content-type": "application/json; charset=utf-8"
+   },
+   "body": {
+    "success": true,
+    "data": {
+     "collections": [
+      "rec"
+     ],
+     "database": "e2e-mcp-recorded-graph"
+    },
+    "error": null,
+    "meta": {
+     "request_id": "aa84575e-6680-40e0-8b09-ca194ea894a3",
+     "api_version": "2.0.1",
+     "latency_ms": 12.4,
+     "tenant_id": "e2e-mcp-recorded-graph",
+     "database": "e2e-mcp-recorded-graph"
+    }
+   }
+  },
+  "graph.drop_collection": {
+   "status": 200,
+   "headers": {
+    "content-type": "application/json; charset=utf-8"
+   },
+   "body": {
+    "success": true,
+    "data": {
+     "collection": "rec",
+     "database": "e2e-mcp-recorded-graph",
+     "deleted": true
+    },
+    "error": null,
+    "meta": {
+     "request_id": "e0e67243-2d18-4b65-b2fb-e2aff72a036f",
+     "api_version": "2.0.1",
+     "latency_ms": 89.9,
+     "tenant_id": "e2e-mcp-recorded-graph",
+     "database": "e2e-mcp-recorded-graph"
+    }
+   }
+  },
+  "graph.drop_database": {
+   "status": 200,
+   "headers": {
+    "content-type": "application/json; charset=utf-8"
+   },
+   "body": {
+    "success": true,
+    "data": {
+     "cluster": "shared",
+     "database": "e2e-mcp-recorded-graph",
+     "deleted": true,
+     "deleted_collections": []
+    },
+    "error": null,
+    "meta": {
+     "request_id": "bc5089c5-cf0d-4f26-b238-3313e51a07de",
+     "api_version": "2.0.1",
+     "latency_ms": 64.5,
+     "tenant_id": "e2e-mcp-recorded-graph",
+     "database": "e2e-mcp-recorded-graph"
+    }
+   }
+  },
+  "query": {
+   "status": 200,
+   "headers": {
+    "content-type": "application/json; charset=utf-8"
+   },
+   "body": {
+    "success": true,
+    "data": {
+     "tabular_data": null,
+     "chunks": [
+      {
+       "chunk_uuid": "rec-k-rel_chunk_0000",
+       "id": "rec-k-rel",
+       "chunk_content": "Billing depends on the ledger service.",
+       "source_type": "document",
+       "source_upload_time": "2026-11-28T03:46:06.61668Z",
+       "source_title": "Billing dependencies.md",
+       "source_last_updated_time": "2026-11-28T03:46:06.61668Z",
+       "layout": null,
+       "relevancy_score": 0.7768427210836771,
+       "additional_metadata": {
+        "reviewed": true
+       },
+       "metadata": {
+        "team": "payments"
+       },
+       "extra_context_ids": null
+      }
+     ],
+     "sources": [
+      {
+       "id": "rec-k-rel",
+       "title": "Billing dependencies.md",
+       "type": "document",
+       "description": "",
+       "url": "",
+       "timestamp": "2026-11-28T03:46:06.61668Z",
+       "metadata": {
+        "team": "payments"
+       },
+       "additional_metadata": {
+        "reviewed": true
+       },
+       "app_kind": null,
+       "app_provider": null,
+       "app_external_id": null
+      }
+     ],
+     "graph_context": {
+      "query_paths": [
+       {
+        "triplets": [
+         {
+          "source": {
+           "entity_id": "4b1264cac8f4e74f0b8bc0528d7547bb",
+           "identifier": null,
+           "name": "billing",
+           "namespace": "products",
+           "type": "PRODUCT"
+          },
+          "relation": {
+           "canonical_predicate": "depends on",
+           "chunk_id": "rec-k-rel_chunk_0000",
+           "context": "Billing depends on the ledger service.",
+           "raw_predicate": "depends on",
+           "relationship_id": "67a8ac243b680e372a3dff679074a66b",
+           "source_entity_id": "4b1264cac8f4e74f0b8bc0528d7547bb",
+           "target_entity_id": "bdf9798baa4c3a61f0d50db4135b94fa",
+           "timestamp": 1795837570
+          },
+          "target": {
+           "entity_id": "bdf9798baa4c3a61f0d50db4135b94fa",
+           "identifier": null,
+           "name": "ledger service",
+           "namespace": "products",
+           "type": "PRODUCT"
+          }
+         }
+        ],
+        "relevancy_score": 1,
+        "combined_context": "Graph summary cluster 1 (chronological). Walks: billing → ledger service",
+        "group_id": null,
+        "source_chunk_ids": null
+       }
+      ],
+      "chunk_relations": [],
+      "chunk_id_to_group_ids": {}
+     },
+     "additional_graph_context": {
+      "rec-k-page-0_chunk_0000": {
+       "chunk_uuid": "rec-k-page-0_chunk_0000",
+       "id": "rec-k-page-0",
+       "chunk_content": "Connector message 0 from the payments on-call channel.",
+       "source_type": "document",
+       "source_upload_time": "2026-11-28T03:45:55.04777Z",
+       "source_title": "Slack message 0.md",
+       "source_last_updated_time": "2026-11-28T03:45:55.04777Z",
+       "layout": null,
+       "relevancy_score": 0.7385918490052417,
+       "additional_metadata": {
+        "app_provider": "slack",
+        "author_email": "ada.lovelace@payments.example.com",
+        "author_name": "Ada Lovelace (Payments SRE team)",
+        "channel_id": "C0E2E1234567",
+        "channel_name": "payments-oncall-escalations-emea",
+        "connector_id": "conn_01HZXE2EABCDEFGHJKMNPQRSTV",
+        "github_issue_number": 4201,
+        "github_issue_url": "https://github.com/hydra-db/hydradb-application/issues/4201#issuecomment-1732780000",
+        "github_repo": "hydra-db/hydradb-application",
+        "permalink": "https://example.slack.com/archives/C0E2E1234567/p1732780000000101?thread_ts=1732779000.000050&cid=C0E2E1234567",
+        "slack_ts": "1732780000.000101",
+        "thread_ts": "1732779000.000050",
+        "workspace_id": "T0E2E1234567"
+       },
+       "metadata": {},
+       "extra_context_ids": null
+      }
+     },
+     "additional_context": {
+      "rec-k-page-0_chunk_0000": {
+       "chunk_uuid": "rec-k-page-0_chunk_0000",
+       "id": "rec-k-page-0",
+       "chunk_content": "Connector message 0 from the payments on-call channel.",
+       "source_type": "document",
+       "source_upload_time": "2026-11-28T03:45:55.04777Z",
+       "source_title": "Slack message 0.md",
+       "source_last_updated_time": "2026-11-28T03:45:55.04777Z",
+       "layout": null,
+       "relevancy_score": 0.7385918490052417,
+       "additional_metadata": {
+        "app_provider": "slack",
+        "author_email": "ada.lovelace@payments.example.com",
+        "author_name": "Ada Lovelace (Payments SRE team)",
+        "channel_id": "C0E2E1234567",
+        "channel_name": "payments-oncall-escalations-emea",
+        "connector_id": "conn_01HZXE2EABCDEFGHJKMNPQRSTV",
+        "github_issue_number": 4201,
+        "github_issue_url": "https://github.com/hydra-db/hydradb-application/issues/4201#issuecomment-1732780000",
+        "github_repo": "hydra-db/hydradb-application",
+        "permalink": "https://example.slack.com/archives/C0E2E1234567/p1732780000000101?thread_ts=1732779000.000050&cid=C0E2E1234567",
+        "slack_ts": "1732780000.000101",
+        "thread_ts": "1732779000.000050",
+        "workspace_id": "T0E2E1234567"
+       },
+       "metadata": {},
+       "extra_context_ids": null
+      }
+     },
+     "graph": {
+      "paths": [
+       {
+        "triplets": [
+         {
+          "source": {
+           "entity_id": "4b1264cac8f4e74f0b8bc0528d7547bb",
+           "identifier": null,
+           "name": "billing",
+           "namespace": "products",
+           "type": "PRODUCT"
+          },
+          "relation": {
+           "canonical_predicate": "depends on",
+           "chunk_id": "rec-k-rel_chunk_0000",
+           "context": "Billing depends on the ledger service.",
+           "raw_predicate": "depends on",
+           "relationship_id": "67a8ac243b680e372a3dff679074a66b",
+           "source_entity_id": "4b1264cac8f4e74f0b8bc0528d7547bb",
+           "target_entity_id": "bdf9798baa4c3a61f0d50db4135b94fa",
+           "timestamp": 1795837570
+          },
+          "target": {
+           "entity_id": "bdf9798baa4c3a61f0d50db4135b94fa",
+           "identifier": null,
+           "name": "ledger service",
+           "namespace": "products",
+           "type": "PRODUCT"
+          }
+         }
+        ],
+        "relevancy_score": 1,
+        "combined_context": "Graph summary cluster 1 (chronological). Walks: billing → ledger service",
+        "chunk_ids": []
+       }
+      ]
+     },
+     "forceful_relations": {
+      "declared": [
+       {
+        "via": {
+         "from": "rec-k-rel",
+         "to": "rec-k-page-0"
+        },
+        "chunk": {
+         "chunk_uuid": "rec-k-page-0_chunk_0000",
+         "id": "rec-k-page-0",
+         "chunk_content": "Connector message 0 from the payments on-call channel.",
+         "source_type": "document",
+         "source_upload_time": "2026-11-28T03:45:55.04777Z",
+         "source_title": "Slack message 0.md",
+         "source_last_updated_time": "2026-11-28T03:45:55.04777Z",
+         "layout": null,
+         "relevancy_score": 0.7385918490052417,
+         "additional_metadata": {
+          "app_provider": "slack",
+          "author_email": "ada.lovelace@payments.example.com",
+          "author_name": "Ada Lovelace (Payments SRE team)",
+          "channel_id": "C0E2E1234567",
+          "channel_name": "payments-oncall-escalations-emea",
+          "connector_id": "conn_01HZXE2EABCDEFGHJKMNPQRSTV",
+          "github_issue_number": 4201,
+          "github_issue_url": "https://github.com/hydra-db/hydradb-application/issues/4201#issuecomment-1732780000",
+          "github_repo": "hydra-db/hydradb-application",
+          "permalink": "https://example.slack.com/archives/C0E2E1234567/p1732780000000101?thread_ts=1732779000.000050&cid=C0E2E1234567",
+          "slack_ts": "1732780000.000101",
+          "thread_ts": "1732779000.000050",
+          "workspace_id": "T0E2E1234567"
+         },
+         "metadata": {},
+         "extra_context_ids": null
+        }
+       }
+      ],
+      "inferred": []
+     },
+     "llm_prompt": "# Instructions\n\nThis is the response markdown for the query: Who depends on the ledger service?\n\nEach result below has one or both of these parts:\n- **Original content:** text from the original source document.\n- **Enriched content:** extra context added by enrichment on top of the original content, when there is any. It is not part of the source document.\n\nResults labelled R1, R2 … are forceful relations: documents the user linked to these results when adding their data. They may contain related information the user wanted. They are not ranked by relevance.\n\n**Found:** 1 result across 1 source · 1 related fact\n\n## Results\n\nThe results for this query. R1, R2 … are forceful relations; 1, 2 … are the best matches, in order. Refer to them by label, e.g. [R1] or [1].\n\n### R1. Slack message 0.md\n- **Relevance:** 0.74 · **Type:** document\n- **Id:** rec-k-page-0 · **Last updated:** 2026-11-28T03:45:55.04777Z\n- _linked via declared relation rec-k-rel → rec-k-page-0_\n\n**Original content:**\nConnector message 0 from the payments on-call channel.\n\n---\n\n### 1. Billing dependencies.md\n- **Relevance:** 0.78 · **Type:** document\n- **Id:** rec-k-rel · **Last updated:** 2026-11-28T03:46:06.61668Z\n\n**Original content:**\nBilling depends on the ledger service.\n\n## Related facts\n\nFacts from the knowledge graph that connect entities in the results.\n\n- **billing** —depends on→ **ledger service** (relevance 1.00)\n  - evidence: \"Billing depends on the ledger service.\"\n\n## Sources\n\nThe documents the results above came from, each listed once.\n\n1. **Billing dependencies.md** (document, id: rec-k-rel) — updated 2026-11-28T03:46:06.61668Z\n"
+    },
+    "error": null,
+    "meta": {
+     "request_id": "5fe790ce-d25b-4510-84f6-7a9f3e5c77df",
+     "api_version": "2.0.1",
+     "latency_ms": 1071.4,
+     "tenant_id": "e2e-mcp-recorded",
+     "database": "e2e-mcp-recorded",
+     "sub_tenant_id": "jfzcqcfkjy",
+     "collection": "jfzcqcfkjy",
+     "source_type": "knowledge"
+    }
+   }
+  },
+  "feedback": {
+   "status": 201,
+   "headers": {
+    "content-type": "application/json; charset=utf-8"
+   },
+   "body": {
+    "success": true,
+    "data": {
+     "feedback_id": "e93a2774-cedd-4061-ba6f-3bc046497481",
+     "request_id": "5fe790ce-d25b-4510-84f6-7a9f3e5c77df",
+     "recorded": true,
+     "created_at": "2026-11-28T03:46:25.609219678Z",
+     "message": "Feedback recorded. Thank you — it is used to validate and improve retrieval quality."
+    },
+    "error": null,
+    "meta": {
+     "request_id": "00fb3dc0-3877-4f58-8d44-61e6eef22638",
+     "api_version": "2.0.1",
+     "latency_ms": 32.2
+    }
+   }
+  },
+  "list": {
+   "status": 200,
+   "headers": {
+    "content-type": "application/json; charset=utf-8"
+   },
+   "body": {
+    "success": true,
+    "data": {
+     "success": true,
+     "message": "Successfully fetched sources",
+     "sources": [
+      {
+       "additional_metadata": {
+        "reviewed": true
+       },
+       "collection": "jfzcqcfkjy",
+       "database": "e2e-mcp-recorded",
+       "id": "rec-k-rel",
+       "sub_tenant_id": "jfzcqcfkjy",
+       "tenant_id": "e2e-mcp-recorded"
+      },
+      {
+       "additional_metadata": {
+        "app_provider": "slack",
+        "author_email": "ada.lovelace@payments.example.com",
+        "author_name": "Ada Lovelace (Payments SRE team)",
+        "channel_id": "C0E2E1234567",
+        "channel_name": "payments-oncall-escalations-emea",
+        "connector_id": "conn_01HZXE2EABCDEFGHJKMNPQRSTV",
+        "github_issue_number": 4250,
+        "github_issue_url": "https://github.com/hydra-db/hydradb-application/issues/4250#issuecomment-1732780000",
+        "github_repo": "hydra-db/hydradb-application",
+        "permalink": "https://example.slack.com/archives/C0E2E1234567/p1732780000000150?thread_ts=1732779000.000050&cid=C0E2E1234567",
+        "slack_ts": "1732780000.000150",
+        "thread_ts": "1732779000.000050",
+        "workspace_id": "T0E2E1234567"
+       },
+       "collection": "jfzcqcfkjy",
+       "database": "e2e-mcp-recorded",
+       "id": "rec-k-page-49",
+       "sub_tenant_id": "jfzcqcfkjy",
+       "tenant_id": "e2e-mcp-recorded"
+      },
+      {
+       "additional_metadata": {
+        "app_provider": "slack",
+        "author_email": "ada.lovelace@payments.example.com",
+        "author_name": "Ada Lovelace (Payments SRE team)",
+        "channel_id": "C0E2E1234567",
+        "channel_name": "payments-oncall-escalations-emea",
+        "connector_id": "conn_01HZXE2EABCDEFGHJKMNPQRSTV",
+        "github_issue_number": 4248,
+        "github_issue_url": "https://github.com/hydra-db/hydradb-application/issues/4248#issuecomment-1732780000",
+        "github_repo": "hydra-db/hydradb-application",
+        "permalink": "https://example.slack.com/archives/C0E2E1234567/p1732780000000148?thread_ts=1732779000.000050&cid=C0E2E1234567",
+        "slack_ts": "1732780000.000148",
+        "thread_ts": "1732779000.000050",
+        "workspace_id": "T0E2E1234567"
+       },
+       "collection": "jfzcqcfkjy",
+       "database": "e2e-mcp-recorded",
+       "id": "rec-k-page-47",
+       "sub_tenant_id": "jfzcqcfkjy",
+       "tenant_id": "e2e-mcp-recorded"
+      },
+      {
+       "additional_metadata": {
+        "app_provider": "slack",
+        "author_email": "ada.lovelace@payments.example.com",
+        "author_name": "Ada Lovelace (Payments SRE team)",
+        "channel_id": "C0E2E1234567",
+        "channel_name": "payments-oncall-escalations-emea",
+        "connector_id": "conn_01HZXE2EABCDEFGHJKMNPQRSTV",
+        "github_issue_number": 4247,
+        "github_issue_url": "https://github.com/hydra-db/hydradb-application/issues/4247#issuecomment-1732780000",
+        "github_repo": "hydra-db/hydradb-application",
+        "permalink": "https://example.slack.com/archives/C0E2E1234567/p1732780000000147?thread_ts=1732779000.000050&cid=C0E2E1234567",
+        "slack_ts": "1732780000.000147",
+        "thread_ts": "1732779000.000050",
+        "workspace_id": "T0E2E1234567"
+       },
+       "collection": "jfzcqcfkjy",
+       "database": "e2e-mcp-recorded",
+       "id": "rec-k-page-46",
+       "sub_tenant_id": "jfzcqcfkjy",
+       "tenant_id": "e2e-mcp-recorded"
+      },
+      {
+       "additional_metadata": {
+        "app_provider": "slack",
+        "author_email": "ada.lovelace@payments.example.com",
+        "author_name": "Ada Lovelace (Payments SRE team)",
+        "channel_id": "C0E2E1234567",
+        "channel_name": "payments-oncall-escalations-emea",
+        "connector_id": "conn_01HZXE2EABCDEFGHJKMNPQRSTV",
+        "github_issue_number": 4246,
+        "github_issue_url": "https://github.com/hydra-db/hydradb-application/issues/4246#issuecomment-1732780000",
+        "github_repo": "hydra-db/hydradb-application",
+        "permalink": "https://example.slack.com/archives/C0E2E1234567/p1732780000000146?thread_ts=1732779000.000050&cid=C0E2E1234567",
+        "slack_ts": "1732780000.000146",
+        "thread_ts": "1732779000.000050",
+        "workspace_id": "T0E2E1234567"
+       },
+       "collection": "jfzcqcfkjy",
+       "database": "e2e-mcp-recorded",
+       "id": "rec-k-page-45",
+       "sub_tenant_id": "jfzcqcfkjy",
+       "tenant_id": "e2e-mcp-recorded"
+      },
+      {
+       "additional_metadata": {
+        "app_provider": "slack",
+        "author_email": "ada.lovelace@payments.example.com",
+        "author_name": "Ada Lovelace (Payments SRE team)",
+        "channel_id": "C0E2E1234567",
+        "channel_name": "payments-oncall-escalations-emea",
+        "connector_id": "conn_01HZXE2EABCDEFGHJKMNPQRSTV",
+        "github_issue_number": 4242,
+        "github_issue_url": "https://github.com/hydra-db/hydradb-application/issues/4242#issuecomment-1732780000",
+        "github_repo": "hydra-db/hydradb-application",
+        "permalink": "https://example.slack.com/archives/C0E2E1234567/p1732780000000142?thread_ts=1732779000.000050&cid=C0E2E1234567",
+        "slack_ts": "1732780000.000142",
+        "thread_ts": "1732779000.000050",
+        "workspace_id": "T0E2E1234567"
+       },
+       "collection": "jfzcqcfkjy",
+       "database": "e2e-mcp-recorded",
+       "id": "rec-k-page-41",
+       "sub_tenant_id": "jfzcqcfkjy",
+       "tenant_id": "e2e-mcp-recorded"
+      },
+      {
+       "additional_metadata": {
+        "app_provider": "slack",
+        "author_email": "ada.lovelace@payments.example.com",
+        "author_name": "Ada Lovelace (Payments SRE team)",
+        "channel_id": "C0E2E1234567",
+        "channel_name": "payments-oncall-escalations-emea",
+        "connector_id": "conn_01HZXE2EABCDEFGHJKMNPQRSTV",
+        "github_issue_number": 4244,
+        "github_issue_url": "https://github.com/hydra-db/hydradb-application/issues/4244#issuecomment-1732780000",
+        "github_repo": "hydra-db/hydradb-application",
+        "permalink": "https://example.slack.com/archives/C0E2E1234567/p1732780000000144?thread_ts=1732779000.000050&cid=C0E2E1234567",
+        "slack_ts": "1732780000.000144",
+        "thread_ts": "1732779000.000050",
+        "workspace_id": "T0E2E1234567"
+       },
+       "collection": "jfzcqcfkjy",
+       "database": "e2e-mcp-recorded",
+       "id": "rec-k-page-43",
+       "sub_tenant_id": "jfzcqcfkjy",
+       "tenant_id": "e2e-mcp-recorded"
+      },
+      {
+       "additional_metadata": {
+        "app_provider": "slack",
+        "author_email": "ada.lovelace@payments.example.com",
+        "author_name": "Ada Lovelace (Payments SRE team)",
+        "channel_id": "C0E2E1234567",
+        "channel_name": "payments-oncall-escalations-emea",
+        "connector_id": "conn_01HZXE2EABCDEFGHJKMNPQRSTV",
+        "github_issue_number": 4249,
+        "github_issue_url": "https://github.com/hydra-db/hydradb-application/issues/4249#issuecomment-1732780000",
+        "github_repo": "hydra-db/hydradb-application",
+        "permalink": "https://example.slack.com/archives/C0E2E1234567/p1732780000000149?thread_ts=1732779000.000050&cid=C0E2E1234567",
+        "slack_ts": "1732780000.000149",
+        "thread_ts": "1732779000.000050",
+        "workspace_id": "T0E2E1234567"
+       },
+       "collection": "jfzcqcfkjy",
+       "database": "e2e-mcp-recorded",
+       "id": "rec-k-page-48",
+       "sub_tenant_id": "jfzcqcfkjy",
+       "tenant_id": "e2e-mcp-recorded"
+      },
+      {
+       "additional_metadata": {
+        "app_provider": "slack",
+        "author_email": "ada.lovelace@payments.example.com",
+        "author_name": "Ada Lovelace (Payments SRE team)",
+        "channel_id": "C0E2E1234567",
+        "channel_name": "payments-oncall-escalations-emea",
+        "connector_id": "conn_01HZXE2EABCDEFGHJKMNPQRSTV",
+        "github_issue_number": 4245,
+        "github_issue_url": "https://github.com/hydra-db/hydradb-application/issues/4245#issuecomment-1732780000",
+        "github_repo": "hydra-db/hydradb-application",
+        "permalink": "https://example.slack.com/archives/C0E2E1234567/p1732780000000145?thread_ts=1732779000.000050&cid=C0E2E1234567",
+        "slack_ts": "1732780000.000145",
+        "thread_ts": "1732779000.000050",
+        "workspace_id": "T0E2E1234567"
+       },
+       "collection": "jfzcqcfkjy",
+       "database": "e2e-mcp-recorded",
+       "id": "rec-k-page-44",
+       "sub_tenant_id": "jfzcqcfkjy",
+       "tenant_id": "e2e-mcp-recorded"
+      },
+      {
+       "additional_metadata": {
+        "app_provider": "slack",
+        "author_email": "ada.lovelace@payments.example.com",
+        "author_name": "Ada Lovelace (Payments SRE team)",
+        "channel_id": "C0E2E1234567",
+        "channel_name": "payments-oncall-escalations-emea",
+        "connector_id": "conn_01HZXE2EABCDEFGHJKMNPQRSTV",
+        "github_issue_number": 4240,
+        "github_issue_url": "https://github.com/hydra-db/hydradb-application/issues/4240#issuecomment-1732780000",
+        "github_repo": "hydra-db/hydradb-application",
+        "permalink": "https://example.slack.com/archives/C0E2E1234567/p1732780000000140?thread_ts=1732779000.000050&cid=C0E2E1234567",
+        "slack_ts": "1732780000.000140",
+        "thread_ts": "1732779000.000050",
+        "workspace_id": "T0E2E1234567"
+       },
+       "collection": "jfzcqcfkjy",
+       "database": "e2e-mcp-recorded",
+       "id": "rec-k-page-39",
+       "sub_tenant_id": "jfzcqcfkjy",
+       "tenant_id": "e2e-mcp-recorded"
+      },
+      {
+       "additional_metadata": {
+        "app_provider": "slack",
+        "author_email": "ada.lovelace@payments.example.com",
+        "author_name": "Ada Lovelace (Payments SRE team)",
+        "channel_id": "C0E2E1234567",
+        "channel_name": "payments-oncall-escalations-emea",
+        "connector_id": "conn_01HZXE2EABCDEFGHJKMNPQRSTV",
+        "github_issue_number": 4239,
+        "github_issue_url": "https://github.com/hydra-db/hydradb-application/issues/4239#issuecomment-1732780000",
+        "github_repo": "hydra-db/hydradb-application",
+        "permalink": "https://example.slack.com/archives/C0E2E1234567/p1732780000000139?thread_ts=1732779000.000050&cid=C0E2E1234567",
+        "slack_ts": "1732780000.000139",
+        "thread_ts": "1732779000.000050",
+        "workspace_id": "T0E2E1234567"
+       },
+       "collection": "jfzcqcfkjy",
+       "database": "e2e-mcp-recorded",
+       "id": "rec-k-page-38",
+       "sub_tenant_id": "jfzcqcfkjy",
+       "tenant_id": "e2e-mcp-recorded"
+      },
+      {
+       "additional_metadata": {
+        "app_provider": "slack",
+        "author_email": "ada.lovelace@payments.example.com",
+        "author_name": "Ada Lovelace (Payments SRE team)",
+        "channel_id": "C0E2E1234567",
+        "channel_name": "payments-oncall-escalations-emea",
+        "connector_id": "conn_01HZXE2EABCDEFGHJKMNPQRSTV",
+        "github_issue_number": 4243,
+        "github_issue_url": "https://github.com/hydra-db/hydradb-application/issues/4243#issuecomment-1732780000",
+        "github_repo": "hydra-db/hydradb-application",
+        "permalink": "https://example.slack.com/archives/C0E2E1234567/p1732780000000143?thread_ts=1732779000.000050&cid=C0E2E1234567",
+        "slack_ts": "1732780000.000143",
+        "thread_ts": "1732779000.000050",
+        "workspace_id": "T0E2E1234567"
+       },
+       "collection": "jfzcqcfkjy",
+       "database": "e2e-mcp-recorded",
+       "id": "rec-k-page-42",
+       "sub_tenant_id": "jfzcqcfkjy",
+       "tenant_id": "e2e-mcp-recorded"
+      },
+      {
+       "additional_metadata": {
+        "app_provider": "slack",
+        "author_email": "ada.lovelace@payments.example.com",
+        "author_name": "Ada Lovelace (Payments SRE team)",
+        "channel_id": "C0E2E1234567",
+        "channel_name": "payments-oncall-escalations-emea",
+        "connector_id": "conn_01HZXE2EABCDEFGHJKMNPQRSTV",
+        "github_issue_number": 4238,
+        "github_issue_url": "https://github.com/hydra-db/hydradb-application/issues/4238#issuecomment-1732780000",
+        "github_repo": "hydra-db/hydradb-application",
+        "permalink": "https://example.slack.com/archives/C0E2E1234567/p1732780000000138?thread_ts=1732779000.000050&cid=C0E2E1234567",
+        "slack_ts": "1732780000.000138",
+        "thread_ts": "1732779000.000050",
+        "workspace_id": "T0E2E1234567"
+       },
+       "collection": "jfzcqcfkjy",
+       "database": "e2e-mcp-recorded",
+       "id": "rec-k-page-37",
+       "sub_tenant_id": "jfzcqcfkjy",
+       "tenant_id": "e2e-mcp-recorded"
+      },
+      {
+       "additional_metadata": {
+        "app_provider": "slack",
+        "author_email": "ada.lovelace@payments.example.com",
+        "author_name": "Ada Lovelace (Payments SRE team)",
+        "channel_id": "C0E2E1234567",
+        "channel_name": "payments-oncall-escalations-emea",
+        "connector_id": "conn_01HZXE2EABCDEFGHJKMNPQRSTV",
+        "github_issue_number": 4241,
+        "github_issue_url": "https://github.com/hydra-db/hydradb-application/issues/4241#issuecomment-1732780000",
+        "github_repo": "hydra-db/hydradb-application",
+        "permalink": "https://example.slack.com/archives/C0E2E1234567/p1732780000000141?thread_ts=1732779000.000050&cid=C0E2E1234567",
+        "slack_ts": "1732780000.000141",
+        "thread_ts": "1732779000.000050",
+        "workspace_id": "T0E2E1234567"
+       },
+       "collection": "jfzcqcfkjy",
+       "database": "e2e-mcp-recorded",
+       "id": "rec-k-page-40",
+       "sub_tenant_id": "jfzcqcfkjy",
+       "tenant_id": "e2e-mcp-recorded"
+      },
+      {
+       "additional_metadata": {
+        "app_provider": "slack",
+        "author_email": "ada.lovelace@payments.example.com",
+        "author_name": "Ada Lovelace (Payments SRE team)",
+        "channel_id": "C0E2E1234567",
+        "channel_name": "payments-oncall-escalations-emea",
+        "connector_id": "conn_01HZXE2EABCDEFGHJKMNPQRSTV",
+        "github_issue_number": 4235,
+        "github_issue_url": "https://github.com/hydra-db/hydradb-application/issues/4235#issuecomment-1732780000",
+        "github_repo": "hydra-db/hydradb-application",
+        "permalink": "https://example.slack.com/archives/C0E2E1234567/p1732780000000135?thread_ts=1732779000.000050&cid=C0E2E1234567",
+        "slack_ts": "1732780000.000135",
+        "thread_ts": "1732779000.000050",
+        "workspace_id": "T0E2E1234567"
+       },
+       "collection": "jfzcqcfkjy",
+       "database": "e2e-mcp-recorded",
+       "id": "rec-k-page-34",
+       "sub_tenant_id": "jfzcqcfkjy",
+       "tenant_id": "e2e-mcp-recorded"
+      },
+      {
+       "additional_metadata": {
+        "app_provider": "slack",
+        "author_email": "ada.lovelace@payments.example.com",
+        "author_name": "Ada Lovelace (Payments SRE team)",
+        "channel_id": "C0E2E1234567",
+        "channel_name": "payments-oncall-escalations-emea",
+        "connector_id": "conn_01HZXE2EABCDEFGHJKMNPQRSTV",
+        "github_issue_number": 4237,
+        "github_issue_url": "https://github.com/hydra-db/hydradb-application/issues/4237#issuecomment-1732780000",
+        "github_repo": "hydra-db/hydradb-application",
+        "permalink": "https://example.slack.com/archives/C0E2E1234567/p1732780000000137?thread_ts=1732779000.000050&cid=C0E2E1234567",
+        "slack_ts": "1732780000.000137",
+        "thread_ts": "1732779000.000050",
+        "workspace_id": "T0E2E1234567"
+       },
+       "collection": "jfzcqcfkjy",
+       "database": "e2e-mcp-recorded",
+       "id": "rec-k-page-36",
+       "sub_tenant_id": "jfzcqcfkjy",
+       "tenant_id": "e2e-mcp-recorded"
+      },
+      {
+       "additional_metadata": {
+        "app_provider": "slack",
+        "author_email": "ada.lovelace@payments.example.com",
+        "author_name": "Ada Lovelace (Payments SRE team)",
+        "channel_id": "C0E2E1234567",
+        "channel_name": "payments-oncall-escalations-emea",
+        "connector_id": "conn_01HZXE2EABCDEFGHJKMNPQRSTV",
+        "github_issue_number": 4236,
+        "github_issue_url": "https://github.com/hydra-db/hydradb-application/issues/4236#issuecomment-1732780000",
+        "github_repo": "hydra-db/hydradb-application",
+        "permalink": "https://example.slack.com/archives/C0E2E1234567/p1732780000000136?thread_ts=1732779000.000050&cid=C0E2E1234567",
+        "slack_ts": "1732780000.000136",
+        "thread_ts": "1732779000.000050",
+        "workspace_id": "T0E2E1234567"
+       },
+       "collection": "jfzcqcfkjy",
+       "database": "e2e-mcp-recorded",
+       "id": "rec-k-page-35",
+       "sub_tenant_id": "jfzcqcfkjy",
+       "tenant_id": "e2e-mcp-recorded"
+      },
+      {
+       "additional_metadata": {
+        "app_provider": "slack",
+        "author_email": "ada.lovelace@payments.example.com",
+        "author_name": "Ada Lovelace (Payments SRE team)",
+        "channel_id": "C0E2E1234567",
+        "channel_name": "payments-oncall-escalations-emea",
+        "connector_id": "conn_01HZXE2EABCDEFGHJKMNPQRSTV",
+        "github_issue_number": 4234,
+        "github_issue_url": "https://github.com/hydra-db/hydradb-application/issues/4234#issuecomment-1732780000",
+        "github_repo": "hydra-db/hydradb-application",
+        "permalink": "https://example.slack.com/archives/C0E2E1234567/p1732780000000134?thread_ts=1732779000.000050&cid=C0E2E1234567",
+        "slack_ts": "1732780000.000134",
+        "thread_ts": "1732779000.000050",
+        "workspace_id": "T0E2E1234567"
+       },
+       "collection": "jfzcqcfkjy",
+       "database": "e2e-mcp-recorded",
+       "id": "rec-k-page-33",
+       "sub_tenant_id": "jfzcqcfkjy",
+       "tenant_id": "e2e-mcp-recorded"
+      },
+      {
+       "additional_metadata": {
+        "app_provider": "slack",
+        "author_email": "ada.lovelace@payments.example.com",
+        "author_name": "Ada Lovelace (Payments SRE team)",
+        "channel_id": "C0E2E1234567",
+        "channel_name": "payments-oncall-escalations-emea",
+        "connector_id": "conn_01HZXE2EABCDEFGHJKMNPQRSTV",
+        "github_issue_number": 4230,
+        "github_issue_url": "https://github.com/hydra-db/hydradb-application/issues/4230#issuecomment-1732780000",
+        "github_repo": "hydra-db/hydradb-application",
+        "permalink": "https://example.slack.com/archives/C0E2E1234567/p1732780000000130?thread_ts=1732779000.000050&cid=C0E2E1234567",
+        "slack_ts": "1732780000.000130",
+        "thread_ts": "1732779000.000050",
+        "workspace_id": "T0E2E1234567"
+       },
+       "collection": "jfzcqcfkjy",
+       "database": "e2e-mcp-recorded",
+       "id": "rec-k-page-29",
+       "sub_tenant_id": "jfzcqcfkjy",
+       "tenant_id": "e2e-mcp-recorded"
+      },
+      {
+       "additional_metadata": {
+        "app_provider": "slack",
+        "author_email": "ada.lovelace@payments.example.com",
+        "author_name": "Ada Lovelace (Payments SRE team)",
+        "channel_id": "C0E2E1234567",
+        "channel_name": "payments-oncall-escalations-emea",
+        "connector_id": "conn_01HZXE2EABCDEFGHJKMNPQRSTV",
+        "github_issue_number": 4231,
+        "github_issue_url": "https://github.com/hydra-db/hydradb-application/issues/4231#issuecomment-1732780000",
+        "github_repo": "hydra-db/hydradb-application",
+        "permalink": "https://example.slack.com/archives/C0E2E1234567/p1732780000000131?thread_ts=1732779000.000050&cid=C0E2E1234567",
+        "slack_ts": "1732780000.000131",
+        "thread_ts": "1732779000.000050",
+        "workspace_id": "T0E2E1234567"
+       },
+       "collection": "jfzcqcfkjy",
+       "database": "e2e-mcp-recorded",
+       "id": "rec-k-page-30",
+       "sub_tenant_id": "jfzcqcfkjy",
+       "tenant_id": "e2e-mcp-recorded"
+      },
+      {
+       "additional_metadata": {
+        "app_provider": "slack",
+        "author_email": "ada.lovelace@payments.example.com",
+        "author_name": "Ada Lovelace (Payments SRE team)",
+        "channel_id": "C0E2E1234567",
+        "channel_name": "payments-oncall-escalations-emea",
+        "connector_id": "conn_01HZXE2EABCDEFGHJKMNPQRSTV",
+        "github_issue_number": 4233,
+        "github_issue_url": "https://github.com/hydra-db/hydradb-application/issues/4233#issuecomment-1732780000",
+        "github_repo": "hydra-db/hydradb-application",
+        "permalink": "https://example.slack.com/archives/C0E2E1234567/p1732780000000133?thread_ts=1732779000.000050&cid=C0E2E1234567",
+        "slack_ts": "1732780000.000133",
+        "thread_ts": "1732779000.000050",
+        "workspace_id": "T0E2E1234567"
+       },
+       "collection": "jfzcqcfkjy",
+       "database": "e2e-mcp-recorded",
+       "id": "rec-k-page-32",
+       "sub_tenant_id": "jfzcqcfkjy",
+       "tenant_id": "e2e-mcp-recorded"
+      },
+      {
+       "additional_metadata": {
+        "app_provider": "slack",
+        "author_email": "ada.lovelace@payments.example.com",
+        "author_name": "Ada Lovelace (Payments SRE team)",
+        "channel_id": "C0E2E1234567",
+        "channel_name": "payments-oncall-escalations-emea",
+        "connector_id": "conn_01HZXE2EABCDEFGHJKMNPQRSTV",
+        "github_issue_number": 4232,
+        "github_issue_url": "https://github.com/hydra-db/hydradb-application/issues/4232#issuecomment-1732780000",
+        "github_repo": "hydra-db/hydradb-application",
+        "permalink": "https://example.slack.com/archives/C0E2E1234567/p1732780000000132?thread_ts=1732779000.000050&cid=C0E2E1234567",
+        "slack_ts": "1732780000.000132",
+        "thread_ts": "1732779000.000050",
+        "workspace_id": "T0E2E1234567"
+       },
+       "collection": "jfzcqcfkjy",
+       "database": "e2e-mcp-recorded",
+       "id": "rec-k-page-31",
+       "sub_tenant_id": "jfzcqcfkjy",
+       "tenant_id": "e2e-mcp-recorded"
+      },
+      {
+       "additional_metadata": {
+        "app_provider": "slack",
+        "author_email": "ada.lovelace@payments.example.com",
+        "author_name": "Ada Lovelace (Payments SRE team)",
+        "channel_id": "C0E2E1234567",
+        "channel_name": "payments-oncall-escalations-emea",
+        "connector_id": "conn_01HZXE2EABCDEFGHJKMNPQRSTV",
+        "github_issue_number": 4226,
+        "github_issue_url": "https://github.com/hydra-db/hydradb-application/issues/4226#issuecomment-1732780000",
+        "github_repo": "hydra-db/hydradb-application",
+        "permalink": "https://example.slack.com/archives/C0E2E1234567/p1732780000000126?thread_ts=1732779000.000050&cid=C0E2E1234567",
+        "slack_ts": "1732780000.000126",
+        "thread_ts": "1732779000.000050",
+        "workspace_id": "T0E2E1234567"
+       },
+       "collection": "jfzcqcfkjy",
+       "database": "e2e-mcp-recorded",
+       "id": "rec-k-page-25",
+       "sub_tenant_id": "jfzcqcfkjy",
+       "tenant_id": "e2e-mcp-recorded"
+      },
+      {
+       "additional_metadata": {
+        "app_provider": "slack",
+        "author_email": "ada.lovelace@payments.example.com",
+        "author_name": "Ada Lovelace (Payments SRE team)",
+        "channel_id": "C0E2E1234567",
+        "channel_name": "payments-oncall-escalations-emea",
+        "connector_id": "conn_01HZXE2EABCDEFGHJKMNPQRSTV",
+        "github_issue_number": 4229,
+        "github_issue_url": "https://github.com/hydra-db/hydradb-application/issues/4229#issuecomment-1732780000",
+        "github_repo": "hydra-db/hydradb-application",
+        "permalink": "https://example.slack.com/archives/C0E2E1234567/p1732780000000129?thread_ts=1732779000.000050&cid=C0E2E1234567",
+        "slack_ts": "1732780000.000129",
+        "thread_ts": "1732779000.000050",
+        "workspace_id": "T0E2E1234567"
+       },
+       "collection": "jfzcqcfkjy",
+       "database": "e2e-mcp-recorded",
+       "id": "rec-k-page-28",
+       "sub_tenant_id": "jfzcqcfkjy",
+       "tenant_id": "e2e-mcp-recorded"
+      },
+      {
+       "additional_metadata": {
+        "app_provider": "slack",
+        "author_email": "ada.lovelace@payments.example.com",
+        "author_name": "Ada Lovelace (Payments SRE team)",
+        "channel_id": "C0E2E1234567",
+        "channel_name": "payments-oncall-escalations-emea",
+        "connector_id": "conn_01HZXE2EABCDEFGHJKMNPQRSTV",
+        "github_issue_number": 4228,
+        "github_issue_url": "https://github.com/hydra-db/hydradb-application/issues/4228#issuecomment-1732780000",
+        "github_repo": "hydra-db/hydradb-application",
+        "permalink": "https://example.slack.com/archives/C0E2E1234567/p1732780000000128?thread_ts=1732779000.000050&cid=C0E2E1234567",
+        "slack_ts": "1732780000.000128",
+        "thread_ts": "1732779000.000050",
+        "workspace_id": "T0E2E1234567"
+       },
+       "collection": "jfzcqcfkjy",
+       "database": "e2e-mcp-recorded",
+       "id": "rec-k-page-27",
+       "sub_tenant_id": "jfzcqcfkjy",
+       "tenant_id": "e2e-mcp-recorded"
+      },
+      {
+       "additional_metadata": {
+        "app_provider": "slack",
+        "author_email": "ada.lovelace@payments.example.com",
+        "author_name": "Ada Lovelace (Payments SRE team)",
+        "channel_id": "C0E2E1234567",
+        "channel_name": "payments-oncall-escalations-emea",
+        "connector_id": "conn_01HZXE2EABCDEFGHJKMNPQRSTV",
+        "github_issue_number": 4227,
+        "github_issue_url": "https://github.com/hydra-db/hydradb-application/issues/4227#issuecomment-1732780000",
+        "github_repo": "hydra-db/hydradb-application",
+        "permalink": "https://example.slack.com/archives/C0E2E1234567/p1732780000000127?thread_ts=1732779000.000050&cid=C0E2E1234567",
+        "slack_ts": "1732780000.000127",
+        "thread_ts": "1732779000.000050",
+        "workspace_id": "T0E2E1234567"
+       },
+       "collection": "jfzcqcfkjy",
+       "database": "e2e-mcp-recorded",
+       "id": "rec-k-page-26",
+       "sub_tenant_id": "jfzcqcfkjy",
+       "tenant_id": "e2e-mcp-recorded"
+      },
+      {
+       "additional_metadata": {
+        "app_provider": "slack",
+        "author_email": "ada.lovelace@payments.example.com",
+        "author_name": "Ada Lovelace (Payments SRE team)",
+        "channel_id": "C0E2E1234567",
+        "channel_name": "payments-oncall-escalations-emea",
+        "connector_id": "conn_01HZXE2EABCDEFGHJKMNPQRSTV",
+        "github_issue_number": 4223,
+        "github_issue_url": "https://github.com/hydra-db/hydradb-application/issues/4223#issuecomment-1732780000",
+        "github_repo": "hydra-db/hydradb-application",
+        "permalink": "https://example.slack.com/archives/C0E2E1234567/p1732780000000123?thread_ts=1732779000.000050&cid=C0E2E1234567",
+        "slack_ts": "1732780000.000123",
+        "thread_ts": "1732779000.000050",
+        "workspace_id": "T0E2E1234567"
+       },
+       "collection": "jfzcqcfkjy",
+       "database": "e2e-mcp-recorded",
+       "id": "rec-k-page-22",
+       "sub_tenant_id": "jfzcqcfkjy",
+       "tenant_id": "e2e-mcp-recorded"
+      },
+      {
+       "additional_metadata": {
+        "app_provider": "slack",
+        "author_email": "ada.lovelace@payments.example.com",
+        "author_name": "Ada Lovelace (Payments SRE team)",
+        "channel_id": "C0E2E1234567",
+        "channel_name": "payments-oncall-escalations-emea",
+        "connector_id": "conn_01HZXE2EABCDEFGHJKMNPQRSTV",
+        "github_issue_number": 4225,
+        "github_issue_url": "https://github.com/hydra-db/hydradb-application/issues/4225#issuecomment-1732780000",
+        "github_repo": "hydra-db/hydradb-application",
+        "permalink": "https://example.slack.com/archives/C0E2E1234567/p1732780000000125?thread_ts=1732779000.000050&cid=C0E2E1234567",
+        "slack_ts": "1732780000.000125",
+        "thread_ts": "1732779000.000050",
+        "workspace_id": "T0E2E1234567"
+       },
+       "collection": "jfzcqcfkjy",
+       "database": "e2e-mcp-recorded",
+       "id": "rec-k-page-24",
+       "sub_tenant_id": "jfzcqcfkjy",
+       "tenant_id": "e2e-mcp-recorded"
+      },
+      {
+       "additional_metadata": {
+        "app_provider": "slack",
+        "author_email": "ada.lovelace@payments.example.com",
+        "author_name": "Ada Lovelace (Payments SRE team)",
+        "channel_id": "C0E2E1234567",
+        "channel_name": "payments-oncall-escalations-emea",
+        "connector_id": "conn_01HZXE2EABCDEFGHJKMNPQRSTV",
+        "github_issue_number": 4222,
+        "github_issue_url": "https://github.com/hydra-db/hydradb-application/issues/4222#issuecomment-1732780000",
+        "github_repo": "hydra-db/hydradb-application",
+        "permalink": "https://example.slack.com/archives/C0E2E1234567/p1732780000000122?thread_ts=1732779000.000050&cid=C0E2E1234567",
+        "slack_ts": "1732780000.000122",
+        "thread_ts": "1732779000.000050",
+        "workspace_id": "T0E2E1234567"
+       },
+       "collection": "jfzcqcfkjy",
+       "database": "e2e-mcp-recorded",
+       "id": "rec-k-page-21",
+       "sub_tenant_id": "jfzcqcfkjy",
+       "tenant_id": "e2e-mcp-recorded"
+      },
+      {
+       "additional_metadata": {
+        "app_provider": "slack",
+        "author_email": "ada.lovelace@payments.example.com",
+        "author_name": "Ada Lovelace (Payments SRE team)",
+        "channel_id": "C0E2E1234567",
+        "channel_name": "payments-oncall-escalations-emea",
+        "connector_id": "conn_01HZXE2EABCDEFGHJKMNPQRSTV",
+        "github_issue_number": 4214,
+        "github_issue_url": "https://github.com/hydra-db/hydradb-application/issues/4214#issuecomment-1732780000",
+        "github_repo": "hydra-db/hydradb-application",
+        "permalink": "https://example.slack.com/archives/C0E2E1234567/p1732780000000114?thread_ts=1732779000.000050&cid=C0E2E1234567",
+        "slack_ts": "1732780000.000114",
+        "thread_ts": "1732779000.000050",
+        "workspace_id": "T0E2E1234567"
+       },
+       "collection": "jfzcqcfkjy",
+       "database": "e2e-mcp-recorded",
+       "id": "rec-k-page-13",
+       "sub_tenant_id": "jfzcqcfkjy",
+       "tenant_id": "e2e-mcp-recorded"
+      },
+      {
+       "additional_metadata": {
+        "app_provider": "slack",
+        "author_email": "ada.lovelace@payments.example.com",
+        "author_name": "Ada Lovelace (Payments SRE team)",
+        "channel_id": "C0E2E1234567",
+        "channel_name": "payments-oncall-escalations-emea",
+        "connector_id": "conn_01HZXE2EABCDEFGHJKMNPQRSTV",
+        "github_issue_number": 4220,
+        "github_issue_url": "https://github.com/hydra-db/hydradb-application/issues/4220#issuecomment-1732780000",
+        "github_repo": "hydra-db/hydradb-application",
+        "permalink": "https://example.slack.com/archives/C0E2E1234567/p1732780000000120?thread_ts=1732779000.000050&cid=C0E2E1234567",
+        "slack_ts": "1732780000.000120",
+        "thread_ts": "1732779000.000050",
+        "workspace_id": "T0E2E1234567"
+       },
+       "collection": "jfzcqcfkjy",
+       "database": "e2e-mcp-recorded",
+       "id": "rec-k-page-19",
+       "sub_tenant_id": "jfzcqcfkjy",
+       "tenant_id": "e2e-mcp-recorded"
+      },
+      {
+       "additional_metadata": {
+        "app_provider": "slack",
+        "author_email": "ada.lovelace@payments.example.com",
+        "author_name": "Ada Lovelace (Payments SRE team)",
+        "channel_id": "C0E2E1234567",
+        "channel_name": "payments-oncall-escalations-emea",
+        "connector_id": "conn_01HZXE2EABCDEFGHJKMNPQRSTV",
+        "github_issue_number": 4224,
+        "github_issue_url": "https://github.com/hydra-db/hydradb-application/issues/4224#issuecomment-1732780000",
+        "github_repo": "hydra-db/hydradb-application",
+        "permalink": "https://example.slack.com/archives/C0E2E1234567/p1732780000000124?thread_ts=1732779000.000050&cid=C0E2E1234567",
+        "slack_ts": "1732780000.000124",
+        "thread_ts": "1732779000.000050",
+        "workspace_id": "T0E2E1234567"
+       },
+       "collection": "jfzcqcfkjy",
+       "database": "e2e-mcp-recorded",
+       "id": "rec-k-page-23",
+       "sub_tenant_id": "jfzcqcfkjy",
+       "tenant_id": "e2e-mcp-recorded"
+      },
+      {
+       "additional_metadata": {
+        "app_provider": "slack",
+        "author_email": "ada.lovelace@payments.example.com",
+        "author_name": "Ada Lovelace (Payments SRE team)",
+        "channel_id": "C0E2E1234567",
+        "channel_name": "payments-oncall-escalations-emea",
+        "connector_id": "conn_01HZXE2EABCDEFGHJKMNPQRSTV",
+        "github_issue_number": 4221,
+        "github_issue_url": "https://github.com/hydra-db/hydradb-application/issues/4221#issuecomment-1732780000",
+        "github_repo": "hydra-db/hydradb-application",
+        "permalink": "https://example.slack.com/archives/C0E2E1234567/p1732780000000121?thread_ts=1732779000.000050&cid=C0E2E1234567",
+        "slack_ts": "1732780000.000121",
+        "thread_ts": "1732779000.000050",
+        "workspace_id": "T0E2E1234567"
+       },
+       "collection": "jfzcqcfkjy",
+       "database": "e2e-mcp-recorded",
+       "id": "rec-k-page-20",
+       "sub_tenant_id": "jfzcqcfkjy",
+       "tenant_id": "e2e-mcp-recorded"
+      },
+      {
+       "additional_metadata": {
+        "app_provider": "slack",
+        "author_email": "ada.lovelace@payments.example.com",
+        "author_name": "Ada Lovelace (Payments SRE team)",
+        "channel_id": "C0E2E1234567",
+        "channel_name": "payments-oncall-escalations-emea",
+        "connector_id": "conn_01HZXE2EABCDEFGHJKMNPQRSTV",
+        "github_issue_number": 4215,
+        "github_issue_url": "https://github.com/hydra-db/hydradb-application/issues/4215#issuecomment-1732780000",
+        "github_repo": "hydra-db/hydradb-application",
+        "permalink": "https://example.slack.com/archives/C0E2E1234567/p1732780000000115?thread_ts=1732779000.000050&cid=C0E2E1234567",
+        "slack_ts": "1732780000.000115",
+        "thread_ts": "1732779000.000050",
+        "workspace_id": "T0E2E1234567"
+       },
+       "collection": "jfzcqcfkjy",
+       "database": "e2e-mcp-recorded",
+       "id": "rec-k-page-14",
+       "sub_tenant_id": "jfzcqcfkjy",
+       "tenant_id": "e2e-mcp-recorded"
+      },
+      {
+       "additional_metadata": {
+        "app_provider": "slack",
+        "author_email": "ada.lovelace@payments.example.com",
+        "author_name": "Ada Lovelace (Payments SRE team)",
+        "channel_id": "C0E2E1234567",
+        "channel_name": "payments-oncall-escalations-emea",
+        "connector_id": "conn_01HZXE2EABCDEFGHJKMNPQRSTV",
+        "github_issue_number": 4217,
+        "github_issue_url": "https://github.com/hydra-db/hydradb-application/issues/4217#issuecomment-1732780000",
+        "github_repo": "hydra-db/hydradb-application",
+        "permalink": "https://example.slack.com/archives/C0E2E1234567/p1732780000000117?thread_ts=1732779000.000050&cid=C0E2E1234567",
+        "slack_ts": "1732780000.000117",
+        "thread_ts": "1732779000.000050",
+        "workspace_id": "T0E2E1234567"
+       },
+       "collection": "jfzcqcfkjy",
+       "database": "e2e-mcp-recorded",
+       "id": "rec-k-page-16",
+       "sub_tenant_id": "jfzcqcfkjy",
+       "tenant_id": "e2e-mcp-recorded"
+      },
+      {
+       "additional_metadata": {
+        "app_provider": "slack",
+        "author_email": "ada.lovelace@payments.example.com",
+        "author_name": "Ada Lovelace (Payments SRE team)",
+        "channel_id": "C0E2E1234567",
+        "channel_name": "payments-oncall-escalations-emea",
+        "connector_id": "conn_01HZXE2EABCDEFGHJKMNPQRSTV",
+        "github_issue_number": 4216,
+        "github_issue_url": "https://github.com/hydra-db/hydradb-application/issues/4216#issuecomment-1732780000",
+        "github_repo": "hydra-db/hydradb-application",
+        "permalink": "https://example.slack.com/archives/C0E2E1234567/p1732780000000116?thread_ts=1732779000.000050&cid=C0E2E1234567",
+        "slack_ts": "1732780000.000116",
+        "thread_ts": "1732779000.000050",
+        "workspace_id": "T0E2E1234567"
+       },
+       "collection": "jfzcqcfkjy",
+       "database": "e2e-mcp-recorded",
+       "id": "rec-k-page-15",
+       "sub_tenant_id": "jfzcqcfkjy",
+       "tenant_id": "e2e-mcp-recorded"
+      },
+      {
+       "additional_metadata": {
+        "app_provider": "slack",
+        "author_email": "ada.lovelace@payments.example.com",
+        "author_name": "Ada Lovelace (Payments SRE team)",
+        "channel_id": "C0E2E1234567",
+        "channel_name": "payments-oncall-escalations-emea",
+        "connector_id": "conn_01HZXE2EABCDEFGHJKMNPQRSTV",
+        "github_issue_number": 4218,
+        "github_issue_url": "https://github.com/hydra-db/hydradb-application/issues/4218#issuecomment-1732780000",
+        "github_repo": "hydra-db/hydradb-application",
+        "permalink": "https://example.slack.com/archives/C0E2E1234567/p1732780000000118?thread_ts=1732779000.000050&cid=C0E2E1234567",
+        "slack_ts": "1732780000.000118",
+        "thread_ts": "1732779000.000050",
+        "workspace_id": "T0E2E1234567"
+       },
+       "collection": "jfzcqcfkjy",
+       "database": "e2e-mcp-recorded",
+       "id": "rec-k-page-17",
+       "sub_tenant_id": "jfzcqcfkjy",
+       "tenant_id": "e2e-mcp-recorded"
+      },
+      {
+       "additional_metadata": {
+        "app_provider": "slack",
+        "author_email": "ada.lovelace@payments.example.com",
+        "author_name": "Ada Lovelace (Payments SRE team)",
+        "channel_id": "C0E2E1234567",
+        "channel_name": "payments-oncall-escalations-emea",
+        "connector_id": "conn_01HZXE2EABCDEFGHJKMNPQRSTV",
+        "github_issue_number": 4210,
+        "github_issue_url": "https://github.com/hydra-db/hydradb-application/issues/4210#issuecomment-1732780000",
+        "github_repo": "hydra-db/hydradb-application",
+        "permalink": "https://example.slack.com/archives/C0E2E1234567/p1732780000000110?thread_ts=1732779000.000050&cid=C0E2E1234567",
+        "slack_ts": "1732780000.000110",
+        "thread_ts": "1732779000.000050",
+        "workspace_id": "T0E2E1234567"
+       },
+       "collection": "jfzcqcfkjy",
+       "database": "e2e-mcp-recorded",
+       "id": "rec-k-page-9",
+       "sub_tenant_id": "jfzcqcfkjy",
+       "tenant_id": "e2e-mcp-recorded"
+      },
+      {
+       "additional_metadata": {
+        "app_provider": "slack",
+        "author_email": "ada.lovelace@payments.example.com",
+        "author_name": "Ada Lovelace (Payments SRE team)",
+        "channel_id": "C0E2E1234567",
+        "channel_name": "payments-oncall-escalations-emea",
+        "connector_id": "conn_01HZXE2EABCDEFGHJKMNPQRSTV",
+        "github_issue_number": 4219,
+        "github_issue_url": "https://github.com/hydra-db/hydradb-application/issues/4219#issuecomment-1732780000",
+        "github_repo": "hydra-db/hydradb-application",
+        "permalink": "https://example.slack.com/archives/C0E2E1234567/p1732780000000119?thread_ts=1732779000.000050&cid=C0E2E1234567",
+        "slack_ts": "1732780000.000119",
+        "thread_ts": "1732779000.000050",
+        "workspace_id": "T0E2E1234567"
+       },
+       "collection": "jfzcqcfkjy",
+       "database": "e2e-mcp-recorded",
+       "id": "rec-k-page-18",
+       "sub_tenant_id": "jfzcqcfkjy",
+       "tenant_id": "e2e-mcp-recorded"
+      },
+      {
+       "additional_metadata": {
+        "app_provider": "slack",
+        "author_email": "ada.lovelace@payments.example.com",
+        "author_name": "Ada Lovelace (Payments SRE team)",
+        "channel_id": "C0E2E1234567",
+        "channel_name": "payments-oncall-escalations-emea",
+        "connector_id": "conn_01HZXE2EABCDEFGHJKMNPQRSTV",
+        "github_issue_number": 4211,
+        "github_issue_url": "https://github.com/hydra-db/hydradb-application/issues/4211#issuecomment-1732780000",
+        "github_repo": "hydra-db/hydradb-application",
+        "permalink": "https://example.slack.com/archives/C0E2E1234567/p1732780000000111?thread_ts=1732779000.000050&cid=C0E2E1234567",
+        "slack_ts": "1732780000.000111",
+        "thread_ts": "1732779000.000050",
+        "workspace_id": "T0E2E1234567"
+       },
+       "collection": "jfzcqcfkjy",
+       "database": "e2e-mcp-recorded",
+       "id": "rec-k-page-10",
+       "sub_tenant_id": "jfzcqcfkjy",
+       "tenant_id": "e2e-mcp-recorded"
+      },
+      {
+       "additional_metadata": {
+        "app_provider": "slack",
+        "author_email": "ada.lovelace@payments.example.com",
+        "author_name": "Ada Lovelace (Payments SRE team)",
+        "channel_id": "C0E2E1234567",
+        "channel_name": "payments-oncall-escalations-emea",
+        "connector_id": "conn_01HZXE2EABCDEFGHJKMNPQRSTV",
+        "github_issue_number": 4213,
+        "github_issue_url": "https://github.com/hydra-db/hydradb-application/issues/4213#issuecomment-1732780000",
+        "github_repo": "hydra-db/hydradb-application",
+        "permalink": "https://example.slack.com/archives/C0E2E1234567/p1732780000000113?thread_ts=1732779000.000050&cid=C0E2E1234567",
+        "slack_ts": "1732780000.000113",
+        "thread_ts": "1732779000.000050",
+        "workspace_id": "T0E2E1234567"
+       },
+       "collection": "jfzcqcfkjy",
+       "database": "e2e-mcp-recorded",
+       "id": "rec-k-page-12",
+       "sub_tenant_id": "jfzcqcfkjy",
+       "tenant_id": "e2e-mcp-recorded"
+      },
+      {
+       "additional_metadata": {
+        "app_provider": "slack",
+        "author_email": "ada.lovelace@payments.example.com",
+        "author_name": "Ada Lovelace (Payments SRE team)",
+        "channel_id": "C0E2E1234567",
+        "channel_name": "payments-oncall-escalations-emea",
+        "connector_id": "conn_01HZXE2EABCDEFGHJKMNPQRSTV",
+        "github_issue_number": 4209,
+        "github_issue_url": "https://github.com/hydra-db/hydradb-application/issues/4209#issuecomment-1732780000",
+        "github_repo": "hydra-db/hydradb-application",
+        "permalink": "https://example.slack.com/archives/C0E2E1234567/p1732780000000109?thread_ts=1732779000.000050&cid=C0E2E1234567",
+        "slack_ts": "1732780000.000109",
+        "thread_ts": "1732779000.000050",
+        "workspace_id": "T0E2E1234567"
+       },
+       "collection": "jfzcqcfkjy",
+       "database": "e2e-mcp-recorded",
+       "id": "rec-k-page-8",
+       "sub_tenant_id": "jfzcqcfkjy",
+       "tenant_id": "e2e-mcp-recorded"
+      },
+      {
+       "additional_metadata": {
+        "app_provider": "slack",
+        "author_email": "ada.lovelace@payments.example.com",
+        "author_name": "Ada Lovelace (Payments SRE team)",
+        "channel_id": "C0E2E1234567",
+        "channel_name": "payments-oncall-escalations-emea",
+        "connector_id": "conn_01HZXE2EABCDEFGHJKMNPQRSTV",
+        "github_issue_number": 4212,
+        "github_issue_url": "https://github.com/hydra-db/hydradb-application/issues/4212#issuecomment-1732780000",
+        "github_repo": "hydra-db/hydradb-application",
+        "permalink": "https://example.slack.com/archives/C0E2E1234567/p1732780000000112?thread_ts=1732779000.000050&cid=C0E2E1234567",
+        "slack_ts": "1732780000.000112",
+        "thread_ts": "1732779000.000050",
+        "workspace_id": "T0E2E1234567"
+       },
+       "collection": "jfzcqcfkjy",
+       "database": "e2e-mcp-recorded",
+       "id": "rec-k-page-11",
+       "sub_tenant_id": "jfzcqcfkjy",
+       "tenant_id": "e2e-mcp-recorded"
+      },
+      {
+       "additional_metadata": {
+        "app_provider": "slack",
+        "author_email": "ada.lovelace@payments.example.com",
+        "author_name": "Ada Lovelace (Payments SRE team)",
+        "channel_id": "C0E2E1234567",
+        "channel_name": "payments-oncall-escalations-emea",
+        "connector_id": "conn_01HZXE2EABCDEFGHJKMNPQRSTV",
+        "github_issue_number": 4203,
+        "github_issue_url": "https://github.com/hydra-db/hydradb-application/issues/4203#issuecomment-1732780000",
+        "github_repo": "hydra-db/hydradb-application",
+        "permalink": "https://example.slack.com/archives/C0E2E1234567/p1732780000000103?thread_ts=1732779000.000050&cid=C0E2E1234567",
+        "slack_ts": "1732780000.000103",
+        "thread_ts": "1732779000.000050",
+        "workspace_id": "T0E2E1234567"
+       },
+       "collection": "jfzcqcfkjy",
+       "database": "e2e-mcp-recorded",
+       "id": "rec-k-page-2",
+       "sub_tenant_id": "jfzcqcfkjy",
+       "tenant_id": "e2e-mcp-recorded"
+      },
+      {
+       "additional_metadata": {
+        "app_provider": "slack",
+        "author_email": "ada.lovelace@payments.example.com",
+        "author_name": "Ada Lovelace (Payments SRE team)",
+        "channel_id": "C0E2E1234567",
+        "channel_name": "payments-oncall-escalations-emea",
+        "connector_id": "conn_01HZXE2EABCDEFGHJKMNPQRSTV",
+        "github_issue_number": 4204,
+        "github_issue_url": "https://github.com/hydra-db/hydradb-application/issues/4204#issuecomment-1732780000",
+        "github_repo": "hydra-db/hydradb-application",
+        "permalink": "https://example.slack.com/archives/C0E2E1234567/p1732780000000104?thread_ts=1732779000.000050&cid=C0E2E1234567",
+        "slack_ts": "1732780000.000104",
+        "thread_ts": "1732779000.000050",
+        "workspace_id": "T0E2E1234567"
+       },
+       "collection": "jfzcqcfkjy",
+       "database": "e2e-mcp-recorded",
+       "id": "rec-k-page-3",
+       "sub_tenant_id": "jfzcqcfkjy",
+       "tenant_id": "e2e-mcp-recorded"
+      },
+      {
+       "additional_metadata": {
+        "app_provider": "slack",
+        "author_email": "ada.lovelace@payments.example.com",
+        "author_name": "Ada Lovelace (Payments SRE team)",
+        "channel_id": "C0E2E1234567",
+        "channel_name": "payments-oncall-escalations-emea",
+        "connector_id": "conn_01HZXE2EABCDEFGHJKMNPQRSTV",
+        "github_issue_number": 4202,
+        "github_issue_url": "https://github.com/hydra-db/hydradb-application/issues/4202#issuecomment-1732780000",
+        "github_repo": "hydra-db/hydradb-application",
+        "permalink": "https://example.slack.com/archives/C0E2E1234567/p1732780000000102?thread_ts=1732779000.000050&cid=C0E2E1234567",
+        "slack_ts": "1732780000.000102",
+        "thread_ts": "1732779000.000050",
+        "workspace_id": "T0E2E1234567"
+       },
+       "collection": "jfzcqcfkjy",
+       "database": "e2e-mcp-recorded",
+       "id": "rec-k-page-1",
+       "sub_tenant_id": "jfzcqcfkjy",
+       "tenant_id": "e2e-mcp-recorded"
+      },
+      {
+       "additional_metadata": {
+        "app_provider": "slack",
+        "author_email": "ada.lovelace@payments.example.com",
+        "author_name": "Ada Lovelace (Payments SRE team)",
+        "channel_id": "C0E2E1234567",
+        "channel_name": "payments-oncall-escalations-emea",
+        "connector_id": "conn_01HZXE2EABCDEFGHJKMNPQRSTV",
+        "github_issue_number": 4208,
+        "github_issue_url": "https://github.com/hydra-db/hydradb-application/issues/4208#issuecomment-1732780000",
+        "github_repo": "hydra-db/hydradb-application",
+        "permalink": "https://example.slack.com/archives/C0E2E1234567/p1732780000000108?thread_ts=1732779000.000050&cid=C0E2E1234567",
+        "slack_ts": "1732780000.000108",
+        "thread_ts": "1732779000.000050",
+        "workspace_id": "T0E2E1234567"
+       },
+       "collection": "jfzcqcfkjy",
+       "database": "e2e-mcp-recorded",
+       "id": "rec-k-page-7",
+       "sub_tenant_id": "jfzcqcfkjy",
+       "tenant_id": "e2e-mcp-recorded"
+      },
+      {
+       "additional_metadata": {
+        "app_provider": "slack",
+        "author_email": "ada.lovelace@payments.example.com",
+        "author_name": "Ada Lovelace (Payments SRE team)",
+        "channel_id": "C0E2E1234567",
+        "channel_name": "payments-oncall-escalations-emea",
+        "connector_id": "conn_01HZXE2EABCDEFGHJKMNPQRSTV",
+        "github_issue_number": 4201,
+        "github_issue_url": "https://github.com/hydra-db/hydradb-application/issues/4201#issuecomment-1732780000",
+        "github_repo": "hydra-db/hydradb-application",
+        "permalink": "https://example.slack.com/archives/C0E2E1234567/p1732780000000101?thread_ts=1732779000.000050&cid=C0E2E1234567",
+        "slack_ts": "1732780000.000101",
+        "thread_ts": "1732779000.000050",
+        "workspace_id": "T0E2E1234567"
+       },
+       "collection": "jfzcqcfkjy",
+       "database": "e2e-mcp-recorded",
+       "id": "rec-k-page-0",
+       "sub_tenant_id": "jfzcqcfkjy",
+       "tenant_id": "e2e-mcp-recorded"
+      },
+      {
+       "additional_metadata": {
+        "app_provider": "slack",
+        "author_email": "ada.lovelace@payments.example.com",
+        "author_name": "Ada Lovelace (Payments SRE team)",
+        "channel_id": "C0E2E1234567",
+        "channel_name": "payments-oncall-escalations-emea",
+        "connector_id": "conn_01HZXE2EABCDEFGHJKMNPQRSTV",
+        "github_issue_number": 4206,
+        "github_issue_url": "https://github.com/hydra-db/hydradb-application/issues/4206#issuecomment-1732780000",
+        "github_repo": "hydra-db/hydradb-application",
+        "permalink": "https://example.slack.com/archives/C0E2E1234567/p1732780000000106?thread_ts=1732779000.000050&cid=C0E2E1234567",
+        "slack_ts": "1732780000.000106",
+        "thread_ts": "1732779000.000050",
+        "workspace_id": "T0E2E1234567"
+       },
+       "collection": "jfzcqcfkjy",
+       "database": "e2e-mcp-recorded",
+       "id": "rec-k-page-5",
+       "sub_tenant_id": "jfzcqcfkjy",
+       "tenant_id": "e2e-mcp-recorded"
+      },
+      {
+       "additional_metadata": {
+        "app_provider": "slack",
+        "author_email": "ada.lovelace@payments.example.com",
+        "author_name": "Ada Lovelace (Payments SRE team)",
+        "channel_id": "C0E2E1234567",
+        "channel_name": "payments-oncall-escalations-emea",
+        "connector_id": "conn_01HZXE2EABCDEFGHJKMNPQRSTV",
+        "github_issue_number": 4207,
+        "github_issue_url": "https://github.com/hydra-db/hydradb-application/issues/4207#issuecomment-1732780000",
+        "github_repo": "hydra-db/hydradb-application",
+        "permalink": "https://example.slack.com/archives/C0E2E1234567/p1732780000000107?thread_ts=1732779000.000050&cid=C0E2E1234567",
+        "slack_ts": "1732780000.000107",
+        "thread_ts": "1732779000.000050",
+        "workspace_id": "T0E2E1234567"
+       },
+       "collection": "jfzcqcfkjy",
+       "database": "e2e-mcp-recorded",
+       "id": "rec-k-page-6",
+       "sub_tenant_id": "jfzcqcfkjy",
+       "tenant_id": "e2e-mcp-recorded"
+      },
+      {
+       "additional_metadata": {
+        "app_provider": "slack",
+        "author_email": "ada.lovelace@payments.example.com",
+        "author_name": "Ada Lovelace (Payments SRE team)",
+        "channel_id": "C0E2E1234567",
+        "channel_name": "payments-oncall-escalations-emea",
+        "connector_id": "conn_01HZXE2EABCDEFGHJKMNPQRSTV",
+        "github_issue_number": 4205,
+        "github_issue_url": "https://github.com/hydra-db/hydradb-application/issues/4205#issuecomment-1732780000",
+        "github_repo": "hydra-db/hydradb-application",
+        "permalink": "https://example.slack.com/archives/C0E2E1234567/p1732780000000105?thread_ts=1732779000.000050&cid=C0E2E1234567",
+        "slack_ts": "1732780000.000105",
+        "thread_ts": "1732779000.000050",
+        "workspace_id": "T0E2E1234567"
+       },
+       "collection": "jfzcqcfkjy",
+       "database": "e2e-mcp-recorded",
+       "id": "rec-k-page-4",
+       "sub_tenant_id": "jfzcqcfkjy",
+       "tenant_id": "e2e-mcp-recorded"
+      }
+     ],
+     "total": 51,
+     "pagination": {
+      "page": 1,
+      "page_size": 100,
+      "total": 51,
+      "total_pages": 1,
+      "has_next": false,
+      "has_previous": false
+     }
+    },
+    "error": null,
+    "meta": {
+     "request_id": "9b789f04-ba2e-4fe9-80a8-e3e59c807f43",
+     "api_version": "2.0.1",
+     "latency_ms": 23.1,
+     "tenant_id": "e2e-mcp-recorded",
+     "database": "e2e-mcp-recorded",
+     "sub_tenant_id": "jfzcqcfkjy",
+     "collection": "jfzcqcfkjy",
+     "source_type": "knowledge"
+    }
+   }
+  },
+  "delete": {
+   "status": 200,
+   "headers": {
+    "content-type": "application/json; charset=utf-8"
+   },
+   "body": {
+    "success": true,
+    "data": {
+     "success": true,
+     "message": "Successfully deleted 1 memory source(s)",
+     "results": [
+      {
+       "id": "rec-m-text",
+       "deleted": true
+      }
+     ],
+     "deleted_count": 1,
+     "user_memory_deleted": 1
+    },
+    "error": null,
+    "meta": {
+     "request_id": "5fe4fded-c73c-448c-b946-2adef584f262",
+     "api_version": "2.0.1",
+     "latency_ms": 1812,
+     "tenant_id": "e2e-mcp-recorded",
+     "database": "e2e-mcp-recorded",
+     "sub_tenant_id": "jfzcqcfkjy",
+     "collection": "jfzcqcfkjy",
+     "source_type": "memory"
+    }
+   }
+  },
+  "collections.delete": {
+   "status": 202,
+   "headers": {
+    "content-type": "application/json; charset=utf-8"
+   },
+   "body": {
+    "success": true,
+    "data": {
+     "tenant_id": "e2e-mcp-recorded",
+     "database": "e2e-mcp-recorded",
+     "sub_tenant_id": "rec-drop",
+     "collection": "rec-drop",
+     "status": "deletion_scheduled",
+     "message": "Collection deregistered. Background cleanup is in progress."
+    },
+    "error": null,
+    "meta": {
+     "request_id": "7d5022d1-a712-48aa-be99-2edcef77e164",
+     "api_version": "2.0.1",
+     "latency_ms": 53.8
+    }
+   }
+  },
+  "databases.delete": {
+   "status": 202,
+   "headers": {
+    "content-type": "application/json; charset=utf-8"
+   },
+   "body": {
+    "success": true,
+    "data": {
+     "tenant_id": "e2e-mcp-recorded",
+     "database": "e2e-mcp-recorded",
+     "status": "deletion_scheduled",
+     "message": "Tenant deregistered. Background cleanup is in progress."
+    },
+    "error": null,
+    "meta": {
+     "request_id": "d1ab7f58-4980-4473-95e0-ec6b7357f604",
+     "api_version": "2.0.1",
+     "latency_ms": 27.5
+    }
+   }
+  }
+ }
+}
