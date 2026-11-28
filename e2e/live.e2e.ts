@@ -1269,30 +1269,41 @@ const SCENARIOS: Scenario[] = [
 	{
 		id: "graph.documented_writes",
 		tools: ["hydradb_graph_admin", "hydradb_graph_query"],
-		knownIssue: "F-mcp-8",
-		async run({ call, run: r, expectFixed }) {
+		async run({ call, run: r }) {
 			const database = r.scratchGraphDatabase;
+			const collection = "e2e";
+			const write = async (what: string, query: string, params?: Record<string, unknown>) =>
+				ok(await call("hydradb_graph_query", { database, collection, query, ...(params ? { params } : {}) }), what);
+			const read = async (what: string, query: string) => items(await write(what, query), "rows");
 
 			ok(await call("hydradb_graph_admin", { action: "create_database", database }), "graph create_database");
 
 			try {
-				const batch = await call("hydradb_graph_query", {
-					database,
-					collection: "e2e",
-					query: "UNWIND $rows AS row MERGE (p:Person {key: row.key}) SET p.name = row.name",
-					params: { rows: [{ key: "ada", name: "Ada" }, { key: "grace", name: "Grace" }] },
-				});
-				const upsert = await call("hydradb_graph_query", {
-					database,
-					collection: "e2e",
-					query: "MERGE (p:Person {key: $key}) SET p.name = $name RETURN p.key AS key",
-					params: { key: "ada", name: "Ada Lovelace" },
-				});
+				const nodes = "UNWIND $rows AS row MERGE (n {id: row.id}) SET n:Person, n.name = row.name";
+				const edges = "UNWIND $edges AS e CREATE (a {id: e.src})-[:KNOWS]->(b {id: e.dst})";
 
-				await expectFixed(() => {
-					assert.equal(batch.isError, false, `the documented UNWIND $rows batch write is refused: ${brief(batch)}`);
-					assert.equal(upsert.isError, false, `the documented MERGE-on-a-key upsert is refused: ${brief(upsert)}`);
-				});
+				await write("the node batch", nodes, { rows: [{ id: 1, name: "Ada" }, { id: 2, name: "Grace" }, { id: 3, name: "Alan" }] });
+				await write("the node batch re-run as an upsert", nodes, { rows: [{ id: 1, name: "Ada Lovelace" }] });
+				await write("the edge batch", edges, { edges: [{ src: 1, dst: 2 }, { src: 2, dst: 3 }] });
+				await write("the edge batch re-run", edges, { edges: [{ src: 1, dst: 2 }, { src: 2, dst: 3 }] });
+				await write("a one-hop MERGE edge", "MERGE (a:Person {id: 1})-[:MENTORS]->(b:Person {id: 3})");
+				await write("SET on a matched node", "MATCH (n:Person {id: 2}) SET n.age = 85");
+
+				assert.deepEqual(await read("the node read", "MATCH (n:Person) RETURN n.id AS id, n.name AS name ORDER BY id"), [
+					{ id: 1, name: "Ada Lovelace" },
+					{ id: 2, name: "Grace" },
+					{ id: 3, name: "Alan" },
+				]);
+				assert.deepEqual(
+					await read("the edge read", "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.id AS src, b.id AS dst ORDER BY src"),
+					[{ src: 1, dst: 2 }, { src: 2, dst: 3 }],
+					"a re-run of the edge batch added edges",
+				);
+				assert.deepEqual(await read("the MERGE edge read", "MATCH (:Person {id: 1})-[:MENTORS]->(b:Person) RETURN b.name AS name"), [{ name: "Alan" }]);
+				assert.deepEqual(await read("the SET read", "MATCH (n:Person {id: 2}) RETURN n.age AS age"), [{ age: 85 }]);
+
+				await write("the row-map delete", "UNWIND $rows AS row MATCH (n {id: row.id}) DETACH DELETE n", { rows: [{ id: 3 }] });
+				assert.deepEqual(await read("the count after delete", "MATCH (n:Person) RETURN count(n) AS c"), [{ c: 2 }]);
 			} finally {
 				ok(await call("hydradb_graph_admin", { action: "drop_database", database }), "graph drop_database");
 			}
