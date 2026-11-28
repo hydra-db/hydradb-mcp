@@ -37,8 +37,9 @@ The workflow `.github/workflows/e2e.yml` runs this tier nightly, on demand, and 
 Runs offline inside `npm test`. `e2e/simulator.ts` listens on 127.0.0.1, records every request, and answers from `e2e/fixtures/staging.json`, which holds real staging answers.
 
 - Every probe in `PROBES` (one tool call that reaches one route) meets every simulated result in `OUTCOMES`: `400`, `401`, `403`, `404`, `429`, `500`, `503`, a connection reset, an answer slower than the server's deadline, a non-JSON `200`, a `200` of `{}`, and a `200` with an empty list.
-- Each cell asserts that the failure is reported as `isError` with the status and the server's message, inside a time budget, without the API key, and that an unsafe write is sent exactly once after a `500`, a reset or a timeout.
-- Every ingest mode's request is checked against the keys the API accepts.
+- Each cell asserts that the failure is reported as `isError` with the status and the server's message, inside a time budget, without the API key, and that an unsafe write is sent exactly once after a `500`, a reset or a timeout. An empty list must be reported as nothing found, not as an error.
+- Connector tools replace every API failure with one fixed sentence per class (`hideConnectorFailure` in `src/server.ts`), so their cells check that sentence instead of the status and message.
+- The request of every ingest mode, and of `hydradb_update` and `hydradb_feedback`, is checked against the keys the API accepts and must carry the caller's values.
 - A recorded page of 50 connector rows is listed through the server and must keep every metadata key in both views.
 
 Run it alone with `npx tsx --test e2e/simulated.test.ts`.
