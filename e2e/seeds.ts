@@ -63,6 +63,28 @@ const GRAPH = {
 
 export const APP_METADATA = { slack_ts: "1732780000.000999", channel_name: "payments-oncall" };
 
+/** Fake principals under a reserved test domain. */
+export const ALICE_EMAIL = "alice@e2e.hydradb.test";
+export const ALICE = `user_email:${ALICE_EMAIL}`;
+export const BOB = "user_email:bob@e2e.hydradb.test";
+
+/** An app item the access-control scenarios read back. Titles and bodies are unique, so a leak shows in any output. */
+export interface AclItem {
+	id: string;
+	title: string;
+	body: string;
+}
+
+export const ACL_OPEN: AclItem = { id: "e2e-k-acl-open", title: "Open heron note", body: "The heron migration log is open to every reader." };
+export const ACL_ALICE: AclItem = { id: "e2e-k-acl-alice", title: "Alice heron note", body: "Alice keeps the heron migration budget in vault seven." };
+export const ACL_PRIVATE: AclItem = { id: "e2e-k-acl-private", title: "Private heron note", body: "The private heron census lists nesting sites by grid square." };
+/** Restricted to Alice like ACL_ALICE, but only the ACL change scenario reads it, so that scenario can edit it. */
+export const ACL_FLIP: AclItem = { id: "e2e-k-acl-flip", title: "Flip heron note", body: "Alice drafts the heron flip memo before review." };
+/** The three the read scenarios assert on: unrestricted, Alice's, private. */
+export const ACL_ITEMS = [ACL_OPEN, ACL_ALICE, ACL_PRIVATE];
+
+const appItem = (item: AclItem) => ({ id: item.id, title: item.title, kind: "custom", fields: { body: item.body } });
+
 export interface Seed {
 	/** The ingest scenario that asserts this call's answer. */
 	scenario: string;
@@ -208,6 +230,20 @@ export const SEEDS: Seed[] = [
 			],
 		},
 		ids: ["e2e-k-app"],
+	},
+	{
+		// Alice's and the private item link to the open one, so a subgraph from it crosses into both.
+		scenario: "ingest.knowledge.acl",
+		args: {
+			kind: "knowledge",
+			app_knowledge: [
+				appItem(ACL_OPEN),
+				{ ...appItem(ACL_ALICE), acl: [ALICE], relations: { ids: [ACL_OPEN.id] } },
+				{ ...appItem(ACL_PRIVATE), acl: ["__private__"], relations: { ids: [ACL_OPEN.id] } },
+				{ ...appItem(ACL_FLIP), acl: [ALICE] },
+			],
+		},
+		ids: [ACL_OPEN.id, ACL_ALICE.id, ACL_PRIVATE.id, ACL_FLIP.id],
 	},
 	{
 		scenario: "ingest.knowledge.collection",

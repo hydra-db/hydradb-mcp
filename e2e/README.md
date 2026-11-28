@@ -14,6 +14,7 @@ Runs the server against a real HydraDB API (staging in CI) and skips unless `HYD
 - Each scenario reads back what was written, whole: stored content, every metadata key and value, the ids, in both the text and `structuredContent`.
 - `completeness.tools` fails when a tool in `tools/list` has no scenario.
 - Connector tools that change things outside the test database run only against a connector id that does not exist.
+- The `acl.*` scenarios seed three app items: one with no access list, one restricted to `user_email:alice@e2e.hydradb.test`, one `__private__`. Every read that takes `acl` (list, query, inspect, subgraph, relations) runs as Alice, as Alice's bare email, as Bob, as `__public__` and with no `acl`, and asserts by id which items come back and that no hidden title or body appears in the text or `structuredContent`. A fourth item restricted to Alice is made public with `hydradb_update`, read as Bob, then put back. `acl.http.list` repeats the list over the HTTP transport. The server has no default principal list in its environment or in an HTTP header, so every scenario passes `acl` per call.
 
 Run it:
 
@@ -41,6 +42,7 @@ Runs offline inside `npm test`. `e2e/simulator.ts` listens on 127.0.0.1, records
 - Connector tools replace every API failure with one fixed sentence per class (`hideConnectorFailure` in `src/server.ts`), so their cells check that sentence instead of the status and message.
 - The request of every ingest mode, and of `hydradb_update` and `hydradb_feedback`, is checked against the keys the API accepts and must carry the caller's values.
 - A recorded page of 50 connector rows is listed through the server and must keep every metadata key in both views.
+- Every read that takes `acl` must send the caller's principals exactly, in the body field or the repeated `acl` query parameter the API reads. `hydradb_update` and an app knowledge ingest must send the complete list once.
 
 Run it alone with `npx tsx --test e2e/simulated.test.ts`.
 
